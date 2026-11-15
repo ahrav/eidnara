@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use support::direct_host::{BUDGET, FixtureProcess, Launch, request_json, wait_for_store};
 
 const MIB: u64 = 1024 * 1024;
-const GLIBC_ARENA_HEAP_KIB: u64 = 64 * 1024;
+const GLIBC_ARENA_HEAP_BYTES: u64 = 64 * MIB;
 const SESSION_GROWTH_BOUND_BYTES: u64 = MIB;
 const SESSION_KEYED_HOLDERS: [&str; 4] = [
     "snapshots",
@@ -46,9 +46,11 @@ struct Mapping {
 }
 
 fn mappings(pid: u32) -> Vec<Mapping> {
-    std::fs::read_to_string(format!("/proc/{pid}/maps"))
-        .expect("process maps")
-        .lines()
+    parse_mappings(&std::fs::read_to_string(format!("/proc/{pid}/maps")).expect("process maps"))
+}
+
+fn parse_mappings(maps: &str) -> Vec<Mapping> {
+    maps.lines()
         .map(|line| {
             let mut fields = line.split_whitespace();
             let (start, end) = fields
@@ -56,18 +58,22 @@ fn mappings(pid: u32) -> Vec<Mapping> {
                 .and_then(|range| range.split_once('-'))
                 .expect("address range");
             let permissions = fields.next().expect("permissions");
+            let inode = fields.nth(2).expect("inode");
+            let label = fields.next();
             Mapping {
                 start: u64::from_str_radix(start, 16).expect("start address"),
                 end: u64::from_str_radix(end, 16).expect("end address"),
                 readable: permissions.starts_with('r'),
-                anonymous: fields.nth(3).is_none(),
+                anonymous: inode == "0" && label.is_none_or(|label| label.starts_with("[anon:")),
             }
         })
         .collect()
 }
 
-fn glibc_arena_heaps(pid: u32) -> usize {
-    let mappings = mappings(pid);
+/// Counts glibc arena heaps: a 64 MiB region aligned to its size, whose used part is readable
+/// and whose unused tail is reserved without access. The kernel may merge the used part with a
+/// readable mapping below it, so the used mapping may start before the region.
+fn glibc_arena_heaps(mappings: &[Mapping]) -> usize {
     mappings
         .windows(2)
         .filter(|pair| {
@@ -77,9 +83,30 @@ fn glibc_arena_heaps(pid: u32) -> usize {
                 && used.readable
                 && !reserved.readable
                 && used.end == reserved.start
-                && (reserved.end - used.start) / 1024 == GLIBC_ARENA_HEAP_KIB
+                && reserved.end % GLIBC_ARENA_HEAP_BYTES == 0
+                && reserved.end - reserved.start < GLIBC_ARENA_HEAP_BYTES
+                && used.start + GLIBC_ARENA_HEAP_BYTES <= reserved.end
         })
         .count()
+}
+
+#[test]
+fn arena_heaps_are_counted_when_named_and_when_their_used_part_is_merged() {
+    let maps = "\
+7f0000000000-7f0000021000 rw-p 00000000 00:00 0
+7f0000021000-7f0004000000 ---p 00000000 00:00 0
+7f0007f00000-7f0008021000 rw-p 00000000 00:00 0
+7f0008021000-7f000c000000 ---p 00000000 00:00 0
+7f0010000000-7f0010021000 rw-p 00000000 00:00 0                          [anon:glibc: malloc arena]
+7f0010021000-7f0014000000 ---p 00000000 00:00 0                          [anon:glibc: malloc arena]
+7f0020000000-7f0020021000 rw-p 00000000 00:00 0
+7f0020021000-7f0060000000 ---p 00000000 00:00 0
+7f0070000000-7f0070021000 rw-p 00000000 08:01 131 /usr/lib/libc.so.6
+7f0070021000-7f0074000000 ---p 00021000 08:01 131 /usr/lib/libc.so.6
+7f0080001000-7f0080021000 rw-p 00000000 00:00 0
+7f0080021000-7f0084000000 ---p 00000000 00:00 0
+";
+    assert_eq!(glibc_arena_heaps(&parse_mappings(maps)), 3);
 }
 
 fn tool_output(session: usize, turn: usize, bytes: usize) -> String {
@@ -269,14 +296,17 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
                 "a live session holds a `{holder}` entry: {live}"
             );
         }
-        let status = status_after_teardown(&observer, observer_route).await;
+        status_after_teardown(&observer, observer_route).await;
+        let before = rss_anon_bytes(pid);
+        let status = request_json(&observer, observer_route, json!({"kind": "status"})).await;
         let sampled = rss_anon_bytes(pid);
         let reported = status["process_memory"]["rss_anon_bytes"]
             .as_u64()
             .expect("the status reports anonymous resident bytes");
+        let (low, high) = (before.min(sampled), before.max(sampled));
         assert!(
-            reported.abs_diff(sampled) <= sampled / 2,
-            "status reports {reported} bytes, /proc reports {sampled}"
+            (low - low / 2..=high + high / 2).contains(&reported),
+            "status reports {reported} bytes, /proc reports {before} before it and {sampled} after"
         );
         assert_eq!(
             status["process_memory"]["c_heap"]["in_use_bytes"].is_u64(),
@@ -315,7 +345,7 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
             status["process_memory"]["c_heap_arena_limit"], C_HEAP_ARENAS,
             "the fixture sets the arena limit before it starts threads"
         );
-        let arena_heaps = glibc_arena_heaps(pid);
+        let arena_heaps = glibc_arena_heaps(&mappings(pid));
         assert!(
             (1..C_HEAP_ARENAS).contains(&arena_heaps),
             "{arena_heaps} heaps outside the main arena under a limit of {C_HEAP_ARENAS} arenas"

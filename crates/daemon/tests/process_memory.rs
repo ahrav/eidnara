@@ -78,6 +78,17 @@ async fn resident_drop(daemon: &KernelDaemon) -> u64 {
         .expect("resident drop")
 }
 
+/// Probes health as the host does until a probe's check has released: checks are spaced, so the
+/// probe that follows another test's check starts none.
+async fn probes_release(daemon: &KernelDaemon, count: u64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while releases(daemon).await < count {
+        assert!(Instant::now() < deadline, "fewer than {count} releases");
+        let _ = CompositeComponent::health(daemon.handler()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn releases_reach(daemon: &KernelDaemon, count: u64) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while releases(daemon).await < count {
@@ -117,9 +128,8 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
         heap.is_resident(),
         "freed chunks stay resident until a release"
     );
-    let _ = CompositeComponent::health(daemon.handler()).await;
+    probes_release(&daemon, releases_before + 1).await;
     heap.released().await;
-    releases_reach(&daemon, releases_before + 1).await;
 
     let reported = process_memory(&daemon).await;
     assert_eq!(reported["c_heap_releases"], releases_before + 1);
@@ -150,14 +160,17 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
 async fn closing_a_sessions_last_route_releases_freed_c_heap_pages() {
     let _serial = ONE_AT_A_TIME.lock().await;
     let daemon = KernelDaemon::start().await;
-    let route = bind_session(&daemon, 40, "session-that-ends").await;
+    let first = bind_session(&daemon, 40, "session-that-ends").await;
+    let last = bind_session(&daemon, 42, "session-that-ends").await;
 
     let heap = FragmentedCHeap::new();
+    CompositeComponent::route_gone(daemon.handler(), first).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         heap.is_resident(),
-        "freed chunks stay resident until a release"
+        "freed chunks stay resident while the session keeps a route"
     );
-    CompositeComponent::route_gone(daemon.handler(), route).await;
+    CompositeComponent::route_gone(daemon.handler(), last).await;
     heap.released().await;
     daemon.shutdown().await;
 }
@@ -177,8 +190,11 @@ async fn memory_freed_after_a_release_is_returned_when_the_session_ends() {
     const CHUNK_BYTES: usize = 64 * 1024;
     let live: Vec<Vec<u8>> = (0..4096).map(|_| vec![1_u8; CHUNK_BYTES]).collect();
     let heap = FragmentedCHeap::new();
-    let _ = CompositeComponent::health(daemon.handler()).await;
-    releases_reach(&daemon, releases_before + 1).await;
+    probes_release(&daemon, releases_before + 1).await;
+    assert!(
+        !daemon::process_memory::release_free_c_heap_when_due(),
+        "a check after a release runs no trim while the live block keeps resident memory high"
+    );
 
     let resident_with_live_block = resident();
     let pinned: Vec<Vec<u8>> = live
@@ -194,6 +210,16 @@ async fn memory_freed_after_a_release_is_returned_when_the_session_ends() {
     );
     assert_eq!(pinned.len(), 64);
     daemon.shutdown().await;
+}
+
+#[test]
+fn glibc_versions_are_compared_by_their_leading_numbers() {
+    use support::glibc::version_exports_mallinfo2;
+    assert!(version_exports_mallinfo2("2.33"));
+    assert!(version_exports_mallinfo2("2.39-git"));
+    assert!(version_exports_mallinfo2("3.0"));
+    assert!(!version_exports_mallinfo2("2.28"));
+    assert!(!version_exports_mallinfo2("2.32.9000"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

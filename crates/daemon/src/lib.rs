@@ -13695,7 +13695,9 @@ impl CompositeComponent for Handler {
     }
 
     async fn health(&self) -> HealthReport {
-        self.release_c_heap_when_due();
+        if process_memory::health_probe_starts_a_check() {
+            self.release_c_heap_when_due();
+        }
         let now = now_ms().max(0) as u64;
         let phase = self.store_open.phase.load(Ordering::Acquire);
         let mut report = match phase {

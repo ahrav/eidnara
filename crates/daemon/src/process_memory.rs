@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 pub const C_HEAP_ARENAS: usize = 4;
 /// The size of one glibc arena heap.
 pub const C_HEAP_RELEASE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
+/// The host probes health every 50 ms while a component starts and every 30 s afterwards.
+/// One second between checks keeps every steady probe and one in twenty of the startup probes.
+const HEALTH_CHECK_SPACING: std::time::Duration = std::time::Duration::from_secs(1);
 
 static ARENA_LIMIT_SET: AtomicBool = AtomicBool::new(false);
 static RELEASING: AtomicBool = AtomicBool::new(false);
@@ -63,14 +66,16 @@ impl ProcessMemory {
         }
     }
 
-    fn heap_reading(&self, resident_bytes: u64) -> HeapReading {
-        HeapReading {
+    fn heap_reading(&self) -> Option<HeapReading> {
+        Some(HeapReading {
             free_bytes: self.c_heap.map(|heap| heap.free_bytes),
-            resident_bytes: self.rss_anon_bytes.unwrap_or(resident_bytes),
-        }
+            resident_bytes: self.rss_anon_bytes?,
+        })
     }
 
     pub fn to_json(&self) -> Value {
+        let releases = RELEASES.count.load(Ordering::Acquire);
+        let resident_drop_bytes = RELEASES.resident_drop_bytes.load(Ordering::Relaxed);
         json!({
             "rss_anon_bytes": self.rss_anon_bytes,
             "rss_file_bytes": self.rss_file_bytes,
@@ -82,8 +87,8 @@ impl ProcessMemory {
                 "mmapped_bytes": heap.mmapped_bytes,
             })),
             "c_heap_arena_limit": ARENA_LIMIT_SET.load(Ordering::Relaxed).then_some(C_HEAP_ARENAS),
-            "c_heap_releases": RELEASES.count.load(Ordering::Relaxed),
-            "c_heap_release_resident_drop_bytes": RELEASES.resident_drop_bytes.load(Ordering::Relaxed),
+            "c_heap_releases": releases,
+            "c_heap_release_resident_drop_bytes": resident_drop_bytes,
         })
     }
 }
@@ -103,18 +108,23 @@ fn status_field(status: &str, name: &str) -> Option<u64> {
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[allow(unsafe_code)]
 fn c_heap() -> Option<CHeap> {
     type Mallinfo2 = unsafe extern "C" fn() -> libc::mallinfo2;
     static MALLINFO2: std::sync::OnceLock<Option<Mallinfo2>> = std::sync::OnceLock::new();
     let mallinfo2 = (*MALLINFO2.get_or_init(|| {
         // SAFETY: `dlsym` reads the NUL-terminated name and returns null when no loaded object exports it.
+        #[allow(unsafe_code)]
         let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"mallinfo2".as_ptr()) };
+        if symbol.is_null() {
+            return None;
+        }
         // SAFETY: a non-null `mallinfo2` symbol is glibc's `struct mallinfo2 mallinfo2(void)`.
-        (!symbol.is_null())
-            .then(|| unsafe { std::mem::transmute::<*mut libc::c_void, Mallinfo2>(symbol) })
+        #[allow(unsafe_code)]
+        let function = unsafe { std::mem::transmute::<*mut libc::c_void, Mallinfo2>(symbol) };
+        Some(function)
     }))?;
     // SAFETY: `mallinfo2` takes no arguments and returns its totals by value.
+    #[allow(unsafe_code)]
     let info = unsafe { mallinfo2() };
     Some(CHeap {
         in_use_bytes: info.uordblks as u64,
@@ -129,7 +139,6 @@ fn c_heap() -> Option<CHeap> {
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[allow(unsafe_code)]
 pub fn limit_c_heap_arenas() {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let variable =
@@ -142,6 +151,7 @@ pub fn limit_c_heap_arenas() {
         return;
     }
     // SAFETY: `mallopt` takes two integers, and the `Threads` count read above is 1, so no thread reads the limit during the write.
+    #[allow(unsafe_code)]
     let set = unsafe { libc::mallopt(libc::M_ARENA_MAX, C_HEAP_ARENAS as libc::c_int) == 1 };
     ARENA_LIMIT_SET.store(set, Ordering::Relaxed);
 }
@@ -199,43 +209,79 @@ impl Releases {
         )
     }
 
-    /// Resets the floors after a trim and counts it as a release when resident memory fell.
+    /// Resets the floors after a trim.
     ///
     /// The freed-byte floor is the lower of the two readings, so bytes freed while the trim ran
     /// count as growth at the next check.
-    fn record(&self, before: HeapReading, after: HeapReading, trimmed: bool) {
+    fn reset_floors(&self, before: HeapReading, after: HeapReading) {
         self.resident_floor
             .store(after.resident_bytes, Ordering::Relaxed);
         let free_floor = after.free_bytes.map_or(0, |after| {
             before.free_bytes.map_or(after, |before| before.min(after))
         });
         self.free_floor.store(free_floor, Ordering::Relaxed);
+    }
+
+    /// Counts a trim as a release when it reported work and resident memory fell across it.
+    ///
+    /// The count is published after the drop total, so a reader that sees the count sees its bytes.
+    fn count(&self, before: HeapReading, after: HeapReading, trimmed: bool) {
         let dropped = before.resident_bytes.saturating_sub(after.resident_bytes);
         if trimmed && dropped > 0 {
             self.resident_drop_bytes
                 .fetch_add(dropped, Ordering::Relaxed);
-            self.count.fetch_add(1, Ordering::Relaxed);
+            self.count.fetch_add(1, Ordering::Release);
         }
     }
 }
 
+/// Whether a health probe at `now_ms` starts a check: the first probe, and each probe at least
+/// one spacing after the probe that last started one.
+fn health_check_is_spaced(last_ms: &AtomicU64, now_ms: u64) -> bool {
+    let last = last_ms.load(Ordering::Relaxed);
+    let spaced =
+        last == u64::MAX || now_ms.saturating_sub(last) >= HEALTH_CHECK_SPACING.as_millis() as u64;
+    spaced
+        && last_ms
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+}
+
+/// Whether the health probe running now starts a release check.
+pub fn health_probe_starts_a_check() -> bool {
+    static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static LAST_MS: AtomicU64 = AtomicU64::new(u64::MAX);
+    let now_ms = STARTED
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64;
+    health_check_is_spaced(&LAST_MS, now_ms)
+}
+
 /// Runs one trim when a release is due and reports whether it ran one.
+///
+/// A check that cannot read the process's resident memory runs no trim and leaves the floors.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[allow(unsafe_code)]
 pub fn release_free_c_heap_when_due() -> bool {
     if RELEASING.swap(true, Ordering::AcqRel) {
         return false;
     }
-    let before = ProcessMemory::sample().heap_reading(0);
-    let due = RELEASES.is_due(before);
-    if due {
+    let due = ProcessMemory::sample()
+        .heap_reading()
+        .filter(|before| RELEASES.is_due(*before));
+    let trim = due.map(|before| {
         // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
+        #[allow(unsafe_code)]
         let trimmed = unsafe { libc::malloc_trim(0) } == 1;
-        let after = ProcessMemory::sample().heap_reading(before.resident_bytes);
-        RELEASES.record(before, after, trimmed);
-    }
+        let after = ProcessMemory::sample().heap_reading().unwrap_or(before);
+        RELEASES.reset_floors(before, after);
+        (before, after, trimmed)
+    });
     RELEASING.store(false, Ordering::Release);
-    due
+    if let Some((before, after, trimmed)) = trim {
+        RELEASES.count(before, after, trimmed);
+    }
+    trim.is_some()
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
@@ -301,6 +347,11 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
+    fn record(releases: &Releases, before: HeapReading, after: HeapReading, trimmed: bool) {
+        releases.reset_floors(before, after);
+        releases.count(before, after, trimmed);
+    }
+
     fn reading(free_bytes: Option<u64>, resident_bytes: u64) -> HeapReading {
         HeapReading {
             free_bytes,
@@ -330,7 +381,7 @@ mod tests {
         let releases = Releases::default();
         let before = reading(Some(300 * MIB), 800 * MIB);
         assert!(releases.is_due(before));
-        releases.record(before, reading(Some(280 * MIB), 520 * MIB), true);
+        record(&releases, before, reading(Some(280 * MIB), 520 * MIB), true);
 
         assert_eq!(releases.count.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -350,7 +401,7 @@ mod tests {
             let before = reading(Some(300 * MIB), 800 * MIB);
             assert!(releases.is_due(before));
             let after = reading(Some(300 * MIB), after_resident);
-            releases.record(before, after, trimmed);
+            record(&releases, before, after, trimmed);
 
             assert_eq!(releases.count.load(Ordering::Relaxed), 0);
             assert_eq!(releases.resident_drop_bytes.load(Ordering::Relaxed), 0);
@@ -364,7 +415,7 @@ mod tests {
         let before = reading(Some(100 * MIB), 400 * MIB);
         assert!(releases.is_due(before));
         let after = reading(Some(100 * MIB + THRESHOLD), 300 * MIB);
-        releases.record(before, after, true);
+        record(&releases, before, after, true);
 
         assert_eq!(releases.free_floor.load(Ordering::Relaxed), 100 * MIB);
         assert!(releases.is_due(after));
@@ -375,10 +426,34 @@ mod tests {
         let releases = Releases::default();
         let before = reading(None, 400 * MIB);
         assert!(releases.is_due(before));
-        releases.record(before, reading(None, 300 * MIB), true);
+        record(&releases, before, reading(None, 300 * MIB), true);
 
         assert_eq!(releases.free_floor.load(Ordering::Relaxed), 0);
         assert_eq!(releases.resident_floor.load(Ordering::Relaxed), 300 * MIB);
+    }
+
+    #[test]
+    fn a_health_probe_starts_a_check_at_most_once_per_spacing() {
+        let spacing = HEALTH_CHECK_SPACING.as_millis() as u64;
+        let last = AtomicU64::new(u64::MAX);
+        assert!(health_check_is_spaced(&last, 0));
+        assert!(!health_check_is_spaced(&last, 50));
+        assert!(!health_check_is_spaced(&last, spacing - 1));
+        assert!(health_check_is_spaced(&last, spacing));
+        assert!(!health_check_is_spaced(&last, spacing + 50));
+        assert!(health_check_is_spaced(&last, 2 * spacing));
+    }
+
+    #[test]
+    fn a_process_status_without_a_resident_figure_gives_no_heap_reading() {
+        let unreadable = ProcessMemory::default();
+        assert!(unreadable.heap_reading().is_none());
+        let readable = ProcessMemory {
+            rss_anon_bytes: Some(7),
+            ..ProcessMemory::default()
+        };
+        let reading = readable.heap_reading().expect("a reading");
+        assert_eq!((reading.free_bytes, reading.resident_bytes), (None, 7));
     }
 
     #[test]
