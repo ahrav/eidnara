@@ -346,6 +346,19 @@ describe("Pi context handler in compaction-off mode", () => {
                 if (part.type === "text") expect(SHOWN.startsWith(part.text ?? "")).toBe(true);
             }
         }
+        if (tokensPerSecond !== undefined) {
+            let joined = "";
+            for (const update of updates) {
+                const { message, assistantMessageEvent: event } = JSON.parse(update) as {
+                    message: { content: { text?: string }[] };
+                    assistantMessageEvent: { type: string; contentIndex: number; delta?: string };
+                };
+                if (event.type === "text_start") joined = "";
+                if (event.type !== "text_delta") continue;
+                joined += event.delta ?? "";
+                expect(message.content[event.contentIndex]?.text).toBe(joined);
+            }
+        }
         const ends = updates
             .map(
                 (update) =>

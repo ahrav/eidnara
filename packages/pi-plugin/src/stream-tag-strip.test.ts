@@ -152,6 +152,18 @@ function replay(
     return { events, partial };
 }
 
+function deltaSender(part: Part): (delta: string) => [string | undefined, string] {
+    const partial = { role: "assistant", content: [part] };
+    return (delta) => {
+        const event = {
+            message: { ...partial },
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
+        };
+        stripStreamedTags(event);
+        return [(event.message.content[0] as Part).text, event.assistantMessageEvent.delta];
+    };
+}
+
 describe("stripStreamedTags", () => {
     const answer = `${S}230${S} I reran the suite: ${S}12${S} 1610 pass, see \u00a7 4.`;
     const shown = "I reran the suite:  1610 pass, see \u00a7 4.";
@@ -263,15 +275,7 @@ describe("stripStreamedTags", () => {
 
     it("starts the deltas over when a part restarts, dropping a held prefix", () => {
         const part = { type: "text", text: `ok ${S}12` };
-        const partial = { role: "assistant", content: [part] as Part[] };
-        const send = (delta: string) => {
-            const event = {
-                message: { ...partial },
-                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
-            };
-            stripStreamedTags(event);
-            return [(event.message.content[0] as Part).text, event.assistantMessageEvent.delta];
-        };
+        const send = deltaSender(part);
         expect(send(`ok ${S}12`)).toEqual(["ok ", "ok "]);
         part.text = "new";
         expect(send("new")).toEqual(["new", "new"]);
@@ -359,15 +363,7 @@ describe("stripStreamedTags", () => {
 
     it("starts deltas that run on their own over when the part restarts", () => {
         const part = { type: "text", text: "" };
-        const partial = { role: "assistant", content: [part] as Part[] };
-        const send = (delta: string) => {
-            const event = {
-                message: { ...partial },
-                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
-            };
-            stripStreamedTags(event);
-            return [(event.message.content[0] as Part).text, event.assistantMessageEvent.delta];
-        };
+        const send = deltaSender(part);
         part.text = `ok ${S}12x`;
         expect(send(`ok ${S}12`)).toEqual([`ok ${S}12x`, "ok "]);
         part.text = "new";
@@ -376,15 +372,7 @@ describe("stripStreamedTags", () => {
 
     it("shows a restarted part whose text keeps an earlier prefix of what it showed", () => {
         const part = { type: "text", text: "" };
-        const partial = { role: "assistant", content: [part] as Part[] };
-        const send = (delta: string) => {
-            const event = {
-                message: { ...partial },
-                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
-            };
-            stripStreamedTags(event);
-            return [(event.message.content[0] as Part).text, event.assistantMessageEvent.delta];
-        };
+        const send = deltaSender(part);
         for (const delta of ["ab", "c"]) {
             part.text += delta;
             expect(send(delta)).toEqual([part.text, delta]);
@@ -395,15 +383,7 @@ describe("stripStreamedTags", () => {
 
     it("keeps the whitespace after an opening tag out of deltas that run behind the part", () => {
         const part = { type: "text", text: "" };
-        const partial = { role: "assistant", content: [part] as Part[] };
-        const send = (delta: string) => {
-            const event = {
-                message: { ...partial },
-                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
-            };
-            stripStreamedTags(event);
-            return [(event.message.content[0] as Part).text, event.assistantMessageEvent.delta];
-        };
+        const send = deltaSender(part);
         part.text = `${S}1${S}`;
         expect(send(`${S}1${S}`)).toEqual(["", ""]);
         part.text += " ab cd";
@@ -451,14 +431,13 @@ describe("stripStreamedTags", () => {
     });
 
     it("keeps an update's delta when a part's accessor strips another update meanwhile", () => {
-        const strip = () =>
-            stripStreamedTags({
-                message: { role: "assistant", content: [{ type: "text", text: "q" }] },
-                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "q" },
-            });
+        const inner = {
+            message: { role: "assistant", content: [{ type: "text", text: "q" }] },
+            assistantMessageEvent: { type: "text_delta", contentIndex: 3, delta: "zz" },
+        };
         const reentrant = {
             get type() {
-                strip();
+                stripStreamedTags(inner);
                 return "text";
             },
             text: "x",
@@ -471,6 +450,40 @@ describe("stripStreamedTags", () => {
             assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: `hi${S}1${S}` },
         };
         stripStreamedTags(event);
+        expect(event.assistantMessageEvent.delta).toBe("hi");
+        expect(inner.assistantMessageEvent.delta).toBe("zz");
+    });
+
+    it("keeps an update's delta when a reentrant strip fails inside a part's accessor", () => {
+        const failing = {
+            get type(): string {
+                throw new Error("accessor failed");
+            },
+        };
+        const caught: unknown[] = [];
+        const reentrant = {
+            get type() {
+                try {
+                    stripStreamedTags({
+                        message: { role: "assistant", content: [failing] },
+                        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "q" },
+                    });
+                } catch (error) {
+                    caught.push(error);
+                }
+                return "text";
+            },
+            text: "x",
+        };
+        const event = {
+            message: {
+                role: "assistant",
+                content: [{ type: "text", text: `hi${S}1${S}` }, reentrant],
+            },
+            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: `hi${S}1${S}` },
+        };
+        stripStreamedTags(event);
+        expect(caught.length).toBeGreaterThan(0);
         expect(event.assistantMessageEvent.delta).toBe("hi");
     });
 
@@ -521,12 +534,19 @@ describe("stripStreamedTags", () => {
             };
             const restartAt = next(3) === 0 ? next(16) : -1;
             const pending: string[] = [];
+            let seen = "";
             let shown = "";
             let sent = "";
             let deltas = "";
             const deliver = (lag: number) => {
                 while (pending.length > lag) {
                     const piece = pending.shift() ?? "";
+                    if (!part.text.startsWith(seen)) {
+                        shown = "";
+                        sent = "";
+                        deltas = "";
+                    }
+                    seen = part.text;
                     const event = emit({ type: "text_delta", delta: piece });
                     const whole = reference(part.text, true);
                     const context = JSON.stringify({ round, text: part.text, shown: event.shown });
@@ -542,13 +562,7 @@ describe("stripStreamedTags", () => {
             for (let step = 0; step < steps; step += 1) {
                 if (step === restartAt) {
                     deliver(0);
-                    const text = randomText(10);
-                    if (!text.startsWith(part.text)) {
-                        shown = "";
-                        sent = "";
-                        deltas = "";
-                    }
-                    part.text = text;
+                    part.text = randomText(10);
                 }
                 const piece = randomText(7);
                 part.text += piece;
