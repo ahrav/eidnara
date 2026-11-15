@@ -262,8 +262,8 @@ Guarantee: A capture job id is the SHA-256 of `(project, harness, session_id, me
 Check: `always` - for every capture job, `job_id == job_id(source, redacted_text)`, and for every decision it writes, `object_id == "mem_" + sha256(job_id + ":" + index)[..32]`
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
-Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:112`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:384`, and the object id at `:1679`
-Existing check: `crates/memory-store/src/memory_capture.rs:755`; `crates/daemon/src/memory_capture.rs:2437`, `:2486`, `:2800`, `:2822`, `:2917`; `crates/daemon/src/lib.rs:24957`, `:26281` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:114`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:384`, and the object id at `:1679`
+Existing check: `crates/memory-store/src/memory_capture.rs:796`; `crates/daemon/src/memory_capture.rs:2437`, `:2486`, `:2800`, `:2822`, `:2917`; `crates/daemon/src/lib.rs:24957`, `:26281` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -307,7 +307,7 @@ Guarantee: A unit the memo records as `Pending` can publish on a later pass that
 Check: `sometimes` - a campaign constructs a window whose memo holds a `Pending` entry and a later pass that publishes it; narrowed by refinement R6 to publication from the memo's `Pending` entry
 Fault/timing angle: the Kernel is starting or the window exceeds one pass's unit bound
 Required faults and enabling state: a 33-unit window; a Kernel still starting during the first pass
-Confidence: high - [evidence](evidence/p2-deferred-source-units-publish-on-a-later-pass.md). Read `Disposition::Pending` at `crates/daemon/src/source_capture.rs:183`
+Confidence: high - [evidence](evidence/p2-deferred-source-units-publish-on-a-later-pass.md). Read `Disposition::Pending` at `crates/daemon/src/source_capture.rs:186`
 Existing check: `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234`; `crates/daemon/src/source_capture_tests.rs:4505` for the settlement witness (unaudited)
 Impact: without the witness, U4's rule that settlement means job end rather than descriptor presence is untested
 Open questions: None.
@@ -456,7 +456,7 @@ Reachability: explicit-config-only - the wait runs only with source and memory c
 Status: active - activated by U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136))
 Exercised: yes - `a_running_entry_waits_for_its_end_or_its_budget_deadline` releases a waiter exactly at `accepted_at + 5 s`; `on_the_paused_clock_the_wait_is_zero_when_settled_and_ends_exactly_at_the_deadline` holds a real submit pending at the deadline minus 1 ms and releases it exactly at the deadline on the paused tokio clock; `a_publish_past_its_budget_releases_the_submit_at_the_deadline` does so on the real clock; `a_submit_during_the_publish_waits_outside_the_gate_and_then_cites` takes the capture commit gate from the test while the submit waits
 Guarantee: With source capture enabled, the submit path proceeds to publish within `accepted_at + 5 s` plus one blocking-pool scheduling slack, whatever the source job does, and never holds the capture commit gate while waiting.
-Check: `always` - the wait returns within the bound measured from the record's `accepted_at`, the bound being `CAPTURE_BUDGET` (`crates/daemon/src/source_capture.rs:41`), which also seeds the job's `EvalBudget` from the same instant in `into_job` (`:708`); a submit observes every distinct job session's entry under one lock, and one publication slot means at most one of them is `Running`, so the waits end by that entry's deadline; the commit gate is acquired only after the waits return, in the blocking hop, and the job records its end after releasing the gate
+Check: `always` - the wait returns within the bound measured from the record's `accepted_at`, the bound being `CAPTURE_BUDGET` (`crates/daemon/src/source_capture.rs:41`), which also seeds the job's `EvalBudget` from the same instant in `into_job` (`:711`); a submit observes every distinct job session's entry under one lock, and one publication slot means at most one of them is `Running`, so the waits end by that entry's deadline; the commit gate is acquired only after the waits return, in the blocking hop, and the job records its end after releasing the gate
 Fault/timing angle: a source job that stalls past its budget
 Required faults and enabling state: a parked source job under a paused tokio clock; a parked job with a real clock
 Confidence: high - [evidence](evidence/p2-new-settlement-wait-is-bounded-and-gate-free.md). Read `settle` at `crates/daemon/src/source_capture/settlement.rs:272` and `capture_settlements` at `crates/daemon/src/memory_capture/native.rs:124`
@@ -504,8 +504,8 @@ Guarantee: Within one daemon process, each of the seven capture-decision counter
 Check: `always` - after each publish settles, `counter[reason] == committed(reason)` in this process; the closure records the reasons, and `record_capture_decisions` adds them only after `commit_before` returns a receipt that was not replayed, so `committed <= counter <= attempted` holds under loss per METHOD effect accounting
 Fault/timing angle: a publish that rolls back after its reasons were computed; a replayed receipt
 Required faults and enabling state: a replayed publish; a refused commit
-Confidence: high - [evidence](evidence/p2-new-miss-counters-track-rationale.md). Read `record_capture_decisions` at `crates/daemon/src/source_capture.rs:659` and its call in `CaptureWork::publish`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:3844`; `crates/host-runtime/src/control.rs:1966` for the wire allowlist (unaudited)
+Confidence: high - [evidence](evidence/p2-new-miss-counters-track-rationale.md). Read `record_capture_decisions` at `crates/daemon/src/source_capture.rs:662` and its call in `CaptureWork::publish`
+Existing check: `crates/daemon/src/source_capture_tests.rs:3496`, `:3662`, `:3844`; `crates/host-runtime/src/control.rs:1967` for the wire allowlist (unaudited)
 Impact: operators tune the budget on numbers that count failures as misses
 Open questions: None.
 

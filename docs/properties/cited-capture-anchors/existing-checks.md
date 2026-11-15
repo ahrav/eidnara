@@ -22,7 +22,7 @@ part.
 | Cited-evidence predicate | `crates/kernel/src/slice/write.rs:42` (`EVIDENCE_CITED_SQL`), `:585` (`retire_evidence`); `crates/kernel/src/local_file.rs:245` (`expire_harness_captures`) | cited evidence is never retired or swept | unaudited |
 | Capture receipt key and digest | `crates/daemon/src/memory_capture.rs:1588` (`publish_captured_memories`) | replay by job key and frozen-plan digest | unaudited |
 | Quote and source validation | `crates/daemon/src/memory_capture.rs:219` (`parse_capture_batch`), `:281` (`validate_capture_memories`) | quotes are substrings of their own batch source | unaudited |
-| Job identity | `crates/memory-store/src/memory_capture.rs:112` (`job_id`) | job id derives from the source tuple and redacted text | unaudited |
+| Job identity | `crates/memory-store/src/memory_capture.rs:114` (`job_id`) | job id derives from the source tuple and redacted text | unaudited |
 | Hashed fragment id | `crates/daemon/src/memory_capture.rs:384` (`native_capture_fragments`) | out-of-grammar or oversized ids become `{sha256}:{offset}` | unaudited |
 | Capture commit gate | `crates/daemon/src/memory_capture.rs:1078`; `crates/daemon/src/lib.rs:7044` | publish, checkpoint, source publish, and delete serialize | unaudited |
 | Message unit identity | `crates/daemon/src/harness_sources.rs:214` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
@@ -33,8 +33,8 @@ part.
 | Citation lookup and reasons | `crates/daemon/src/memory_capture/cite.rs:301` (`Citation::lookup`), `:136` (`is_hashed_source_id`) | reads only the job's own lineages inside the envelope; one closed reason per decision | unaudited |
 | Block location and target | `crates/daemon/src/memory_capture/cite.rs:198` (`locate`), `:230` (`target`) | digest-located blocks; `block`, `span`, or `first` | unaudited |
 | Citation events | `crates/daemon/src/memory_capture/cite.rs:379` (`append_citations`) | one event per cited block, evidence live, decision row uncited | unaudited |
-| Capture-decision counters | `crates/daemon/src/source_capture.rs:659` (`record_capture_decisions`); `crates/host-runtime/src/control.rs:709` (`SOURCE_CAPTURE_COUNTERS`) | counts added after a non-replayed receipt; names forwarded by the host | unaudited |
-| Settlement record | `crates/daemon/src/source_capture/settlement.rs:91` (`Settlements`), `:272` (`settle`); writers in `crates/daemon/src/source_capture.rs:708` (`into_job`), `:572` (`refuse_handoff`), `:933` (the job's end, after the gate is released), `:470` (`ActiveSlot`) | bounded per-session record; the wait returns by `accepted_at + 5 s`; a free slot leaves no `Running` entry | unaudited |
+| Capture-decision counters | `crates/daemon/src/source_capture.rs:662` (`record_capture_decisions`); `crates/host-runtime/src/control.rs:709` (`SOURCE_CAPTURE_COUNTERS`) | counts added after a non-replayed receipt; names forwarded by the host | unaudited |
+| Settlement record | `crates/daemon/src/source_capture/settlement.rs:91` (`Settlements`), `:272` (`settle`); writers in `crates/daemon/src/source_capture.rs:711` (`into_job`), `:575` (`refuse_handoff`), `:936` (the job's end, after the gate is released), `:473` (`ActiveSlot`) | bounded per-session record; the wait returns by `accepted_at + 5 s`; a free slot leaves no `Running` entry | unaudited |
 | Settlement wait | `crates/daemon/src/memory_capture/native.rs:124` (`capture_settlements`, which observes every job session under one lock), awaited at `:394`; `crates/daemon/src/memory_capture/cite.rs:123` (`settlement_key`) | settles each job session's observed entry before the blocking hop that takes the commit gate; skips error submits, consent off, and unjoinable ids; a cancel returns with nothing recorded | unaudited |
 | Anchor write validation | `crates/kernel/src/anchor_write.rs:297` (`validate_anchor`), `:288` (`validate_anchor_row`) | written anchor rows pass the engine's bound check and decoder and round-trip | unaudited |
 | Anchor write order | `crates/kernel/src/anchor_write.rs:410` (`insert_anchor_inner`) | registry row, anchor row, and change record in one envelope | unaudited |
@@ -70,7 +70,7 @@ part.
 | `crates/daemon/src/lib.rs:24957` `automatic_capture_commits_once_and_is_explicitly_retrievable` | same; identity record | unaudited |
 | `crates/daemon/src/memory_capture.rs:1816`, `:1849`, `:1881`, `:1923`, `:2418` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
 | `crates/daemon/src/lib.rs:25365` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
-| `crates/memory-store/src/memory_capture.rs:755` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
+| `crates/memory-store/src/memory_capture.rs:796` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
 | `crates/daemon/src/memory_capture.rs:2437`, `:2486`, `:2800`, `:2822`; `crates/daemon/src/lib.rs:26281` | same | unaudited |
 | `crates/daemon/src/lib.rs:25513`, `:25851`, `:26056`, `:26604`, `:25262`; `crates/daemon/src/source_capture_tests.rs:1037` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:867`, `:1259`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1724` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
@@ -108,7 +108,7 @@ part.
 | `crates/daemon/src/source_capture_tests.rs:4281` `a_queue_full_refusal_settles_at_once_and_hashed_ids_skip_the_wait`; `:4337` `consent_off_and_error_submits_arm_no_wait_while_a_publish_runs` | `p2-new-miss-reason-matches-outcome`; `p2-new-cited-decision-pair-observed` (AC10, disabled, hashed) | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:4375` `the_settlement_is_written_after_the_response_and_a_shutdown_refusal_records_it`; `:4424` `a_cancel_or_a_dropped_request_during_the_wait_writes_no_decision_and_releases_the_lease`; `:4470` `every_job_end_leaves_an_ended_settlement_and_an_idle_slot` | `p2-new-lookup-runs-only-after-settlement` (AC10, writer coverage) | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:4505` `a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found` | `p2-new-lookup-runs-only-after-settlement`; `p2-new-miss-reason-matches-outcome`; `p2-deferred-source-units-publish-on-a-later-pass` | unaudited |
-| `crates/host-runtime/src/control.rs:1966` `the_wire_document_names_exactly_the_forwarded_fields` | `p2-new-miss-counters-track-rationale` (wire names) | unaudited |
+| `crates/host-runtime/src/control.rs:1967` `the_wire_document_names_exactly_the_forwarded_fields` | `p2-new-miss-counters-track-rationale` (wire names) | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:311` `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` | `p2-new-anchor-row-decodes-on-write`; `p2-new-anchor-and-registry-share-one-envelope` | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:383` `git_anchors_with_an_empty_capture_list_store_a_null_payload` | `p2-new-anchor-row-decodes-on-write` | unaudited |
 | `crates/kernel/tests/kernel_anchor_write.rs:459` `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` | same | unaudited |

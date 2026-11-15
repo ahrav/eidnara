@@ -23,7 +23,7 @@ branch, to the end of its chain, as the Kernel's checkout snapshot
 (`head_id`, `crates/kernel/src/applicability/checkout.rs:699`) does; when its first store lookup exhausts the store's index
 slots, only the object lookup repeats, for the same id, in a store opened
 with the default slot sizing (`reopened_kind`, `:70`). The store freezes a plan
-once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:373`,
+once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:394`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
