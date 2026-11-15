@@ -181,6 +181,7 @@ async function streamedTurns(
     serve: (body: Json) => Json = (body) =>
         additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 }),
     cwd = root,
+    tokensPerSecond?: number,
 ) {
     writeUserConfig(config);
     const { call } = daemon(serve);
@@ -196,6 +197,7 @@ async function streamedTurns(
         ],
         settings: PI_SETTINGS,
         tokenSize: { min: 1, max: 1 },
+        ...(tokensPerSecond ? { tokensPerSecond } : {}),
     });
     const updates: string[] = [];
     const unsubscribe = harness.session.subscribe((event) => {
@@ -322,10 +324,28 @@ describe("Pi context handler in compaction-off mode", () => {
         expect(capabilities(compactionOff)).toEqual([false, true]);
     });
 
-    it("streams a compaction-on answer without its tags wherever a delta cuts one", async () => {
-        const { h, updates } = await streamedTurns(CHAIN);
+    it.each([
+        ["runs ahead of Pi's handlers", undefined],
+        ["keeps pace with Pi's handlers", 2_000],
+    ])("streams a compaction-on answer without its tags wherever a delta cuts one when the provider %s", async (_pace, tokensPerSecond) => {
+        const { h, updates } = await streamedTurns(
+            CHAIN,
+            STREAMED,
+            [0, 1, 2, 3],
+            undefined,
+            root,
+            tokensPerSecond,
+        );
         expect(updates.length).toBeGreaterThan(STREAMED.length);
         for (const update of updates) expect(update).not.toMatch(/\u00a7\d/u);
+        for (const update of updates) {
+            const { message } = JSON.parse(update) as {
+                message: { content: { type: string; text?: string }[] };
+            };
+            for (const part of message.content) {
+                if (part.type === "text") expect(SHOWN.startsWith(part.text ?? "")).toBe(true);
+            }
+        }
         const ends = updates
             .map(
                 (update) =>

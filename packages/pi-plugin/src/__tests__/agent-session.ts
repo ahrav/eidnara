@@ -37,6 +37,7 @@ export async function createTestAgentSession(args: {
     /** Tool names to enable; none when unset. */
     tools?: string[];
     tokenSize?: { min?: number; max?: number };
+    tokensPerSecond?: number;
 }): Promise<TestAgentSession> {
     const faux = registerFauxProvider({
         provider: "faux",
@@ -44,6 +45,7 @@ export async function createTestAgentSession(args: {
             { id: "faux-model", contextWindow: args.contextWindow ?? 200_000, maxTokens: 8_192 },
         ],
         ...(args.tokenSize ? { tokenSize: args.tokenSize } : {}),
+        ...(args.tokensPerSecond ? { tokensPerSecond: args.tokensPerSecond } : {}),
     });
     const requests: { messages: unknown[]; systemPrompt: string | undefined }[] = [];
     const script: FauxResponseStep[] = [];
