@@ -1,12 +1,12 @@
-//! Outside-sim tests for open items across folds: a question pending after one fold closes when a
-//! later fold holds the user's answer, an unanswered question ages out once a later segment passes
-//! over it, and a constraint stands until a later fold records its lift.
+//! Fold-level tests for open items: a question pending after one fold leaves the rendered history
+//! once a later fold holds the user's answer or passes over it, and a constraint stands until a
+//! later fold stores the claim of its lift.
 //!
 //! The fixtures follow the shape of real sessions in which a compaction summary kept a "waiting
 //! on the user" line after the user had answered: a scope confirmation, a wait on merges the user
 //! then reported done, a choice between two values, a go-ahead on a numbered list, and a constraint
 //! the user later lifted. The deterministic tests script the summarizer's answers through the
-//! production validator and renderer. The live test sends the same messages to a real summarizer
+//! production validator and renderer. The live test sends such a session to a real summarizer
 //! model.
 
 use super::*;
@@ -228,7 +228,7 @@ impl Answered {
 }
 
 #[test]
-fn a_question_pending_after_one_fold_closes_when_the_next_fold_holds_the_answer() {
+fn a_question_pending_after_one_fold_leaves_once_the_next_fold_holds_the_answer() {
     for case in ANSWERED {
         let messages = case.answered();
         let mut stored = Vec::new();
@@ -318,16 +318,16 @@ fn a_summary_that_records_the_answer_and_keeps_the_waiting_line_renders_the_answ
             case.decided_line()
         )));
         assert!(
-            consolidated.ends_with(&case.decided_line()),
+            consolidated.ends_with(&format!("\n{}", case.decided_line())),
             "{consolidated}"
         );
-        // The third tier held the waiting line alone, so the row renders its second tier there.
-        assert_eq!(old, consolidated);
+        // The third tier held the waiting line alone, so the row renders its heading there.
+        assert_eq!(old, "## 1-4 \u{b7} Work 1-4");
     }
 }
 
 #[test]
-fn an_unanswered_question_stays_open_until_a_later_segment_passes_over_it() {
+fn an_unanswered_question_leaves_once_a_later_segment_passes_over_it() {
     let case = &ANSWERED[0];
     let mut messages = case.asking();
     messages.push(user(
@@ -440,7 +440,7 @@ fn constraint_then_other_work(messages: &[IngressMessage]) -> Vec<StoredHistoryS
 }
 
 #[test]
-fn a_constraint_stands_in_every_tier_until_a_later_fold_records_its_lift() {
+fn a_constraint_stands_in_every_tier_until_a_later_fold_stores_its_lift_claim() {
     let messages = constraint_session();
     let mut stored = constraint_then_other_work(&messages);
     for tier in &rendered_tiers(&stored)[0] {
@@ -505,7 +505,7 @@ fn a_lift_whose_claim_fails_validation_leaves_the_constraint_standing() {
 }
 
 #[test]
-fn an_answer_and_a_lift_under_other_keys_age_out_the_question_and_keep_the_constraint() {
+fn an_answer_and_a_lift_under_other_keys_leave_the_constraint_standing() {
     let case = &ANSWERED[0];
     let messages = vec![
         user(1, &format!("{} {CONSTRAINT}.", case.request)),
@@ -549,7 +549,15 @@ fn an_answer_and_a_lift_under_other_keys_age_out_the_question_and_keep_the_const
         ],
         5,
     );
-    fold(&mut stored, &second, &second_chunk);
+    let rows = fold(&mut stored, &second, &second_chunk);
+    assert_eq!(
+        rows[0]
+            .claims
+            .iter()
+            .map(|claim| claim.key.as_str())
+            .collect::<Vec<_>>(),
+        ["migration.step-order", "policy.bug-fixes"]
+    );
 
     let history = rendered_tiers(&stored);
     for tier in &history[0] {
@@ -559,62 +567,157 @@ fn an_answer_and_a_lift_under_other_keys_age_out_the_question_and_keep_the_const
 }
 
 #[test]
-fn a_later_segment_of_the_same_fold_settles_an_earlier_segment() {
-    let case = &ANSWERED[3];
-    let messages = case.answered();
-    let chunk = chunk_of(&messages, 1, 5);
-    let first_p1 = format!("I reviewed the parser module.\n{}", case.waiting_line());
-    let second_p1 = format!("{}\nI applied the fixes.", case.decided_line());
+fn a_later_segment_of_the_same_fold_lifts_an_earlier_segments_constraint() {
+    let messages = constraint_session();
+    let chunk = chunk_of(&messages, 1, 7);
+    let set = format!("{CONSTRAINT_LINE}\nI measured the baseline.");
+    let lifted = format!("{LIFTED_LINE}\nI opened two pull requests.");
     let text = output(
         &[
-            segment_xml(1, 2, [&first_p1, &first_p1, "Reviewed the parser.", ""]),
-            segment_xml(3, 4, [&second_p1, &second_p1, &second_p1, ""]),
+            segment_xml(1, 4, [&set, &set, &set, ""]),
+            segment_xml(5, 6, [&lifted, &lifted, &lifted, ""]),
         ],
         &[claim(
-            case.key,
-            &cite(&chunk, 3, case.answer),
-            case.answer,
-            &case.decided_line(),
+            "policy.baseline-fixes",
+            &cite(&chunk, 5, LIFT),
+            LIFT,
+            LIFTED_LINE,
         )],
-        5,
+        7,
     );
     let mut stored = Vec::new();
     assert_eq!(fold(&mut stored, &text, &chunk).len(), 2);
 
     let history = rendered_tiers(&stored);
-    assert_eq!(open_lines(&history[0][0]), Vec::<&str>::new());
-    assert!(history[1][0].contains(&case.decided_line()));
+    for tier in &history[0] {
+        assert_eq!(open_lines(tier), Vec::<&str>::new());
+        assert!(tier.ends_with("I measured the baseline."), "{tier}");
+    }
+    assert!(history[1][0].contains(LIFTED_LINE));
 }
 
-/// The first fold ends waiting on the user and records a user constraint; the second fold holds
-/// the user's answer and the lift. Both folds run through the production handler, and the history
-/// the next request receives states the outcomes alone.
-#[tokio::test(flavor = "current_thread")]
-async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settles() {
-    let case = &ANSWERED[0];
+/// The baseline `compose_m0` writes for session `ses` of `store` under a 60,000-token history
+/// budget, with memory and project documents left out.
+fn composed_baseline(store: &MemoryStore) -> String {
+    crate::m0_compose::compose_m0(
+        store,
+        &crate::m0_compose::M0ComposeInputs {
+            session_id: "ses",
+            project_path: "git:proj",
+            project_directory: "/nonexistent-docs",
+            now_ms: 0,
+            history_budget_tokens: 60_000.0,
+            covered_system_messages: &[],
+            memory_enabled: false,
+            user_profile_budget_tokens: 0.0,
+            inject_docs: false,
+            project_doc_files: &[],
+            document_reads: None,
+            temporal_awareness: false,
+            legacy_history_segment_seqs: None,
+        },
+        &[],
+        tokenizer::estimate_tokens,
+    )
+    .unwrap()
+    .m0_bytes
+}
+
+/// A long session whose constraint sits in an important old row and whose lift sits in a newer
+/// row the decay curve archives. The bounded read loads the archived row as its claims alone,
+/// and the baseline still retires the constraint, as a read of every row does.
+#[test]
+fn a_bounded_read_lifts_a_constraint_through_a_row_it_loads_without_text() {
+    use crate::test_support::synthetic_history::SyntheticHistory;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&crate::test_support::descriptor(dir.path())).unwrap();
+    SyntheticHistory::mixed(400).seed(&store, "ses");
+    let set = format!("{CONSTRAINT_LINE}\nBaseline measured in the important old row.");
+    let lifted = format!("{LIFTED_LINE}\nTwo pull requests opened.");
+    let lift_claim = serde_json::to_string(&[memory_store::Claim {
+        key: "policy.baseline-fixes".into(),
+        value: LIFT.into(),
+        ordinal: 705,
+        anchor: Some(LIFTED_LINE.into()),
+    }])
+    .unwrap();
+    let rewrite = |sequence: i64, text: &str, importance: i64, claims: &str| {
+        store
+            .with_fenced_conn_for_test(|tx| {
+                let changed = tx.execute(
+                    "UPDATE history_segments
+                        SET content = ?3, p1 = ?3, p2 = ?3, p3 = ?3, importance = ?4, claims = ?5,
+                            legacy = 0
+                      WHERE session_id = ?1 AND sequence = ?2",
+                    rusqlite::params!["ses", sequence, text, importance, claims],
+                )?;
+                assert_eq!(changed, 1);
+                Ok(())
+            })
+            .unwrap();
+    };
+    rewrite(40, &set, 100, "[]");
+    rewrite(70, &lifted, 1, "[]");
+
+    // With no lift claim stored, the constraint renders, and the newer row is archived: the
+    // baseline holds the old row's text and none of the lifting row's.
+    let standing = composed_baseline(&store);
+    assert_eq!(open_lines(&standing), [CONSTRAINT_LINE], "{standing}");
+    assert!(
+        !standing.contains("Two pull requests opened."),
+        "{standing}"
+    );
+
+    rewrite(70, &lifted, 1, &lift_claim);
+    let retired = composed_baseline(&store);
+    assert_eq!(open_lines(&retired), Vec::<&str>::new(), "{retired}");
+    assert!(retired.contains("Baseline measured in the important old row."));
+    assert!(!retired.contains("Two pull requests opened."), "{retired}");
+}
+
+/// A session in two spans: the user sets a constraint and the assistant ends on a question, then
+/// the user answers the question and lifts the constraint.
+fn question_under_a_constraint(case: &Answered) -> (Vec<IngressMessage>, Vec<IngressMessage>) {
     let log = work_log("the migration");
-    let before = vec![
+    let asking = vec![
         user(1, &format!("{} {CONSTRAINT}.", case.request)),
         assistant(
             2,
             &format!("{log}I finished the first step. {}", case.question),
         ),
     ];
-    let added = vec![
+    let answering = vec![
         user(3, &format!("{}. Also, {LIFT}.", case.answer)),
         assistant(
             4,
             &format!("{log}The remaining steps are done, and two pull requests hold the fixes."),
         ),
     ];
-    let tail = |first: u64| {
-        vec![
-            user(first, &format!("unrelated tail {}", "pad ".repeat(3000))),
-            user(first + 1, "What is left on the migration?"),
-        ]
-    };
-    let mut first_messages = before.clone();
-    first_messages.extend(tail(3));
+    (asking, answering)
+}
+
+/// `messages` followed by a padded tail, which keeps them outside the live window so a fold
+/// covers all of them.
+fn with_tail(mut messages: Vec<IngressMessage>) -> Vec<IngressMessage> {
+    let next = messages.last().unwrap().ordinal + 1;
+    messages.push(user(
+        next,
+        &format!("unrelated tail {}", "pad ".repeat(3000)),
+    ));
+    messages.push(user(next + 1, "What is left to do?"));
+    messages
+}
+
+/// The first fold ends waiting on the user and records a user constraint; the second fold holds
+/// the user's answer and the lift. Both folds run through the production handler. The next
+/// request carries the outcomes in the rows above its frozen baseline, and the baseline the next
+/// rebuild writes holds the outcomes alone.
+#[tokio::test(flavor = "current_thread")]
+async fn a_fold_that_settles_open_items_reaches_the_next_request_and_the_next_baseline() {
+    let case = &ANSWERED[0];
+    let (asking, answering) = question_under_a_constraint(case);
+    let first_messages = with_tail(asking.clone());
     let first_chunk = chunk_of(&first_messages, 1, 3);
     let first_p1 = format!(
         "{CONSTRAINT_LINE}\nI finished the first migration step.\n{}",
@@ -639,9 +742,7 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
         )],
         3,
     );
-    let mut second_messages = before.clone();
-    second_messages.extend(added);
-    second_messages.extend(tail(5));
+    let second_messages = with_tail([asking, answering].concat());
     let second_chunk = chunk_of(&second_messages, 3, 5);
     let second_p1 = format!(
         "{}\n{LIFTED_LINE}\nI finished the remaining steps.",
@@ -684,6 +785,7 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
             request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT),
         )
     };
+    let open = [CONSTRAINT_LINE.to_owned(), case.waiting_line()];
     let fired = pass(first_messages.clone()).await;
     assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
     wait_for_count(&producer.starts, 1).await;
@@ -691,11 +793,7 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
     // The request after the first fold carries the open question and the constraint.
     let served = pass(first_messages).await;
     let history = synthetic_text(&served, 0) + &synthetic_text(&served, 1);
-    assert_eq!(
-        open_lines(&history),
-        [CONSTRAINT_LINE.to_owned(), case.waiting_line()],
-        "{history}"
-    );
+    assert_eq!(open_lines(&history), open, "{history}");
     let fired = pass(second_messages.clone()).await;
     assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
     wait_for_count(&producer.starts, 2).await;
@@ -713,10 +811,13 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
     );
     assert!(rows[0].p1.as_deref().unwrap().contains(CONSTRAINT_LINE));
 
-    // The rows above the frozen baseline state both outcomes, and the update block names the
-    // lift under the constraint's key.
+    // The frozen baseline keeps its bytes until its next rebuild. The rows above it state both
+    // outcomes and hold no open line, and the update block names the lift under the
+    // constraint's key.
     let served = pass(second_messages).await;
-    let since = synthetic_text(&served, 1);
+    let (baseline, since) = (synthetic_text(&served, 0), synthetic_text(&served, 1));
+    assert_eq!(open_lines(&baseline), open, "{baseline}");
+    assert_eq!(open_lines(&since), Vec::<&str>::new(), "{since}");
     assert!(since.contains(&case.decided_line()), "{since}");
     assert!(since.contains(LIFTED_LINE), "{since}");
     assert!(
@@ -725,28 +826,7 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
     );
 
     // The baseline the next rebuild writes from the stored rows holds the outcomes alone.
-    let rebuilt = crate::m0_compose::compose_m0(
-        &store,
-        &crate::m0_compose::M0ComposeInputs {
-            session_id: "ses",
-            project_path: "git:proj",
-            project_directory: "/nonexistent-docs",
-            now_ms: 0,
-            history_budget_tokens: 0.0,
-            covered_system_messages: &[],
-            memory_enabled: false,
-            user_profile_budget_tokens: 0.0,
-            inject_docs: false,
-            project_doc_files: &[],
-            document_reads: None,
-            temporal_awareness: false,
-            legacy_history_segment_seqs: None,
-        },
-        &[],
-        |text: &str| text.len(),
-    )
-    .unwrap()
-    .m0_bytes;
+    let rebuilt = composed_baseline(&store);
     assert_eq!(open_lines(&rebuilt), Vec::<&str>::new(), "{rebuilt}");
     assert!(rebuilt.contains(&case.decided_line()), "{rebuilt}");
     assert!(rebuilt.contains(LIFTED_LINE), "{rebuilt}");
@@ -760,112 +840,55 @@ const LIVE_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const LIVE_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const LIVE_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 
-/// A session whose folds go through a real summarizer model.
-struct LiveSession {
-    handler: Handler,
-    store: Arc<MemoryStore>,
-    project: PathBuf,
-    factory: Arc<RealHistorySummarizerProducerFactory>,
+/// Folds `messages`, with a padded tail, through `handler`'s real summarizer model as firing
+/// `firing` of session `ses`, and returns every stored row.
+async fn live_fold(
+    handler: &Handler,
+    store: &MemoryStore,
     wait: Duration,
-    folds: u64,
-    _dir: tempfile::TempDir,
-}
-
-impl LiveSession {
-    fn new(
-        factory: &Arc<RealHistorySummarizerProducerFactory>,
-        model: &str,
-        wait: Duration,
-    ) -> Self {
-        let config = DaemonConfig {
-            model_chain: vec![model.to_owned()],
-            ..default_test_config()
-        };
-        let (handler, store, dir, project) = handler_with_factory(
-            Arc::clone(factory) as Arc<dyn HistorySummarizerProducerFactory>,
-            config,
-            Arc::new(MissingSessionResolver),
-            "opencode",
-        );
-        Self {
-            handler,
-            store,
-            project,
-            factory: Arc::clone(factory),
-            wait,
-            folds: 0,
-            _dir: dir,
-        }
-    }
-
-    /// Folds the messages after the covered ones through the model and returns every stored row.
-    /// A padded tail keeps `messages` outside the live window so the fold covers all of them.
-    async fn fold(&mut self, mut messages: Vec<IngressMessage>) -> Vec<StoredHistorySegment> {
-        let next = messages.last().unwrap().ordinal + 1;
-        messages.push(user(
-            next,
-            &format!("unrelated tail {}", "pad ".repeat(3000)),
-        ));
-        messages.push(user(next + 1, "What is left to do?"));
-        let request = request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
-        let fired = tokio::time::timeout(self.wait, call_transform_request(&self.handler, request))
-            .await
-            .expect("the transform returns before the deadline");
-        assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
-        self.folds += 1;
-        let firing = self.folds;
-        tokio::time::timeout(self.wait, async {
-            loop {
-                let state = self.store.load("ses").unwrap().meta.history_summarizer;
-                if state.firing_seq >= firing && state.state == HistorySummarizerPhase::Idle {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        })
+    firing: u64,
+    messages: Vec<IngressMessage>,
+) -> Vec<StoredHistorySegment> {
+    let request = request_with_usage(with_tail(messages), HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
+    let fired = tokio::time::timeout(wait, call_transform_request(handler, request))
         .await
-        .expect("the firing settles before the deadline");
-        // The host keeps a producer session after its run ends, so the session is deleted before
-        // the next fold's model call.
-        let mut driver = self
-            .factory
-            .connect(&self.project, "opencode", &BTreeMap::new())
-            .await
-            .expect("the host accepts a cleanup connection");
-        driver
-            .purge_session(
-                &crate::history_summarizer::history_summarizer_producer_session_id(
-                    &project_slug(&self.project),
-                    "ses",
-                    firing,
-                ),
-            )
-            .await
-            .expect("the host deletes the fold's producer session");
-        let rows = self.store.load_history_segments("ses").unwrap();
-        for row in &rows {
-            eprintln!(
-                "live fold {firing} row {}-{}:\np1: {:?}\np2: {:?}\np3: {:?}\nclaims: {:?}",
-                row.start_message, row.end_message, row.p1, row.p2, row.p3, row.claims
-            );
+        .expect("the transform returns before the deadline");
+    assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
+    tokio::time::timeout(wait, async {
+        loop {
+            let state = store.load("ses").unwrap().meta.history_summarizer;
+            if state.firing_seq >= firing && state.state == HistorySummarizerPhase::Idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        rows
+    })
+    .await
+    .expect("the firing settles before the deadline");
+    let rows = store.load_history_segments("ses").unwrap();
+    for row in &rows {
+        eprintln!(
+            "live fold {firing} row {}-{}:\np1: {:?}\np2: {:?}\np3: {:?}\nclaims: {:?}",
+            row.start_message, row.end_message, row.p1, row.p2, row.p3, row.claims
+        );
     }
+    rows
 }
 
-/// The lines of the rendered rows, leaving out each line that quotes a `U:` message.
-fn own_lines(tiers: &[[String; 3]]) -> Vec<&str> {
+/// The status lines of `status` that `tiers` render.
+fn rendered_lines(tiers: &[[String; 3]], status: Status) -> Vec<&str> {
     tiers
         .iter()
         .flatten()
         .flat_map(|tier| tier.lines())
-        .filter(|line| !line.contains("U:"))
+        .filter(|line| status_line(line).is_some_and(|(found, _)| found == status))
         .collect()
 }
 
 /// Two folds through a real summarizer model: the first ends on the assistant's question under a
 /// user constraint, the second holds the user's answer and the lift. After the first fold the
-/// history holds the question as open; after the second it holds the lift and no open line.
+/// history renders the question as waiting and the constraint as standing; after the second the
+/// stored rows hold the decision and the lift's claim, and the history renders both items settled.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "opt-in live summarizer run; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE naming a \
             host that admits sends without a credential claim (direct_host_fixture without \
@@ -878,73 +901,78 @@ async fn a_live_summarizer_settles_open_items_across_two_folds() {
         connection_file: PathBuf::from(required(LIVE_CONNECTION_FILE)),
         cancellation: CancellationToken::new(),
     });
-    let model = required(LIVE_MODEL);
     let wait = Duration::from_secs(required(LIVE_WAIT_SECONDS).parse().unwrap());
-
-    let case = &ANSWERED[0];
-    let log = work_log("the migration");
-    let before = vec![
-        user(1, &format!("{} {CONSTRAINT}.", case.request)),
-        assistant(
-            2,
-            &format!("{log}I finished the first step. {}", case.question),
-        ),
-    ];
-    let mut session = LiveSession::new(&factory, &model, wait);
-    let rows = session.fold(before.clone()).await;
-    assert!(!rows.is_empty(), "the first fold publishes a row");
-    // The question is open after the first fold: a waiting line, or the summarizer's own words.
-    let history = rendered_tiers(&rows);
-    let lines = own_lines(&history);
-    let waiting = lines
-        .iter()
-        .any(|line| matches!(status_line(line), Some((Status::Waiting, _))));
-    let stated_open = lines.iter().any(|line| {
-        let line = line.to_lowercase();
-        [
-            "still open",
-            "undecided",
-            "not answered",
-            "unanswered",
-            "no answer",
-            "asked",
-        ]
-        .iter()
-        .any(|phrase| line.contains(phrase))
-    });
-    assert!(waiting || stated_open, "{lines:#?}");
-
-    let mut all = before;
-    all.push(user(3, &format!("{}. Also, {LIFT}.", case.answer)));
-    all.push(assistant(
-        4,
-        &format!("{log}The remaining steps are done, and two pull requests hold the fixes."),
-    ));
-    let rows = session.fold(all).await;
-    assert!(
-        rows.iter().any(|row| row.end_message >= 3),
-        "the second fold publishes a row that covers the answer: {rows:#?}"
+    let config = DaemonConfig {
+        model_chain: vec![required(LIVE_MODEL)],
+        ..default_test_config()
+    };
+    let (handler, store, _dir, project) = handler_with_factory(
+        Arc::clone(&factory) as Arc<dyn HistorySummarizerProducerFactory>,
+        config,
+        Arc::new(MissingSessionResolver),
+        "opencode",
     );
+    let (asking, answering) = question_under_a_constraint(&ANSWERED[0]);
+
+    let rows = live_fold(&handler, &store, wait, 1, asking.clone()).await;
     let history = rendered_tiers(&rows);
-    let lines = own_lines(&history);
-    let open: Vec<&&str> = lines
+    assert!(
+        !rendered_lines(&history, Status::Waiting).is_empty(),
+        "{history:#?}"
+    );
+    assert!(
+        !rendered_lines(&history, Status::Constraint).is_empty(),
+        "{history:#?}"
+    );
+
+    let rows = live_fold(&handler, &store, wait, 2, [asking, answering].concat()).await;
+    // The second fold's rows state the decision and store the claim that lifts the constraint.
+    let settling: Vec<Status> = rows
         .iter()
-        .filter(|line| status_line(line).is_some_and(|(status, _)| status.is_open()))
+        .filter(|row| row.end_message >= 3)
+        .filter_map(|row| row.p1.as_deref())
+        .flat_map(str::lines)
+        .filter_map(status_line)
+        .map(|(status, _)| status)
         .collect();
-    assert_eq!(open, Vec::<&&str>::new(), "{lines:#?}");
+    assert!(settling.contains(&Status::Decided), "{rows:#?}");
     assert!(
-        lines.iter().any(|line| {
-            let line = line.to_lowercase();
-            [
-                "lifted",
-                "own pull request",
-                "separate pull request",
-                "pr per",
-                "each bug",
-            ]
-            .iter()
-            .any(|phrase| line.contains(phrase))
+        rows.iter().flat_map(|row| &row.claims).any(|claim| {
+            claim.ordinal == 3
+                && claim.anchor.as_deref().and_then(status_line)
+                    == Some((Status::Lifted, claim.key.as_str()))
         }),
-        "{lines:#?}"
+        "{rows:#?}"
     );
+    let history = rendered_tiers(&rows);
+    assert_eq!(
+        rendered_lines(&history, Status::Waiting),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        rendered_lines(&history, Status::Constraint),
+        Vec::<&str>::new()
+    );
+    assert!(
+        !rendered_lines(&history, Status::Lifted).is_empty(),
+        "{history:#?}"
+    );
+
+    // The host keeps a producer session after its run ends; both are deleted here.
+    let mut driver = factory
+        .connect(&project, "opencode", &BTreeMap::new())
+        .await
+        .expect("the host accepts a cleanup connection");
+    for firing in [1, 2] {
+        driver
+            .purge_session(
+                &crate::history_summarizer::history_summarizer_producer_session_id(
+                    &project_slug(&project),
+                    "ses",
+                    firing,
+                ),
+            )
+            .await
+            .expect("the host deletes the fold's producer session");
+    }
 }

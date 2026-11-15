@@ -199,11 +199,11 @@ Open questions: None.
 ### zero-claims-render-identical
 
 Type: safety
-Reachability: default-production - every compose over rows without superseded claims
+Reachability: default-production - every compose over rows without superseded claims and without retired open-item lines
 Status: active
 Exercised: yes - `rows_without_claims_render_the_bytes_they_rendered_before` composes m0 and m1 with no claims and with claims that nothing supersedes; `rows_that_retire_no_line_keep_their_tiers_byte_for_byte` projects rows whose open-item lines all stay and compares every tier with the stored text; the pre-existing render, tight-render, transform, and differential goldens run unchanged
 Guarantee: When no loaded claim is superseded and no loaded row retires an open-item line, m0 and m1 history bytes equal the renderer's bytes before corrections existed, and `apply_corrections` returns its input borrowed.
-Check: `always` - golden equality over every pre-existing golden, byte equality between the claims and no-claims stores, and pointer equality for the empty case
+Check: `always` - golden equality over every pre-existing golden, byte equality between the claims and no-claims stores, pointer equality for the empty case, and equality of `content` and every tier with the stored text for rows whose status lines all stay
 Fault/timing angle: none
 Required faults and enabling state: claims present but none superseded; rows with no claims; rows whose status lines all stay open
 Confidence: high - [evidence](evidence/zero-claims-render-identical.md). Verified that `render-golden.json` only gained cases, that no other render or transform golden changed, and that the m1 block is empty when the new rows carry no claims (decision A7 narrows the m1 clause to that condition)
@@ -233,7 +233,7 @@ Reachability: default-production - every rendered row
 Status: active
 Exercised: partial - `corrections_render_to_fixed_bytes` pins literal bytes for a fixed input in every test process, each of which seeds its own hasher; no test compares two hasher seeds in one run
 Guarantee: Rendered bytes are a function of the loaded rows and their claims alone; no map iteration order, clock, or allocator state reaches the output.
-Check: `always` - the fixed input renders the pinned literal bytes; every collection on the path is a `Vec` or a `BTreeMap`
+Check: `always` - the fixed input renders the pinned literal bytes; every collection on the path is a `Vec`, a `BTreeMap`, or a `BTreeSet`
 Fault/timing angle: none
 Required faults and enabling state: two processes with different hasher seeds
 Confidence: high - [evidence](evidence/apply-corrections-is-a-pure-function-of-body-and-corrections.md). Verified by reading `live_claims`, `corrections_for`, `apply_corrections`, and `render_memory_updates`: none reads a clock or iterates a hash map
@@ -325,7 +325,7 @@ Type: safety
 Reachability: default-production - every m0 and m1 compose
 Status: active
 Exercised: partial - the committed bound test covers store work, measured claim visits, and measured anchor searches up to H = 50,000 and N = 10^6 under both correction regimes; `guard_rerenders_search_each_anchor_again_at_every_demoted_tier` measures the searches of one guard walk and `eight_maximal_corrections_add_at_most_the_escaped_marker_bound` measures the bytes eight corrections at the claim bounds add; the per-segment marker count and the m1-entry clause hold by source reading and are not measured; render time was measured with an uncommitted driver
-Guarantee: Per compose, each liveness scan visits each claim of R once, at most 8 x |R|, and the pass adds no store statement, row, or VM step beyond the segment load; each render of a row below tier 5 runs one anchor search per anchored correction, the guard renders a row again at each tier it demotes it to, and a compose renders at most four times, so at most 16 searches per anchored correction and 128 x |R|; at most 8 markers or footer entries per rendered segment, adding at most 8 x (82 + 5 x 128 + d) bytes before the guard, where d is the ordinal's digit count (5,928 bytes at 19 digits); at most 8 x |R| entries in the m1 block; nothing grows with H or N beyond the claims stored on rows in R.
+Guarantee: Per compose, each liveness scan visits each claim of R once, at most 8 x |R|, and the pass adds no store statement, row, or VM step beyond the segment load; each render of a row below tier 5 runs one anchor search per anchored correction, the guard renders a row again at each tier it demotes it to, and a compose renders at most four times, so at most 16 searches per anchored correction and 128 x |R|; at most 8 markers or footer entries per rendered segment, adding at most 8 x (82 + 5 x 128 + d) bytes before the guard, where d is the ordinal's digit count (5,928 bytes at 19 digits); at most 8 x |R| entries in the m1 block; nothing grows with H or N beyond the claims stored on rows in R; open-item retirement reads the claims and tier lines of each row of R once per compose, adds no store work, and only removes lines.
 Check: `always` - store statements, rows, and VM steps per compose are equal with and without claims; an m0 compose's `CLAIMS_VISITED` count equals the claims held by R and is at most 8 x |R|, and its `ANCHOR_SEARCHES` count is at most 16 x the anchored corrections of R; an m1 compose visits twice the claims on its rows (corrections, then the block); one guard walk searches each anchored correction once per tier below 5 it renders the row at; eight corrections at the key, value, and ordinal bounds with all-`&` values add at most the escaped bound; timing is not a committed check
 Fault/timing angle: footers raise rendered bytes above the curve's target, so the budget guard demotes rows one tier per iteration and re-estimates the whole body each time
 Required faults and enabling state: a session of 10^6 messages; one correction per three messages; one per two hundred; no claims
@@ -378,7 +378,8 @@ Within this part:
   store-wide meaning of a rendered correction.
 - `anchor-is-substring-of-stored-p1` is the precondition under which
   `apply-corrections-splice-is-disjoint-and-total` splices rather than
-  footers at tier 1.
+  footers at tier 1, for an anchor whose line open-item retirement leaves in
+  the rendered tier; an anchor that stood in a retired line footers.
 - `claims-column-is-set-once-at-insert` and `revert-restores-earlier-value`
   make deletion the only way a claim leaves the loaded set.
 - `m0-bytes-change-only-at-hard` and `correction-visible-before-next-hard`
