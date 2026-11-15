@@ -380,7 +380,7 @@ Within this part:
   `apply-corrections-splice-is-disjoint-and-total` splices rather than
   footers at tier 1, for an anchor whose line open-item retirement leaves in
   the rendered tier. An anchor that stood only in a retired line footers, and so
-  does an anchor whose first occurrence in one of the row's tiers lies in an
+  does an anchor whose first occurrence in one of the row's tiers touches an
   open status line, which `history_open_items::beside_open_lines` clears
   before the row renders.
 - `claims-column-is-set-once-at-insert` and `revert-restores-earlier-value`

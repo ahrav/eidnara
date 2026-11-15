@@ -18,14 +18,12 @@
 //!
 //! - **Waiting lines** speak for the end of their own segment. A waiting line renders while its
 //!   segment is the newest summarized segment among the rows rendered together; a legacy row and
-//!   an archive row, which covers a span no fold summarized, leave it in place. The frozen
-//!   baseline keeps its bytes between rebuilds, so a waiting line in its newest segment stays
-//!   there until the next rebuild, with the newer segments rendered after it. The fold of the
-//!   next span reads that segment in its
-//!   reference window and states the item again in a newer segment, settles it, or passes over
-//!   it; in each case the older line leaves. In the newest segment a waiting line leaves when the
-//!   segment itself answers it: the key's last status line in `p1`, the segment's full statement,
-//!   settles it, or a settling line with its key follows it in its own tier.
+//!   an archive row, which covers a span no fold summarized, leave it in place. The fold of the
+//!   next span reads that segment in its reference window and states the item again in a newer
+//!   segment, settles it, or passes over it; in each case the older line leaves. In the newest
+//!   segment a waiting line leaves when the segment itself answers it: the key's last status line
+//!   in `p1`, the segment's full statement, settles it, or a settling line with its key follows
+//!   it in its own tier.
 //! - **Constraints** stand in every tier until a lift with evidence. The evidence is a stored claim
 //!   with the constraint's key whose anchor reads as the `Lifted` line of that key. Claim
 //!   validation stores a claim only when its one citation resolves to a message inside the
@@ -34,15 +32,19 @@
 //!   whole line. Such a claim in a later segment retires the constraint line; in the constraint's
 //!   own segment it retires the line when `Lifted` is the key's last status line in `p1`. A
 //!   `Decided` line, and any other claim, leaves the constraint line standing: a correction whose
-//!   anchor lies in an open line of the row lists on the row's `[corrections: …]` line, so only
+//!   anchor touches an open line of the row lists on the row's `[corrections: …]` line, so only
 //!   retirement takes an open line out of a tier.
+//!
+//! The rules read the rows rendered together. The frozen baseline keeps its bytes between
+//! rebuilds and the rows above it render on their own, so an open line in the baseline stays
+//! until the next rebuild, with the segment that settles it rendered after it.
 //!
 //! The evidence lives in the claims of the summarized segments, which every read of such a row
 //! carries, so the state is the same whether a row the decay curve archives was loaded with its
-//! text or with its claims alone. The summarizer sees
-//! the newest [`crate::history_summarizer_prompt::SESSION_REF_WINDOW`] segments when it folds. A
-//! lift it writes under another key than the constraint's leaves the constraint line standing
-//! beside the lifted line.
+//! text or with its claims alone. The summarizer sees the newest
+//! [`crate::history_summarizer_prompt::SESSION_REF_WINDOW`] segments when it folds. A lift it
+//! writes under another key than the constraint's leaves the constraint line standing beside the
+//! lifted line.
 //!
 //! Retirement only removes lines from a row's tiers. A tier it empties renders the row's heading
 //! alone, at that tier and at a sparser tier the row stores no text for. Corrections apply to
