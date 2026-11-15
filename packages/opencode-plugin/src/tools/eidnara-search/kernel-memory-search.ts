@@ -361,7 +361,7 @@ export type SnapshotScan =
  * anti-memories in the pages read that carry an expiry, the scan retains the best `limit` among
  * those eligible at `nowMs`.
  *
- * Only the first page is gated; later pages read the snapshot that gate admitted. `truncated`
+ * Only the first page can be gated; later pages read the first page's snapshot. `truncated`
  * reports rows left unread: after the first page for a query with no ranking term, after
  * `maxPages` pages, past the deadline, or when the daemon refuses a later page or answers it from
  * another snapshot, over another connection, or with a row at or before the cursor. A search the

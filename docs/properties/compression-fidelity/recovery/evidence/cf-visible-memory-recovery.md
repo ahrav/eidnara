@@ -43,7 +43,7 @@ Do not build a second fixture or a second three-way disposition oracle.
 - [Daemon read, lines 431-521](../../../../../crates/daemon/src/kernel_routes/read.rs#L431)
   binds the request, applies the requested freshness gate, reads project-visible
   rows, and bounds serialized output. This is not native artifact expansion.
-- [Memory ranking, lines 173-175, 248-299](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L173)
+- [Memory ranking, lines 177-180, 253-299](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L177)
   uses memory decision summaries/rationales. Exact object-id matching is a
   lookup mode. [Lines 188-229](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L178)
   render rejected approaches distinctly and carry their rationale.
