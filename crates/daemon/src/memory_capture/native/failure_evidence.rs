@@ -82,6 +82,10 @@ struct Quote {
 /// any copy could be the one meant. Returns whether any memory gained a line.
 pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) -> bool {
     let lines = lines(source);
+    let failures = failure_evidence(&lines);
+    if failures.is_empty() {
+        return false;
+    }
     let mut quotes = Vec::with_capacity(memories.len());
     for (memory, captured) in memories.iter().enumerate() {
         let quote = captured.quote.trim_end();
@@ -106,7 +110,7 @@ pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) -> bool {
     let mut changed = false;
     let mut appended = vec![0; memories.len()];
     let mut framing: Option<(usize, Option<&Quote>)> = None;
-    for evidence in failure_evidence(&lines) {
+    for evidence in failures {
         let introducing = match framing {
             Some((start, target)) if start == evidence.block_start => target,
             _ => {
@@ -436,7 +440,12 @@ mod tests {
             .iter()
             .map(|quote| format!("User stated: {quote}"))
             .collect();
-        assert_eq!(contents(source, &mut memories), expected, "{source:?}");
+        assert!(!attach(source, &mut memories), "{source:?}");
+        let stored: Vec<_> = memories
+            .iter()
+            .map(|memory| memory.content.as_str())
+            .collect();
+        assert_eq!(stored, expected, "{source:?}");
     }
 
     #[test]
