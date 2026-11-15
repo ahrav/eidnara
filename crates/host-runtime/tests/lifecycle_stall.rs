@@ -547,6 +547,14 @@ impl HostProcess {
             let probe: usize = entered["ENTER ".len()..].parse().expect("probe number");
             std::thread::sleep(after_entry);
             self.signal(rustix::process::Signal::STOP);
+            let deadline = std::time::Instant::now() + BUDGET;
+            while !self.is_stopped() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the host never stopped"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
             std::thread::sleep(Duration::from_millis(100));
             let reached = format!("{marker} {probe}");
             if self.lines.try_iter().all(|line| line != reached) {
@@ -569,6 +577,11 @@ impl HostProcess {
         assert!(
             self.is_stopped(),
             "the host stays stopped until it is resumed"
+        );
+        assert_eq!(
+            self.lines.try_iter().next(),
+            None,
+            "the stop landed before the host wrote again"
         );
         self.signal(rustix::process::Signal::CONT);
 
