@@ -316,7 +316,7 @@ function streamPart(
     return stream;
 }
 
-/** `snapshotContent` returns `parts` with each text part replaced by its stripped snapshot. For updates, `streamPart` advances each text part's stream before the snapshot spread reads the part's accessors, and the snapshot reads text from that captured stream after the spread. A string `delta` in the update sets `releasedDelta`. */
+/** `snapshotContent` returns a copy of `parts` with each text part replaced by its stripped snapshot. For updates, `streamPart` advances each text part's stream before the snapshot spread reads the part's accessors, and the snapshot reads text from that captured stream after the spread. A string `delta` for a text part sets `releasedDelta`. */
 function snapshotContent(parts: unknown[], update: StreamUpdate | undefined): unknown[] {
     let firstText = true;
     return parts.map((part: unknown, index: number) => {

@@ -164,6 +164,37 @@ function deltaSender(part: Part): (delta: string) => [string | undefined, string
     };
 }
 
+function stripWithReentry(
+    text: string,
+    delta: string,
+    reenter: (part: { text: string }) => string,
+): { shown: string | undefined; delta: string } {
+    let reads = 0;
+    const part = {
+        get type() {
+            reads += 1;
+            if (reads === 2) {
+                const nested = reenter(part);
+                stripStreamedTags({
+                    message: { role: "assistant", content: [part] },
+                    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: nested },
+                });
+            }
+            return "text";
+        },
+        text,
+    };
+    const event = {
+        message: { role: "assistant", content: [part] as Part[] },
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
+    };
+    stripStreamedTags(event);
+    return {
+        shown: (event.message.content[0] as Part).text,
+        delta: event.assistantMessageEvent.delta,
+    };
+}
+
 describe("stripStreamedTags", () => {
     const answer = `${S}230${S} I reran the suite: ${S}12${S} 1610 pass, see \u00a7 4.`;
     const shown = "I reran the suite:  1610 pass, see \u00a7 4.";
@@ -478,89 +509,20 @@ describe("stripStreamedTags", () => {
     });
 
     it("shows what a strip of the same part from its accessor released", () => {
-        let reads = 0;
-        const part = {
-            get type() {
-                reads += 1;
-                if (reads === 2) {
-                    part.text += " more";
-                    stripStreamedTags({
-                        message: { role: "assistant", content: [part] },
-                        assistantMessageEvent: {
-                            type: "text_delta",
-                            contentIndex: 0,
-                            delta: " more",
-                        },
-                    });
-                }
-                return "text";
-            },
-            text: "hi",
+        const grow = (part: { text: string }) => {
+            part.text += " more";
+            return " more";
         };
-        const event = {
-            message: { role: "assistant", content: [part] as Part[] },
-            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
-        };
-        stripStreamedTags(event);
-        expect((event.message.content[0] as Part).text).toBe("hi more");
-        expect(event.assistantMessageEvent.delta).toBe("hi");
-    });
-
-    it("shows what a strip of the same part from its accessor released while the deltas run on their own", () => {
-        let reads = 0;
-        const part = {
-            get type() {
-                reads += 1;
-                if (reads === 2) {
-                    part.text += " more";
-                    stripStreamedTags({
-                        message: { role: "assistant", content: [part] },
-                        assistantMessageEvent: {
-                            type: "text_delta",
-                            contentIndex: 0,
-                            delta: " more",
-                        },
-                    });
-                }
-                return "text";
-            },
-            text: "hi!",
-        };
-        const event = {
-            message: { role: "assistant", content: [part] as Part[] },
-            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
-        };
-        stripStreamedTags(event);
-        expect((event.message.content[0] as Part).text).toBe("hi! more");
-        expect(event.assistantMessageEvent.delta).toBe("hi");
+        expect(stripWithReentry("hi", "hi", grow)).toEqual({ shown: "hi more", delta: "hi" });
+        expect(stripWithReentry("hi!", "hi", grow)).toEqual({ shown: "hi! more", delta: "hi" });
     });
 
     it("shows the stream it copied when a strip of the same part from its accessor restarts it", () => {
-        let reads = 0;
-        const part = {
-            get type() {
-                reads += 1;
-                if (reads === 2) {
-                    part.text = "zzz";
-                    stripStreamedTags({
-                        message: { role: "assistant", content: [part] },
-                        assistantMessageEvent: {
-                            type: "text_delta",
-                            contentIndex: 0,
-                            delta: "zzz",
-                        },
-                    });
-                }
-                return "text";
-            },
-            text: "hi",
+        const restart = (part: { text: string }) => {
+            part.text = "zzz";
+            return "zzz";
         };
-        const event = {
-            message: { role: "assistant", content: [part] as Part[] },
-            assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "hi" },
-        };
-        stripStreamedTags(event);
-        expect((event.message.content[0] as Part).text).toBe("hi");
+        expect(stripWithReentry("hi", "hi", restart)).toEqual({ shown: "hi", delta: "hi" });
     });
 
     it("keeps an update's delta when a reentrant strip fails inside a part's accessor", () => {
