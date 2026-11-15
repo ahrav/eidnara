@@ -810,39 +810,62 @@ const LIVE_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const LIVE_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const LIVE_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 
-/// Folds `messages`, with a padded tail, through `handler`'s real summarizer model as firing
-/// `firing` of session `ses`, and returns every stored row.
-async fn live_fold(
-    handler: &Handler,
-    store: &MemoryStore,
+/// A session whose folds run through a real summarizer model.
+struct LiveSession {
+    handler: Handler,
+    store: Arc<MemoryStore>,
+    project: PathBuf,
+    factory: Arc<RealHistorySummarizerProducerFactory>,
     wait: Duration,
-    firing: u64,
-    messages: Vec<IngressMessage>,
-) -> Vec<StoredHistorySegment> {
-    let request = request_with_usage(with_tail(messages), HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
-    let fired = tokio::time::timeout(wait, call_transform_request(handler, request))
-        .await
-        .expect("the transform returns before the deadline");
-    assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
-    tokio::time::timeout(wait, async {
-        loop {
-            let state = store.load("ses").unwrap().meta.history_summarizer;
-            if state.firing_seq >= firing && state.state == HistorySummarizerPhase::Idle {
-                break;
+    _dir: tempfile::TempDir,
+}
+
+impl LiveSession {
+    /// Folds `messages`, with a padded tail, as firing `firing` of session `ses`, and returns
+    /// every stored row.
+    async fn fold(&self, firing: u64, messages: Vec<IngressMessage>) -> Vec<StoredHistorySegment> {
+        let request = request_with_usage(with_tail(messages), HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
+        let fired = tokio::time::timeout(self.wait, call_transform_request(&self.handler, request))
+            .await
+            .expect("the transform returns before the deadline");
+        assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
+        tokio::time::timeout(self.wait, async {
+            loop {
+                let state = self.store.load("ses").unwrap().meta.history_summarizer;
+                if state.firing_seq >= firing && state.state == HistorySummarizerPhase::Idle {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        })
+        .await
+        .expect("the firing settles before the deadline");
+        // The host keeps a producer session after its run ends, so the session is deleted
+        // before the next fold's model call.
+        let mut driver = self
+            .factory
+            .connect(&self.project, "opencode", &BTreeMap::new())
+            .await
+            .expect("the host accepts a cleanup connection");
+        driver
+            .purge_session(
+                &crate::history_summarizer::history_summarizer_producer_session_id(
+                    &project_slug(&self.project),
+                    "ses",
+                    firing,
+                ),
+            )
+            .await
+            .expect("the host deletes the fold's producer session");
+        let rows = self.store.load_history_segments("ses").unwrap();
+        for row in &rows {
+            eprintln!(
+                "live fold {firing} row {}-{}:\np1: {:?}\np2: {:?}\np3: {:?}\nclaims: {:?}",
+                row.start_message, row.end_message, row.p1, row.p2, row.p3, row.claims
+            );
         }
-    })
-    .await
-    .expect("the firing settles before the deadline");
-    let rows = store.load_history_segments("ses").unwrap();
-    for row in &rows {
-        eprintln!(
-            "live fold {firing} row {}-{}:\np1: {:?}\np2: {:?}\np3: {:?}\nclaims: {:?}",
-            row.start_message, row.end_message, row.p1, row.p2, row.p3, row.claims
-        );
+        rows
     }
-    rows
 }
 
 /// The status lines of `status` that `tiers` render.
@@ -876,15 +899,23 @@ async fn a_live_summarizer_settles_open_items_across_two_folds() {
         model_chain: vec![required(LIVE_MODEL)],
         ..default_test_config()
     };
-    let (handler, store, _dir, project) = handler_with_factory(
+    let (handler, store, dir, project) = handler_with_factory(
         Arc::clone(&factory) as Arc<dyn HistorySummarizerProducerFactory>,
         config,
         Arc::new(MissingSessionResolver),
         "opencode",
     );
+    let session = LiveSession {
+        handler,
+        store,
+        project,
+        factory,
+        wait,
+        _dir: dir,
+    };
     let (asking, answering) = question_under_a_constraint(&ANSWERED[0]);
 
-    let rows = live_fold(&handler, &store, wait, 1, asking.clone()).await;
+    let rows = session.fold(1, asking.clone()).await;
     let history = rendered_tiers(&rows);
     assert!(
         !rendered_lines(&history, Status::Waiting).is_empty(),
@@ -895,7 +926,7 @@ async fn a_live_summarizer_settles_open_items_across_two_folds() {
         "{history:#?}"
     );
 
-    let rows = live_fold(&handler, &store, wait, 2, [asking, answering].concat()).await;
+    let rows = session.fold(2, [asking, answering].concat()).await;
     // The second fold's rows state the decision and store the claim that lifts the constraint.
     let settling: Vec<Status> = rows
         .iter()
@@ -927,22 +958,4 @@ async fn a_live_summarizer_settles_open_items_across_two_folds() {
         !rendered_lines(&history, Status::Lifted).is_empty(),
         "{history:#?}"
     );
-
-    // The host keeps a producer session after its run ends; both are deleted here.
-    let mut driver = factory
-        .connect(&project, "opencode", &BTreeMap::new())
-        .await
-        .expect("the host accepts a cleanup connection");
-    for firing in [1, 2] {
-        driver
-            .purge_session(
-                &crate::history_summarizer::history_summarizer_producer_session_id(
-                    &project_slug(&project),
-                    "ses",
-                    firing,
-                ),
-            )
-            .await
-            .expect("the host deletes the fold's producer session");
-    }
 }
