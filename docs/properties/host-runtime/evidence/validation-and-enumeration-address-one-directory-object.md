@@ -50,13 +50,11 @@ the deliberate escape hatch, documented at `:580-586` as requiring every consume
 to perform its own validation. One consumer honours the descriptor:
 `generation_launcher` (`crates/daemon/src/bin/eidnara-host.rs:929-945`) uses
 `open_verified_file`. The other does not:
-`crates/daemon/src/bin/eidnara_host/serve.rs:509` and `:529` hand
-`generation.path().join(BUNDLE_DIR)` and `generation.path().join(ORT_LIBRARY)`
-downstream as pathnames. The comment at `serve.rs:510-517` states the hazard in
-the property's own terms - "a directory replaced after validation could serve
-different embedding bytes under a generation the daemon still reported as valid"
-
-- and mitigates it by forwarding the manifest's SHA-256 so the loader verifies
+`crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs:18-19`, which
+`serve.rs:1192-1202` calls with the generation's `descriptor_root_path()`, hand
+`root.join(BUNDLE_DIR)` and `root.join(ORT_LIBRARY)` downstream as pathnames. The comment at `serve.rs:1188-1190` states the hazard in
+the property's own terms - "a replaced bundle can remain self-consistent while
+serving different embeddings" - and mitigates it by forwarding the manifest's SHA-256 so the loader verifies
 content. So two store objects are addressed by re-resolved pathname, guarded by
 content hash rather than by descriptor pinning.
 
@@ -98,7 +96,7 @@ provided the loader actually verifies.
 
 Fault class H6: a directory replacement between the pin and the use, under the
 transaction lock. The `serve.rs` window is wider than the in-store ones, since it
-spans from `validate` in `serve::run` (`serve.rs:544-547`) to whenever the loader
+spans from `validate` in `serve::run` (`serve.rs:542-545`) to whenever the loader
 resolves the pathname, in a process that holds `lifetime.lock` rather than
 `transaction.lock`.
 
@@ -120,10 +118,10 @@ prevents a fourth instance appearing at the `path()` boundary.
   `renameat`, `renameat_with`, `Dir::read_from`), production code only;
   `git show a9489c35` and `git show 0827dbc8` for both diffs; all consumers of
   `ValidatedGeneration::path()` and `open_verified_file`
-  (`eidnara-host.rs:929-945`, `serve.rs:492-533`).
+  (`eidnara-host.rs:929-945`, `serve.rs:490-531`).
 - Findings: as above. Zero remaining instances of the directory-level shape
   inside `generation.rs`; two pathname handoffs of store objects at
-  `serve.rs:509` and `:529`; three entry-level double resolutions under an
+  `payload_local_embeddings.rs:18-19`; three entry-level double resolutions under an
   identical pinned parent.
 - Missing evidence: whether `load_bundle` and the ORT loader actually verify the
   forwarded hashes against the bytes they read. `crates/host-runtime/src/local_embeddings/`

@@ -33,10 +33,10 @@ Repository-wide search for the identifier returns six hits, all verified:
 | --- | --- |
 | `crates/host-runtime/src/config.rs:250` | the declaration |
 | `crates/host-runtime/src/config.rs:262` | `Debug` formatting, inside the hand-written impl |
-| `crates/daemon/src/bin/eidnara_host/serve.rs:487` | written as `Vec::new()` |
+| `crates/daemon/src/bin/eidnara_host/serve.rs:485` | written as `Vec::new()` |
 | `crates/daemon/tests/host_adapter.rs:29` | written as `Vec::new()` |
 | `crates/daemon/tests/host_adapter.rs:88` | written as `Vec::new()` |
-| `crates/daemon/examples/direct_host_fixture.rs:577` | written as `Vec::new()` |
+| `crates/daemon/examples/direct_host_fixture.rs:588` | written as `Vec::new()` |
 
 Four writes, all of the empty vector. Zero reads other than the `Debug` impl.
 

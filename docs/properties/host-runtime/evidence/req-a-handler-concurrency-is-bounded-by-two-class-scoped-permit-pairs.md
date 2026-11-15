@@ -87,7 +87,7 @@ ResourceDeclaration {
 
 with `RESERVED_PENDING_REQUESTS = 96` (`model_execution/config.rs:185`) and
 `RESERVED_HANDLER_TASKS = 96` (`:188`). The production binary composes that exact
-component: `crates/daemon/src/bin/eidnara_host/serve.rs:571-580` builds
+component: `crates/daemon/src/bin/eidnara_host/serve.rs:569-578` builds
 `ModelExecutionComponent::new` or `new_with_credentials` and passes it to
 `StaticComposite::new` at `:575`, which reaches `host_runtime::run` at `:632`. So at
 defaults the general pools are 1024-96 = 928 pending and 256-96 = 160 tasks, and
@@ -168,7 +168,7 @@ permit.
 
 - Sources examined: `runtime.rs:117-121` (the comment claiming possible
   unreachability), `model_execution/mod.rs:164-176`, `model_execution/config.rs:183-188`,
-  `crates/daemon/src/bin/eidnara_host/serve.rs:560-580` and `:632`,
+  `crates/daemon/src/bin/eidnara_host/serve.rs:558-578` and `:630`,
   `composite.rs:11-14` (the fixed occupant list).
 - Findings: ModelExecution declares 96/96 with `route_class: RouteClass::Reserved`, and the
   production binary composes it. The `runtime.rs` comment describes a

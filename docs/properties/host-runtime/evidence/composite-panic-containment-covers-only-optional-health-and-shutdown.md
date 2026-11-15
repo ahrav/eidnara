@@ -139,7 +139,7 @@ runtime rather than being contained. That is the record's `Exercised: partial -
 both contained categories have dedicated tests; no test pins that the other
 categories deliberately escalate.`
 
-**Reachability.** `serve.rs:575` constructs `StaticComposite::new(...)` and `:632`
+**Reachability.** `serve.rs:573` constructs `StaticComposite::new(...)` and `:630`
 passes it to `host_runtime::run`. `composite.rs` contains zero `#[cfg]` attributes,
 verified by grep, so every one of the eleven positions is unconditional.
 

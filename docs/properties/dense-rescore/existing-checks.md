@@ -115,7 +115,7 @@ refusal classes.
   scan has no production caller at this base.
 - `Ledger::reconcile` (`crates/daemon/src/vector_admission.rs:335`) runs
   only in tests. No production process owns a vector `Ledger` at this base,
-  and the production prunes (`crates/daemon/src/bin/eidnara_host/serve.rs:389`,
+  and the production prunes (`crates/daemon/src/bin/eidnara_host/serve.rs:387`,
   `crates/daemon/src/bin/eidnara-host.rs:1255`) run in launcher processes
   that own none, so the prune readback reconcile in #618 is met only in tests until
   the RP2.7/RP2.8 vector-reader owner reconciles in its own process.

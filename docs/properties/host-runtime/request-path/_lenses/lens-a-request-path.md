@@ -30,7 +30,7 @@ verified here, not assumed.
    general-class". That comment is not a reachability answer:
    `model_execution/mod.rs:164-176` declares `route_class: RouteClass::Reserved` with
    `RESERVED_PENDING_REQUESTS = 96` and `RESERVED_HANDLER_TASKS = 96`
-   (`model_execution/config.rs:185`, `:188`), and `serve.rs:575` composes that exact
+   (`model_execution/config.rs:185`, `:188`), and `serve.rs:573` composes that exact
    ModelExecution component. Both permit classes are live in production.
 3. **Only two of this sub-part's five test binaries run in CI.** Every
    `host-runtime` invocation in `the source repository`ci.yml`workflow` carries a `--test` filter:

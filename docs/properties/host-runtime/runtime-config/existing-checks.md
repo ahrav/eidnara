@@ -12,7 +12,7 @@ lens B, which derived each by extracting the production half of each file and
 grepping it so no test-module hit is included. This synthesis re-derived the file
 lengths with`wc -l`, the`#[cfg(test)]` boundaries by grep, the `ci.yml`hit
 list by grep, and four load-bearing line references by printing them
-(`config.rs:294`,`runtime.rs:876`,`:1130`,`:1223`, plus`serve.rs:593`).
+(`config.rs:294`,`runtime.rs:876`,`:1130`,`:1223`, plus`serve.rs:591`).
 
 **Every status below is `unaudited`.** An existing check never removes a property
 from the catalog. Test adequacy belongs to `/testing:invariant-test-review`;
@@ -240,7 +240,7 @@ feature.
 | --- | --- | --- | --- |
 | 2 | CLI or config-file exposure of these knobs belongs to the source daemon-lifecycle work, not this crate | `config.rs:5-6` | **Nothing, and nothing should.** A negative claim; it is what makes doc comments the only contract |
 | 9 | `host_capabilities` is a host-to-handler capability channel | `config.rs:250` (field, undocumented) | **Nothing. Zero readers repo-wide** |
-| 11 | Signal acquisition stays outside this crate; the source module-host work will map SIGINT/SIGTERM | `runtime.rs:3-5` | **First clause holds, second clause is stale, and this row previously said "Nothing. No signal mapping exists".** The caller does supply a `CancellationToken` and the crate does not acquire signals. But the production wiring exists today, outside the crate: `serve.rs:617-622` installs `SignalKind::terminate` and `SignalKind::interrupt` streams and fails startup if either installation fails, `:623-631` spawns the task that cancels the token on the first signal to arrive, and all of it precedes `host_runtime::run` at `:632`. The comment at `serve.rs:604-616` states why the ordering is mandatory. So the register row is reclassified from "no implementing code" to "implemented by the caller, and the crate's own comment has not been updated to say so" |
+| 11 | Signal acquisition stays outside this crate; the source module-host work will map SIGINT/SIGTERM | `runtime.rs:3-5` | **First clause holds, second clause is stale, and this row previously said "Nothing. No signal mapping exists".** The caller does supply a `CancellationToken` and the crate does not acquire signals. But the production wiring exists today, outside the crate: `serve.rs:615-620` installs `SignalKind::terminate` and `SignalKind::interrupt` streams and fails startup if either installation fails, `:621-629` spawns the task that cancels the token on the first signal to arrive, and all of it precedes `host_runtime::run` at `:630`. The comment at `serve.rs:602-614` states why the ordering is mandatory. So the register row is reclassified from "no implementing code" to "implemented by the caller, and the crate's own comment has not been updated to say so" |
 | 20, in-crate half | `HarnessClosureStore` is public host API | `lib.rs:18` (`pub mod`, no `#[doc(hidden)]`) | **Never constructed in-crate**; its only two production constructions discard the error |
 
 Two register rows are actively **contradicted** by code rather than merely
@@ -284,10 +284,10 @@ conditionality map both leaned on it.
 1. `runtime.rs:3-5` - signal acquisition "stays outside this crate" and "future
    production wiring in the source module-host work will map SIGINT/SIGTERM, while tests
    inject deterministic shutdown". The first clause is true. The second is
-   **stale, not forward-looking**: `serve.rs:617-622` already installs both a
-   `SIGTERM` and a `SIGINT` stream, `:623-631` cancels the token `run` receives on
-   the first of the two, and all of it runs before `run` is entered at `:632`,
-   with `serve.rs:604-616` explaining why that ordering is mandatory. So the crate
+   **stale, not forward-looking**: `serve.rs:615-620` already installs both a
+   `SIGTERM` and a `SIGINT` stream, `:621-629` cancels the token `run` receives on
+   the first of the two, and all of it runs before `run` is entered at `:630`,
+   with `serve.rs:602-614` explaining why that ordering is mandatory. So the crate
    comment describes as future a mapping its sole production caller performs
    today. Register row 11, reclassified there.
 2. `config.rs:5-6` - CLI and config-file exposure "belongs to the spawn/doctor
@@ -327,7 +327,7 @@ Six, each held by discipline rather than by a build step.
    call sites.** `harness_closure.rs:162-166` deliberately makes the error a single
    `&'static str` behind one constructor with a `detail()` accessor, which is a
    well-built bounded vocabulary. Both production consumers throw it away:
-   `serve.rs:162` and `:349` are each
+   `serve.rs:160` and `:347` are each
    `HarnessClosureStore::open(&closure_root).ok()`. A store that fails to open is
    therefore indistinguishable from one that was never configured.
 6. **`file_mode::raw_mode`'s platform claim is prose only.** `file_mode.rs:7-8`
@@ -372,7 +372,7 @@ The fourth was added by a disposition pass; the first three are as synthesized.
    gap a panic rather than a rejection. **This is the quietest area in either
    sub-part by the margin between consequence and coverage**, and it is
    compounded by the store never being constructed in-crate at all: its two
-   production constructions are `serve.rs:162` and `:349`, both `.ok()`. Owned by
+   production constructions are `serve.rs:160` and `:347`, both `.ok()`. Owned by
    [rt-a-a-closure-store-open-failure-is-classified-not-swallowed](../catalog.md#rt-a-a-closure-store-open-failure-is-classified-not-swallowed),
    which is the catalog's only `medium` confidence record precisely because its
    two call sites are outside this footprint.
@@ -492,7 +492,7 @@ Stated so a later pass knows what was and was not looked at.
   makes a correct graceful shutdown look like a client timeout. (needs human
   input)
 - Should `HarnessClosureStore::open`'s error reach a log or a startup failure
-  instead of `.ok()` at `serve.rs:162` and `:349`? The error type was built as a
+  instead of `.ok()` at `serve.rs:160` and `:347`? The error type was built as a
   closed bounded vocabulary specifically to be reportable. (needs human input)
 - Is `HarnessClosureStore` intended as public API? `lib.rs:18` exports
   `harness_closure` as a plain `pub mod` with no `#[doc(hidden)]`, unlike

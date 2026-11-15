@@ -51,7 +51,7 @@ separately:
   because only the graceful path is observable from inside the old process, and
   because a campaign that only ever calls `shutdown` would never exercise the
   abrupt case at all.
-- `src/bin/eidnara_host/serve.rs:603-620` — the daemon installs a
+- `src/bin/eidnara_host/serve.rs:601-618` — the daemon installs a
   `SignalKind::terminate` handler and drives a graceful shutdown, so SIGTERM
   takes the graceful path. A `kill -9` or a panic-abort takes the abrupt one.
 
@@ -160,7 +160,7 @@ satisfied only by the page coordinator.
 
 - Sources examined: the reset block (`:12095-12099`) and its position inside
   `shutdown` (`:12048`); the constructors (`:3463-3467`); and
-  `src/bin/eidnara_host/serve.rs:603-620`, which routes SIGTERM to the graceful
+  `src/bin/eidnara_host/serve.rs:601-618`, which routes SIGTERM to the graceful
   path.
 - Findings: the two modes differ in exactly one observable respect, whether
   `:12095-12099` runs. Neither mode preserves anything, so for the purpose of the

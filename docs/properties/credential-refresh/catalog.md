@@ -37,8 +37,8 @@ non-empty summarizer chain or another operator selection.
   without a source owner.
 - `explicit-config-only`: N2, N8, and N9. The source owner exists only when
   the host envelope carries an `aws_source` selection
-  (`crates/daemon/src/bin/eidnara_host/serve.rs:92`, built at `:1313`,
-  installed at `:1336`); a daemon without it never evaluates `covers`. Model
+  (`crates/daemon/src/bin/eidnara_host/serve.rs:90`, built at `:1294`,
+  installed at `:1317`); a daemon without it never evaluates `covers`. Model
   folding needs an admitted, non-empty `model_chain`
   (`crates/daemon/src/config.rs:185` `eidnara_folds`); a default
   `DaemonConfig` leaves the chain empty and the summarizer answers
@@ -77,7 +77,7 @@ Semantics distribution: three `always`, two `sometimes`.
 
 Type: safety
 Reachability: explicit-config-only - the owner exists only under an
-`aws_source` selection (`serve.rs:1313`)
+`aws_source` selection (`serve.rs:1294`)
 Status: active
 Exercised: yes - the owner unit test drives lifetimes one second below, equal
 to, and one second above the deadline plus skew, and the subprocess suite
@@ -142,7 +142,7 @@ Open questions: None.
 Type: liveness
 Reachability: explicit-config-only - folding needs the admitted, non-empty
 `model_chain` (`config.rs:181`) and the rotation half needs the `aws_source`
-selection (`serve.rs:1313`)
+selection (`serve.rs:1294`)
 Status: active
 Exercised: yes - each folding path folds again after a source failure and its
 cooldown, and the 24-hour soak rotates 24 rows and survives an external login

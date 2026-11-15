@@ -127,7 +127,7 @@ So of the three non-success bind outcomes the comment names, one has a test.
 Panicking `bind` and close-wins-bind have none, and neither do the three
 latch-tripping paths above.
 
-**Reachability.** `serve.rs:575` constructs `StaticComposite::new(...)` and `:632`
+**Reachability.** `serve.rs:573` constructs `StaticComposite::new(...)` and `:630`
 passes it to `host_runtime::run`; both re-printed at carry time. `composite.rs`
 contains zero `#[cfg]` attributes, verified by grep, so no part of the file is
 gated. The routed path that reaches `handle` and `route_gone` is Fact 1 of the
@@ -280,7 +280,7 @@ from the client's side or from the latch, not from a subsequent request.
   freed on a path where the composite's entry leaked.
 - Missing evidence: whether the latch-tripped incarnation's teardown drops the
   composite, which would drop the map with it. `StaticComposite` is owned by the
-  value `serve.rs:575` builds and `:632` moves into `host_runtime::run`, so its
+  value `serve.rs:573` builds and `:630` moves into `host_runtime::run`, so its
   lifetime is the `run` call, but tracing whether `run` returns on every
   latch-tripping path was not done - that is 2a's and 2f's scope.
 - Conclusion: unresolved, needs the fatal-latch teardown path traced in
