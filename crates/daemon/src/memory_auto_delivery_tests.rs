@@ -1256,10 +1256,18 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
 /// Sets short publication waits, so a test that holds the gate or the Kernel
 /// writer finishes in well under a second.
 fn short_waits(handler: &Handler) {
+    waits(
+        handler,
+        Duration::from_millis(300),
+        Duration::from_millis(200),
+    );
+}
+
+fn waits(handler: &Handler, plan_commit_budget: Duration, commit_wait: Duration) {
     handler.native_capture.lock().unwrap().set_waits_for_test(
         crate::memory_capture::CaptureWaits {
-            plan_commit_budget: Duration::from_millis(300),
-            commit_wait: Duration::from_millis(200),
+            plan_commit_budget,
+            commit_wait,
         },
     );
 }
@@ -1464,7 +1472,9 @@ async fn a_held_capture_gate_leaves_the_plan_as_it_was_and_the_drain_still_issue
 #[tokio::test]
 async fn a_submission_under_a_held_writer_freezes_every_plan_inside_one_allowance() {
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
-    short_waits(&handler);
+    // The allowance starts before the plans are frozen, so it is long
+    // enough for that step on a loaded host.
+    waits(&handler, Duration::from_secs(3), Duration::from_secs(2));
     let digest = kernel_routes::ProjectBinding::new(&project)
         .digest()
         .to_owned();
@@ -1741,7 +1751,7 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     let kernel = handler.kernel.kernel_store().unwrap();
     let binding = kernel_routes::ProjectBinding::new(&project);
     let tip = kernel.tip().unwrap();
-    let read_for = |sessions: &[&str], caps: (usize, usize)| -> (Vec<String>, bool) {
+    let read_for = |sessions: &[Option<&str>], caps: (usize, usize)| -> (Vec<String>, bool) {
         let response =
             crate::canonical_memory::read_other_sessions(&kernel, &binding, sessions, tip, caps)
                 .unwrap();
@@ -1758,7 +1768,7 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         summaries.sort();
         (summaries, response.truncated)
     };
-    let read = |session: &str, caps: (usize, usize)| read_for(&[session], caps);
+    let read = |session: &str, caps: (usize, usize)| read_for(&[Some(session)], caps);
     const ROWS: usize = 1_000;
     const BYTES: usize = 1 << 20;
     let unbounded = (ROWS, BYTES);
@@ -1784,9 +1794,14 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     assert!(truncated);
     assert!(!other_session.contains(&stated(THURSDAY)));
     // The byte cap is the stored size of the other session's statement.
-    let rows =
-        crate::canonical_memory::read_other_sessions(&kernel, &binding, &["s3"], tip, unbounded)
-            .unwrap();
+    let rows = crate::canonical_memory::read_other_sessions(
+        &kernel,
+        &binding,
+        &[Some("s3")],
+        tip,
+        unbounded,
+    )
+    .unwrap();
     let ids: Vec<String> = rows
         .rows
         .iter()
@@ -1819,10 +1834,99 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     // A read for two sessions holds what either is delivered: the newest
     // two rows for the session that wrote none, and the older statement for
     // the session that wrote the twelve.
-    let (both, truncated) = read_for(&["s2", "s3"], (2, BYTES));
+    let (both, truncated) = read_for(&[Some("s2"), Some("s3")], (2, BYTES));
     assert!(truncated);
     assert_eq!(both.len(), 3);
     assert!(both.contains(&stated(THURSDAY)));
+}
+
+/// Pi derives an extension message under an id in its reserved space and
+/// gives it the role `user`. A queued job with such an id is extracted as an
+/// assistant source: its memory is stored labeled as a report, and a
+/// replacement it names is refused, so the memory it names stays.
+#[tokio::test]
+async fn a_row_pi_derived_is_extracted_as_an_assistant_source() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "assistant", ASSISTANT_NOTE)],
+        |_, _| vec![fact(ASSISTANT_NOTE)],
+    )
+    .await;
+    let derived = "The integration suite takes about nine minutes on CI.";
+    let roles = std::cell::RefCell::new(Vec::new());
+    for (id, replace) in [
+        ("eidnara:custom:5e6f7081", true),
+        ("eidnara:custom:6f708192", false),
+    ] {
+        let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+        enqueue(&handler, SECOND, "s2", &[(id, "user", derived)]).await;
+        let work = body(
+            handler
+                .handle_native_capture_next(test_route(SECOND), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        roles
+            .borrow_mut()
+            .push(prompt["messages"][0]["role"].as_str().unwrap().to_string());
+        let mut memory = json!({
+            "category": "PROJECT_RULES",
+            "content": "CI suite duration.",
+            "quote": derived,
+        });
+        if replace {
+            memory["replaces"] = json!(
+                ids_containing(
+                    prompt["existing_memories"].as_array().unwrap(),
+                    "four minutes"
+                )[0]
+            );
+        }
+        let submission = json!({
+            "method": "memory.capture.submit",
+            "session_id": "s2",
+            "lease": work["lease"],
+            "model": work["model"],
+            "output": json!({"version": 1, "decisions": [
+                {"message_id": prompt["messages"][0]["id"], "memories": [memory]},
+            ]})
+            .to_string(),
+        });
+        assert_eq!(
+            body(
+                handler
+                    .handle_native_capture_submit(test_route(SECOND), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        handler.native_capture.lock().unwrap().expire_all_for_test();
+        store
+            .execute_tag_sql_for_test("DELETE FROM memory_capture_jobs WHERE commit_seq IS NULL")
+            .unwrap();
+    }
+    assert_eq!(*roles.borrow(), ["assistant", "assistant"]);
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (
+                format!("Assistant reported: {ASSISTANT_NOTE}"),
+                "labeled".to_string()
+            ),
+            (
+                format!("Assistant reported: {derived}"),
+                "labeled".to_string()
+            ),
+        ],
+        "the replacement is refused and the plain proposal is stored as a report"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
 }
 
 /// A source commits, its queue row is pruned, and the same message is

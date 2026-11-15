@@ -1054,9 +1054,15 @@ impl CaptureWork {
         messages: &[CaptureMessage],
         jobs: &[CaptureJob],
     ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
-        let mut sessions: Vec<&str> = jobs.iter().map(|job| job.session_id.as_str()).collect();
+        // Each session's delivery, and the plain newest window, which holds
+        // the statements a session wrote itself.
+        let mut sessions: Vec<Option<&str>> = jobs
+            .iter()
+            .map(|job| Some(job.session_id.as_str()))
+            .collect();
         sessions.sort_unstable();
         sessions.dedup();
+        sessions.push(None);
         let kernel = self
             .kernel
             .kernel_store()
@@ -1108,10 +1114,11 @@ impl CaptureWork {
     /// `settlement` is what the session's source publish reached when the
     /// submit took its citation lookup. The capture gate and the Kernel
     /// writer are awaited until `deadline`; a gate still held then leaves
-    /// the plan as it is for the next drain. A failure carries the plan the
-    /// commit read and the dispatch count read beside it, so the recovery
-    /// acts on that freeze of the plan and on no later one. A failure before
-    /// the plan is read carries none.
+    /// the plan as it is for the next drain. The plan is the one the queue
+    /// holds when the gate is taken, read with the dispatch count beside it;
+    /// a job that holds none then has nothing to publish. A failure carries
+    /// both, so the recovery acts on that freeze of the plan and on no later
+    /// one. A failure before the plan is read carries none.
     fn publish(
         &self,
         job: &CaptureJob,
@@ -1131,20 +1138,11 @@ impl CaptureWork {
                 Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(GATE_POLL),
             }
         };
-        let Some(plan) = self
+        // The read writes nothing: a plan the queue released since the
+        // caller read the job stays released.
+        let Some((plan, attempts)) = self
             .store
-            .prepare_memory_capture(
-                &job.project,
-                &job.job_id,
-                job.prepared.as_deref().ok_or_else(unread)?,
-            )
-            .map_err(|_| unread())?
-        else {
-            return Ok(());
-        };
-        let Some(attempts) = self
-            .store
-            .frozen_memory_capture_attempts(&job.project, &job.job_id)
+            .frozen_memory_capture(&job.project, &job.job_id)
             .map_err(|_| unread())?
         else {
             return Ok(());
@@ -1327,7 +1325,8 @@ fn unpublished(error: kernel::KernelError) -> Unpublished {
     }
 }
 
-/// How long one capture commit waits for the Kernel writer.
+/// How long one capture publication waits for the capture gate and then the
+/// Kernel writer.
 pub(super) const COMMIT_WAIT: Duration = Duration::from_secs(5);
 /// How long one drain call spends committing frozen plans before it prepares
 /// the extraction window, and how long one submission spends committing the
@@ -1345,6 +1344,17 @@ const COMMIT_REFUSED: &str = "kernel_write_refused";
 /// ([`statement_source_id`]).
 pub(crate) const CAPTURE_SOURCE_ID: &str = "memory_capture";
 const CAPTURE_SOURCE_KIND: &str = "assistant";
+
+/// Whether `object` has the shape of a capture decision: a memory-domain
+/// decision on the capture lineage with the capture source kind. The check
+/// reads the row's structure; a Kernel writer that reproduces the whole
+/// shape is treated as capture.
+pub(crate) fn is_capture_memory(object: &kernel::ObjectRow) -> bool {
+    object.object_kind == "decision"
+        && object.domain_id == "memory"
+        && object.source_id == CAPTURE_SOURCE_ID
+        && object.source_kind == CAPTURE_SOURCE_KIND
+}
 
 /// The lineages a user correction may replace: capture rows, whichever role
 /// they quote, and memories the agent wrote with the host memory tool.
@@ -1396,19 +1406,27 @@ impl<'a> Prose<'a> {
     }
 }
 
-/// A captured memory qualifies as the user's own words when it is an
-/// attributed quotation spanning whole statements of a user message that the
-/// job holds whole. `prose` is the job's text.
+/// Whether a queued job is a message of the user: its role is `user`, and it
+/// is no row Pi derived.
 ///
 /// Pi reserves the `eidnara:` id space for the rows it derives: extension
 /// messages and branch and compaction summaries. A queued Pi job with such an
 /// id is one of those rows whichever path or build enqueued it, so it is
-/// published labeled. A bash execution keeps its host id and is told apart
+/// extracted as an assistant source: it is offered to the extractor under
+/// the assistant role, its memories are labeled `Assistant reported`, and it
+/// replaces nothing. A bash execution keeps its host id and is told apart
 /// only where the native row is at hand, at the transform checkpoint.
-fn user_attributed(job: &CaptureJob, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
+pub(super) fn is_user_source(job: &CaptureJob) -> bool {
     job.role == "user"
-        && !cite::is_hashed_source_id(&job.message_id)
         && !(job.harness == "pi" && crate::codec::pi::is_reserved_id(&job.message_id))
+}
+
+/// A captured memory qualifies as the user's own words when it is an
+/// attributed quotation spanning whole statements of a user message that the
+/// job holds whole. `prose` is the job's text.
+fn user_attributed(job: &CaptureJob, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
+    is_user_source(job)
+        && !cite::is_hashed_source_id(&job.message_id)
         && memory
             .content
             .strip_prefix(USER_STATED)
@@ -1768,17 +1786,18 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
 ///
 /// The candidates are ranked from two bounded reads at one tip, each under
 /// `caps`: the newest memories served on explicit search, and the memories
-/// a transform pass delivers to each of `sessions`, the sessions whose
-/// messages the batch holds. A project's assistant reports outnumber its
-/// approved statements, and a session's own statements are left out of its
-/// delivery, so the second read reaches statements older than the first
-/// read's window: a memory a session is shown is a memory its correction can
-/// name.
+/// served on `auto_inject` to each of `sessions`. Those readers are the
+/// sessions whose messages the batch holds, each with its own statements
+/// left out as a transform pass leaves them out, and `None`, the plain
+/// newest window, which holds a session's own statements. A project's
+/// assistant reports outnumber its approved statements, so the second read
+/// reaches statements older than the first read's window. The candidates
+/// are a bounded set: a memory older than every window is not offered.
 fn select_existing_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
     words: &HashSet<String>,
-    sessions: &[&str],
+    sessions: &[Option<&str>],
     caps: (usize, usize),
 ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
     let tip = kernel.tip().map_err(|_| "kernel_unavailable")?;
@@ -2021,7 +2040,7 @@ fn write_captured_memories(
     let recorded_at = now_ms();
     let mut written = 0;
     for (index, memory) in output.memories.iter().enumerate() {
-        if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && job.role != "user" {
+        if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !is_user_source(job) {
             return Err(kernel::KernelError::Conflict);
         }
         if let Some(target) = &memory.duplicate_of {
@@ -2954,6 +2973,20 @@ mod tests {
             (0, 0),
             "the extension message's memory is labeled on both surfaces"
         );
+        assert_eq!(
+            kernel_routes::read::read_visible(
+                &kernel,
+                &project,
+                kernel::Surface::ExplicitSearch,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap()
+            .rows
+            .len(),
+            1,
+            "the memory is written"
+        );
         publish("job-typed", "5e6f7081");
         assert_eq!(
             served().0,
@@ -3499,13 +3532,14 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect();
-        let offered_to = |session: &str, caps| -> Vec<(String, bool)> {
-            select_existing_memories(&kernel, &project, &words, &[session], caps)
+        let offered_for = |sessions: &[Option<&str>], caps| -> Vec<(String, bool)> {
+            select_existing_memories(&kernel, &project, &words, sessions, caps)
                 .unwrap()
                 .into_iter()
                 .map(|candidate| (candidate.content, candidate.automatic))
                 .collect()
         };
+        let offered_to = |session: &str, caps| offered_for(&[Some(session)], caps);
         let offered = |caps| offered_to("another-session", caps);
         let stated = (format!("{USER_STATED}: {statement}"), true);
         let all = offered((1_000, 1 << 20));
@@ -3524,6 +3558,14 @@ mod tests {
                 .all(|(content, automatic)| { content.starts_with("Run ") && !automatic }),
             "{windowed:?}"
         );
+        // The session that wrote the statement is delivered none of its own
+        // rows. The plain newest window holds the statement, so a batch of
+        // that session's messages is still offered it.
+        let delivery_only = offered_to("session", (3, 1 << 20));
+        assert!(!delivery_only.contains(&stated), "{delivery_only:?}");
+        let with_plain = offered_for(&[Some("session"), None], (3, 1 << 20));
+        assert_eq!(with_plain[0], stated, "{with_plain:?}");
+        assert_eq!(with_plain.len(), 4);
 
         // A second session then states three things, which fill both newest
         // windows. A transform pass delivers the older statement to that
@@ -3539,7 +3581,7 @@ mod tests {
         let delivered = crate::canonical_memory::read_other_sessions(
             &kernel,
             &project,
-            &["writing-session"],
+            &[Some("writing-session")],
             kernel.tip().unwrap(),
             (3, 1 << 20),
         )

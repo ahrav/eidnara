@@ -1116,10 +1116,10 @@ and leaves out facts captured from that session's own messages. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
 however many of them are newer, they take no place from another session's
 facts. The extractor's reference memories are ranked from two bounded reads
-at one snapshot: the newest facts on `explicit_search`, and the facts a
-transform would deliver to each session whose messages the batch holds, so a
-fact a session is shown is a fact its correction can name; a fact older than
-both windows is not offered. A user message may correct earlier facts, and only
+at one snapshot: the newest facts on `explicit_search`, and the facts served
+on `auto_inject` in the plain newest window and in the delivery of each
+session whose messages the batch holds; a fact older than every window is
+not offered. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces` (which must share its category
 and at least one content word), retires each further fact it names

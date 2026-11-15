@@ -110,7 +110,7 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
         .enumerate()
         .map(|(index, job)| CaptureMessage {
             id: format!("source_{}", index + 1),
-            role: if job.role == "user" {
+            role: if super::is_user_source(job) {
                 CaptureRole::User
             } else {
                 CaptureRole::Assistant
@@ -660,7 +660,7 @@ impl CaptureWork {
                     continue;
                 }
             };
-            let attribution = if job.role == "user" {
+            let attribution = if super::is_user_source(&job) {
                 USER_STATED
             } else {
                 super::ASSISTANT_REPORTED

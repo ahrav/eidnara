@@ -230,7 +230,7 @@ pub(crate) fn read_project_memory(
     match read_other_sessions(
         &store,
         project,
-        &[session_id],
+        &[Some(session_id)],
         tip,
         (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
     ) {
@@ -244,9 +244,10 @@ pub(crate) fn read_project_memory(
 /// The project's injectable memory rows at `tip` that a pass delivers to each
 /// of `sessions`: for one session, the newest rows under the row and byte
 /// caps among the rows whose capture rationale names another session or
-/// none. With several sessions the response holds the union of their
-/// deliveries, which is at most twice the caps, because a row a session
-/// leaves out is kept only while another session still has room.
+/// none. A reader given as `None` leaves out no row, so its delivery is the
+/// plain newest window. With several readers the response holds the union
+/// of their deliveries, which is at most twice the caps, because a row a
+/// session leaves out is kept only while another reader still has room.
 ///
 /// A row's session is in its decision payload. The rows are walked in
 /// serving order and their payloads are loaded one page at a time, each page
@@ -257,12 +258,12 @@ pub(crate) fn read_project_memory(
 pub(crate) fn read_other_sessions(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
-    sessions: &[&str],
+    sessions: &[Option<&str>],
     tip: i64,
     (max_rows, max_row_bytes): (usize, usize),
 ) -> Result<ReadResponse, kernel::KernelError> {
     struct Delivery<'s> {
-        session: &'s str,
+        session: Option<&'s str>,
         rows: usize,
         bytes: u64,
         full: bool,
@@ -325,12 +326,12 @@ pub(crate) fn read_other_sessions(
             let decision = decisions
                 .remove(&row.object.object_id)
                 .ok_or(kernel::KernelError::CorruptCanonicalRow)?;
-            let owner = (row.object.source_id == crate::memory_capture::CAPTURE_SOURCE_ID)
+            let owner = crate::memory_capture::is_capture_memory(&row.object)
                 .then(|| capture_session(&decision.payload.rationale))
                 .flatten();
             let mut delivered = false;
             for delivery in deliveries.iter_mut().filter(|delivery| !delivery.full) {
-                if owner.as_deref() == Some(delivery.session) {
+                if owner.is_some() && owner.as_deref() == delivery.session {
                     continue;
                 }
                 if delivery.rows == max_rows
