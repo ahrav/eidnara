@@ -398,7 +398,7 @@ and its rebuild outcomes without parsing the log:
 | Field | Meaning |
 |---|---|
 | `tip` | The kernel tip read when the status was answered; `null` when the kernel could not be read within the operation's budget. |
-| `checkpoint` | The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `null` before a selected family is observed and when the last observation could not read one. |
+| `checkpoint` | The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `null` before a selected family is observed, when the last observation could not read one, and after a slice that found the record disabled. |
 | `lag_commits` | `tip - checkpoint`, floored at zero; `null` when either is. A reader is refused once the lag an observation finds exceeds `catchup_lag_commits`. |
 | `rebuilds.recorded` | First builds and rebuilds the slice loop recorded since the daemon started. |
 | `rebuilds.completed` | Builds that reached Current since the daemon started, whoever recorded them. |

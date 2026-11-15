@@ -212,7 +212,7 @@ pub struct SearchLifecycleOwner {
 /// How far the selected family trails the kernel and what the slice loop did about it, since this daemon process started. The status surface reports it, so an operator or a test harness reads the projection's lag and its rebuild outcomes without parsing the log.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectionProgress {
-    /// The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `None` until a selected family is observed, and again once an observation finds none it can read.
+    /// The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `None` until a selected family is observed, and again once an observation finds none it can read or a slice finds the record disabled.
     pub checkpoint: Option<i64>,
     /// First builds and rebuilds the slice loop recorded.
     pub rebuilds_recorded: u64,
@@ -913,6 +913,11 @@ impl SearchLifecycleOwner {
         let completed = matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Current));
         let building = {
             let mut progress = self.lock_progress();
+            if matches!(outcome, SliceOutcome::Disabled) {
+                // A disabled record serves no family, so the last observation describes nothing a reader can use.
+                progress.checkpoint = None;
+                progress.unobserved = None;
+            }
             progress.blocked = stalled(outcome).map(|(_, detail)| match &progress.unobserved {
                 Some(reason) => format!("{detail}; coverage: {reason}"),
                 None => detail,

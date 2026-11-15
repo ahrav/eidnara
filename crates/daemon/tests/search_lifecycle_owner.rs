@@ -4919,6 +4919,55 @@ async fn a_request_wakes_an_idle_slice_loop() {
     assert!(began.duration_since(requested) < Duration::from_secs(2));
 }
 
+/// The status reports the commit the loop's family has applied while the family is Current, and reports none once a slice finds the record disabled: a disabled record serves no family for a lag to describe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_disabled_record_reports_no_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
+        Arc::clone(&owner),
+        cancel.clone(),
+    ));
+    let started = Instant::now();
+    loop {
+        let (progress, tip) = owner.progress(&slice_budget());
+        if matches!(control(home), ControlState::Current(_)) && progress.checkpoint == tip {
+            assert_eq!(progress.blocked, None, "{progress:?}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the loop's family did not reach the tip: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("the disable reconciles");
+    let started = Instant::now();
+    loop {
+        let (progress, _) = owner.progress(&slice_budget());
+        if progress.checkpoint.is_none() {
+            assert_eq!(progress.blocked, None, "{progress:?}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "a slice over the disabled record kept the checkpoint: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cancel.cancel();
+    loop_task.await.unwrap();
+    let _ = owner.shutdown().await;
+}
+
 /// A request made after a reload that changes the identity while the old family's supervisor still runs does not open admission under the new identity over that supervisor: it closes admission, refuses, and leaves the rotation to the next slice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_request_over_running_foreign_maintenance_closes_admission_until_rotation() {
