@@ -627,10 +627,20 @@ impl CaptureWork {
             } else {
                 "Assistant reported"
             };
+            let mut proposed = decision.memories;
+            // A user's statement is stored as its whole sentences, so a
+            // quotation that cuts a lead-in or a qualifier is widened first.
+            if job.role == "user" && holds_whole_message(&job) {
+                for memory in &mut proposed {
+                    if let Some(statement) = enclosing_statement(&job.text, &memory.quote) {
+                        memory.quote = statement.to_owned();
+                    }
+                }
+            }
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
-            let memories = collapse_quotations(attribution, decision.memories);
+            let memories = collapse_quotations(attribution, proposed);
             if memories.iter().any(|memory| {
                 !user_attributed(&job, memory)
                     && memory

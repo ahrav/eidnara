@@ -981,7 +981,13 @@ and `store_failed`; mismatched models and malformed envelopes are errors.
 
 Before freezing, each memory's text becomes its exact supporting quotation,
 prefixed with `User stated:` or `Assistant reported:` from the native role.
-The model's paraphrase is not published. Memories of one source that share a
+The model's paraphrase is not published. A quotation of a user source that
+reaches capture under its own message id and lies inside one plain-prose
+paragraph is first widened to the whole sentences of that paragraph that
+contain it, when those sentences meet the statement rule below and fit one
+memory's 2,048 bytes: a quotation that leaves out a lead-in clause, a
+negation, or a condition is stored as the user's whole sentence. A quotation
+whose sentences do not qualify is stored as proposed. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
 among them; distinct replacement targets keep one memory each, since a
 memory supersedes exactly one predecessor. Relevant and sufficiently complete quote selection still depends
@@ -1054,9 +1060,17 @@ line holding only a markup tag opens through the last line closing that tag
 item, a heading, a blockquote, an indented code line, a double quotation mark
 of any script, a single opening quotation mark that starts a word, or a line
 ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
-after such a line, every paragraph after one holding a quotation mark, and
+after such a line, every paragraph inside a quotation an earlier paragraph
+left open, and
 every paragraph that a fence or tag line borders without a blank
-line. The quotation starts the
+line. A paragraph leaves a double quotation open, or closes the open one,
+when it holds an odd number of the marks of one style (straight, curly,
+angle, corner, or ornamental); a paragraph whose marks pair up ends its
+quotations itself. When the prose of the whole message holds an odd number of
+some style's marks, no pairing is trusted and every paragraph after the first
+one holding a double mark is left out. A paragraph that opens a single
+quotation with no word-ending single mark to close it leaves out every later
+paragraph. The quotation starts the
 paragraph, or follows a `.`, `!`, or `?` and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
@@ -1078,7 +1092,14 @@ is retired with its fact in the same way. When the Kernel's admission policy
 refuses a statement record, the same frozen plan commits with each of its user
 statements as a labeled memory for explicit search, and
 `decisions_approval_refused` counts them. Every other captured fact remains labeled model inference
-for explicit search, not human approval or automatic-context eligibility. The
+for explicit search, not human approval or automatic-context eligibility.
+Each reference memory offered to the extractor carries `user_statement`, true
+when the Kernel serves it on automatic surfaces. A proposal that names
+`duplicate_of` writes nothing, with one exception: a user's statement that
+duplicates a memory the Kernel does not serve on automatic surfaces, such as
+an assistant's report or a memory the host memory tool wrote, is recorded as
+its own fact with its statement record, the duplicated memory stays, and the
+new fact's rationale names it under `restates`. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,

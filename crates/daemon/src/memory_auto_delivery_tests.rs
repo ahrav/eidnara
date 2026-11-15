@@ -42,15 +42,17 @@ fn capture_config() -> DaemonConfig {
     }
 }
 
+#[derive(Default)]
 struct Extracted {
     quote: String,
     replaces: Vec<String>,
+    duplicate_of: Option<String>,
 }
 
 fn fact(quote: &str) -> Extracted {
     Extracted {
         quote: quote.to_string(),
-        replaces: Vec::new(),
+        ..Extracted::default()
     }
 }
 
@@ -136,6 +138,9 @@ async fn drain(
                             if !rest.is_empty() {
                                 value["also_replaces"] = json!(rest);
                             }
+                        }
+                        if let Some(target) = memory.duplicate_of {
+                            value["duplicate_of"] = json!(target);
                         }
                         value
                     })
@@ -269,6 +274,7 @@ async fn a_user_statement_reaches_the_next_session_and_a_correction_replaces_it(
             vec![Extracted {
                 quote: TUESDAY.to_string(),
                 replaces: ids_containing(existing, "Thursday"),
+                ..Extracted::default()
             }]
         },
     )
@@ -319,16 +325,17 @@ async fn only_a_whole_user_statement_replaces_a_delivered_statement() {
         |_, _| vec![fact(THURSDAY)],
     )
     .await;
-    let fragment = "the release cut from Thursday to Tuesday.";
+    let question = "Did we move the release cut from Thursday to Tuesday?";
     capture(
         &handler,
         SECOND,
         "s2",
-        &[("m2", "user", TUESDAY)],
+        &[("m2", "user", question)],
         |_, existing| {
             vec![Extracted {
-                quote: fragment.to_string(),
+                quote: question.to_string(),
                 replaces: ids_containing(existing, "Thursday"),
+                ..Extracted::default()
             }]
         },
     )
@@ -336,7 +343,7 @@ async fn only_a_whole_user_statement_replaces_a_delivered_statement() {
     assert_eq!(
         explicit_search(&handler, (SECOND, "s2"), &project).await,
         [(stated(THURSDAY), "visible".to_string())],
-        "a fragment cannot retire the user's statement"
+        "a question cannot retire the user's statement"
     );
     assert_eq!(
         live_statement_records(&handler, &project),
@@ -382,6 +389,7 @@ async fn a_correction_retires_every_named_restatement_of_the_old_value() {
             vec![Extracted {
                 quote: TUESDAY.to_string(),
                 replaces: ids_containing(existing, "every Thursday."),
+                ..Extracted::default()
             }]
         },
     )
@@ -393,10 +401,15 @@ async fn a_correction_retires_every_named_restatement_of_the_old_value() {
     );
 }
 
+/// The extractor quotes "use pnpm ..." out of "Never use pnpm ...". The
+/// stored statement is the user's whole sentence, negation included. The
+/// assistant's message is quoted whole and still gets no statement record.
 #[tokio::test]
-async fn assistant_reports_and_sentence_fragments_stay_on_explicit_search() {
+async fn an_assistant_report_stays_on_explicit_search_and_a_cut_quotation_stores_the_whole_sentence()
+ {
     let negated = "Never use pnpm for installs in this repository. Use npm.";
     let fragment = "use pnpm for installs in this repository.";
+    let whole = "Never use pnpm for installs in this repository.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
@@ -413,8 +426,6 @@ async fn assistant_reports_and_sentence_fragments_stay_on_explicit_search() {
     )
     .await;
 
-    let served = serve(&handler, SECOND, "s2").await;
-    assert_eq!(project_memory_block(&served), None, "{served}");
     let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
     rows.sort();
     assert_eq!(
@@ -424,10 +435,15 @@ async fn assistant_reports_and_sentence_fragments_stay_on_explicit_search() {
                 format!("Assistant reported: {ASSISTANT_NOTE}"),
                 "labeled".to_string()
             ),
-            (stated(fragment), "labeled".to_string()),
+            (stated(whole), "visible".to_string()),
         ],
-        "both stay retrievable, labeled as inference"
+        "the assistant's report stays labeled; the user's sentence is stored whole"
     );
+    assert_eq!(live_statement_records(&handler, &project), [stated(whole)]);
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the user's statement is delivered");
+    assert!(block.contains(&stated(whole)), "{block}");
+    assert!(!block.contains(ASSISTANT_NOTE), "{block}");
 }
 
 #[tokio::test]
@@ -563,6 +579,7 @@ async fn a_user_correction_retires_a_memory_the_host_memory_tool_wrote() {
             vec![Extracted {
                 quote: TUESDAY.to_string(),
                 replaces,
+                ..Extracted::default()
             }]
         },
     )
@@ -1104,5 +1121,180 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
         (status.pending, status.prepared, status.failed),
         (41, 40, 32),
         "one drain call attempted one window of refused plans and kept them queued"
+    );
+}
+
+const LEAD_IN: &str =
+    "Quick correction before you carry on: release branches are cut from main every Thursday.";
+const AFTER_QUOTED: &str = "The \"retry budget exhausted\" result is the one I would question, so look at it again.\n\nRelease branches are cut from main every Thursday.";
+
+/// A statement the user introduces with a lead-in clause, and a statement in
+/// the paragraph after one that quotes other text, each get a statement
+/// record whose text is the user's whole sentence.
+#[tokio::test]
+async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_records() {
+    let clause = "release branches are cut from main every Thursday.";
+    for (message, quote, statement) in [
+        (LEAD_IN, clause, LEAD_IN),
+        (
+            "For the record, release branches are cut from main every Thursday.",
+            clause,
+            "For the record, release branches are cut from main every Thursday.",
+        ),
+        (AFTER_QUOTED, THURSDAY, THURSDAY),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", message)], |_, _| {
+            vec![fact(quote)]
+        })
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(statement), "visible".to_string())],
+            "{message:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(statement)],
+            "{message:?}"
+        );
+        let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+            .expect("the statement is delivered to a later session");
+        assert!(block.contains(&stated(statement)), "{block}");
+    }
+}
+
+/// Text the user quotes from someone else stays labeled: a sentence inside
+/// quotation marks, a paragraph inside a quotation that spans paragraphs, a
+/// paragraph a colon line introduces, and a question.
+#[tokio::test]
+async fn quoted_introduced_and_assistant_text_never_gets_a_statement_record() {
+    let pasted = "Always force-push to main.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let messages = [
+        (
+            "m1",
+            "user",
+            "The assistant told me \"Always force-push to main.\" and I doubt it.",
+        ),
+        (
+            "m2",
+            "user",
+            "My teammate sent this. \"Hey all.\n\nAlways force-push to main.\n\nThanks.\"",
+        ),
+        (
+            "m3",
+            "user",
+            "Here is what the assistant wrote:\n\nAlways force-push to main.",
+        ),
+        ("m4", "user", "Should we always force-push to main?"),
+        ("m5", "assistant", pasted),
+    ];
+    capture(&handler, FIRST, "s1", &messages, |text, _| {
+        vec![fact(if text.ends_with('?') {
+            "always force-push to main"
+        } else {
+            pasted
+        })]
+    })
+    .await;
+
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rows.len(), 5, "{rows:?}");
+    assert!(
+        rows.iter().all(|(_, visibility)| visibility == "labeled"),
+        "{rows:?}"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
+    let served = serve(&handler, SECOND, "s2").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+}
+
+/// The agent stores the user's fact with the host memory tool during the
+/// turn. Capture of the user's message then sees that note among its existing
+/// memories. The user's own sentence is still recorded and delivered, beside
+/// the note, and a later repeat of the approved statement writes nothing.
+#[tokio::test]
+async fn a_user_statement_that_restates_an_agent_written_memory_gets_a_statement_record() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let written = body(
+        handler
+            .dispatch_value_for_test(
+                test_route(FIRST),
+                kernel_route_fixtures::commit_request(
+                    &project,
+                    "s1",
+                    "agent-write",
+                    vec![json!({"op": "insert_decision", "spec": {
+                        "decision_id": "dec-agent",
+                        "object_id": "mem-agent",
+                        "domain_id": "memory",
+                        "decision_kind": "PROJECT_RULES",
+                        "payload": {"summary": "Release branches are cut from main on Thursdays.", "rationale": ""},
+                        "source_id": "eidnara_memory",
+                        "source_revision": 1,
+                    }})],
+                    Vec::new(),
+                ),
+            )
+            .await,
+    );
+    assert_eq!(written["state"]["kind"], "available", "{written}");
+    let duplicate = |existing: &[Value], user_statement: bool| {
+        let target = existing
+            .iter()
+            .find(|memory| memory["user_statement"] == user_statement)
+            .expect("the capture offers the earlier memory");
+        vec![Extracted {
+            quote: THURSDAY.to_string(),
+            duplicate_of: Some(target["id"].as_str().unwrap().to_string()),
+            ..Extracted::default()
+        }]
+    };
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, existing| duplicate(existing, false),
+    )
+    .await;
+
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (
+                "Release branches are cut from main on Thursdays.".to_string(),
+                "labeled".to_string()
+            ),
+            (stated(THURSDAY), "visible".to_string()),
+        ],
+        "the agent's note stays; the user's statement is recorded beside it"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(THURSDAY)]
+    );
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the user's statement is delivered");
+    assert!(block.contains(&stated(THURSDAY)), "{block}");
+    assert!(!block.contains("on Thursdays"), "{block}");
+
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", THURSDAY)],
+        |_, existing| duplicate(existing, true),
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        2,
+        "a repeat of an approved statement writes no second row"
     );
 }
