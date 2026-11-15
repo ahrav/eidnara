@@ -216,11 +216,11 @@ async fn status_after_teardown(client: &Client, route: ClientRoute) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_its_route() {
-    let sessions = env_count("EIDNARA_SOAK_SESSIONS", 15);
-    let turns = env_count("EIDNARA_SOAK_TURNS", 12);
-    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 192 * 1024);
-    let window = sessions / 3;
-    assert!(window >= 2, "three windows of at least two sessions");
+    let sessions = env_count("EIDNARA_SOAK_SESSIONS", 40);
+    let turns = env_count("EIDNARA_SOAK_TURNS", 6);
+    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 384 * 1024);
+    let window = sessions / 4;
+    assert!(window >= 2, "four windows of at least two sessions");
     assert!(
         (turns * output_bytes) as u64 >= 2 * SESSION_GROWTH_BOUND_BYTES,
         "one session's request window is at least twice the growth allowed per session"
@@ -270,13 +270,13 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
     );
     let low_water =
         |range: std::ops::Range<usize>| *anonymous[range].iter().min().expect("a window");
-    let middle = low_water(window..2 * window);
-    let last = low_water(sessions - window..sessions);
-    let allowed = SESSION_GROWTH_BOUND_BYTES * window as u64;
+    let early = low_water(window..2 * window);
+    let late = low_water(sessions - window..sessions);
+    let between = (sessions - 2 * window) as u64;
     assert!(
-        last <= middle + allowed,
-        "anonymous memory grew {} MiB over {window} sessions: {:?}",
-        last.saturating_sub(middle) / MIB,
+        late <= early + SESSION_GROWTH_BOUND_BYTES * between,
+        "anonymous memory grew {} MiB over {between} sessions: {:?}",
+        late.saturating_sub(early) / MIB,
         anonymous
             .iter()
             .map(|bytes| bytes / MIB)
@@ -290,7 +290,7 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
     );
     let arena_heaps = glibc_arena_heaps(pid);
     assert!(
-        arena_heaps < C_HEAP_ARENAS,
+        (1..C_HEAP_ARENAS).contains(&arena_heaps),
         "{arena_heaps} heaps outside the main arena under a limit of {C_HEAP_ARENAS} arenas"
     );
 

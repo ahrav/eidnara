@@ -2,12 +2,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 
+/// One glibc malloc arena for each SQLite connection the default route holds open: the memory
+/// store's, the kernel store's writer, and its two readers.
 pub const C_HEAP_ARENAS: usize = 4;
+/// The size of one glibc arena heap.
 pub const C_HEAP_RELEASE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
 static ARENA_LIMIT_SET: AtomicBool = AtomicBool::new(false);
 static RELEASING: AtomicBool = AtomicBool::new(false);
-static RESIDENT_AFTER_RELEASE: AtomicU64 = AtomicU64::new(0);
+static RESIDENT_FLOOR: AtomicU64 = AtomicU64::new(0);
+static FREE_FLOOR: AtomicU64 = AtomicU64::new(0);
 static RELEASES: AtomicU64 = AtomicU64::new(0);
 static RELEASE_RESIDENT_DROP_BYTES: AtomicU64 = AtomicU64::new(0);
 
@@ -100,8 +104,10 @@ fn c_heap() -> Option<CHeap> {
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
 pub fn limit_c_heap_arenas() {
-    let single_threaded = ProcessMemory::sample().threads == Some(1);
-    if !single_threaded || std::env::var_os("MALLOC_ARENA_MAX").is_some() {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let tuned = std::env::var_os("MALLOC_ARENA_MAX").is_some()
+        || std::env::var("GLIBC_TUNABLES").is_ok_and(|tunables| tunables.contains("arena_max"));
+    if status_field(&status, "Threads") != Some(1) || tuned {
         return;
     }
     // SAFETY: `mallopt` takes two integers, and `single_threaded` holds, so no thread reads the limit during the write.
@@ -116,48 +122,58 @@ pub fn release_in_flight() -> bool {
     RELEASING.load(Ordering::Acquire)
 }
 
-fn release_is_due(free_bytes: u64, resident_bytes: u64, resident_after_release: u64) -> bool {
-    free_bytes >= C_HEAP_RELEASE_THRESHOLD_BYTES
-        && resident_bytes.saturating_sub(resident_after_release) >= C_HEAP_RELEASE_THRESHOLD_BYTES
+/// Freed bytes or resident bytes have grown one threshold past their floor since the last release.
+/// `free_bytes` is `None` where glibc lacks `mallinfo2`; resident growth alone decides there.
+fn release_is_due(
+    free_bytes: Option<(u64, u64)>,
+    resident_bytes: u64,
+    resident_floor: u64,
+) -> bool {
+    let grew = |now: u64, floor: u64| now.saturating_sub(floor) >= C_HEAP_RELEASE_THRESHOLD_BYTES;
+    match free_bytes {
+        Some((free, free_floor)) => {
+            free >= C_HEAP_RELEASE_THRESHOLD_BYTES
+                && (grew(free, free_floor) || grew(resident_bytes, resident_floor))
+        }
+        None => grew(resident_bytes, resident_floor),
+    }
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
-pub fn release_free_c_heap_when_due() -> Option<u64> {
+pub fn release_free_c_heap_when_due() {
     if RELEASING.swap(true, Ordering::AcqRel) {
-        return None;
+        return;
     }
     let before = ProcessMemory::sample();
     let resident = before.rss_anon_bytes.unwrap_or(0);
-    let due = before.c_heap.is_some_and(|heap| {
-        release_is_due(
-            heap.free_bytes,
-            resident,
-            RESIDENT_AFTER_RELEASE.load(Ordering::Relaxed),
-        )
+    let free = before.c_heap.map(|heap| heap.free_bytes);
+    let resident_floor = RESIDENT_FLOOR
+        .fetch_min(resident, Ordering::Relaxed)
+        .min(resident);
+    let free_floors = free.map(|free| {
+        let floor = FREE_FLOOR.fetch_min(free, Ordering::Relaxed).min(free);
+        (free, floor)
     });
-    let dropped = due.then(|| {
+    if release_is_due(free_floors, resident, resident_floor) {
         // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
         unsafe { libc::malloc_trim(0) };
-        let after = status_field(
-            &std::fs::read_to_string("/proc/self/status").unwrap_or_default(),
-            "RssAnon",
-        )
-        .map_or(resident, kib);
-        RESIDENT_AFTER_RELEASE.store(after, Ordering::Relaxed);
+        let after = ProcessMemory::sample();
+        let resident_after = after.rss_anon_bytes.unwrap_or(resident);
+        RESIDENT_FLOOR.store(resident_after, Ordering::Relaxed);
+        FREE_FLOOR.store(
+            after.c_heap.map_or(0, |heap| heap.free_bytes),
+            Ordering::Relaxed,
+        );
+        RELEASE_RESIDENT_DROP_BYTES
+            .fetch_add(resident.saturating_sub(resident_after), Ordering::Relaxed);
         RELEASES.fetch_add(1, Ordering::Relaxed);
-        let dropped = resident.saturating_sub(after);
-        RELEASE_RESIDENT_DROP_BYTES.fetch_add(dropped, Ordering::Relaxed);
-        dropped
-    });
+    }
     RELEASING.store(false, Ordering::Release);
-    dropped
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub fn release_free_c_heap_when_due() -> Option<u64> {
-    None
-}
+pub fn release_free_c_heap_when_due() {}
 
 #[cfg(test)]
 mod tests {
@@ -176,28 +192,33 @@ mod tests {
     }
 
     #[test]
-    fn a_release_is_due_when_freed_bytes_and_resident_growth_both_reach_the_threshold() {
-        let resident_after_release = 500 * 1024 * 1024;
+    fn a_release_is_due_once_freed_or_resident_bytes_grow_one_threshold_past_their_floor() {
+        let floor = 500 * 1024 * 1024;
+        let quiet = Some((floor, floor));
+        assert!(!release_is_due(quiet, floor, floor));
+        assert!(!release_is_due(quiet, floor + THRESHOLD - 1, floor));
+        assert!(release_is_due(quiet, floor + THRESHOLD, floor));
+        assert!(!release_is_due(
+            Some((floor + THRESHOLD - 1, floor)),
+            floor,
+            floor
+        ));
         assert!(release_is_due(
-            THRESHOLD,
-            resident_after_release + THRESHOLD,
-            resident_after_release
+            Some((floor + THRESHOLD, floor)),
+            floor,
+            floor
         ));
-        assert!(!release_is_due(
-            THRESHOLD - 1,
-            resident_after_release + THRESHOLD,
-            resident_after_release
-        ));
-        assert!(!release_is_due(
-            THRESHOLD * 8,
-            resident_after_release + THRESHOLD - 1,
-            resident_after_release
-        ));
-        assert!(!release_is_due(
-            THRESHOLD * 8,
-            resident_after_release - THRESHOLD,
-            resident_after_release
-        ));
-        assert!(release_is_due(THRESHOLD, THRESHOLD, 0));
+        assert!(release_is_due(Some((THRESHOLD, 0)), 0, 0));
+    }
+
+    #[test]
+    fn freed_bytes_under_one_threshold_start_no_release() {
+        assert!(!release_is_due(Some((THRESHOLD - 1, 0)), THRESHOLD * 8, 0));
+    }
+
+    #[test]
+    fn resident_growth_alone_decides_where_glibc_reports_no_heap() {
+        assert!(!release_is_due(None, THRESHOLD - 1, 0));
+        assert!(release_is_due(None, THRESHOLD, 0));
     }
 }

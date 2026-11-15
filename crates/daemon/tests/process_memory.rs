@@ -66,13 +66,44 @@ async fn process_memory(daemon: &KernelDaemon) -> Value {
     daemon.call(json!({"kind": "status"})).await["process_memory"].clone()
 }
 
+async fn releases(daemon: &KernelDaemon) -> u64 {
+    process_memory(daemon).await["c_heap_releases"]
+        .as_u64()
+        .expect("release count")
+}
+
+async fn releases_reach(daemon: &KernelDaemon, count: u64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while releases(daemon).await < count {
+        assert!(Instant::now() < deadline, "fewer than {count} releases");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn bind_session(daemon: &KernelDaemon, channel: u16, session: &str) -> RouteHandle {
+    let route = RouteHandle { channel, epoch: 1 };
+    let identity = RouteIdentity {
+        project_root: daemon.project().to_path_buf(),
+        harness: "test".to_owned(),
+        session: session.to_owned(),
+        consumer_module_id: None,
+        consumer_launch_nonce: None,
+        consumer_capabilities: Vec::new(),
+        admission_facts: None,
+        credential_fingerprints: std::collections::BTreeMap::new(),
+    };
+    assert!(matches!(
+        daemon.handler().bind(route, identity).await,
+        BindOutcome::Accept
+    ));
+    route
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_threshold() {
     let _serial = ONE_AT_A_TIME.lock().await;
     let daemon = KernelDaemon::start().await;
-    let releases_before = process_memory(&daemon).await["c_heap_releases"]
-        .as_u64()
-        .expect("release count");
+    let releases_before = releases(&daemon).await;
 
     let heap = FragmentedCHeap::new();
     assert!(
@@ -81,6 +112,7 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
     );
     let _ = CompositeComponent::health(daemon.handler()).await;
     heap.released().await;
+    releases_reach(&daemon, releases_before + 1).await;
 
     let reported = process_memory(&daemon).await;
     assert_eq!(reported["c_heap_releases"], releases_before + 1);
@@ -103,7 +135,7 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
     let _ = CompositeComponent::health(daemon.handler()).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
-        process_memory(&daemon).await["c_heap_releases"],
+        releases(&daemon).await,
         releases_before + 1,
         "freed chunks whose pages are released start no second release"
     );
@@ -114,24 +146,7 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
 async fn closing_a_sessions_last_route_releases_freed_c_heap_pages() {
     let _serial = ONE_AT_A_TIME.lock().await;
     let daemon = KernelDaemon::start().await;
-    let route = RouteHandle {
-        channel: 40,
-        epoch: 1,
-    };
-    let identity = RouteIdentity {
-        project_root: daemon.project().to_path_buf(),
-        harness: "test".to_owned(),
-        session: "session-that-ends".to_owned(),
-        consumer_module_id: None,
-        consumer_launch_nonce: None,
-        consumer_capabilities: Vec::new(),
-        admission_facts: None,
-        credential_fingerprints: std::collections::BTreeMap::new(),
-    };
-    assert!(matches!(
-        daemon.handler().bind(route, identity).await,
-        BindOutcome::Accept
-    ));
+    let route = bind_session(&daemon, 40, "session-that-ends").await;
 
     let heap = FragmentedCHeap::new();
     assert!(
@@ -140,6 +155,35 @@ async fn closing_a_sessions_last_route_releases_freed_c_heap_pages() {
     );
     CompositeComponent::route_gone(daemon.handler(), route).await;
     heap.released().await;
+    daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_freed_after_a_release_is_returned_when_the_session_ends() {
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let daemon = KernelDaemon::start().await;
+    let route = bind_session(&daemon, 41, "session-with-a-live-block").await;
+    let releases_before = releases(&daemon).await;
+
+    const CHUNK_BYTES: usize = 64 * 1024;
+    let live: Vec<Vec<u8>> = (0..4096).map(|_| vec![1_u8; CHUNK_BYTES]).collect();
+    let heap = FragmentedCHeap::new();
+    let _ = CompositeComponent::health(daemon.handler()).await;
+    releases_reach(&daemon, releases_before + 1).await;
+
+    let resident_with_live_block = resident();
+    let pinned: Vec<Vec<u8>> = live
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, chunk)| (index % 64 == 0).then_some(chunk))
+        .collect();
+    CompositeComponent::route_gone(daemon.handler(), route).await;
+    releases_reach(&daemon, releases_before + 2).await;
+    assert!(
+        resident() + heap.freed_bytes / 2 < resident_with_live_block,
+        "the block freed after the first release leaves resident memory"
+    );
+    assert_eq!(pinned.len(), 64);
     daemon.shutdown().await;
 }
 
