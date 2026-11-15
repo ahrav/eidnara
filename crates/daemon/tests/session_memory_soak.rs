@@ -12,7 +12,8 @@ use support::direct_host::{BUDGET, FixtureProcess, Launch, request_json, wait_fo
 
 const MIB: u64 = 1024 * 1024;
 const GLIBC_ARENA_HEAP_BYTES: u64 = 64 * MIB;
-/// The daemon keeps up to one release threshold of freed pages resident between releases.
+/// The daemon keeps up to one release threshold of freed C-heap pages resident between releases.
+/// With 20 sessions between the compared windows, the soak fails above 3.2 MiB of growth per session.
 const PLATEAU_ALLOWANCE_BYTES: u64 = C_HEAP_RELEASE_THRESHOLD_BYTES;
 const SESSION_KEYED_HOLDERS: [&str; 4] = [
     "snapshots",
