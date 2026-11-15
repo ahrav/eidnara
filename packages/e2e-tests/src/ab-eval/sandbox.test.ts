@@ -110,6 +110,24 @@ describe("sandbox availability", () => {
         }
     });
 
+    it("is unavailable when sudo ignores the request to preserve the environment", () => {
+        const bin = mkdtempSync(join(tmpdir(), "ab-fake-sudo-"));
+        // sudo-rs warns, drops the caller's environment, and runs the command; the command is the first absolute path or `true`.
+        writeFileSync(
+            join(bin, "sudo"),
+            '#!/bin/sh\necho "sudo: preserving the entire environment is not supported, \'--preserve-env\' is ignored" >&2\nwhile [ $# -gt 0 ]; do case "$1" in /*|true) break;; esac; shift; done\nexec env -i "$@"\n',
+            { mode: 0o755 },
+        );
+        const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+        const probe = `import { sandboxAvailable } from ${JSON.stringify(join(import.meta.dir, "sandbox.ts"))}; console.log(sandboxAvailable());`;
+        try {
+            const result = spawnSync(process.execPath, ["-e", probe], { env, encoding: "utf8" });
+            expect(result.stdout.trim()).toBe("false");
+        } finally {
+            rmSync(bin, { recursive: true, force: true });
+        }
+    });
+
     it("is unavailable when sudo works but namespace creation is refused", () => {
         const bin = mkdtempSync(join(tmpdir(), "ab-fake-sudo-"));
         writeFileSync(
