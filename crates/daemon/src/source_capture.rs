@@ -671,8 +671,11 @@ impl SourceCapture {
         self.counters.add(Count::ExpiryRetained, expiry.retained);
     }
 
-    /// Adds one committed memory-capture publish's decisions, one citation
-    /// reason and one anchor reason each, and logs each reason's count.
+    /// Adds one committed memory-capture publish's capture decisions, one
+    /// citation reason and one anchor reason each, and one approval-refused
+    /// count for each user statement the publish stored labeled after the
+    /// Kernel's admission policy refused its approval. Logs each reason's
+    /// count.
     pub(crate) fn record_capture_decisions(&self, reasons: &[Count]) {
         debug_assert!(
             reasons

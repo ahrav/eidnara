@@ -600,19 +600,19 @@ impl ProducerContext<'_> {
             .filter(|_| self.injects_memory())
     }
 
-    /// The injectable rows of the pinned read; empty when no read was taken or it was withheld.
+    /// The injectable rows of the pinned read; empty when no read was taken, it was withheld, or automatic injection is off. Callers rely on this gate and apply none of their own.
     fn project_memory_rows(&self) -> &[CanonicalMemory] {
         self.injected_memory()
             .map_or(&[], CanonicalMemoryRead::rows)
     }
 
-    /// The row digest the m1 revision signal folds in; `None` when no read was taken or it was withheld.
+    /// The row digest the m1 revision signal folds in; `None` when no read was taken, it was withheld, or automatic injection is off.
     fn project_memory_revision(&self) -> Option<u64> {
         self.injected_memory()
             .and_then(CanonicalMemoryRead::revision)
     }
 
-    /// The composition record a HARD freezes beside its m0 bytes; `None` when no read was taken.
+    /// The composition record a HARD freezes beside its m0 bytes; `None` when no read was taken or automatic injection is off.
     fn project_memory_composition(&self) -> Option<ProjectMemoryComposition> {
         self.injected_memory().map(CanonicalMemoryRead::composition)
     }

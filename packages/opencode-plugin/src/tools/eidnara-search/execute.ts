@@ -23,6 +23,7 @@ import {
     type KernelMemorySearchResult,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    resolveContests,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 import { normalizeEidnaraSearchArgs, prepareQueryFromNormalizedArgs } from "./query-input";
@@ -111,7 +112,14 @@ export type EidnaraSearchExecution =
 
 /** One memory read for the search: the rows it returned, or the state that refused it. */
 type MemoryRead =
-    | { rows: ReadRow[]; truncated: boolean; unresolvedObjectIds: string[]; state: null }
+    | {
+          rows: ReadRow[];
+          truncated: boolean;
+          unresolvedObjectIds: string[];
+          /** The store state the rows were read at. */
+          knownAsOf: number;
+          state: null;
+      }
     | { state: MemoryState };
 
 export async function executeEidnaraSearch(
@@ -218,13 +226,20 @@ export async function executeEidnaraSearch(
                       rows: read.rows,
                       truncated: false,
                       unresolvedObjectIds: read.unresolvedObjectIds,
+                      knownAsOf: read.knownAsOf,
                       state: null,
                   }
                 : { state: read.state };
         }
         const read = await client.read({ surface: "explicit_search", gated, ...signal });
         return isAvailable(read)
-            ? { rows: read.rows, truncated: read.truncated, unresolvedObjectIds: [], state: null }
+            ? {
+                  rows: read.rows,
+                  truncated: read.truncated,
+                  unresolvedObjectIds: [],
+                  knownAsOf: read.known_as_of,
+                  state: null,
+              }
             : { state: read.state };
     };
     let memory = await readMemory(true);
@@ -250,12 +265,20 @@ export async function executeEidnaraSearch(
     if (memoryTruncated) {
         notes.push("Memory: the memory read was truncated; older memories were not searched.");
     }
-    const memoryNote = notes.join("\n");
-    const hits = searchKernelMemoryRows({
+    const hits =
+        searchKernelMemoryRows({
+            rows: memoryRows,
+            query,
+            limit,
+            excludeObjectIds: new Set(),
+        }) ?? [];
+    const contestNote = await resolveContests({
+        client,
+        results: hits,
         rows: memoryRows,
-        query,
-        limit,
-        excludeObjectIds: new Set(),
+        asOf: memory.knownAsOf,
+        ...(toolContext.abort ? { signal: toolContext.abort } : {}),
     });
-    return completeFrom(hits ?? [], memoryNote);
+    if (contestNote) notes.push(contestNote);
+    return completeFrom(hits, notes.join("\n"));
 }

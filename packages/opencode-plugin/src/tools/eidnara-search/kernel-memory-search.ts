@@ -29,10 +29,10 @@ import {
 import { isRecord } from "../../shared/record-type-guard";
 import { splitQueryOperands } from "./bounds";
 
-/** The observation that contests a user's statement: the contesting memory's own result id and the quoted excerpt of its text. */
+/** The observation that contests a user's statement: the contesting memory's own result id and the quoted excerpt of its text. `excerpt` is absent when the observation's row could not be read. */
 export interface MemoryContest {
     memory: string;
-    excerpt: string;
+    excerpt?: string;
 }
 
 export interface MemorySearchResult {
@@ -52,7 +52,9 @@ export interface MemorySearchResult {
     provenance?: RouteCausality;
     /** Exact SHA-256 digest of the served revision's content bytes. */
     contentDigest?: string;
-    /** Present when capture recorded an observation that contradicts this user statement. */
+    /** The memory capture recorded as contradicting this user statement, before `resolveContests` judges whether the daemon serves it. */
+    contestingMemoryId?: string;
+    /** Present when capture recorded an observation that contradicts this user statement and the daemon serves that observation on explicit search. */
     contestedBy?: MemoryContest;
 }
 
@@ -103,7 +105,7 @@ export type ChunkedObjectRead =
  * whose read still reports truncated without serving its row lands in
  * `unresolvedObjectIds` instead of passing as proven-missing.
  *
- * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`.
+ * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A caller that continues an earlier read passes that read's `knownAsOf` as `asOf`, and every chunk reads that store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`.
  */
 export async function readObjectRowsChunked(args: {
     client: KernelClient;
@@ -114,10 +116,12 @@ export async function readObjectRowsChunked(args: {
     signal?: AbortSignal;
     /** Each chunk's read receives this deadline's remainder, so every chunk ends by the same instant. */
     deadline?: Deadline;
+    /** The store state to read; absent or `null` reads the tip. */
+    asOf?: number | null;
 }): Promise<ChunkedObjectRead> {
     const rows: ReadRow[] = [];
     const unresolvedObjectIds: string[] = [];
-    let snapshot: number | null = null;
+    let snapshot: number | null = args.asOf ?? null;
     const pending: (readonly string[])[] = [];
     for (let start = 0; start < args.objectIds.length; start += MAX_READ_OBJECT_IDS) {
         pending.push(args.objectIds.slice(start, start + MAX_READ_OBJECT_IDS));
@@ -217,8 +221,8 @@ export function contestExcerpt(text: string): string {
     return JSON.stringify(shown);
 }
 
-/** The observation a capture recorded as contradicting a user's statement: the contesting memory's id and the excerpt of its text. `undefined` for a row capture did not write and for a rationale that holds no contest with both members. */
-function contestOf(row: ReadRow, decision: ReadDecision): MemoryContest | undefined {
+/** The id of the memory a capture recorded as contradicting a user's statement. The record names the memory and holds none of its text. `undefined` for a row capture did not write and for a rationale that names no contesting memory. */
+function contestingMemoryOf(row: ReadRow, decision: ReadDecision): string | undefined {
     const { rationale } = decision.payload;
     if (row.object.source_id !== CAPTURE_SOURCE_ID || !rationale.includes("contested_by")) {
         return undefined;
@@ -230,14 +234,75 @@ function contestOf(row: ReadRow, decision: ReadDecision): MemoryContest | undefi
         return undefined;
     }
     const contest = isRecord(parsed) ? parsed.contested_by : undefined;
-    if (
-        !isRecord(contest) ||
-        typeof contest.memory !== "string" ||
-        typeof contest.text !== "string"
-    ) {
-        return undefined;
+    return isRecord(contest) && typeof contest.memory === "string" ? contest.memory : undefined;
+}
+
+/** Whether a reader is shown this memory as a contesting observation: a live memory decision the daemon serves on explicit search, labeled or not, with normal sensitivity. */
+function servesAsObservation(row: ReadRow): boolean {
+    return (
+        isMemoryDecisionRow(row) &&
+        row.object.invalidated_commit_seq === null &&
+        row.visibility !== "hidden" &&
+        row.object.sensitivity === "normal"
+    );
+}
+
+/**
+ * Fills `contestedBy` on each result whose statement names a contesting memory. The contest shows the observation's own served text, so each named memory is read by id on explicit search at `asOf`, the store state the results were read at, unless `rows` already holds it. A memory that read does not serve, such as one the Kernel hides or one that was retired, contests nothing a reader is shown. When the read fails, the result names the observation without its text and the returned note says so.
+ */
+export async function resolveContests(args: {
+    client: KernelClient;
+    results: KernelMemorySearchResult[];
+    /** Rows already read at `asOf`. */
+    rows: readonly ReadRow[];
+    asOf: number | null;
+    signal?: AbortSignal;
+    deadline?: Deadline;
+}): Promise<string | undefined> {
+    const pending = args.results.filter(
+        (result): result is MemorySearchResult & { contestingMemoryId: string } =>
+            result.source === "memory" && result.contestingMemoryId !== undefined,
+    );
+    if (pending.length === 0) return undefined;
+    const known = new Map(args.rows.map((row) => [row.object.object_id, row]));
+    const missing = [
+        ...new Set(
+            pending.map((result) => result.contestingMemoryId).filter((id) => !known.has(id)),
+        ),
+    ];
+    let unread = false;
+    if (missing.length > 0) {
+        const read = await readObjectRowsChunked({
+            client: args.client,
+            surface: "explicit_search",
+            gated: false,
+            objectIds: missing,
+            asOf: args.asOf,
+            ...(args.signal ? { signal: args.signal } : {}),
+            ...(args.deadline ? { deadline: args.deadline } : {}),
+        });
+        if (read.ok && (args.asOf === null || read.knownAsOf === args.asOf)) {
+            for (const row of read.rows) known.set(row.object.object_id, row);
+        } else {
+            unread = true;
+        }
     }
-    return { memory: contest.memory, excerpt: contestExcerpt(contest.text) };
+    let unresolved = false;
+    for (const result of pending) {
+        const row = known.get(result.contestingMemoryId);
+        if (row === undefined && unread && missing.includes(result.contestingMemoryId)) {
+            result.contestedBy = { memory: result.contestingMemoryId };
+            unresolved = true;
+        } else if (row !== undefined && servesAsObservation(row) && row.decision) {
+            result.contestedBy = {
+                memory: result.contestingMemoryId,
+                excerpt: contestExcerpt(row.decision.payload.summary),
+            };
+        }
+    }
+    return unresolved
+        ? "Memory: a contesting observation could not be read; its statement names it without its text."
+        : undefined;
 }
 
 /** A rejected-approach row emits `anti_memory`. An unparseable stored summary becomes a warning carrying the raw summary as the rejected strategy. Callers pass a previously parsed `antiMemory` value to reuse the parse result. */
@@ -281,7 +346,9 @@ export function memoryResultFromRow(
         category: decision?.decision_kind ?? row.object.object_kind,
         matchType,
         ...(row.labeled ? { policyLabel: "labeled" } : {}),
-        ...(decision && contestOf(row, decision) ? { contestedBy: contestOf(row, decision) } : {}),
+        ...(decision && contestingMemoryOf(row, decision) !== undefined
+            ? { contestingMemoryId: contestingMemoryOf(row, decision) }
+            : {}),
     };
 }
 

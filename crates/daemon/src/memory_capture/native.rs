@@ -13,10 +13,33 @@ type LeaseKey = (String, String);
 #[derive(Default)]
 pub(crate) struct NativeCaptureState {
     leases: HashMap<LeaseKey, NativeLease>,
+    waits: CaptureWaits,
+}
+
+/// How long capture publication waits: one call's shared allowance for
+/// committing frozen plans, and the longest one publication waits for the
+/// capture gate and the Kernel writer.
+#[derive(Clone, Copy)]
+pub(crate) struct CaptureWaits {
+    pub(crate) plan_commit_budget: Duration,
+    pub(crate) commit_wait: Duration,
+}
+
+impl Default for CaptureWaits {
+    fn default() -> Self {
+        Self {
+            plan_commit_budget: super::PLAN_COMMIT_BUDGET,
+            commit_wait: super::COMMIT_WAIT,
+        }
+    }
 }
 
 #[cfg(test)]
 impl NativeCaptureState {
+    pub(crate) fn set_waits_for_test(&mut self, waits: CaptureWaits) {
+        self.waits = waits;
+    }
+
     pub(crate) fn expire_ready_for_test(&mut self) {
         for lease in self.leases.values_mut() {
             if lease.plan.is_some() {
@@ -150,6 +173,11 @@ impl HandlerCore {
     }
 
     fn native_capture_work(&self, store: Arc<MemoryStore>, binding: SessionBinding) -> CaptureWork {
+        let waits = self
+            .native_capture
+            .lock()
+            .expect("native capture mutex")
+            .waits;
         CaptureWork {
             store,
             kernel: Arc::clone(&self.kernel),
@@ -158,6 +186,8 @@ impl HandlerCore {
             cancel: self.cancel.clone(),
             commit_gate: Arc::clone(&self.capture_commit_gate),
             source_capture: Arc::clone(&self.source_capture),
+            plan_commit_budget: waits.plan_commit_budget,
+            commit_wait: waits.commit_wait,
         }
     }
 
@@ -238,7 +268,9 @@ impl HandlerCore {
         let state = Arc::clone(&self.native_capture);
         // The guard travels with the blocking work: a request future dropped
         // mid-claim keeps the reservation until that work has finished, and
-        // the dispatch is recorded only once the work is issued.
+        // the batch's model dispatch is recorded only once the work is
+        // issued. A frozen plan the claim commits and the Kernel refuses
+        // records its own dispatch during the claim and keeps it.
         kernel_routes::blocking(move || {
             let mut guard = guard;
             let (plan, prompt) = match work.claim(primary.as_deref()) {
@@ -417,7 +449,9 @@ impl HandlerCore {
     }
 }
 
-/// Memories of one source sharing a category and quotation freeze as one.
+/// Memories of one source sharing a category and quotation freeze as one;
+/// two quotations that differ only in the sentence's closing mark are one
+/// quotation.
 /// A replacement target survives the collapse so the correction it carries
 /// is not lost; one quotation superseding two memories keeps one entry per
 /// target, since a decision supersedes exactly one predecessor. The
@@ -433,12 +467,18 @@ pub(super) fn collapse_quotations(
         memory.content = format!("{attribution}: {}", memory.quote);
         match memories.iter_mut().find(|kept| {
             kept.category == memory.category
-                && kept.content == memory.content
+                && statement_key(&kept.content) == statement_key(&memory.content)
                 && (kept.replaces.is_none()
                     || memory.replaces.is_none()
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
+                // The joined memory keeps the quotation that holds the
+                // sentence's closing mark.
+                if memory.content.len() > kept.content.len() {
+                    kept.content = memory.content;
+                    kept.quote = memory.quote;
+                }
                 if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
@@ -462,22 +502,24 @@ pub(super) fn collapse_quotations(
 /// have joined or moved them, so the frozen plan names each target for one
 /// purpose. A memory contests no memory it replaces, retires, or duplicates,
 /// and names each contest once. A target some memory of the source replaces
-/// or retires is contested and duplicated by none of them. Each target is
-/// contested by the first memory that names it, and every memory is still
-/// written.
-pub(super) fn settle_links(memories: &mut [CapturedMemory]) {
+/// or retires is contested by none of them, and a memory that only
+/// duplicates such a target is dropped: its fact is the one the sibling
+/// replaces. A duplicate of such a target that also contests other memories
+/// is kept for its contests and written as its own memory. Each target is
+/// contested by the first memory that names it.
+pub(super) fn settle_links(memories: &mut Vec<CapturedMemory>) {
     let removed: Vec<String> = memories
         .iter()
         .flat_map(|memory| memory.replaces.iter().chain(&memory.also_replaces))
         .cloned()
         .collect();
     let mut contested: Vec<String> = Vec::new();
-    for memory in memories {
-        if memory
+    memories.retain_mut(|memory| {
+        let replaced_duplicate = memory
             .duplicate_of
             .as_ref()
-            .is_some_and(|target| removed.contains(target))
-        {
+            .is_some_and(|target| removed.contains(target));
+        if replaced_duplicate {
             memory.duplicate_of = None;
         }
         let duplicate = memory.duplicate_of.clone();
@@ -490,27 +532,70 @@ pub(super) fn settle_links(memories: &mut [CapturedMemory]) {
             }
             kept
         });
+        !replaced_duplicate || !memory.contests.is_empty()
+    });
+}
+
+/// Settles the contests of one batch across its sources, after each source
+/// settled its own links. A target any source of the batch replaces or
+/// retires is contested by none of them, so the replacement commits against
+/// the row the plan named. A target is contested by the first source that
+/// names it, so two sources leave one record on it. Every memory is still
+/// written.
+fn settle_batch_contests(batch: &mut [Vec<CapturedMemory>]) {
+    let removed: Vec<String> = batch
+        .iter()
+        .flatten()
+        .flat_map(|memory| memory.replaces.iter().chain(&memory.also_replaces))
+        .cloned()
+        .collect();
+    let mut contested: Vec<String> = Vec::new();
+    for memories in batch {
+        let mut named = Vec::new();
+        for memory in memories.iter_mut() {
+            memory.contests.retain(|target| {
+                let kept = !removed.contains(target) && !contested.contains(target);
+                if kept {
+                    named.push(target.clone());
+                }
+                kept
+            });
+        }
+        contested.append(&mut named);
     }
 }
 
-/// Widens each cut quotation of a user message to the whole sentences that
-/// hold it, so the stored statement keeps a lead-in, a negation, or a
+/// A statement's text for comparison: without edge whitespace and without
+/// its closing `.` or `!`, so a sentence quoted with and without its closing
+/// mark is one statement.
+fn statement_key(text: &str) -> &str {
+    text.trim().trim_end_matches(['.', '!'])
+}
+
+/// Widens each cut quotation of a user message to the whole sentence that
+/// holds it, so the stored statement keeps a lead-in, a negation, or a
 /// condition the extractor left out.
 ///
-/// A proposal that replaces or retires memories is widened by a lead-in
-/// only (see [`Widening::LeadIn`]). Two proposals of different categories
-/// that widen to one sentence keep their own quotations, so one sentence is
-/// stored once per category at most and each clause stays its own memory.
+/// A proposal that replaces, retires, or contests memories keeps its
+/// quotation: the extractor judged that relation from the clause it quoted,
+/// and only a correction quoted whole replaces a memory served
+/// automatically. A replacement the parser released as a contest is such a
+/// proposal. Two
+/// proposals of different categories that name one sentence keep their own
+/// quotations, so one sentence is stored once per category at most and each
+/// clause stays its own memory.
 fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) {
     let widened: Vec<Option<&str>> = proposed
         .iter()
         .map(|memory| {
-            let widening = if memory.replaces.is_some() || !memory.also_replaces.is_empty() {
-                Widening::LeadIn
+            if memory.replaces.is_some()
+                || !memory.also_replaces.is_empty()
+                || !memory.contests.is_empty()
+            {
+                None
             } else {
-                Widening::Sentences
-            };
-            enclosing_statement(prose, &memory.quote, widening)
+                enclosing_statement(prose, &memory.quote)
+            }
         })
         .collect();
     for index in 0..proposed.len() {
@@ -519,7 +604,8 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
         };
         let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
             other.category != proposed[index].category
-                && other_widened.unwrap_or(other.quote.as_str()) == statement
+                && statement_key(other_widened.unwrap_or(other.quote.as_str()))
+                    == statement_key(statement)
         });
         if !shared {
             proposed[index].quote = statement.to_owned();
@@ -609,7 +695,7 @@ impl CaptureWork {
         // The frozen plans share one budget, so a busy Kernel writer delays
         // the extraction window by that budget at most. A plan the budget
         // does not reach stays ripe for the next call.
-        let budget = Instant::now() + super::PLAN_COMMIT_BUDGET;
+        let budget = Instant::now() + self.plan_commit_budget;
         for job in jobs {
             if job.prepared.is_none() {
                 unprepared.push(job);
@@ -619,7 +705,7 @@ impl CaptureWork {
                     .map_or(SettlementOutcome::Settled, |key| {
                         self.source_capture.settlement_now(&key)
                     });
-                let deadline = budget.min(Instant::now() + super::COMMIT_WAIT);
+                let deadline = budget.min(Instant::now() + self.commit_wait);
                 self.publish_or_recover(&job, settlement, deadline)?;
             }
         }
@@ -644,7 +730,7 @@ impl CaptureWork {
             return Err("invalid_model_configuration");
         }
         let mut messages = messages_for(&unprepared);
-        let mut existing = self.existing_memories(&messages)?;
+        let mut existing = self.existing_memories(&messages, &unprepared)?;
         let prompt = loop {
             let prompt = render_capture_prompt_with_existing(&messages, &existing)?;
             if prompt.len() <= MAX_NATIVE_PROMPT_BYTES {
@@ -686,9 +772,10 @@ impl CaptureWork {
         now: i64,
         settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
-        // Whether a memory of the message at `index` will be stored as the
-        // user's own statement: a whole statement as quoted, or one a lead-in
-        // widens to.
+        // Whether a memory of the message at `index` that names a target is
+        // the user's own statement: a whole statement as quoted. Freezing
+        // keeps the quotation of such a memory, so this is the judgment
+        // publication makes of it.
         let proses: Vec<super::Prose<'_>> = plan
             .jobs
             .iter()
@@ -698,8 +785,7 @@ impl CaptureWork {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
             job.role == "user"
                 && !super::cite::is_hashed_source_id(&job.message_id)
-                && (super::quotes_whole_statements(prose, &memory.quote)
-                    || enclosing_statement(prose, &memory.quote, Widening::LeadIn).is_some())
+                && super::quotes_whole_statements(prose, &memory.quote)
         };
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
             Ok(decisions) => decisions,
@@ -708,26 +794,28 @@ impl CaptureWork {
                 return self.failed(&plan.jobs, "extraction_failed", now);
             }
         };
-        // One read per submission, so every plan it freezes names one HEAD.
-        let head = observe_head(self.binding.kernel_project.root());
-        for (mut job, decision) in plan.jobs.into_iter().zip(decisions) {
+        // Each source's memories are settled first, then the batch's
+        // contests across sources, and only then is any plan frozen.
+        let mut accepted = Vec::new();
+        let mut settled = Vec::new();
+        for (index, (job, decision)) in plan.jobs.iter().zip(decisions).enumerate() {
             let decision = match decision {
                 Ok(decision) => decision,
                 Err(reason) => {
                     eprintln!("daemon: native memory capture source rejected: {reason}");
-                    self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
+                    self.failed(std::slice::from_ref(job), "extraction_failed", now)?;
                     continue;
                 }
             };
             let attribution = if job.role == "user" {
                 USER_STATED
             } else {
-                "Assistant reported"
+                super::ASSISTANT_REPORTED
             };
-            let prose = super::Prose::of(&job.text);
+            let prose = &proses[index];
             let mut proposed = decision.memories;
             if job.role == "user" && !super::cite::is_hashed_source_id(&job.message_id) {
-                widen_cut_quotations(&prose, &mut proposed);
+                widen_cut_quotations(prose, &mut proposed);
             }
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
@@ -737,10 +825,10 @@ impl CaptureWork {
             // word duplicates that memory, whichever copy the extractor named.
             for memory in &mut memories {
                 if memory.duplicate_of.is_some()
-                    && let Some(approved) = plan
-                        .existing
-                        .iter()
-                        .find(|previous| previous.automatic && previous.content == memory.content)
+                    && let Some(approved) = plan.existing.iter().find(|previous| {
+                        previous.automatic
+                            && statement_key(&previous.content) == statement_key(&memory.content)
+                    })
                 {
                     memory.duplicate_of = Some(approved.id.clone());
                 }
@@ -749,7 +837,7 @@ impl CaptureWork {
             // user's approved statement. Its targets among those become
             // contests: the statement stays and is shown beside the quotation.
             for memory in &mut memories {
-                if user_attributed(&job, &prose, memory) {
+                if user_attributed(job, prose, memory) {
                     continue;
                 }
                 let automatic = |target: &String| {
@@ -769,6 +857,14 @@ impl CaptureWork {
                 }
             }
             settle_links(&mut memories);
+            accepted.push(job.clone());
+            settled.push(memories);
+        }
+        settle_batch_contests(&mut settled);
+        // One read per submission, so every plan it freezes names one HEAD.
+        let head = observe_head(self.binding.kernel_project.root());
+        let budget = Instant::now() + self.plan_commit_budget;
+        for (mut job, memories) in accepted.into_iter().zip(settled) {
             let existing = plan
                 .existing
                 .iter()
@@ -808,11 +904,16 @@ impl CaptureWork {
                 // The plan's copy of the job predates the dispatch that
                 // produced this output; the backoff counts that dispatch.
                 job.attempts += 1;
-                self.publish_or_recover(
-                    &job,
-                    job_settlement(settlements, &job),
-                    Instant::now() + super::COMMIT_WAIT,
-                )?;
+                // The batch shares one budget: every plan is frozen, and a
+                // plan the budget does not reach is committed by the next
+                // drain's plan window.
+                if Instant::now() < budget {
+                    self.publish_or_recover(
+                        &job,
+                        job_settlement(settlements, &job),
+                        budget.min(Instant::now() + self.commit_wait),
+                    )?;
+                }
             }
         }
         Ok(())

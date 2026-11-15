@@ -11,9 +11,7 @@ use std::hash::{Hash, Hasher};
 use kernel::{Surface, SurfaceVisibility};
 use memory_store::ProjectMemoryComposition;
 
-use crate::kernel_routes::read::{
-    MAX_READ_ROW_BYTES, MAX_READ_ROWS, ReadResponse, RowSelection, read_visible_within,
-};
+use crate::kernel_routes::read::{MAX_READ_ROW_BYTES, MAX_READ_ROWS, ReadResponse};
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding, serving};
 use crate::m0_compose::trim_memories_to_budget;
 use crate::memory_render::{is_positive_memory_category, render_memory_line};
@@ -201,7 +199,7 @@ impl CanonicalMemoryRead {
 ///
 /// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
-/// Capture rows whose rationale names `session_id` are left out: the reading session holds those statements in its own conversation. They are left out of the bounded read itself (see [`read_other_sessions`]), so they spend none of its caps, and the token budget trims what remains.
+/// Capture rows whose rationale names `session_id` are left out: the reading session holds those statements in its own conversation. They are judged before the row and byte caps apply (see [`read_other_sessions`]), so they spend neither cap, and the token budget trims what remains.
 ///
 /// The store phase, the serving decision for a tip read on the `auto_inject`
 /// surface, and the visible-row read each withhold the composition with the
@@ -232,91 +230,132 @@ pub(crate) fn read_project_memory(
     match read_other_sessions(
         &store,
         project,
-        session_id,
+        &[session_id],
         tip,
         (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
     ) {
-        Ok(mut response) => {
-            let contested: Vec<(String, String)> = response
-                .rows
-                .iter()
-                .filter_map(|row| {
-                    let decision = response.decisions.get(&row.object.object_id)?;
-                    Some((
-                        decision.object_id.clone(),
-                        contested_content(&store, session_id, row, decision)?,
-                    ))
-                })
-                .collect();
-            for (object_id, content) in contested {
-                if let Some(decision) = response.decisions.get_mut(&object_id) {
-                    decision.payload.summary = content;
-                }
+        Ok(mut response) => match show_contests(&store, project, session_id, &mut response) {
+            Ok(()) => {
+                CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
             }
-            CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
-        }
+            Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
+        },
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
 }
 
-/// Further bounded reads one pass makes to pass over the reading session's
-/// own captures. Each skips every such row the reads before it kept, up to
-/// the row cap per read, so four cover a session that wrote more than 32,000
-/// of the project's newest memories, and a pass costs five reads at most.
-const SESSION_REFILL_READS: usize = 4;
-
-/// The project's injectable memory rows at `tip` without the capture rows
-/// whose rationale names `session_id`, under the given row and byte caps.
+/// The project's injectable memory rows at `tip` that a pass delivers to each
+/// of `sessions`: for one session, the newest rows under the row and byte
+/// caps among the rows whose capture rationale names another session or
+/// none. With several sessions the response holds the union of their
+/// deliveries, which is at most twice the caps, because a row a session
+/// leaves out is kept only while another session still has room.
 ///
-/// A row's session is in its decision payload, which a bounded read loads
-/// only for the rows it keeps. When a read reaches a cap and holds rows of
-/// the reading session, it is repeated at the same tip with those rows left
-/// out before the caps apply, so older rows of other sessions take their
-/// places. A read that reached no cap holds every eligible row already. After
-/// [`SESSION_REFILL_READS`] repeats the pass serves the rows of other
-/// sessions the last read kept.
+/// A row's session is in its decision payload. The rows are walked in
+/// serving order and their payloads are loaded one page at a time, each page
+/// within the caps, so a session's own rows spend neither cap however many
+/// of them are newer than the rows it is served, and the payloads held at
+/// once stay within three times the byte cap. `truncated` reports that some
+/// session's delivery left out a row it was eligible for.
 pub(crate) fn read_other_sessions(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
-    session_id: &str,
+    sessions: &[&str],
     tip: i64,
-    caps: (usize, usize),
+    (max_rows, max_row_bytes): (usize, usize),
 ) -> Result<ReadResponse, kernel::KernelError> {
-    let mut own = std::collections::HashSet::new();
-    let mut refills = 0;
-    loop {
-        let mut response = read_visible_within(
+    struct Delivery<'s> {
+        session: &'s str,
+        rows: usize,
+        bytes: u64,
+        full: bool,
+    }
+    let (known_as_of, tip, candidates) =
+        crate::kernel_routes::read::domain_decisions_in_serving_order(
             store,
             project,
             Surface::AutoInject,
-            Some(tip),
-            RowSelection::DomainDecisionsExcept(MEMORY_DOMAIN_ID, &own),
-            caps,
+            tip,
+            MEMORY_DOMAIN_ID,
         )?;
-        let decisions = &response.decisions;
-        let mine: std::collections::HashSet<String> = response
-            .rows
+    let mut deliveries: Vec<Delivery<'_>> = sessions
+        .iter()
+        .map(|&session| Delivery {
+            session,
+            rows: 0,
+            bytes: 0,
+            full: false,
+        })
+        .collect();
+    let mut response = ReadResponse {
+        known_as_of,
+        tip,
+        rows: Vec::new(),
+        truncated: false,
+        decisions: std::collections::HashMap::new(),
+    };
+    let mut pending = std::collections::VecDeque::from(candidates);
+    while !pending.is_empty() && deliveries.iter().any(|delivery| !delivery.full) {
+        let ids: Vec<String> = pending
             .iter()
-            .filter(|row| {
-                row.object.source_id == crate::memory_capture::CAPTURE_SOURCE_ID
-                    && decisions
-                        .get(&row.object.object_id)
-                        .is_some_and(|decision| {
-                            capture_session(&decision.payload.rationale).as_deref()
-                                == Some(session_id)
-                        })
-            })
+            .take(max_rows.max(1))
             .map(|row| row.object.object_id.clone())
             .collect();
-        if mine.is_empty() || !response.truncated || refills == SESSION_REFILL_READS {
-            response
-                .rows
-                .retain(|row| !mine.contains(&row.object.object_id));
-            return Ok(response);
+        let sizes: std::collections::HashMap<String, u64> = store
+            .decision_payload_sizes_as_of(&ids, known_as_of)?
+            .into_iter()
+            .collect();
+        // One page holds the rows whose payloads fit the byte cap together,
+        // and its first row whatever its size.
+        let mut page = Vec::new();
+        let mut page_bytes: u64 = 0;
+        for id in &ids {
+            let size = *sizes
+                .get(id)
+                .ok_or(kernel::KernelError::CorruptCanonicalRow)?;
+            page_bytes = page_bytes.saturating_add(size);
+            if !page.is_empty() && page_bytes > max_row_bytes as u64 {
+                break;
+            }
+            page.push((pending.pop_front().expect("a row per id"), size));
         }
-        own.extend(mine);
-        refills += 1;
+        let mut decisions: std::collections::HashMap<String, kernel::DecisionRow> = store
+            .decisions_for_objects_as_of(&ids[..page.len()], known_as_of)?
+            .into_iter()
+            .map(|decision| (decision.object_id.clone(), decision))
+            .collect();
+        for (row, size) in page {
+            let decision = decisions
+                .remove(&row.object.object_id)
+                .ok_or(kernel::KernelError::CorruptCanonicalRow)?;
+            let owner = (row.object.source_id == crate::memory_capture::CAPTURE_SOURCE_ID)
+                .then(|| capture_session(&decision.payload.rationale))
+                .flatten();
+            let mut delivered = false;
+            for delivery in deliveries.iter_mut().filter(|delivery| !delivery.full) {
+                if owner.as_deref() == Some(delivery.session) {
+                    continue;
+                }
+                if delivery.rows == max_rows
+                    || delivery.bytes.saturating_add(size) > max_row_bytes as u64
+                {
+                    delivery.full = true;
+                    response.truncated = true;
+                } else {
+                    delivery.rows += 1;
+                    delivery.bytes += size;
+                    delivered = true;
+                }
+            }
+            if delivered {
+                response
+                    .decisions
+                    .insert(row.object.object_id.clone(), decision);
+                response.rows.push(row);
+            }
+        }
     }
+    Ok(response)
 }
 
 fn capture_session(rationale: &str) -> Option<std::borrow::Cow<'_, str>> {
@@ -376,45 +415,97 @@ fn contested_line(
     )
 }
 
-/// The text the block shows for a capture-written statement that a live
-/// observation contests: the statement with [`contested_line`]'s note.
-/// `None` leaves the stored summary: for a decision that is not contested,
-/// for a row capture did not write, for a contest recorded from the reading
-/// session's own message, and for a contest whose observation is no longer
-/// live.
-fn contested_content(
-    kernel: &kernel::KernelStore,
+/// The contest a pass shows beside capture-written statement `row`: the
+/// record in its rationale, unless the reading session's own message
+/// recorded it. `None` for a decision that is not contested and for a row
+/// capture did not write.
+fn shown_contest(
     session_id: &str,
     row: &kernel::VisibleRow,
     decision: &kernel::DecisionRow,
-) -> Option<String> {
+) -> Option<crate::memory_capture::Contest> {
     if row.object.source_id != crate::memory_capture::CAPTURE_SOURCE_ID
         || !decision.payload.rationale.contains("contested_by")
     {
         return None;
     }
-    let contest = crate::memory_capture::capture_rationale(decision).contested_by?;
-    if contest.session.as_deref() == Some(session_id) {
-        return None;
+    crate::memory_capture::capture_rationale(decision)
+        .contested_by
+        .filter(|contest| contest.session.as_deref() != Some(session_id))
+}
+
+/// Rewrites each contested statement of `response` to [`contested_line`]'s
+/// text, for the contests whose observation the Kernel serves. The
+/// observations are read by id in one project-scoped read on explicit
+/// search at the response's snapshot, so a contest shows the text of a
+/// memory that is live, belongs to the project, is not hidden, and has
+/// normal sensitivity there; a labeled observation, such as an assistant's
+/// report, is one. A statement whose observation that read does not serve
+/// keeps its stored text. A failed read fails the pass.
+fn show_contests(
+    store: &kernel::KernelStore,
+    project: &ProjectBinding,
+    session_id: &str,
+    response: &mut ReadResponse,
+) -> Result<(), kernel::KernelError> {
+    let contests: Vec<(String, i64, crate::memory_capture::Contest)> = response
+        .rows
+        .iter()
+        .filter(|row| row.visibility == SurfaceVisibility::Visible)
+        .filter_map(|row| {
+            let decision = response.decisions.get(&row.object.object_id)?;
+            Some((
+                decision.object_id.clone(),
+                row.object.created_commit_seq,
+                shown_contest(session_id, row, decision)?,
+            ))
+        })
+        .collect();
+    if contests.is_empty() {
+        return Ok(());
     }
-    let live = kernel
-        .object_states(std::slice::from_ref(&contest.memory))
-        .ok()?
-        .1
-        .into_iter()
-        .flatten()
-        .any(|state| state.object.invalidated_commit_seq.is_none());
-    if !live {
-        return None;
+    let mut ids: Vec<String> = contests
+        .iter()
+        .map(|(_, _, contest)| contest.memory.clone())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut observations = std::collections::HashMap::new();
+    for ids in ids.chunks(crate::kernel_routes::read::MAX_READ_OBJECT_IDS) {
+        let served = crate::kernel_routes::read::read_visible_within(
+            store,
+            project,
+            Surface::ExplicitSearch,
+            Some(response.known_as_of),
+            crate::kernel_routes::read::RowSelection::Objects(ids),
+            (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+        )?;
+        for row in &served.rows {
+            if row.visibility != SurfaceVisibility::Hidden
+                && row.object.sensitivity == kernel::Sensitivity::Normal
+                && let Some(decision) = served.decisions.get(&row.object.object_id)
+            {
+                observations.insert(decision.object_id.clone(), decision.payload.summary.clone());
+            }
+        }
     }
-    let recorded = |commit_seq: i64| kernel.commit_recorded_at(commit_seq).ok().flatten();
-    Some(contested_line(
-        &decision.payload.summary,
-        recorded(contest.stated_seq),
-        recorded(row.object.created_commit_seq),
-        &contest.memory,
-        &contest.text,
-    ))
+    let recorded = |commit_seq: i64| store.commit_recorded_at(commit_seq);
+    for (statement, contested_seq, contest) in contests {
+        let (Some(text), Some(decision)) = (
+            observations.get(&contest.memory),
+            response.decisions.get_mut(&statement),
+        ) else {
+            continue;
+        };
+        decision.payload.summary = contested_line(
+            &decision.payload.summary,
+            recorded(contest.stated_seq)?,
+            recorded(contested_seq)?,
+            &contest.memory,
+            text,
+        );
+    }
+    Ok(())
 }
 
 /// The domain filter the injectable memory surface applies to canonical rows:

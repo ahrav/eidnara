@@ -26,7 +26,7 @@ Evidence stored `Sensitive`, a decision asserted `Normal` citing it, and a read 
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/kernel/tests/kernel_slice.rs:1453`, `:1526`; `crates/kernel/tests/kernel_review_acceptance.rs:988`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/kernel/tests/kernel_slice.rs:1454`, `:1527`; `crates/kernel/tests/kernel_review_acceptance.rs:988`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

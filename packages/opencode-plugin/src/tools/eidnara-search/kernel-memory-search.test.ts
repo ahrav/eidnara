@@ -11,6 +11,7 @@ import {
     memoryResultFromRow,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    resolveContests,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 import { packSearchResults } from "./render";
@@ -263,44 +264,160 @@ describe("a contested statement in explicit search", () => {
             labeled: false,
             sourceId,
         });
-    const contestOf = (row: ReadRow) => {
+    const observed = (overrides: Partial<ReadRow> = {}): ReadRow => ({
+        ...readRow({
+            objectId: OBJECT_B,
+            decisionKind: "CONFIG_VALUES",
+            summary: observation,
+            rationale: JSON.stringify({ source: "memory_capture", contests: [OBJECT_A] }),
+            seq: 8,
+            sourceId: "memory_capture",
+        }),
+        ...overrides,
+    });
+    const client = (kernel = new FakeKernel()) => {
+        const transport = new FakeKernelTransport(kernel);
+        return {
+            transport,
+            client: new KernelClient({
+                transport,
+                enabled: true,
+                sessionId: "ses-contest",
+                projectRoot: "git:contest-project",
+            }),
+        };
+    };
+    const record = { memory: OBJECT_B, stated_seq: 4 };
+    /** The contest a search shows for `row` when the rows it read are `rows`. */
+    const shown = async (row: ReadRow, rows: readonly ReadRow[]) => {
         const result = memoryResultFromRow(row, 1, "exact");
-        return result.source === "memory" ? result.contestedBy : undefined;
+        const { client: kernelClient, transport } = client();
+        const note = await resolveContests({
+            client: kernelClient,
+            results: [result],
+            rows,
+            asOf: null,
+        });
+        return {
+            contest: result.source === "memory" ? result.contestedBy : undefined,
+            note,
+            reads: transport.calls.filter((call) => call.method === "kernel.read").length,
+        };
     };
 
-    test("the statement names the contesting memory and its quoted text, and both results are returned", () => {
-        const rationale = contestedBy({ memory: OBJECT_B, text: observation, stated_seq: 4 });
-        const rows = [
-            contested(rationale),
-            readRow({
-                objectId: OBJECT_B,
-                decisionKind: "CONFIG_VALUES",
-                summary: observation,
-                rationale: JSON.stringify({ source: "memory_capture", contests: [OBJECT_A] }),
-                seq: 8,
-                sourceId: "memory_capture",
-            }),
-        ];
-        expect(contestOf(rows[0] as ReadRow)).toEqual({
-            memory: OBJECT_B,
-            excerpt: JSON.stringify(observation),
+    test("the statement names the contesting memory and shows that memory's served text, and both results are returned", async () => {
+        const rationale = contestedBy(record);
+        const rows = [contested(rationale), observed()];
+        expect(await shown(rows[0] as ReadRow, rows)).toEqual({
+            contest: { memory: OBJECT_B, excerpt: JSON.stringify(observation) },
+            note: undefined,
+            reads: 0,
         });
-        const hits = searchKernelMemoryRows({ rows, query: "gateway client limit", limit: 5 });
-        expect(hits?.map((hit) => hit.objectId).sort()).toEqual([OBJECT_A, OBJECT_B]);
-        const packed = packSearchResults("gateway client limit", hits ?? []);
+        const hits =
+            searchKernelMemoryRows({ rows, query: "gateway client limit", limit: 5 }) ?? [];
+        expect(hits.map((hit) => hit.objectId).sort()).toEqual([OBJECT_A, OBJECT_B]);
+        await resolveContests({ client: client().client, results: hits, rows, asOf: null });
+        const packed = packSearchResults("gateway client limit", hits);
         expect(packed.text).toContain(
             `${statement}\n${rationale}\nContested by ${OBJECT_B}: ${JSON.stringify(observation)}`,
         );
         expect(packed.text.match(/Contested by /g)).toHaveLength(1);
+        expect(rationale).not.toContain("500");
     });
 
-    test("a statement longer than one result field keeps its contest line", () => {
+    test("an observation outside the rows already read is read by id at the same store state", async () => {
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: OBJECT_B,
+            decision_kind: "CONFIG_VALUES",
+            summary: observation,
+            source_id: "memory_capture",
+        });
+        const asOf = kernel.tip;
+        kernel.seedDecision({
+            object_id: `mem_${"c".repeat(32)}`,
+            decision_kind: "NAMING",
+            summary: "A later commit.",
+        });
+        const { client: kernelClient, transport } = client(kernel);
+        const result = memoryResultFromRow(contested(contestedBy(record)), 1, "exact");
+        const note = await resolveContests({
+            client: kernelClient,
+            results: [result],
+            rows: [],
+            asOf,
+        });
+        expect(note).toBeUndefined();
+        expect(result.source === "memory" ? result.contestedBy : undefined).toEqual({
+            memory: OBJECT_B,
+            excerpt: JSON.stringify(observation),
+        });
+        const reads = transport.calls.filter((call) => call.method === "kernel.read");
+        expect(reads.map((call) => call.body)).toEqual([
+            expect.objectContaining({ object_ids: [OBJECT_B], as_of: asOf }),
+        ]);
+    });
+
+    test("an observation the daemon hides, retired, or of another sensitivity contests nothing a reader is shown", async () => {
+        const row = contested(contestedBy(record));
+        const base = observed();
+        for (const hidden of [
+            observed({ visibility: "hidden" }),
+            observed({ object: { ...base.object, invalidated_commit_seq: 12 } }),
+            observed({ object: { ...base.object, sensitivity: "secret" } }),
+            observed({ object: { ...base.object, domain_id: "user-statements" } }),
+        ]) {
+            expect((await shown(row, [row, hidden])).contest).toBeUndefined();
+        }
+        // The store holds no such memory: the read answers without it.
+        expect(await shown(row, [row])).toEqual({ contest: undefined, note: undefined, reads: 1 });
+    });
+
+    test("a contest whose observation cannot be read names the memory without its text", async () => {
+        const transport = new FakeKernelTransport(new FakeKernel());
+        const kernelClient = new KernelClient({
+            transport,
+            enabled: true,
+            sessionId: "ses-contest",
+            projectRoot: "git:contest-project",
+        });
+        const result = memoryResultFromRow(contested(contestedBy(record)), 1, "exact");
+        transport.failWith = new Error("daemon went away");
+        const note = await resolveContests({
+            client: kernelClient,
+            results: [result],
+            rows: [],
+            asOf: null,
+        });
+        expect(note).toContain("could not be read");
+        expect(result.source === "memory" ? result.contestedBy : undefined).toEqual({
+            memory: OBJECT_B,
+        });
+        const packed = packSearchResults(OBJECT_A, [result]);
+        expect(packed.text.endsWith(`\nContested by ${OBJECT_B}`)).toBe(true);
+    });
+
+    test("a statement longer than one result field keeps its contest line, and the excerpt keeps its closing mark", async () => {
         const long = `User stated: ${"The gateway admits at most 300 clients at once. ".repeat(40)}`;
-        const rationale = contestedBy({ memory: OBJECT_B, text: observation, stated_seq: 4 });
-        const hit = memoryResultFromRow(contested(rationale, "memory_capture", long), 1, "exact");
+        const row = contested(contestedBy(record), "memory_capture", long);
+        // 240 control characters each take six bytes in the quoted excerpt, past one field's 1,024 bytes.
+        const control = observed();
+        control.decision = {
+            decision_kind: "CONFIG_VALUES",
+            payload: { summary: "\u0001".repeat(CONTEST_EXCERPT_CHARS), rationale: "" },
+        };
+        const hit = memoryResultFromRow(row, 1, "exact");
+        await resolveContests({
+            client: client().client,
+            results: [hit],
+            rows: [row, control],
+            asOf: null,
+        });
         const packed = packSearchResults(OBJECT_A, [hit]);
         expect(long.length).toBeGreaterThan(1024);
-        expect(packed.text).toContain(`Contested by ${OBJECT_B}: ${JSON.stringify(observation)}`);
+        const excerpt = contestExcerpt("\u0001".repeat(CONTEST_EXCERPT_CHARS));
+        expect(excerpt.length).toBeGreaterThan(1024);
+        expect(packed.text).toContain(`Contested by ${OBJECT_B}: ${excerpt}`);
     });
 
     test("the contesting text is folded to one line, cut to its excerpt, and quoted", () => {
@@ -316,18 +433,23 @@ describe("a contested statement in explicit search", () => {
         expect(contestExcerpt("short")).toBe('"short"');
     });
 
-    test("a row capture did not write, and a record without the contesting memory or its text, show no contest", () => {
-        const whole = contestedBy({ memory: OBJECT_B, text: observation, stated_seq: 4 });
-        expect(contestOf(contested(whole))).toBeDefined();
+    test("a row capture did not write, and a record that names no contesting memory, show no contest", async () => {
+        const whole = contestedBy(record);
+        const rows = [observed()];
+        expect((await shown(contested(whole), rows)).contest).toBeDefined();
         for (const row of [
             contested(whole, "eidnara_memory"),
-            contested(contestedBy({ memory: OBJECT_B, stated_seq: 4 })),
-            contested(contestedBy({ memory: 7, text: observation })),
+            contested(contestedBy({ stated_seq: 4 })),
+            contested(contestedBy({ memory: 7 })),
             contested(contestedBy("mem_b")),
             contested(`{"contested_by":`),
             contested(JSON.stringify({ source: "memory_capture", contests: [OBJECT_B] })),
         ]) {
-            expect(contestOf(row)).toBeUndefined();
+            expect(await shown(row, rows)).toEqual({
+                contest: undefined,
+                note: undefined,
+                reads: 0,
+            });
         }
     });
 });
