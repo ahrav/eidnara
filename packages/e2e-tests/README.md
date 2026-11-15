@@ -263,11 +263,15 @@ is a built payload's `payload-manifest.json`. The fixture then:
   digest;
 - installs the fixture search admission pair, the records the
   `search_admission_records` example writes, under its `--state-root`. The
-  records carry no qualification measurement: they admit the projection under
-  every hook with the daemon integration tests' fixture values, except a
-  catch-up lag of 1,000,000 commits and catch-up windows of 4,096 rows, 8 MiB
-  of payload, and 8 MiB of source, which `search_admission_records/records.rs`
-  sets so one capture batch or source publication fits in a window.
+  records carry no qualification measurement, and the repository carries no
+  production manifest to copy. They admit the projection under every hook,
+  and `search_admission_records/records.rs` sizes their limits for a data
+  home as large as the kernel admits: 4 GiB of evidence, 1,048,576 source
+  descriptor revisions, a source hold of the kernel's 30-day maximum, one
+  hour for a rebuild slice, and a reader lag of 1,024 commits. A rebuild scans
+  every descriptor, holds the whole decoded corpus as one batch, and stages
+  the whole projection file, so each of those limits scales with the store;
+  the file states each derivation.
 
 ModelExecution side calls keep the fixture's own routing: its controlled
 backend, a cassette, or the closures `--harness-runtime` names. The memory
@@ -290,6 +294,12 @@ The route in use is observable three ways:
   startup;
 - `session.status` reports `search_admission.state`, which reads `admitted`
   once the projection opens;
+- `eidnara-host search status`, run with `XDG_DATA_HOME` set to the fixture's
+  `--state-root`, prints the lifecycle record, the admission, and a `progress`
+  block with the projection's lag behind the kernel tip (`lag_commits`), the
+  counts of rebuilds recorded, completed, and renewed since the fixture
+  started, and the reason the last slice gave when the record is short of
+  Current (`blocked`);
 - each result the route ranks renders `match=fused lanes=<lanes>`. A search
   the route cannot serve, before admission or while the lane starts, carries
   `Memory: the fused search route is unavailable (<reason>); results come

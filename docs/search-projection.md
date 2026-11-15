@@ -51,6 +51,27 @@ Each lifecycle slice:
 A slice ends within the manifest's `supervisor_slice_ms`, within the caller's
 budget, and for an Intent within the record's own deadline.
 
+### Catch-up past the freshness limit
+
+The gate refuses every hook of a family whose coverage observation trails the
+kernel by more than `catchup_lag_commits` (`Denial::Stale`, status code
+`coverage_stale`), so a reader never ranks from a family that far behind. The
+catch-up episode of a Current family is the work that applies those commits,
+so it is admitted on every gate except that one
+(`EvidenceEvaluator::judge_catch_up`, `HookGate::admit_catch_up`,
+`SearchSelection::pin_for_catch_up`): the manifest and evidence identities,
+class coverage, the resource and capability evidence, both-harness evidence,
+the hook flags, and the episode's page charges are judged as for any other
+admission, and a checkpoint past the observed tip is refused. A slice that
+finds its Current family stale therefore still runs the episode, under the
+family's hold, and the refresh after the episode re-admits readers once the
+family is back inside the limit. A commit burst larger than the limit between
+two slices costs readers one refused interval and no rebuild.
+
+The exemption covers the Current family's episode only. A rebuild's
+construction and completion are judged on every gate, as described under
+[Expiry and renewal](#expiry-and-renewal).
+
 ## Rebuilds of a Current family
 
 A slice over a Current record reports `SliceOutcome::Rebuild(cause)` when the
@@ -341,6 +362,27 @@ the gate admits but no family is selected, and `family_refused` when the gate
 admits a selected family whose own checks refused the pin. Codes name the gate or condition,
 never record content. OpenCode's `/eidnara-status` renders the block as
 `Search admission`.
+
+`search.lifecycle.status` (`eidnara-host search status`) also carries a
+`progress` block, so an operator or a test harness reads the projection's lag
+and its rebuild outcomes without parsing the log:
+
+| Field | Meaning |
+|---|---|
+| `tip` | The kernel tip read when the status was answered; `null` when the kernel could not be read within the operation's budget. |
+| `checkpoint` | The commit the selected family had applied when the last slice observed it; `null` before a slice observes a selected family and when the last slice could not read one. |
+| `lag_commits` | `tip - checkpoint`, floored at zero; `null` when either is. A reader is refused once the lag a slice observes exceeds `catchup_lag_commits`. |
+| `observed_at` | Wall-clock milliseconds of that observation. |
+| `rebuilds.recorded` | First builds and rebuilds the slice loop recorded since the daemon started. |
+| `rebuilds.completed` | Builds that reached Current since the daemon started, whoever recorded them. |
+| `rebuilds.renewed` | Renewals of a lapsed rebuild since the daemon started. |
+| `blocked` | The last slice's reason for leaving the record short of Current, the text the log line `search lifecycle <reason>` carries, followed by `; coverage: <reason>` when the selected family's coverage could not be observed; `null` after a slice that advanced the record or found the family current. |
+
+The counters and the observation live in the daemon process and start from
+zero at each start. The slice loop logs `search lifecycle rebuild completed:
+attempt=<id> consumer=<id> cause=<cause> target=<commit> elapsed_ms=<ms>` when
+a build reaches Current, with the time since its record was written or last
+renewed.
 
 Every admission, including the one behind the status block, reads the
 lifecycle record fresh. The gate checks the control directory's owner and mode
