@@ -330,13 +330,30 @@ function isSearchableMemoryRow(row: ReadRow, nowMs: number): boolean {
     return isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, nowMs);
 }
 
+/**
+ * The rows a scan carries from page to page, in rank order: the best `limit` rows that stay
+ * eligible, and the best `limit` anti-memories that carry an expiry. The final ranking reads the
+ * clock after the scan, so an anti-memory that expires meanwhile leaves its place to a row kept here.
+ */
+function retainRankedRows(rows: readonly ReadRow[], terms: readonly string[], limit: number) {
+    let lasting = 0;
+    let expiring = 0;
+    const kept: ReadRow[] = [];
+    for (const { row } of rankLexicalRows(rows, terms, Number.POSITIVE_INFINITY)) {
+        const canExpire = antiMemoryPayloadOfRow(row)?.expiresAt != null;
+        if (canExpire ? expiring++ < limit : lasting++ < limit) kept.push(row);
+    }
+    return kept;
+}
+
 export type SnapshotScan =
     | { ok: true; rows: ReadRow[]; truncated: boolean }
     | { ok: false; state: MemoryState };
 
 /**
- * Reads the surface page by page at the first page's snapshot. The retained rows preserve the
- * top `limit` lexical results among eligible rows from the pages read. Only the first page is
+ * Reads the surface page by page at the first page's snapshot. The retained rows, at most twice
+ * `limit`, preserve the top `limit` lexical results among eligible rows from the pages read, at the
+ * scan's start and after any retained anti-memory expires. Only the first page is
  * gated; later pages read the snapshot that gate admitted. `truncated` reports rows left unread:
  * after `maxPages` pages, past the deadline, or when the daemon refuses a later page or answers it
  * from another snapshot, over another connection, or with a row at or before the cursor. A search
@@ -392,9 +409,7 @@ export async function scanSnapshotForLexicalSearch(args: {
                 read.rows.every((row) => followsCursor(prior, row)));
         if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
         const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
-        kept = rankLexicalRows([...kept, ...candidates], terms, args.limit).map(
-            (entry) => entry.row,
-        );
+        kept = retainRankedRows([...kept, ...candidates], terms, args.limit);
         const last = read.rows.at(-1);
         if (!read.truncated || last === undefined || terms.length === 0) {
             return { ok: true, rows: kept, truncated: read.truncated };

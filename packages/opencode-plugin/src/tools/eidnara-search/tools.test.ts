@@ -614,6 +614,16 @@ describe("eidnara_search expiry across the legacy scan", () => {
         expect(result).not.toContain(`id=${OBJECT_B}`);
     });
 
+    it("gives the single result slot to the live memory when the anti-memory ahead of it expires while the scan reads", async () => {
+        const result = await searchWith(
+            (kernel) => new ClockAdvancingTransport(kernel),
+            undefined,
+            1,
+        );
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).not.toContain(`id=${OBJECT_B}`);
+    });
+
     it("gives the single result slot to a live memory over an anti-memory that expired before the scan", async () => {
         // The anti-memory matches as well as the memory and is newer, so it ranks first among unexpired rows.
         const live = await searchWith((kernel) => new FakeKernelTransport(kernel), undefined, 1);

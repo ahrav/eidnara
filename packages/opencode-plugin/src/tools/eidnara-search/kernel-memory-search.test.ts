@@ -1110,4 +1110,60 @@ describe("scanSnapshotForLexicalSearch over several pages", () => {
         if (!scan.ok) return;
         expect(scan.rows.map((row) => row.object.object_id)).toEqual([target]);
     });
+
+    /** Seeds `count` memories and then `count` anti-memories that all match "session caching store"; the anti-memories are newer and expire at `expiresAt`. */
+    function storeWithExpiringAntiMemories(count: number, expiresAt: number): FakeKernel {
+        const kernel = new FakeKernel();
+        for (let index = 0; index < count; index += 1) {
+            kernel.seedDecision({
+                object_id: `mem_${String(index).padStart(32, "0")}`,
+                decision_kind: "PROJECT_RULES",
+                summary: `Session caching uses the embedded store, shard ${index}.`,
+            });
+        }
+        for (let index = 0; index < count; index += 1) {
+            kernel.seedDecision({
+                object_id: `mem_${String(index).padStart(32, "a")}`,
+                decision_kind: ANTI_MEMORY_CATEGORY,
+                summary: renderAntiMemoryContent({
+                    trigger: "session caching store",
+                    rejectedStrategy: `Redis cluster ${index}`,
+                    rejectionReason: "it creates split ownership",
+                    expiresAt,
+                }),
+            });
+        }
+        return kernel;
+    }
+
+    test("keeps the best eligible memory beside a better-ranked anti-memory that can expire", async () => {
+        const kernel = storeWithExpiringAntiMemories(3, NOW + 5_000);
+        kernel.readRowCap = 1;
+        const scan = await scanSnapshotForLexicalSearch({
+            client: clientOver(new FakeKernelTransport(kernel)),
+            surface: "explicit_search",
+            gated: false,
+            query: "session caching store",
+            limit: 1,
+            nowMs: NOW,
+        });
+        expect(scan).toMatchObject({ ok: true, truncated: false });
+        if (!scan.ok) return;
+        // One slot for each kind: the newest anti-memory and the newest memory, of three each.
+        const newestAntiMemory = `mem_${"2".padStart(32, "a")}`;
+        const newestMemory = `mem_${"2".padStart(32, "0")}`;
+        expect(scan.rows.map((row) => row.object.object_id)).toEqual([
+            newestAntiMemory,
+            newestMemory,
+        ]);
+        const ranked = (nowMs: number) =>
+            searchKernelMemoryRows({
+                rows: scan.rows,
+                query: "session caching store",
+                limit: 1,
+                nowMs,
+            })?.map((hit) => hit.objectId);
+        expect(ranked(NOW)).toEqual([newestAntiMemory]);
+        expect(ranked(NOW + 5_000)).toEqual([newestMemory]);
+    });
 });
