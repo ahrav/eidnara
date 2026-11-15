@@ -93,10 +93,11 @@ pub(crate) async fn within_timed<F: Future>(
         let elapsed = started.elapsed();
         let polled = polls.total().saturating_sub(polled_before);
         let late = elapsed.saturating_sub(step).saturating_sub(polled) > HEARTBEAT;
+        let late_charge = polled.min(step + HEARTBEAT);
         let charged = match (late, previous_late) {
             (false, _) => elapsed,
-            (true, false) => polled,
-            (true, true) => polled.max(step),
+            (true, false) => late_charge,
+            (true, true) => late_charge.max(step),
         };
         previous_late = late;
         remaining = remaining.saturating_sub(charged);
@@ -147,6 +148,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_pending_future_expires_at_the_deadline_when_every_heartbeat_is_on_time() {
+        test_cpu::spend(Duration::ZERO);
         let started = Instant::now();
         let result = within(DEADLINE, std::future::pending::<()>()).await;
         assert!(result.is_err());
@@ -165,6 +167,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_clock_jump_keeps_the_budget_the_wait_had_before_it() {
+        test_cpu::spend(Duration::ZERO);
         let wait = tokio::spawn(within(DEADLINE, std::future::pending::<()>()));
         tokio::time::sleep(Duration::from_millis(10_500)).await;
         tokio::time::advance(DEADLINE * 4).await;
@@ -191,6 +194,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_wake_one_heartbeat_late_is_charged_in_full() {
+        test_cpu::spend(Duration::ZERO);
         let wait = tokio::spawn(within(DEADLINE, std::future::pending::<()>()));
         tokio::task::yield_now().await;
         for _ in 0..15 {
@@ -203,6 +207,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn consecutive_late_wakes_charge_one_step_each_after_the_first() {
+        test_cpu::spend(Duration::ZERO);
         let wait = tokio::spawn(within(DEADLINE, std::future::pending::<()>()));
         tokio::task::yield_now().await;
         for _ in 0..31 {
@@ -215,6 +220,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_late_wake_between_on_time_wakes_charges_nothing() {
+        test_cpu::spend(Duration::ZERO);
         let wait = tokio::spawn(within(DEADLINE, std::future::pending::<()>()));
         tokio::task::yield_now().await;
         for _ in 0..29 {
@@ -245,6 +251,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_late_step_charges_at_most_two_heartbeats_of_poll_cpu_time() {
+        let waited = wall_time_until_expiry(HEARTBEAT * 10, HEARTBEAT * 5 / 2).await;
+        assert_eq!(waited, HEARTBEAT * 300);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_join_wait_charges_the_poll_time_of_the_task_it_joins() {
         test_cpu::spend(Duration::ZERO);
         let polls = PollTime::default();
@@ -253,6 +265,7 @@ mod tests {
         let task = tokio::spawn(polls.clone().timing(spinning));
         let result = within_timed(DEADLINE, task, &polls).await;
         assert!(result.is_err());
+        assert!(count.load(Ordering::SeqCst) < 100);
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ async fn spinning() {
     let polls = AtomicUsize::new(0);
     std::future::poll_fn(|cx| {
         assert!(
-            polls.fetch_add(1, Ordering::SeqCst) < 1_000,
+            polls.fetch_add(1, Ordering::SeqCst) < 100,
             "the deadline expires first"
         );
         test_cpu::spend(POLL_TIME);

@@ -425,6 +425,7 @@ impl HostHandler for TimedHealthHandler {
             while started.elapsed() < SPIN {
                 std::hint::spin_loop();
             }
+            announce(&format!("SPUN {probe}"));
         }
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -532,20 +533,20 @@ impl HostProcess {
         rustix::process::kill_process(pid, signal).expect("signal the host process");
     }
 
-    fn stop_inside_a_probe(&self, after_entry: Duration) -> usize {
+    fn stop_before(&self, after_entry: Duration, marker: &str) -> usize {
         for _ in 0..10 {
             let entered = self.expect_line("ENTER ");
             let probe: usize = entered["ENTER ".len()..].parse().expect("probe number");
             std::thread::sleep(after_entry);
             self.signal(rustix::process::Signal::STOP);
             std::thread::sleep(Duration::from_millis(100));
-            let finished = format!("PROBE {probe}");
-            if self.lines.try_iter().all(|line| line != finished) {
+            let reached = format!("{marker} {probe}");
+            if self.lines.try_iter().all(|line| line != reached) {
                 return probe;
             }
             self.signal(rustix::process::Signal::CONT);
         }
-        panic!("no stop landed inside a health probe");
+        panic!("no stop landed before a `{marker}` line");
     }
 
     fn resume_after(&mut self, stopped_in: usize, stopped_for: Duration) {
@@ -577,7 +578,7 @@ impl Drop for HostProcess {
 fn a_host_process_stopped_past_the_deadline_during_a_health_probe_keeps_serving() {
     let mut host = HostProcess::spawn(ROLE_SLOW_PROBE);
     host.expect_line("PROBE 1");
-    let stopped_in = host.stop_inside_a_probe(Duration::from_millis(20));
+    let stopped_in = host.stop_before(Duration::from_millis(20), "PROBE");
     host.resume_after(stopped_in, CHILD_DEADLINE * 2);
 }
 
@@ -585,7 +586,7 @@ fn a_host_process_stopped_past_the_deadline_during_a_health_probe_keeps_serving(
 fn a_host_process_stopped_past_the_deadline_inside_a_health_callback_poll_keeps_serving() {
     let mut host = HostProcess::spawn(ROLE_SPINNING_PROBE);
     host.expect_line("PROBE 1");
-    let stopped_in = host.stop_inside_a_probe(SPIN / 3);
+    let stopped_in = host.stop_before(SPIN / 3, "SPUN");
     host.resume_after(stopped_in, CHILD_DEADLINE * 2);
 }
 
