@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use daemon::process_memory::C_HEAP_ARENAS;
 use host_runtime::{Client, ClientRoute, TargetKind};
 use serde_json::{Value, json};
-use support::direct_host::{BUDGET, FixtureProcess, request_json, wait_for_store};
+use support::direct_host::{BUDGET, FixtureProcess, Launch, request_json, wait_for_store};
 
 const MIB: u64 = 1024 * 1024;
 const GLIBC_ARENA_HEAP_KIB: u64 = 64 * 1024;
@@ -16,8 +16,8 @@ const SESSION_GROWTH_BOUND_BYTES: u64 = MIB;
 const SESSION_KEYED_HOLDERS: [&str; 4] = [
     "snapshots",
     "native_attach",
-    "serialized_output",
     "boundary_token",
+    "tail_hygiene_memo",
 ];
 
 fn env_count(name: &str, default: usize) -> usize {
@@ -155,7 +155,12 @@ fn turn_rows(session: usize, turn: usize, output_bytes: usize) -> Vec<Value> {
     ]
 }
 
-async fn run_session(fixture: &FixtureProcess, session: usize, turns: usize, output_bytes: usize) {
+async fn run_session(
+    fixture: &FixtureProcess,
+    session: usize,
+    turns: usize,
+    output_bytes: usize,
+) -> Value {
     let session_id = format!("soak-session-{session}");
     let client = fixture.client().await;
     let route = fixture
@@ -187,11 +192,18 @@ async fn run_session(fixture: &FixtureProcess, session: usize, turns: usize, out
         assert_eq!(response["status"], "ok", "session {session} turn {turn}");
         previous_output = response["output_revision"].as_str().map(str::to_owned);
     }
+    let live = request_json(&client, route, json!({"kind": "status"})).await;
     client
         .close_route(route)
         .await
         .expect("session route closes");
     client.close().await.expect("session client closes");
+    live["memory_holders"].clone()
+}
+
+fn operator_set_arena_limit() -> bool {
+    std::env::var_os("MALLOC_ARENA_MAX").is_some()
+        || std::env::var("GLIBC_TUNABLES").is_ok_and(|tunables| tunables.contains("arena_max"))
 }
 
 async fn status_after_teardown(client: &Client, route: ClientRoute) -> Value {
@@ -243,7 +255,13 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
 
     let mut anonymous = Vec::with_capacity(sessions);
     for session in 0..sessions {
-        run_session(&fixture, session, turns, output_bytes).await;
+        let live = run_session(&fixture, session, turns, output_bytes).await;
+        for holder in SESSION_KEYED_HOLDERS {
+            assert!(
+                live[holder]["entry_count"].as_u64().expect("entry count") >= 1,
+                "a live session holds a `{holder}` entry: {live}"
+            );
+        }
         let status = status_after_teardown(&observer, observer_route).await;
         let sampled = rss_anon_bytes(pid);
         let reported = status["process_memory"]["rss_anon_bytes"]
@@ -283,21 +301,42 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
             .collect::<Vec<_>>()
     );
 
-    let status = status_after_teardown(&observer, observer_route).await;
-    assert_eq!(
-        status["process_memory"]["c_heap_arena_limit"], C_HEAP_ARENAS,
-        "the fixture sets the arena limit before it starts threads"
-    );
-    let arena_heaps = glibc_arena_heaps(pid);
-    assert!(
-        (1..C_HEAP_ARENAS).contains(&arena_heaps),
-        "{arena_heaps} heaps outside the main arena under a limit of {C_HEAP_ARENAS} arenas"
-    );
+    if !operator_set_arena_limit() {
+        let status = status_after_teardown(&observer, observer_route).await;
+        assert_eq!(
+            status["process_memory"]["c_heap_arena_limit"], C_HEAP_ARENAS,
+            "the fixture sets the arena limit before it starts threads"
+        );
+        let arena_heaps = glibc_arena_heaps(pid);
+        assert!(
+            (1..C_HEAP_ARENAS).contains(&arena_heaps),
+            "{arena_heaps} heaps outside the main arena under a limit of {C_HEAP_ARENAS} arenas"
+        );
+    }
 
     observer
         .close_route(observer_route)
         .await
         .expect("observer route closes");
     observer.close().await.expect("observer client closes");
+    fixture.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_operator_arena_setting_keeps_the_daemon_from_setting_its_own() {
+    let root = tempfile::tempdir().expect("state root");
+    let fixture = Launch::at(root.path().to_path_buf())
+        .env("GLIBC_TUNABLES", "glibc.malloc.arena_max=8")
+        .start();
+    let client = fixture.client().await;
+    let route = fixture
+        .open_route(&client, "context", TargetKind::ToolProvider, "tuned")
+        .await;
+    wait_for_store(&client, route, "tuned").await;
+    let status = request_json(&client, route, json!({"kind": "status"})).await;
+    assert_eq!(status["process_memory"]["c_heap_arena_limit"], Value::Null);
+    assert!(status["process_memory"]["rss_anon_bytes"].is_u64());
+    client.close_route(route).await.expect("route closes");
+    client.close().await.expect("client closes");
     fixture.shutdown();
 }

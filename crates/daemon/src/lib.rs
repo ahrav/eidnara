@@ -4775,7 +4775,7 @@ impl HandlerCore {
     }
 
     fn release_c_heap_when_due(&self) {
-        if process_memory::release_in_flight() || tokio::runtime::Handle::try_current().is_err() {
+        if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
         let _ = self

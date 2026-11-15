@@ -105,12 +105,14 @@ fn c_heap() -> Option<CHeap> {
 #[allow(unsafe_code)]
 pub fn limit_c_heap_arenas() {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let tuned = std::env::var_os("MALLOC_ARENA_MAX").is_some()
-        || std::env::var("GLIBC_TUNABLES").is_ok_and(|tunables| tunables.contains("arena_max"));
-    if status_field(&status, "Threads") != Some(1) || tuned {
+    let operator_set = arena_limit_is_operator_set(
+        std::env::var_os("MALLOC_ARENA_MAX").is_some(),
+        std::env::var("GLIBC_TUNABLES").ok().as_deref(),
+    );
+    if status_field(&status, "Threads") != Some(1) || operator_set {
         return;
     }
-    // SAFETY: `mallopt` takes two integers, and `single_threaded` holds, so no thread reads the limit during the write.
+    // SAFETY: `mallopt` takes two integers, and the `Threads` count read above is 1, so no thread reads the limit during the write.
     let set = unsafe { libc::mallopt(libc::M_ARENA_MAX, C_HEAP_ARENAS as libc::c_int) == 1 };
     ARENA_LIMIT_SET.store(set, Ordering::Relaxed);
 }
@@ -118,20 +120,25 @@ pub fn limit_c_heap_arenas() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn limit_c_heap_arenas() {}
 
-pub fn release_in_flight() -> bool {
-    RELEASING.load(Ordering::Acquire)
+fn arena_limit_is_operator_set(malloc_arena_max: bool, glibc_tunables: Option<&str>) -> bool {
+    malloc_arena_max || glibc_tunables.is_some_and(|tunables| tunables.contains("arena_max"))
+}
+
+fn lowered(floor: &AtomicU64, now: u64) -> u64 {
+    floor.fetch_min(now, Ordering::Relaxed).min(now)
 }
 
 /// Freed bytes or resident bytes have grown one threshold past their floor since the last release.
 /// `free_bytes` is `None` where glibc lacks `mallinfo2`; resident growth alone decides there.
 fn release_is_due(
-    free_bytes: Option<(u64, u64)>,
+    free_bytes: Option<u64>,
+    free_floor: u64,
     resident_bytes: u64,
     resident_floor: u64,
 ) -> bool {
     let grew = |now: u64, floor: u64| now.saturating_sub(floor) >= C_HEAP_RELEASE_THRESHOLD_BYTES;
     match free_bytes {
-        Some((free, free_floor)) => {
+        Some(free) => {
             free >= C_HEAP_RELEASE_THRESHOLD_BYTES
                 && (grew(free, free_floor) || grew(resident_bytes, resident_floor))
         }
@@ -148,14 +155,9 @@ pub fn release_free_c_heap_when_due() {
     let before = ProcessMemory::sample();
     let resident = before.rss_anon_bytes.unwrap_or(0);
     let free = before.c_heap.map(|heap| heap.free_bytes);
-    let resident_floor = RESIDENT_FLOOR
-        .fetch_min(resident, Ordering::Relaxed)
-        .min(resident);
-    let free_floors = free.map(|free| {
-        let floor = FREE_FLOOR.fetch_min(free, Ordering::Relaxed).min(free);
-        (free, floor)
-    });
-    if release_is_due(free_floors, resident, resident_floor) {
+    let resident_floor = lowered(&RESIDENT_FLOOR, resident);
+    let free_floor = free.map_or(0, |free| lowered(&FREE_FLOOR, free));
+    if release_is_due(free, free_floor, resident, resident_floor) {
         // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
         unsafe { libc::malloc_trim(0) };
         let after = ProcessMemory::sample();
@@ -194,31 +196,54 @@ mod tests {
     #[test]
     fn a_release_is_due_once_freed_or_resident_bytes_grow_one_threshold_past_their_floor() {
         let floor = 500 * 1024 * 1024;
-        let quiet = Some((floor, floor));
-        assert!(!release_is_due(quiet, floor, floor));
-        assert!(!release_is_due(quiet, floor + THRESHOLD - 1, floor));
-        assert!(release_is_due(quiet, floor + THRESHOLD, floor));
+        assert!(!release_is_due(Some(floor), floor, floor, floor));
         assert!(!release_is_due(
-            Some((floor + THRESHOLD - 1, floor)),
+            Some(floor),
+            floor,
+            floor + THRESHOLD - 1,
+            floor
+        ));
+        assert!(release_is_due(Some(floor), floor, floor + THRESHOLD, floor));
+        assert!(!release_is_due(
+            Some(floor + THRESHOLD - 1),
+            floor,
             floor,
             floor
         ));
-        assert!(release_is_due(
-            Some((floor + THRESHOLD, floor)),
-            floor,
-            floor
-        ));
-        assert!(release_is_due(Some((THRESHOLD, 0)), 0, 0));
+        assert!(release_is_due(Some(floor + THRESHOLD), floor, floor, floor));
+        assert!(release_is_due(Some(THRESHOLD), 0, 0, 0));
     }
 
     #[test]
     fn freed_bytes_under_one_threshold_start_no_release() {
-        assert!(!release_is_due(Some((THRESHOLD - 1, 0)), THRESHOLD * 8, 0));
+        assert!(!release_is_due(Some(THRESHOLD - 1), 0, THRESHOLD * 8, 0));
     }
 
     #[test]
     fn resident_growth_alone_decides_where_glibc_reports_no_heap() {
-        assert!(!release_is_due(None, THRESHOLD - 1, 0));
-        assert!(release_is_due(None, THRESHOLD, 0));
+        assert!(!release_is_due(None, 0, THRESHOLD - 1, 0));
+        assert!(release_is_due(None, 0, THRESHOLD, 0));
+    }
+
+    #[test]
+    fn a_floor_follows_a_reading_down_and_stays_when_the_reading_rises() {
+        let floor = AtomicU64::new(500);
+        assert_eq!(lowered(&floor, 300), 300);
+        assert_eq!(lowered(&floor, 400), 300);
+        assert_eq!(floor.load(Ordering::Relaxed), 300);
+    }
+
+    #[test]
+    fn an_operator_arena_setting_is_read_from_either_glibc_variable() {
+        assert!(!arena_limit_is_operator_set(false, None));
+        assert!(!arena_limit_is_operator_set(
+            false,
+            Some("glibc.malloc.tcache_count=0")
+        ));
+        assert!(arena_limit_is_operator_set(true, None));
+        assert!(arena_limit_is_operator_set(
+            false,
+            Some("glibc.malloc.arena_max=8")
+        ));
     }
 }
