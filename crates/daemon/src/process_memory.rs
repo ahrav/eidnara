@@ -123,7 +123,13 @@ pub fn limit_c_heap_arenas() {
 pub fn limit_c_heap_arenas() {}
 
 fn arena_limit_is_operator_set(malloc_arena_max: bool, glibc_tunables: Option<&str>) -> bool {
-    malloc_arena_max || glibc_tunables.is_some_and(|tunables| tunables.contains("arena_max"))
+    let sets_arena_max = |tunable: &str| {
+        tunable
+            .split_once('=')
+            .is_some_and(|(name, value)| name == "glibc.malloc.arena_max" && !value.is_empty())
+    };
+    malloc_arena_max
+        || glibc_tunables.is_some_and(|tunables| tunables.split(':').any(sets_arena_max))
 }
 
 fn lowered(floor: &AtomicU64, now: u64) -> u64 {
@@ -159,6 +165,11 @@ fn release_is_due_past_floors(
     release_is_due(free_bytes, free_floor, resident_bytes, resident_floor)
 }
 
+/// The freed-byte level the release acted on: bytes freed while it ran count as growth afterwards.
+fn free_floor_after_release(before: Option<u64>, after: Option<u64>) -> u64 {
+    after.map_or(0, |after| before.map_or(after, |before| before.min(after)))
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
 pub fn release_free_c_heap_when_due() {
@@ -170,17 +181,19 @@ pub fn release_free_c_heap_when_due() {
     let free = before.c_heap.map(|heap| heap.free_bytes);
     if release_is_due_past_floors(free, resident, &FREE_FLOOR, &RESIDENT_FLOOR) {
         // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
-        unsafe { libc::malloc_trim(0) };
+        let released = unsafe { libc::malloc_trim(0) } == 1;
         let after = ProcessMemory::sample();
         let resident_after = after.rss_anon_bytes.unwrap_or(resident);
         RESIDENT_FLOOR.store(resident_after, Ordering::Relaxed);
         FREE_FLOOR.store(
-            after.c_heap.map_or(0, |heap| heap.free_bytes),
+            free_floor_after_release(free, after.c_heap.map(|heap| heap.free_bytes)),
             Ordering::Relaxed,
         );
-        RELEASE_RESIDENT_DROP_BYTES
-            .fetch_add(resident.saturating_sub(resident_after), Ordering::Relaxed);
-        RELEASES.fetch_add(1, Ordering::Relaxed);
+        if released {
+            RELEASE_RESIDENT_DROP_BYTES
+                .fetch_add(resident.saturating_sub(resident_after), Ordering::Relaxed);
+            RELEASES.fetch_add(1, Ordering::Relaxed);
+        }
     }
     RELEASING.store(false, Ordering::Release);
 }
@@ -288,5 +301,30 @@ mod tests {
             false,
             Some("glibc.malloc.arena_max=8")
         ));
+        assert!(arena_limit_is_operator_set(
+            false,
+            Some("glibc.malloc.tcache_count=0:glibc.malloc.arena_max=2")
+        ));
+        assert!(!arena_limit_is_operator_set(
+            false,
+            Some("glibc.malloc.arena_maximum=8:glibc.malloc.arena_max=")
+        ));
+    }
+
+    #[test]
+    fn bytes_freed_while_a_release_runs_count_as_growth_for_the_next_check() {
+        let mib = 1024 * 1024;
+        let before = 100 * mib;
+        let after = before + THRESHOLD;
+        let floor = free_floor_after_release(Some(before), Some(after));
+        assert_eq!(floor, before);
+        assert!(release_is_due(Some(after), floor, 0, 0));
+
+        assert_eq!(
+            free_floor_after_release(Some(before), Some(20 * mib)),
+            20 * mib
+        );
+        assert_eq!(free_floor_after_release(None, Some(20 * mib)), 20 * mib);
+        assert_eq!(free_floor_after_release(Some(before), None), 0);
     }
 }
