@@ -1797,10 +1797,10 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
 /// The memories one batch is offered as replacement, contest, and duplicate
 /// targets.
 const MAX_EXISTING_CANDIDATES: usize = 64;
-/// The candidates chosen for the batch's user messages. Only a user message
-/// replaces a memory, so half of the set is ranked for that use and the other
-/// half for duplicate detection over the whole batch.
-const USER_MESSAGE_CANDIDATES: usize = MAX_EXISTING_CANDIDATES / 2;
+/// The candidates chosen for single messages of the batch. A replacement or
+/// a contest names the memory one message is about, and a duplicate is judged
+/// against the whole batch, so the set is split evenly between the two uses.
+const MESSAGE_CANDIDATES: usize = MAX_EXISTING_CANDIDATES / 2;
 /// The BM25 term-saturation and length-normalization constants, at the
 /// values of the original formulation.
 const BM25_K1: f64 = 1.2;
@@ -1809,12 +1809,13 @@ const BM25_B: f64 = 0.75;
 /// The bounded candidate set for one batch, at most
 /// [`MAX_EXISTING_CANDIDATES`] memory decisions in two ranked parts.
 ///
-/// The first part holds up to [`USER_MESSAGE_CANDIDATES`] memories ranked by
-/// BM25 against each user message on its own, a memory taking its best score.
-/// A correction names the fact it changes in a few words, and the memory it
-/// corrects is a short statement of the same words. Ranking per message with
-/// inverse document frequency and length normalization puts that statement
-/// ahead of long memories that share many common words with a long batch.
+/// The first part holds up to [`MESSAGE_CANDIDATES`] memories ranked by BM25
+/// against each message on its own, a memory taking its best score. A
+/// correction, or a report that a file now holds another value, names the
+/// fact in a few words, and the memory it bears on is a short statement of
+/// the same words. Ranking per message with inverse document frequency and
+/// length normalization puts that statement ahead of long memories that
+/// share many common words with a long batch.
 ///
 /// The rest of the set holds the memories sharing the most of the whole
 /// batch's lowercase words, newest first among ties.
@@ -1829,11 +1830,10 @@ fn select_existing_memories(
         .filter(|word| word.chars().count() >= 3)
         .map(str::to_lowercase)
         .collect();
-    // Each distinct content word of a user message is one query term.
+    // Each distinct content word of a message is one query term.
     let mut terms: HashMap<String, usize> = HashMap::new();
     let queries: Vec<Vec<usize>> = messages
         .iter()
-        .filter(|message| message.role == CaptureRole::User)
         .map(|message| {
             content_words(&message.text)
                 .into_iter()
@@ -1958,7 +1958,7 @@ fn select_existing_memories(
     });
     let relevant = candidates
         .iter()
-        .take(USER_MESSAGE_CANDIDATES)
+        .take(MESSAGE_CANDIDATES)
         .take_while(|candidate| candidate.relevance > 0.0)
         .count();
     candidates[relevant..].sort_by(|a, b| b.shared.cmp(&a.shared).then_with(|| newest_first(a, b)));

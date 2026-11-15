@@ -1118,9 +1118,9 @@ under `restates`, that memory is retired with it if it is live, belongs to the
 project, was written by capture or the host memory tool, and is not served on
 `auto_inject`. The extractor is offered at most 64 reference memories. Up to
 32 are ranked by BM25 (k1 1.2, b 0.75, over the project's memory summaries)
-against each user message of the batch on its own, a memory taking its best
-score, so the short statement a correction names ranks ahead of long memories
-that share common words with the batch; the rest are the memories sharing the
+against each message of the batch on its own, a memory taking its best
+score, so the short statement a correction or an observation names ranks
+ahead of long memories that share common words with the batch; the rest are the memories sharing the
 most of the whole batch's words, newest first among ties. A proposal from any
 role may name `contests`: reference memories whose value its observation
 contradicts without the user changing the fact, each sharing at least one

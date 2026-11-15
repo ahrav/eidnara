@@ -1589,4 +1589,34 @@ async fn a_correction_is_offered_the_short_statement_it_corrects_among_many_long
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
     assert!(block.contains(&stated(correction)), "{block}");
     assert!(!block.contains(&stated(statement)), "{block}");
+
+    // An assistant's long report that names the alias is offered the user's
+    // statement too, so it can contest it.
+    let report = "The upload handler retries each failed request three times and the retry budget resets when a request succeeds; while checking the drain order I saw that deploy/staging.toml sets the staging cluster alias to harbor-north.";
+    let offered = std::cell::Cell::new(false);
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "assistant", report)],
+        |_, existing| {
+            let target = ids_containing(existing, &stated(correction));
+            offered.set(target.len() == 1);
+            vec![Extracted {
+                quote: report.to_string(),
+                contests: target,
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    assert!(
+        offered.get(),
+        "the statement is offered to the assistant's observation"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        block.contains(&format!("{} (stated ", stated(correction))) && block.contains("contested"),
+        "{block}"
+    );
 }
