@@ -342,7 +342,8 @@ Read `read.rs:217-283`.
 Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`,
 `bounded_selection_matches_a_full_sort_and_truncate`,
 `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`, and, for the
-cursor, `paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once`
+cursor under the row cap,
+`paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once`
 (`crates/daemon/tests/kernel_routes.rs:6973`). Status unaudited.
 Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at

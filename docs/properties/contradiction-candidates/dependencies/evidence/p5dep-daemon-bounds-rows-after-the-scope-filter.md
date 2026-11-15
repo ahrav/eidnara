@@ -44,7 +44,9 @@ consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
 - Tests: `crates/daemon/tests/kernel_routes.rs:1958`
   `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`;
   `:2080` `bounded_selection_matches_a_full_sort_and_truncate`; `:2112`
-  `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`.
+  `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`; `:6973`
+  `paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once`
+  (the row bound with a `before` cursor).
 
 ## Failure scenario
 
