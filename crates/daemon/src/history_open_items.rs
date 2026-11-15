@@ -27,13 +27,14 @@
 //! - **Constraints** stand in every tier until a lift with evidence. The evidence is a stored claim
 //!   with the constraint's key whose anchor reads as the `Lifted` line of that key. Claim
 //!   validation stores a claim only when its one citation resolves to a message inside the
-//!   segment that stores it, and keeps its anchor only when the anchor is text of that segment's
-//!   `p1`; the summarizer prompt has the claim cite the user's lifting message and anchor on the
-//!   whole line. Such a claim in a later segment retires the constraint line; in the constraint's
-//!   own segment it retires the line when `Lifted` is the key's last status line in `p1`. A
-//!   `Decided` line, and any other claim, leaves the constraint line standing: a correction whose
-//!   anchor touches an open line of the row lists on the row's `[corrections: …]` line, so only
-//!   retirement takes an open line out of a tier.
+//!   segment that stores it, and keeps an anchor that reads as a `Lifted` line only when the
+//!   claim cites a user message and the anchor is a whole line of that segment's `p1`. The lift
+//!   holds while that claim is the key's live claim, the newest claim with the key among the
+//!   summarized segments rendered together. Such a claim in a later segment retires the
+//!   constraint line; in the constraint's own segment it retires the line when `Lifted` is the
+//!   key's last status line in `p1`. A `Decided` line, and any other claim, leaves the constraint
+//!   line standing: a correction whose anchor touches an open line of the row lists on the row's
+//!   `[corrections: …]` line, so only retirement takes an open line out of a tier.
 //!
 //! The rules read the rows rendered together. The frozen baseline keeps its bytes between
 //! rebuilds and the rows above it render on their own, so an open line in the baseline stays
@@ -81,21 +82,36 @@ const PREFIXES: [(&str, Status); 4] = [
     ("Lifted (", Status::Lifted),
 ];
 
+/// `line` after its leading whitespace and at most one `- ` or `* ` bullet.
+fn unbulleted(line: &str) -> &str {
+    let line = line.trim_start();
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .unwrap_or(line)
+        .trim_start()
+}
+
 /// The status and key of `line` when it is a status line: one of the four prefixes after leading
 /// whitespace and at most one `- ` or `* ` bullet, a key in the claim-key grammar, and text after
 /// `):`.
 pub(crate) fn status_line(line: &str) -> Option<(Status, &str)> {
-    let line = line.trim_start();
-    let line = line
-        .strip_prefix("- ")
-        .or_else(|| line.strip_prefix("* "))
-        .unwrap_or(line)
-        .trim_start();
+    let line = unbulleted(line);
     let (status, rest) = PREFIXES
         .iter()
         .find_map(|(prefix, status)| line.strip_prefix(prefix).map(|rest| (*status, rest)))?;
     let (key, text) = rest.split_once("):")?;
     (is_claim_key(key) && !text.trim().is_empty()).then_some((status, key))
+}
+
+/// Whether `text` reads as a `Lifted` status line.
+pub(crate) fn is_lifted_line(text: &str) -> bool {
+    matches!(status_line(text), Some((Status::Lifted, _)))
+}
+
+/// Whether `anchor` is a whole line of `p1`, with or without the line's bullet.
+pub(crate) fn is_line_of(p1: &str, anchor: &str) -> bool {
+    p1.lines()
+        .any(|line| line.trim() == anchor || unbulleted(line).trim_end() == anchor)
 }
 
 /// Whether `claim` is the evidence of a lift: its anchor is one line that reads as the `Lifted`
@@ -124,20 +140,21 @@ struct Retired {
 /// no key.
 fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
     let mut out: Vec<Option<Retired>> = segments.iter().map(|_| None).collect();
-    // The keys a newer summarized segment lifts, and whether one exists.
+    // Over the newer summarized segments: the keys whose live claim, the newest one, is a lift;
+    // the keys that have a claim at all; and whether such a segment exists.
     let mut lifted_later: BTreeSet<&str> = BTreeSet::new();
+    let mut claimed_later: BTreeSet<&str> = BTreeSet::new();
     let mut newer = false;
     for (at, segment) in segments.iter().enumerate().rev() {
-        let lifted_here = || {
-            segment
-                .claims
-                .iter()
-                .filter(|claim| lifts(claim))
-                .map(|claim| claim.key.as_str())
-        };
         // A legacy row renders flat and an archive row renders empty over a span no fold
         // summarized. Every other row is a summarized segment, with or without its text loaded.
         let session_segment = segment.legacy != 1 && !segment.is_archive();
+        let lifted_here: BTreeSet<&str> = segment
+            .claims
+            .iter()
+            .filter(|claim| lifts(claim) && !claimed_later.contains(claim.key.as_str()))
+            .map(|claim| claim.key.as_str())
+            .collect();
         if session_segment && let Some(p1) = segment.p1.as_deref().filter(|p1| !p1.is_empty()) {
             // Each key's last status line in `p1`.
             let last: BTreeMap<&str, Status> = p1
@@ -154,9 +171,6 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
                 keys.extend(tier.lines().filter_map(status_line).map(|(_, key)| key));
             }
             if !keys.is_empty() {
-                let lifted_last: BTreeSet<&str> = lifted_here()
-                    .filter(|key| last.get(key) == Some(&Status::Lifted))
-                    .collect();
                 out[at] = Some(Retired {
                     aged: newer,
                     answered: last
@@ -166,7 +180,11 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
                         .collect(),
                     lifted: keys
                         .into_iter()
-                        .filter(|key| lifted_later.contains(key) || lifted_last.contains(key))
+                        .filter(|key| {
+                            lifted_later.contains(key)
+                                || (lifted_here.contains(key)
+                                    && last.get(key) == Some(&Status::Lifted))
+                        })
                         .map(str::to_owned)
                         .collect(),
                 });
@@ -174,7 +192,8 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
         }
         if session_segment {
             newer = true;
-            lifted_later.extend(lifted_here());
+            lifted_later.extend(lifted_here);
+            claimed_later.extend(segment.claims.iter().map(|claim| claim.key.as_str()));
         }
     }
     out
@@ -280,10 +299,13 @@ pub(crate) fn rows(
         .map(|(row, retired)| retire(row, retired))
 }
 
-/// [`rows`] over owned segments.
+/// [`rows`] over owned segments, with `corrections`, aligned with them, passed through
+/// [`beside_open_lines`] before the segments move.
 pub(crate) fn owned_rows(
     segments: Vec<StoredHistorySegment>,
-) -> impl Iterator<Item = DecayRenderHistorySegment> {
+    corrections: &mut Vec<Vec<Correction>>,
+) -> impl Iterator<Item = DecayRenderHistorySegment> + use<> {
+    *corrections = beside_open_lines(&segments, std::mem::take(corrections));
     let retired = retirements(&segments);
     segments
         .into_iter()
@@ -292,13 +314,13 @@ pub(crate) fn owned_rows(
         .map(|(row, retired)| retire(row, retired))
 }
 
-/// `corrections` for `row`, with each one whose anchor lies in an open line of one of the row's
-/// tiers listed on the footer: the line stays as written beside the key's live value, and
-/// leaves only through retirement.
+/// `corrections`, aligned with `segments`, with each one whose anchor touches an open line of
+/// its row listed on the footer: the line stays as written beside the key's live value, or
+/// leaves through retirement, and the correction marks no other text in its place.
 pub(crate) fn beside_open_lines(
-    row: &DecayRenderHistorySegment,
-    mut corrections: Vec<Correction>,
-) -> Vec<Correction> {
+    segments: &[StoredHistorySegment],
+    mut corrections: Vec<Vec<Correction>>,
+) -> Vec<Vec<Correction>> {
     // Whether one of the lines that the first occurrence of `anchor` in the trimmed tier touches,
     // the occurrence a splice replaces, is an open status line.
     let in_open_line = |text: &str, anchor: &str| {
@@ -312,15 +334,17 @@ pub(crate) fn beside_open_lines(
                 .any(|line| status_line(line).is_some_and(|(status, _)| status.is_open()))
         })
     };
-    for correction in &mut corrections {
-        let anchored_on_open_line = correction.anchor.as_deref().is_some_and(|anchor| {
-            [&row.p1, &row.p2, &row.p3, &row.p4]
-                .into_iter()
-                .flatten()
-                .any(|text| in_open_line(text, anchor))
-        });
-        if anchored_on_open_line {
-            correction.anchor = None;
+    for (segment, corrections) in segments.iter().zip(&mut corrections) {
+        for correction in corrections {
+            let anchored_on_open_line = correction.anchor.as_deref().is_some_and(|anchor| {
+                [&segment.p1, &segment.p2, &segment.p3, &segment.p4]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| in_open_line(text, anchor))
+            });
+            if anchored_on_open_line {
+                correction.anchor = None;
+            }
         }
     }
     corrections
@@ -622,6 +646,40 @@ mod tests {
     }
 
     #[test]
+    fn a_lift_holds_while_its_claim_is_the_newest_claim_for_the_key() {
+        let set = same(1, &format!("Measured.\n{CONSTRAINT}"), vec![]);
+        let lifted = same(2, LIFTED, vec![lift()]);
+        let later = |claims| same(3, "The user took the lift back.", claims);
+        assert_eq!(
+            p1s(&[set.clone(), lifted.clone(), later(vec![])])[0],
+            "Measured."
+        );
+        // A newer claim under the key supersedes the lift, so the constraint renders again.
+        let superseding = claim(
+            "policy.measurement-fixes",
+            Some("The user took the lift back."),
+        );
+        assert_eq!(
+            p1s(&[set, lifted, later(vec![superseding.clone()])])[0],
+            format!("Measured.\n{CONSTRAINT}")
+        );
+        // The same holds for a segment that lifts its own constraint.
+        let own = same(
+            1,
+            &format!("{CONSTRAINT}\nMeasured.\n{LIFTED}"),
+            vec![lift()],
+        );
+        assert_eq!(
+            p1s(&[own.clone(), later(vec![])])[0],
+            format!("Measured.\n{LIFTED}")
+        );
+        assert_eq!(
+            p1s(&[own, later(vec![superseding])])[0],
+            format!("{CONSTRAINT}\nMeasured.\n{LIFTED}")
+        );
+    }
+
+    #[test]
     fn a_constraint_set_again_after_its_lift_stands() {
         let rendered = p1s(&[
             same(1, &format!("First.\n{CONSTRAINT}"), vec![]),
@@ -838,6 +896,26 @@ mod tests {
     }
 
     #[test]
+    fn a_correction_anchored_on_a_retired_line_marks_no_other_text() {
+        // The claim's words stand in the waiting line and again in the narrative after it.
+        let asked = "Waiting on user (db.port-move): Move the database off port 5432?";
+        let port = |ordinal| Claim {
+            ordinal,
+            ..claim("db.port", Some("port 5432"))
+        };
+        let first = same(
+            1,
+            &format!("{asked}\nThe tests use port 5432."),
+            vec![port(1)],
+        );
+        let rendered = render_rows(&[first, same(2, "Port moved.", vec![port(21)])], false);
+        assert_eq!(
+            render_history_segment_at_tier(&rendered[0], 1),
+            "## 10-19 \u{b7} row 1\nThe tests use port 5432.\n[corrections: db.port = v @21]"
+        );
+    }
+
+    #[test]
     fn a_correction_splices_where_its_first_occurrence_touches_no_open_line() {
         let heading = "## 10-19 \u{b7} row 1";
         let freeze = "Constraint (policy.freeze): Freeze the schema!";
@@ -986,7 +1064,9 @@ mod tests {
             .collect();
         assert_eq!(rows(&segments).map(tiers).collect::<Vec<_>>(), projected);
         assert_eq!(
-            owned_rows(segments).map(tiers).collect::<Vec<_>>(),
+            owned_rows(segments, &mut Vec::new())
+                .map(tiers)
+                .collect::<Vec<_>>(),
             projected
         );
     }
@@ -1024,8 +1104,16 @@ mod tests {
         ]
     }
 
-    /// The tiers of one generated row, and for each key whether the row stores its lift claim.
-    type Generated = ([Vec<Line>; 3], [bool; 2]);
+    /// The claim one generated row stores for a key.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Stored {
+        None,
+        Lift,
+        Other,
+    }
+
+    /// The tiers of one generated row, and the claim it stores for each key.
+    type Generated = ([Vec<Line>; 3], [Stored; 2]);
 
     /// A stored `p1` has text, so each generated `p1` opens with a narrative line.
     fn generated_row() -> impl Strategy<Value = Generated> {
@@ -1035,15 +1123,18 @@ mod tests {
                 prop::collection::vec(line(), 0..5),
                 prop::collection::vec(line(), 0..4),
             ],
-            any::<[bool; 2]>(),
+            [0usize..3, 0usize..3],
         )
-            .prop_map(|(mut tiers, lift_claims)| {
+            .prop_map(|(mut tiers, claims)| {
                 tiers[0].insert(0, Line::Narrative(9));
-                (tiers, lift_claims)
+                (
+                    tiers,
+                    claims.map(|claim| [Stored::None, Stored::Lift, Stored::Other][claim]),
+                )
             })
     }
 
-    fn stored(sequence: usize, (tiers, lift_claims): &Generated) -> StoredHistorySegment {
+    fn stored(sequence: usize, (tiers, stored): &Generated) -> StoredHistorySegment {
         let text = |lines: &Vec<Line>| {
             lines
                 .iter()
@@ -1053,10 +1144,13 @@ mod tests {
         };
         let [p1, p2, p3] = tiers.each_ref().map(text);
         let claims = (0..2)
-            .filter(|key| lift_claims[*key])
-            .map(|key| {
-                let anchor = Line::Status(Status::Lifted, key).text();
-                claim(KEYS[key], Some(&anchor))
+            .filter_map(|key| {
+                match stored[key] {
+                    Stored::None => None,
+                    Stored::Lift => Some(Line::Status(Status::Lifted, key).text()),
+                    Stored::Other => Some(Line::Narrative(9).text()),
+                }
+                .map(|anchor| claim(KEYS[key], Some(&anchor)))
             })
             .collect();
         row(sequence as i64 + 1, [&p1, &p2, &p3, ""], claims)
@@ -1064,7 +1158,7 @@ mod tests {
 
     /// The text lines of `tier` that a line-by-line reading of the module rules keeps.
     fn expected(generated: &[Generated], at: usize, tier: usize) -> Vec<String> {
-        let (tiers, lift_claims) = &generated[at];
+        let (tiers, stored) = &generated[at];
         let lines = &tiers[tier];
         let last_in_p1 = |key: usize| {
             tiers[0].iter().rev().find_map(|line| match line {
@@ -1072,7 +1166,15 @@ mod tests {
                 _ => None,
             })
         };
-        let lifted_later = |key: usize| generated[at + 1..].iter().any(|(_, lifts)| lifts[key]);
+        // The newest claim a later row stores for the key, the key's live claim, when it is
+        // a lift.
+        let live_later = |key: usize| {
+            generated[at + 1..]
+                .iter()
+                .rev()
+                .map(|(_, stored)| stored[key])
+                .find(|stored| *stored != Stored::None)
+        };
         lines
             .iter()
             .enumerate()
@@ -1084,10 +1186,12 @@ mod tests {
                             |later| matches!(later, Line::Status(s, k) if k == key && !s.is_open()),
                         )
                 }
-                Line::Status(Status::Constraint, key) => {
-                    !lifted_later(*key)
-                        && !(lift_claims[*key] && last_in_p1(*key) == Some(Status::Lifted))
-                }
+                Line::Status(Status::Constraint, key) => match live_later(*key) {
+                    Some(live) => live != Stored::Lift,
+                    None => {
+                        !(stored[*key] == Stored::Lift && last_in_p1(*key) == Some(Status::Lifted))
+                    }
+                },
                 Line::Blank => false,
                 _ => true,
             })
@@ -1122,7 +1226,7 @@ mod tests {
             }
             let tiers = |row: DecayRenderHistorySegment| (row.content, row.p1, row.p2, row.p3, row.p4);
             prop_assert_eq!(
-                owned_rows(segments).map(tiers).collect::<Vec<_>>(),
+                owned_rows(segments, &mut Vec::new()).map(tiers).collect::<Vec<_>>(),
                 rendered.into_iter().map(tiers).collect::<Vec<_>>()
             );
         }

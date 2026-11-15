@@ -201,7 +201,6 @@ impl<'a> Builder<'a> {
     /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
     fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
         let escaped = escape_markers(&text);
-        let transformed = transformed || escaped.is_some();
         FrozenAlias {
             alias: String::new(),
             message_id: message
@@ -220,8 +219,9 @@ impl<'a> Builder<'a> {
                 .iter()
                 .map(|block| fingerprint_digest(&block.content_hash))
                 .collect(),
+            transformed: transformed || escaped.is_some(),
             presented: escaped.unwrap_or(text),
-            transformed,
+            user: message.role == "user",
         }
     }
 

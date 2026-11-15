@@ -167,7 +167,7 @@ pub(crate) fn render_rows(
 ) -> Vec<DecayRenderHistorySegment> {
     with_corrections(
         crate::history_open_items::rows(segments),
-        corrections_for(segments),
+        crate::history_open_items::beside_open_lines(segments, corrections_for(segments)),
         temporal_awareness,
     )
 }
@@ -178,13 +178,13 @@ pub(crate) fn render_owned_rows(
     segments: Vec<StoredHistorySegment>,
     temporal_awareness: bool,
 ) -> Vec<DecayRenderHistorySegment> {
-    let corrections = corrections_where(&segments, |segment| {
+    let mut corrections = corrections_where(&segments, |segment| {
         segment.legacy != 1
             && !segment.is_archive()
             && segment.p1.as_deref().is_some_and(|p1| !p1.is_empty())
     });
     with_corrections(
-        crate::history_open_items::owned_rows(segments),
+        crate::history_open_items::owned_rows(segments, &mut corrections),
         corrections,
         temporal_awareness,
     )
@@ -201,7 +201,7 @@ fn with_corrections(
                 row.start_date = None;
                 row.end_date = None;
             }
-            row.corrections = crate::history_open_items::beside_open_lines(&row, corrections);
+            row.corrections = corrections;
             row
         })
         .collect()

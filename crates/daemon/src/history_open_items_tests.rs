@@ -471,6 +471,52 @@ fn a_lift_whose_claim_fails_validation_leaves_the_constraint_standing() {
     assert!(history[2][0].contains(LIFTED_LINE));
 }
 
+/// Claim validation keeps a lift's anchor only as a whole line of `p1` on a claim that cites a
+/// user message; every other lift claim stores no anchor and leaves the constraint standing.
+#[test]
+fn a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message() {
+    let mut messages = constraint_session();
+    // The assistant repeats the user's words, so a claim can cite either message.
+    messages[5] = assistant(
+        6,
+        &format!("Understood: {LIFT}. I opened two pull requests."),
+    );
+    let lifted = |p1: &str, cited: u64, anchor: &str| {
+        let mut stored = constraint_then_other_work(&messages);
+        let chunk = chunk_of(&messages, 5, 7);
+        let text = output(
+            &[segment_xml(5, 6, [p1, p1, p1, ""])],
+            &[claim(
+                "policy.baseline-fixes",
+                &cite(&chunk, cited, LIFT),
+                LIFT,
+                anchor,
+            )],
+            7,
+        );
+        let rows = fold(&mut stored, &text, &chunk);
+        (
+            rows[0].claims[0].anchor.clone(),
+            open_lines(&rendered_tiers(&stored)[0][0]).len(),
+        )
+    };
+    let line = format!("{LIFTED_LINE}\nI opened two pull requests.");
+    // The user's message, the whole line, with or without its bullet: the constraint leaves.
+    assert_eq!(lifted(&line, 5, LIFTED_LINE), (Some(LIFTED_LINE.into()), 0));
+    assert_eq!(
+        lifted(&format!("- {line}"), 5, LIFTED_LINE),
+        (Some(LIFTED_LINE.into()), 0)
+    );
+    // The assistant's message.
+    assert_eq!(lifted(&line, 6, LIFTED_LINE), (None, 1));
+    // The lifted form inside a sentence, with the form alone as the anchor.
+    let inside = format!("The user did not say {LIFTED_LINE}");
+    assert_eq!(lifted(&inside, 5, LIFTED_LINE), (None, 1));
+    // Part of the line.
+    let part = &LIFTED_LINE[..LIFTED_LINE.len() - 20];
+    assert_eq!(lifted(&line, 5, part), (None, 1));
+}
+
 #[test]
 fn an_answer_and_a_lift_under_other_keys_leave_the_constraint_standing() {
     let case = &ANSWERED[0];
