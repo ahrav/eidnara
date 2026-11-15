@@ -261,13 +261,13 @@ function separateDeltas(stream: PartStream): DeltaStream {
     return deltas;
 }
 
-/** Advances one text part for an update and returns its released text. For the part the update targets, it also sets `releasedDelta` to the released delta. */
+/** `streamPart` sets `releasedDelta` to the released delta when the update targets the part. */
 function streamPart(
     part: TextPart,
     index: number,
     leading: boolean,
     update: StreamUpdate | null,
-): string {
+): PartStream {
     const text = part.text;
     let stream = streams.get(part);
     if (stream === undefined || text.slice(0, stream.raw.length) !== stream.raw) {
@@ -306,16 +306,17 @@ function streamPart(
                 advance(stream, text, false);
                 releasedDelta = keptText(text);
             }
-            return stream.released;
+            return stream;
         }
         deltas = separateDeltas(stream);
     }
     if (grew) advance(stream, text, false);
     if (ends) advance(stream, text, true);
     if (piece !== undefined) releasedDelta = pushPiece(deltas, piece, false);
-    return stream.released;
+    return stream;
 }
 
+/** Returns `parts` with each text part replaced by its stripped snapshot. For an update, each text part's stream advances before the snapshot spread reads the part's accessors, and the targeted part sets `releasedDelta`. */
 function snapshotContent(parts: unknown[], update: StreamUpdate | undefined): unknown[] {
     let firstText = true;
     return parts.map((part: unknown, index: number) => {
@@ -323,8 +324,8 @@ function snapshotContent(parts: unknown[], update: StreamUpdate | undefined): un
         const leading = firstText;
         firstText = false;
         if (update === undefined) return { ...part, text: stripTags(part.text, leading) };
-        const text = streamPart(part, index, leading, update);
-        return { ...part, text };
+        const stream = streamPart(part, index, leading, update);
+        return { ...part, text: stream.released };
     });
 }
 
