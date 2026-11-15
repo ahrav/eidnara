@@ -199,7 +199,7 @@ impl CanonicalMemoryRead {
 ///
 /// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
-/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of verdict logs one line.
+/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of the project's verdict logs one line naming the project's digest.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
@@ -207,10 +207,10 @@ pub(crate) fn read_project_memory(
 ) -> CanonicalMemoryRead {
     let read = read_at_tip(kernel, project, memory_budget_tokens);
     let published = kernel.health_block();
-    let facts = (!published.is_stale())
-        .then_some(published.block.facts.as_ref())
-        .flatten();
-    if let Some(line) = kernel.memory_read_report().observe(observed(&read, facts)) {
+    let fresh = !published.is_stale();
+    let facts = published.block.facts.as_ref().filter(|_| fresh);
+    let observed = observed(&read, facts);
+    if let Some(line) = kernel.memory_read_report().observe(project, observed) {
         eprintln!("daemon: project memory {line}");
     }
     read
@@ -278,34 +278,31 @@ pub(crate) enum Observed {
     Withheld(String),
 }
 
-/// The last verdict the canonical memory reader recorded, so a log reader sees each change of verdict once: a withheld read with its state, a read served while derived consumers lag, and the first plainly served read after either. Repeats of a verdict log nothing, and a lag sample that changes within the lagging verdict logs nothing either. An unsampled served read says nothing about the consumers: it keeps a served or lagging verdict as recorded and counts as plainly served after a withheld read or before any verdict. The report also counts the verdict changes it records, for the life of the coordinator, and each line carries that count as `verdict_seq`.
+/// Tracks verdict transitions independently per project, keyed by the project's digest. Plainly served reads remove recorded verdicts. Unsampled served reads preserve recorded lagging verdicts because consumer lag remains unknown. Clearing entries at [`REPORTED_PROJECTS_MAX`] allows unchanged verdicts to be reported again. `verdict_seq` orders recorded transitions across projects.
 #[derive(Debug, Default)]
-pub(crate) struct ReadReport(std::sync::Mutex<(Option<Observed>, u64)>);
+pub(crate) struct ReadReport(std::sync::Mutex<(std::collections::HashMap<String, Observed>, u64)>);
+
+/// Projects whose reads stop retain their entries, so this limit bounds retained verdicts.
+const REPORTED_PROJECTS_MAX: usize = 1024;
 
 impl ReadReport {
-    /// Records `observed` and returns the line to log when its verdict differs from the last one recorded. The verdict is recorded before the caller logs, so a failed log write repeats nothing, and the caller logs outside the report's lock, so other reads record their verdicts while a log write is blocked, though reads that emit a line share stderr's own lock; lines from concurrent reads can print in either order, and each line carries `verdict_seq`, the count of verdict changes recorded through it, so a log reader orders them.
-    pub(crate) fn observe(&self, observed: Observed) -> Option<String> {
+    /// Returns the line to log when `observed` changes `project`'s recorded verdict. Recorded transitions survive caller logging failures. The report's lock is released before the caller logs the returned line. `verdict_seq` orders recorded transitions even when concurrent callers log lines in a different order.
+    pub(crate) fn observe(&self, project: &ProjectBinding, observed: Observed) -> Option<String> {
         let mut guard = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (last, changes) = &mut *guard;
-        let observed = match (&*last, observed) {
-            (
-                Some(Observed::Served | Observed::ServedWhileDerivedLag { .. }),
-                Observed::ServedUnsampled,
-            ) => return None,
-            (_, Observed::ServedUnsampled) => Observed::Served,
-            (_, observed) => observed,
-        };
-        let line = match (&*last, &observed) {
+        let (verdicts, changes) = &mut *guard;
+        let line = match (verdicts.get(project.digest()), &observed) {
+            (None, Observed::Served | Observed::ServedUnsampled) => return None,
             (
                 Some(Observed::ServedWhileDerivedLag { .. }),
-                Observed::ServedWhileDerivedLag { .. },
-            ) => None,
-            (previous, _) if previous.as_ref() == Some(&observed) => None,
-            (None, Observed::Served) => None,
-            (_, Observed::Served | Observed::ServedUnsampled) => Some("served".to_owned()),
+                Observed::ServedUnsampled | Observed::ServedWhileDerivedLag { .. },
+            ) => return None,
+            (Some(Observed::Withheld(last)), Observed::Withheld(state)) if last == state => {
+                return None;
+            }
+            (_, Observed::Served | Observed::ServedUnsampled) => "served".to_owned(),
             (
                 _,
                 Observed::ServedWhileDerivedLag {
@@ -313,16 +310,29 @@ impl ReadReport {
                     lag_positions,
                     oldest_unconsumed_age_ms,
                 },
-            ) => Some(format!(
+            ) => format!(
                 "served from canonical rows while derived consumers lag: consumers={consumers} lag_positions={lag_positions} oldest_unconsumed_age_ms={oldest_unconsumed_age_ms}"
-            )),
-            (_, Observed::Withheld(state)) => Some(format!("withheld state={state}")),
+            ),
+            (_, Observed::Withheld(state)) => format!("withheld state={state}"),
         };
-        *last = Some(observed);
-        line.map(|line| {
-            *changes += 1;
-            format!("{line} verdict_seq={changes}")
-        })
+        match observed {
+            Observed::Served | Observed::ServedUnsampled => {
+                verdicts.remove(project.digest());
+            }
+            observed => {
+                if verdicts.len() >= REPORTED_PROJECTS_MAX
+                    && !verdicts.contains_key(project.digest())
+                {
+                    verdicts.clear();
+                }
+                verdicts.insert(project.digest().to_owned(), observed);
+            }
+        }
+        *changes += 1;
+        Some(format!(
+            "{line} verdict_seq={changes} project={}",
+            project.digest()
+        ))
     }
 }
 
@@ -417,55 +427,143 @@ mod tests {
         );
     }
 
-    /// Each change of verdict yields one line carrying the next `verdict_seq`, a repeat yields none, a lag sample that moves within the lagging verdict yields none, and the first plainly served read after a withheld or lagging one yields `served`.
+    fn project(root: &str) -> ProjectBinding {
+        ProjectBinding::new(std::path::Path::new(root))
+    }
+
+    fn withheld(state: &str) -> Observed {
+        Observed::Withheld(state.to_owned())
+    }
+
+    fn line(verdict: &str, verdict_seq: u64, project: &ProjectBinding) -> Option<String> {
+        Some(format!(
+            "{verdict} verdict_seq={verdict_seq} project={}",
+            project.digest()
+        ))
+    }
+
     #[test]
     fn the_read_report_logs_each_change_of_verdict_once() {
         let report = ReadReport::default();
-        assert_eq!(report.observe(Observed::Served), None);
-        assert_eq!(report.observe(Observed::Served), None);
+        let project = project("/projects/one");
+        let observe = |observed| report.observe(&project, observed);
+        assert_eq!(observe(Observed::Served), None);
+        assert_eq!(observe(Observed::Served), None);
         assert_eq!(
-            report.observe(lagging(10_000)).as_deref(),
-            Some(
-                "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000 verdict_seq=1"
+            observe(lagging(10_000)),
+            line(
+                "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000",
+                1,
+                &project
             )
         );
-        assert_eq!(report.observe(lagging(12_000)), None);
+        assert_eq!(observe(lagging(12_000)), None);
         assert_eq!(
-            report.observe(Observed::ServedUnsampled),
+            observe(Observed::ServedUnsampled),
             None,
             "an unsampled read keeps the lagging verdict"
         );
+        assert_eq!(observe(lagging(12_000)), None, "the lagging verdict stands");
+        assert_eq!(observe(Observed::Served), line("served", 2, &project));
         assert_eq!(
-            report.observe(lagging(12_000)),
-            None,
-            "the lagging verdict stands"
+            observe(withheld("unavailable:store_starting")),
+            line("withheld state=unavailable:store_starting", 3, &project)
+        );
+        assert_eq!(observe(withheld("unavailable:store_starting")), None);
+        assert_eq!(
+            observe(withheld("unavailable:io")),
+            line("withheld state=unavailable:io", 4, &project)
         );
         assert_eq!(
-            report.observe(Observed::Served).as_deref(),
-            Some("served verdict_seq=2")
-        );
-        assert_eq!(
-            report
-                .observe(Observed::Withheld("unavailable:store_starting".to_owned()))
-                .as_deref(),
-            Some("withheld state=unavailable:store_starting verdict_seq=3")
-        );
-        assert_eq!(
-            report.observe(Observed::Withheld("unavailable:store_starting".to_owned())),
-            None
-        );
-        assert_eq!(
-            report
-                .observe(Observed::Withheld("unavailable:io".to_owned()))
-                .as_deref(),
-            Some("withheld state=unavailable:io verdict_seq=4")
-        );
-        assert_eq!(
-            report.observe(Observed::ServedUnsampled).as_deref(),
-            Some("served verdict_seq=5"),
+            observe(Observed::ServedUnsampled),
+            line("served", 5, &project),
             "an unsampled read after a withheld one is served"
         );
-        assert!(report.observe(lagging(10_000)).is_some());
+        assert!(observe(lagging(10_000)).is_some());
+    }
+
+    #[test]
+    fn alternating_projects_log_each_projects_change_of_verdict_once() {
+        let report = ReadReport::default();
+        let (faulty, healthy) = (project("/projects/faulty"), project("/projects/healthy"));
+        let corrupt = || withheld("unavailable:store_unsupported");
+        assert_eq!(
+            report.observe(&faulty, corrupt()),
+            line("withheld state=unavailable:store_unsupported", 1, &faulty)
+        );
+        assert_eq!(report.observe(&healthy, Observed::Served), None);
+        for _ in 0..3 {
+            assert_eq!(
+                report.observe(&faulty, corrupt()),
+                None,
+                "the withheld project's verdict stands across the other project's reads"
+            );
+            assert_eq!(
+                report.observe(&healthy, Observed::Served),
+                None,
+                "the served project's verdict stands across the other project's reads"
+            );
+        }
+        assert_eq!(
+            report.observe(&healthy, lagging(10_000)),
+            line(
+                "served from canonical rows while derived consumers lag: consumers=2 lag_positions=10000 oldest_unconsumed_age_ms=61000",
+                2,
+                &healthy
+            )
+        );
+        assert_eq!(report.observe(&faulty, corrupt()), None);
+        assert_eq!(
+            report.observe(&faulty, Observed::Served),
+            line("served", 3, &faulty)
+        );
+        assert_eq!(report.observe(&healthy, lagging(11_000)), None);
+        assert_eq!(
+            report.observe(&healthy, Observed::ServedUnsampled),
+            None,
+            "an unsampled read keeps the project's lagging verdict"
+        );
+        assert_eq!(
+            report.observe(&faulty, Observed::ServedUnsampled),
+            None,
+            "an unsampled read keeps the project's served verdict"
+        );
+    }
+
+    #[test]
+    fn the_read_report_records_verdicts_for_a_bounded_number_of_projects() {
+        let report = ReadReport::default();
+        let corrupt = || withheld("unavailable:store_unsupported");
+        let projects: Vec<ProjectBinding> = (0..=REPORTED_PROJECTS_MAX)
+            .map(|index| project(&format!("/projects/{index}")))
+            .collect();
+        let (past_the_bound, recorded) = projects.split_last().unwrap();
+        assert!(report.observe(&recorded[0], corrupt()).is_some());
+        for served in &projects[1..] {
+            assert_eq!(report.observe(served, Observed::Served), None);
+        }
+        assert_eq!(
+            report.observe(&recorded[0], corrupt()),
+            None,
+            "served projects take no room"
+        );
+        for project in &recorded[1..] {
+            assert!(report.observe(project, corrupt()).is_some());
+        }
+        for project in recorded {
+            assert_eq!(
+                report.observe(project, corrupt()),
+                None,
+                "a verdict within the bound stays recorded"
+            );
+        }
+        assert!(report.observe(past_the_bound, corrupt()).is_some());
+        assert!(
+            report.observe(&recorded[0], corrupt()).is_some(),
+            "a verdict dropped at the bound logs once more"
+        );
+        assert_eq!(report.observe(&recorded[0], corrupt()), None);
+        assert_eq!(report.observe(past_the_bound, corrupt()), None);
     }
 
     fn visible_row(
