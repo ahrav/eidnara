@@ -196,6 +196,10 @@ export async function searchThroughRoute(args: {
         ...(args.signal ? { signal: args.signal } : {}),
         deadline,
     });
+    // The contest read is one more read of the search: a daemon connection that changed since the ranking refuses the search, as it does for the hydration reads.
+    if (args.client.connectionIdentity() !== connection) {
+        return refusedState(unavailable("snapshot_diverged"));
+    }
     if (contestNote) notes.push(contestNote);
     if (stale.length > 0) {
         notes.push(

@@ -242,6 +242,8 @@ export async function executeEidnaraSearch(
               }
             : { state: read.state };
     };
+    // The rows and the contest read after them are one search: the daemon connection they are read under is the same one.
+    const connection = client.connectionIdentity();
     let memory = await readMemory(true);
     let freshnessNote: string | undefined;
     if (memory.state?.kind === "unavailable" && memory.state.reason === "no_required_consumer") {
@@ -279,6 +281,12 @@ export async function executeEidnaraSearch(
         asOf: memory.knownAsOf,
         ...(toolContext.abort ? { signal: toolContext.abort } : {}),
     });
+    if (client.connectionIdentity() !== connection) {
+        return {
+            status: "invalid",
+            text: `Error: ${renderToolStateText({ kind: "unavailable", reason: "snapshot_diverged" })}`,
+        };
+    }
     if (contestNote) notes.push(contestNote);
     return completeFrom(hits, notes.join("\n"));
 }

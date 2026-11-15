@@ -230,7 +230,7 @@ pub(crate) fn read_project_memory(
     match read_other_sessions(
         &store,
         project,
-        &[session_id],
+        &[Some(session_id)],
         tip,
         (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
     ) {
@@ -247,9 +247,10 @@ pub(crate) fn read_project_memory(
 /// The project's injectable memory rows at `tip` that a pass delivers to each
 /// of `sessions`: for one session, the newest rows under the row and byte
 /// caps among the rows whose capture rationale names another session or
-/// none. With several sessions the response holds the union of their
-/// deliveries, which is at most twice the caps, because a row a session
-/// leaves out is kept only while another session still has room.
+/// none. A reader given as `None` leaves out no row, so its delivery is the
+/// plain newest window. With several readers the response holds the union
+/// of their deliveries, which is at most twice the caps, because a row a
+/// session leaves out is kept only while another reader still has room.
 ///
 /// A row's session is in its decision payload. The rows are walked in
 /// serving order and their payloads are loaded one page at a time, each page
@@ -260,12 +261,12 @@ pub(crate) fn read_project_memory(
 pub(crate) fn read_other_sessions(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
-    sessions: &[&str],
+    sessions: &[Option<&str>],
     tip: i64,
     (max_rows, max_row_bytes): (usize, usize),
 ) -> Result<ReadResponse, kernel::KernelError> {
     struct Delivery<'s> {
-        session: &'s str,
+        session: Option<&'s str>,
         rows: usize,
         bytes: u64,
         full: bool,
@@ -328,12 +329,12 @@ pub(crate) fn read_other_sessions(
             let decision = decisions
                 .remove(&row.object.object_id)
                 .ok_or(kernel::KernelError::CorruptCanonicalRow)?;
-            let owner = (row.object.source_id == crate::memory_capture::CAPTURE_SOURCE_ID)
+            let owner = crate::memory_capture::is_capture_memory(&row.object)
                 .then(|| capture_session(&decision.payload.rationale))
                 .flatten();
             let mut delivered = false;
             for delivery in deliveries.iter_mut().filter(|delivery| !delivery.full) {
-                if owner.as_deref() == Some(delivery.session) {
+                if owner.is_some() && owner.as_deref() == delivery.session {
                     continue;
                 }
                 if delivery.rows == max_rows
@@ -424,7 +425,7 @@ fn shown_contest(
     row: &kernel::VisibleRow,
     decision: &kernel::DecisionRow,
 ) -> Option<crate::memory_capture::Contest> {
-    if row.object.source_id != crate::memory_capture::CAPTURE_SOURCE_ID
+    if !crate::memory_capture::is_capture_memory(&row.object)
         || !decision.payload.rationale.contains("contested_by")
     {
         return None;
@@ -471,18 +472,37 @@ fn show_contests(
     ids.sort_unstable();
     ids.dedup();
     let mut observations = std::collections::HashMap::new();
-    for ids in ids.chunks(crate::kernel_routes::read::MAX_READ_OBJECT_IDS) {
+    // A read the byte cap cut short holds a newest-first prefix of its ids,
+    // so the chunk is halved and read again. One id that still comes back
+    // cut short without its row fails the pass: an id a capped read left
+    // out is no evidence that the observation is unserved.
+    let mut pending: Vec<&[String]> = ids
+        .chunks(crate::kernel_routes::read::MAX_READ_OBJECT_IDS)
+        .collect();
+    while let Some(chunk) = pending.pop() {
         let served = crate::kernel_routes::read::read_visible_within(
             store,
             project,
             Surface::ExplicitSearch,
             Some(response.known_as_of),
-            crate::kernel_routes::read::RowSelection::Objects(ids),
+            crate::kernel_routes::read::RowSelection::Objects(chunk),
             (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
         )?;
+        if served.truncated {
+            if chunk.len() > 1 {
+                let (older, newer) = chunk.split_at(chunk.len() / 2);
+                pending.push(older);
+                pending.push(newer);
+                continue;
+            }
+            if served.rows.is_empty() {
+                return Err(kernel::KernelError::CorruptCanonicalRow);
+            }
+        }
         for row in &served.rows {
             if row.visibility != SurfaceVisibility::Hidden
                 && row.object.sensitivity == kernel::Sensitivity::Normal
+                && crate::memory_capture::is_memory_decision(&row.object)
                 && let Some(decision) = served.decisions.get(&row.object.object_id)
             {
                 observations.insert(decision.object_id.clone(), decision.payload.summary.clone());

@@ -110,7 +110,7 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
         .enumerate()
         .map(|(index, job)| CaptureMessage {
             id: format!("source_{}", index + 1),
-            role: if job.role == "user" {
+            role: if super::is_user_source(job) {
                 CaptureRole::User
             } else {
                 CaptureRole::Assistant
@@ -449,9 +449,7 @@ impl HandlerCore {
     }
 }
 
-/// Memories of one source sharing a category and quotation freeze as one;
-/// two quotations that differ only in the sentence's closing mark are one
-/// quotation.
+/// Memories of one source sharing a category and quotation freeze as one.
 /// A replacement target survives the collapse so the correction it carries
 /// is not lost; one quotation superseding two memories keeps one entry per
 /// target, since a decision supersedes exactly one predecessor. The
@@ -467,18 +465,12 @@ pub(super) fn collapse_quotations(
         memory.content = format!("{attribution}: {}", memory.quote);
         match memories.iter_mut().find(|kept| {
             kept.category == memory.category
-                && statement_key(&kept.content) == statement_key(&memory.content)
+                && kept.content == memory.content
                 && (kept.replaces.is_none()
                     || memory.replaces.is_none()
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                // The joined memory keeps the quotation that holds the
-                // sentence's closing mark.
-                if memory.content.len() > kept.content.len() {
-                    kept.content = memory.content;
-                    kept.quote = memory.quote;
-                }
                 if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
@@ -507,13 +499,17 @@ pub(super) fn collapse_quotations(
 /// replaces. A duplicate of such a target that also contests other memories
 /// is kept for its contests and written as its own memory. Each target is
 /// contested by the first memory that names it.
-pub(super) fn settle_links(memories: &mut Vec<CapturedMemory>) {
+///
+/// Returns, for each memory kept, whether it is such a duplicate kept for
+/// its contests; the batch pass drops it when it strips them.
+pub(super) fn settle_links(memories: &mut Vec<CapturedMemory>) -> Vec<bool> {
     let removed: Vec<String> = memories
         .iter()
         .flat_map(|memory| memory.replaces.iter().chain(&memory.also_replaces))
         .cloned()
         .collect();
     let mut contested: Vec<String> = Vec::new();
+    let mut kept_for_contests = Vec::new();
     memories.retain_mut(|memory| {
         let replaced_duplicate = memory
             .duplicate_of
@@ -532,27 +528,34 @@ pub(super) fn settle_links(memories: &mut Vec<CapturedMemory>) {
             }
             kept
         });
-        !replaced_duplicate || !memory.contests.is_empty()
+        let kept = !replaced_duplicate || !memory.contests.is_empty();
+        if kept {
+            kept_for_contests.push(replaced_duplicate);
+        }
+        kept
     });
+    kept_for_contests
 }
 
 /// Settles the contests of one batch across its sources, after each source
 /// settled its own links. A target any source of the batch replaces or
 /// retires is contested by none of them, so the replacement commits against
 /// the row the plan named. A target is contested by the first source that
-/// names it, so two sources leave one record on it. Every memory is still
-/// written.
-fn settle_batch_contests(batch: &mut [Vec<CapturedMemory>]) {
+/// names it, so two sources leave one record on it. A memory its source
+/// kept only for its contests (see [`settle_links`]) is dropped when this
+/// pass strips them; every other memory is still written.
+pub(super) fn settle_batch_contests(batch: &mut [(Vec<CapturedMemory>, Vec<bool>)]) {
     let removed: Vec<String> = batch
         .iter()
-        .flatten()
+        .flat_map(|(memories, _)| memories)
         .flat_map(|memory| memory.replaces.iter().chain(&memory.also_replaces))
         .cloned()
         .collect();
     let mut contested: Vec<String> = Vec::new();
-    for memories in batch {
+    for (memories, kept_for_contests) in batch {
         let mut named = Vec::new();
-        for memory in memories.iter_mut() {
+        let mut flags = std::mem::take(kept_for_contests).into_iter();
+        memories.retain_mut(|memory| {
             memory.contests.retain(|target| {
                 let kept = !removed.contains(target) && !contested.contains(target);
                 if kept {
@@ -560,16 +563,10 @@ fn settle_batch_contests(batch: &mut [Vec<CapturedMemory>]) {
                 }
                 kept
             });
-        }
+            !(flags.next().unwrap_or(false) && memory.contests.is_empty())
+        });
         contested.append(&mut named);
     }
-}
-
-/// A statement's text for comparison: without edge whitespace and without
-/// its closing `.` or `!`, so a sentence quoted with and without its closing
-/// mark is one statement.
-fn statement_key(text: &str) -> &str {
-    text.trim().trim_end_matches(['.', '!'])
 }
 
 /// Widens each cut quotation of a user message to the whole sentence that
@@ -604,8 +601,7 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
         };
         let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
             other.category != proposed[index].category
-                && statement_key(other_widened.unwrap_or(other.quote.as_str()))
-                    == statement_key(statement)
+                && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
         });
         if !shared {
             proposed[index].quote = statement.to_owned();
@@ -783,7 +779,7 @@ impl CaptureWork {
             .collect();
         let states = |index: usize, memory: &CapturedMemory| {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
-            job.role == "user"
+            super::is_user_source(job)
                 && !super::cite::is_hashed_source_id(&job.message_id)
                 && super::quotes_whole_statements(prose, &memory.quote)
         };
@@ -807,14 +803,14 @@ impl CaptureWork {
                     continue;
                 }
             };
-            let attribution = if job.role == "user" {
+            let attribution = if super::is_user_source(job) {
                 USER_STATED
             } else {
                 super::ASSISTANT_REPORTED
             };
             let prose = &proses[index];
             let mut proposed = decision.memories;
-            if job.role == "user" && !super::cite::is_hashed_source_id(&job.message_id) {
+            if super::is_user_source(job) && !super::cite::is_hashed_source_id(&job.message_id) {
                 widen_cut_quotations(prose, &mut proposed);
             }
             // The stored text is the attributed quotation, so two facts citing
@@ -822,15 +818,37 @@ impl CaptureWork {
             // paraphrases, which can differ.
             let mut memories = collapse_quotations(attribution, proposed);
             // A user's statement that repeats an approved memory word for
-            // word duplicates that memory, whichever copy the extractor named.
+            // word duplicates that memory when the extractor named a copy
+            // that is not served automatically, such as an agent's note. A
+            // named copy that is served automatically is kept, so a repeat
+            // of a contested statement reaches that statement.
             for memory in &mut memories {
-                if memory.duplicate_of.is_some()
-                    && let Some(approved) = plan.existing.iter().find(|previous| {
-                        previous.automatic
-                            && statement_key(&previous.content) == statement_key(&memory.content)
-                    })
+                let Some(named) = memory
+                    .duplicate_of
+                    .as_ref()
+                    .map(|target| plan.existing.iter().find(|previous| previous.id == *target))
+                else {
+                    continue;
+                };
+                if named.is_none_or(|previous| !previous.automatic)
+                    && let Some(approved) = plan
+                        .existing
+                        .iter()
+                        .find(|previous| previous.automatic && previous.content == memory.content)
                 {
                     memory.duplicate_of = Some(approved.id.clone());
+                }
+                // A statement that names a contested statement as the memory
+                // that already holds it settles the contest only word for
+                // word. Another text is the user's own new statement.
+                if named.is_some_and(|previous| {
+                    previous.automatic
+                        && previous.contested
+                        && super::statement_text(&previous.content)
+                            != super::statement_text(&memory.content)
+                }) && user_attributed(job, prose, memory)
+                {
+                    memory.duplicate_of = None;
                 }
             }
             // A user quotation that is not a whole statement cannot retire the
@@ -856,15 +874,28 @@ impl CaptureWork {
                     memory.contests.extend::<Vec<String>>(contested);
                 }
             }
-            settle_links(&mut memories);
+            // A user's contest shows the user's own words beside the
+            // statement, so it is kept for a quotation that is whole
+            // sentences, such as a question. A clause cut out of a sentence
+            // can say the opposite of that sentence and contests nothing.
+            if super::is_user_source(job) {
+                for memory in &mut memories {
+                    if !memory.contests.is_empty()
+                        && !super::quotes_whole_sentences(prose, &memory.quote)
+                    {
+                        memory.contests.clear();
+                    }
+                }
+            }
+            let kept_for_contests = settle_links(&mut memories);
             accepted.push(job.clone());
-            settled.push(memories);
+            settled.push((memories, kept_for_contests));
         }
         settle_batch_contests(&mut settled);
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
         let budget = Instant::now() + self.plan_commit_budget;
-        for (mut job, memories) in accepted.into_iter().zip(settled) {
+        for (mut job, (memories, _)) in accepted.into_iter().zip(settled) {
             let existing = plan
                 .existing
                 .iter()

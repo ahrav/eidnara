@@ -1975,83 +1975,35 @@ async fn clauses_of_one_sentence_in_two_categories_stay_as_quoted() {
     );
 }
 
-/// A sentence quoted with edge spaces or without its closing mark is the
-/// same statement as the sentence quoted whole. Across two categories the
-/// sentence is approved once at most; within one category the two
-/// quotations are one memory, stored with its closing mark; and a repeat
-/// without the mark duplicates the approved sentence.
+/// The extractor quotes a whole sentence with a space before it under one
+/// category and a clause of the same sentence under another. The two name
+/// one sentence, so the clause keeps its quotation and the sentence is
+/// approved once.
 #[tokio::test]
-async fn a_sentence_quoted_with_and_without_its_closing_mark_is_one_statement() {
-    let padded = format!("  {NEVER_FRIDAYS}");
-    for (id, whole) in [
-        ("m1", " Never deploy on Fridays."),
-        ("m2", "Never deploy on Fridays"),
-    ] {
-        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-        let message = if id == "m1" {
-            padded.as_str()
-        } else {
-            NEVER_FRIDAYS
-        };
-        capture(&handler, FIRST, "s1", &[(id, "user", message)], |_, _| {
-            vec![
-                Extracted {
-                    quote: whole.to_string(),
-                    category: Some("PROJECT_RULES"),
-                    ..Extracted::default()
-                },
-                Extracted {
-                    quote: CUT.to_string(),
-                    category: Some("CONSTRAINTS"),
-                    ..Extracted::default()
-                },
-            ]
-        })
-        .await;
-        let records = live_statement_records(&handler, &project);
-        assert!(
-            records.len() <= 1,
-            "{whole:?} beside a clause of another category: {records:?}"
-        );
-    }
-
+async fn a_whole_quotation_with_edge_spaces_and_a_clause_of_it_are_one_sentence() {
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(
-        &handler,
-        FIRST,
-        "s1",
-        &[("m1", "user", NEVER_FRIDAYS)],
-        |_, _| vec![fact("Never deploy on Fridays"), fact(CUT)],
-    )
-    .await;
-    assert_eq!(
-        explicit_search(&handler, (SECOND, "s2"), &project).await,
-        [(stated(NEVER_FRIDAYS), "visible".to_string())],
-        "the two quotations are one memory with its closing mark"
-    );
-    let again = format!("As I said: nothing new. {NEVER_FRIDAYS}");
-    capture(
-        &handler,
-        SECOND,
-        "s2",
-        &[("m2", "user", &again)],
-        |_, existing| {
-            vec![Extracted {
-                quote: "Never deploy on Fridays".to_string(),
-                duplicate_of: ids_containing(existing, &stated(NEVER_FRIDAYS)).pop(),
+    let padded = format!("  {NEVER_FRIDAYS}");
+    capture(&handler, FIRST, "s1", &[("m1", "user", &padded)], |_, _| {
+        vec![
+            Extracted {
+                quote: format!(" {NEVER_FRIDAYS}"),
+                category: Some("PROJECT_RULES"),
                 ..Extracted::default()
-            }]
-        },
-    )
+            },
+            Extracted {
+                quote: CUT.to_string(),
+                category: Some("CONSTRAINTS"),
+                ..Extracted::default()
+            },
+        ]
+    })
     .await;
-    assert_eq!(
-        explicit_search(&handler, (THIRD, "s3"), &project).await,
-        [(stated(NEVER_FRIDAYS), "visible".to_string())],
-        "the repeat without its closing mark writes nothing"
-    );
-    assert_eq!(
-        live_statement_records(&handler, &project),
-        [stated(NEVER_FRIDAYS)]
+    let records = live_statement_records(&handler, &project);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert!(
+        rows.contains(&(stated(CUT), "labeled".to_string())),
+        "the clause of another category keeps its quotation: {rows:?}"
     );
 }
 
@@ -2059,8 +2011,8 @@ async fn a_sentence_quoted_with_and_without_its_closing_mark_is_one_statement() 
 /// the user's whole sentence. A quotation cut after a negation, a fronted
 /// condition, a scope phrase, or a lead-in replaces nothing: the clause the
 /// extractor judged is not the sentence the user wrote. The clause is stored
-/// as quoted, labeled, and the statement is shown contested by it until the
-/// user's whole correction settles it.
+/// as quoted, labeled, and contests nothing: it can say the opposite of the
+/// user's sentence, so the statement is shown as stated.
 #[tokio::test]
 async fn a_correction_replaces_an_approved_statement_only_when_quoted_whole() {
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
@@ -2130,9 +2082,10 @@ async fn a_correction_replaces_an_approved_statement_only_when_quoted_whole() {
         );
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
         assert!(
-            block.contains(&format!("{} (stated ", stated(THURSDAY)))
-                && block.contains(&format!(": \"{}\")", stated(quote))),
-            "the statement is shown contested by the clause as quoted: {block}"
+            block.contains(&stated(THURSDAY))
+                && !block.contains("contested")
+                && !block.contains(quote),
+            "the cut clause is shown in no block: {block}"
         );
     }
 
@@ -2373,7 +2326,7 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     let kernel = handler.kernel.kernel_store().unwrap();
     let binding = kernel_routes::ProjectBinding::new(&project);
     let tip = kernel.tip().unwrap();
-    let read_for = |sessions: &[&str], caps: (usize, usize)| -> (Vec<String>, bool) {
+    let read_for = |sessions: &[Option<&str>], caps: (usize, usize)| -> (Vec<String>, bool) {
         let response =
             crate::canonical_memory::read_other_sessions(&kernel, &binding, sessions, tip, caps)
                 .unwrap();
@@ -2390,7 +2343,7 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         summaries.sort();
         (summaries, response.truncated)
     };
-    let read = |session: &str, caps: (usize, usize)| read_for(&[session], caps);
+    let read = |session: &str, caps: (usize, usize)| read_for(&[Some(session)], caps);
     const ROWS: usize = 1_000;
     const BYTES: usize = 1 << 20;
     let unbounded = (ROWS, BYTES);
@@ -2416,9 +2369,14 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     assert!(truncated);
     assert!(!other_session.contains(&stated(THURSDAY)));
     // The byte cap is the stored size of the other session's statement.
-    let rows =
-        crate::canonical_memory::read_other_sessions(&kernel, &binding, &["s3"], tip, unbounded)
-            .unwrap();
+    let rows = crate::canonical_memory::read_other_sessions(
+        &kernel,
+        &binding,
+        &[Some("s3")],
+        tip,
+        unbounded,
+    )
+    .unwrap();
     let ids: Vec<String> = rows
         .rows
         .iter()
@@ -2451,10 +2409,100 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     // A read for two sessions holds what either is delivered: the newest
     // two rows for the session that wrote none, and the older statement for
     // the session that wrote the twelve.
-    let (both, truncated) = read_for(&["s2", "s3"], (2, BYTES));
+    let (both, truncated) = read_for(&[Some("s2"), Some("s3")], (2, BYTES));
     assert!(truncated);
     assert_eq!(both.len(), 3);
     assert!(both.contains(&stated(THURSDAY)));
+}
+
+/// Pi derives an extension message under an id in its reserved space and
+/// gives it the role `user`. A queued job with such an id is extracted as an
+/// assistant source: its memory is stored labeled as a report, and a
+/// replacement it names replaces nothing, so the memory it names stays.
+#[tokio::test]
+async fn a_row_pi_derived_is_extracted_as_an_assistant_source() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "assistant", ASSISTANT_NOTE)],
+        |_, _| vec![fact(ASSISTANT_NOTE)],
+    )
+    .await;
+    let derived = "The integration suite takes about nine minutes on CI.";
+    let roles = std::cell::RefCell::new(Vec::new());
+    for (id, replace) in [
+        ("eidnara:custom:5e6f7081", true),
+        ("eidnara:custom:6f708192", false),
+    ] {
+        let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+        enqueue(&handler, SECOND, "s2", &[(id, "user", derived)]).await;
+        let work = body(
+            handler
+                .handle_native_capture_next(test_route(SECOND), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work", "{work}");
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        roles
+            .borrow_mut()
+            .push(prompt["messages"][0]["role"].as_str().unwrap().to_string());
+        let mut memory = json!({
+            "category": "PROJECT_RULES",
+            "content": "CI suite duration.",
+            "quote": derived,
+        });
+        if replace {
+            memory["replaces"] = json!(
+                ids_containing(
+                    prompt["existing_memories"].as_array().unwrap(),
+                    "four minutes"
+                )[0]
+            );
+        }
+        let submission = json!({
+            "method": "memory.capture.submit",
+            "session_id": "s2",
+            "lease": work["lease"],
+            "model": work["model"],
+            "output": json!({"version": 1, "decisions": [
+                {"message_id": prompt["messages"][0]["id"], "memories": [memory]},
+            ]})
+            .to_string(),
+        });
+        assert_eq!(
+            body(
+                handler
+                    .handle_native_capture_submit(test_route(SECOND), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        handler.native_capture.lock().unwrap().expire_all_for_test();
+        store
+            .execute_tag_sql_for_test("DELETE FROM memory_capture_jobs WHERE commit_seq IS NULL")
+            .unwrap();
+    }
+    assert_eq!(*roles.borrow(), ["assistant", "assistant"]);
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    rows.dedup();
+    assert_eq!(
+        rows,
+        [
+            (
+                format!("Assistant reported: {ASSISTANT_NOTE}"),
+                "labeled".to_string()
+            ),
+            (
+                format!("Assistant reported: {derived}"),
+                "labeled".to_string()
+            ),
+        ],
+        "the named memory stays, and each proposal is stored as a report"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
 }
 
 /// A source commits, its queue row is pruned, and the same message is
@@ -3375,6 +3423,92 @@ async fn the_users_restatement_of_a_contested_statement_settles_the_contest() {
             .iter()
             .all(|(.., rationale)| rationale.get("contested_by").is_none()),
         "no row names a contest"
+    );
+}
+
+/// One capture call holds two corrections of one statement. The first
+/// replaces it. The second names the same statement, which the first has
+/// claimed, so its source is refused and extracted again in the next drain,
+/// where it replaces the first correction. One value is current.
+#[tokio::test]
+async fn two_corrections_of_one_statement_in_a_batch_are_stored_in_order() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let wednesday = "We moved the release cut from Thursday to Wednesday.";
+    let messages = [("m2", "user", TUESDAY), ("m3", "user", wednesday)];
+    let correcting = |text: &str, existing: &[Value]| {
+        let newest = [TUESDAY, THURSDAY]
+            .iter()
+            .map(|value| ids_containing(existing, &stated(value)))
+            .find(|ids| !ids.is_empty())
+            .expect("a release cut statement is offered");
+        vec![Extracted {
+            quote: text.to_string(),
+            replaces: newest,
+            ..Extracted::default()
+        }]
+    };
+    capture(&handler, SECOND, "s2", &messages, correcting).await;
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        status.pending, 1,
+        "the second correction waits for the next drain"
+    );
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(TUESDAY), "visible".to_string())],
+        "the first correction replaces the statement"
+    );
+    store
+        .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0,paused_until_ms=0")
+        .unwrap();
+    drain(&handler, SECOND, "s2", &messages[1..], correcting).await;
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(wednesday), "visible".to_string())],
+        "the later correction is the one current value"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(wednesday)]
+    );
+}
+
+/// The user names a contested statement as the memory that already holds
+/// their sentence, and the sentence gives another value. The contest stays:
+/// only the user's own repeat of the statement settles it. The sentence is
+/// stored as the user's own statement.
+#[tokio::test]
+async fn a_different_sentence_named_as_a_repeat_settles_no_contest() {
+    let (handler, _dir, project, statement, _) = contested_limit().await;
+    let other = "The gateway admits at most 500 clients at once.";
+    capture(&handler, SECOND, "s2", &[("m3", "user", other)], |_, _| {
+        vec![Extracted {
+            quote: other.to_string(),
+            duplicate_of: Some(statement.clone()),
+            ..Extracted::default()
+        }]
+    })
+    .await;
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        block.contains(&format!("{} (stated ", stated(LIMIT_300))) && block.contains("contested"),
+        "the contest stays: {block}"
+    );
+    let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    assert!(
+        rows.contains(&(stated(other), "visible".to_string())),
+        "the user's sentence is stored as its own statement: {rows:?}"
     );
 }
 
