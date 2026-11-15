@@ -44,8 +44,8 @@ interface ScanState {
     strippedOpeningTag: boolean;
 }
 
-/** The released ranges of the latest `scan`, as `[from, to)` pairs of its input in order, with adjacent ranges merged: `kept[0..keptLength)`. The array only grows, so a scan stores ranges without allocating. */
-const kept: number[] = new Array(64).fill(0);
+/** The released ranges of the latest `scan` as `[from, to)` pairs of its input, in order and with adjacent ranges merged: `kept[0..keptLength)`. The array only grows, so a scan allocates only when it records more ranges than any earlier scan. */
+const kept: number[] = [];
 let keptLength = 0;
 
 function keep(from: number, to: number): void {
@@ -59,16 +59,14 @@ function keep(from: number, to: number): void {
     keptLength += 2;
 }
 
-/** The text of the latest scan's released ranges of `input`. */
+/** The text of the latest scan's released ranges in `input`. */
 function keptText(input: string): string {
-    if (keptLength === 0) return "";
-    if (keptLength === 2) return input.slice(kept[0], kept[1]);
     let out = "";
     for (let i = 0; i < keptLength; i += 2) out += input.slice(kept[i], kept[i + 1]);
     return out;
 }
 
-/** Resolves `input` from `index` under the stripping rule, recording each released range in `kept`, and returns the index where held text begins (`input.length` when nothing is held). Only `input[index..]` is read, so a caller can rescan its held text in place once more text follows it. */
+/** Resolves `input` from `index` under the stripping rule, records each released range in `kept`, and returns the index where held text begins (`input.length` when nothing is held). The scan reads only `input[index..]`, so a caller can rescan its held text in place once more text follows it. */
 function scan(input: string, index: number, final: boolean, state: ScanState): number {
     keptLength = 0;
     while (index < input.length) {
@@ -112,17 +110,16 @@ function scan(input: string, index: number, final: boolean, state: ScanState): n
     return index;
 }
 
-/** A stream fed text in pieces: `held` waits for the next piece. */
+/** A stream fed text in pieces, where `held` waits for the next piece. */
 interface DeltaStream {
     held: string;
     state: ScanState;
 }
 
-/** Feeds one piece and returns the text it releases. */
 function pushPiece(stream: DeltaStream, piece: string, final: boolean): string {
     const input = stream.held + piece;
     const held = scan(input, 0, final, stream.state);
-    stream.held = held === input.length ? "" : input.slice(held);
+    stream.held = input.slice(held);
     if (final) stream.state.leading = false;
     return keptText(input);
 }
@@ -174,10 +171,10 @@ export function isTextPart(part: unknown): part is TextPart {
     );
 }
 
-/** One streamed text part. The part's text so far is `raw`; `raw[held..]` waits for more text. While `view` holds, every removed character precedes the released text, which is the slice `raw[runStart, runEnd)` and shares the provider string's characters. Once a removal follows released text, each change appends its newly released text to `released`. `deltas` strips the update deltas in event order; while it is `undefined`, the deltas have matched the part's growth exactly, so they release what the part released. */
+/** One streamed text part. The part's text so far is `raw`, and `raw[heldFrom..]` waits for more text. While `view` holds, the released text is `raw[runStart, runEnd)`, with removed text confined to either side. Releasing text after a removal that follows that slice clears `view`; subsequent changes append their newly released text to `released`. `deltas` strips the update deltas in event order. While `deltas` is `undefined`, every delta has matched the part's growth exactly and the part remains open, so the deltas release the same text as the part. */
 interface PartStream {
     raw: string;
-    held: number;
+    heldFrom: number;
     state: ScanState;
     view: boolean;
     runStart: number;
@@ -189,7 +186,7 @@ interface PartStream {
 function openPartStream(leading: boolean): PartStream {
     return {
         raw: "",
-        held: 0,
+        heldFrom: 0,
         state: { leading, strippedOpeningTag: false },
         view: true,
         runStart: 0,
@@ -199,10 +196,10 @@ function openPartStream(leading: boolean): PartStream {
     };
 }
 
-/** Scans the part text past the held index; with `final`, the part has ended and its held text resolves. Leaves the newly released ranges in `kept`. */
+/** Scans the part text from the held index and leaves the newly released ranges in `kept`. With `final`, the part has ended and its held text resolves. */
 function advance(stream: PartStream, text: string, final: boolean): void {
     stream.raw = text;
-    stream.held = scan(text, stream.held, final, stream.state);
+    stream.heldFrom = scan(text, stream.heldFrom, final, stream.state);
     if (final) stream.state.leading = false;
     if (keptLength === 0) return;
     if (!stream.view) {
@@ -226,10 +223,10 @@ function advance(stream: PartStream, text: string, final: boolean): void {
     stream.released = released;
 }
 
-/** Releases the part's growth `piece` whole: nothing was held, the growth holds no section sign, and in view it continues the run. */
+/** EXTENDRUN_DOC */
 function extendRun(stream: PartStream, text: string, piece: string): void {
     stream.raw = text;
-    stream.held = text.length;
+    stream.heldFrom = text.length;
     if (stream.view) {
         stream.runEnd = text.length;
         stream.released = text.slice(stream.runStart);
@@ -254,23 +251,17 @@ type StreamUpdate = {
     partial?: unknown;
 };
 
-/** The released delta for the update being stripped, set by the text part the update targets. */
+/** The released delta for the text part targeted by the latest `streamPart` call. */
 let releasedDelta: string | undefined;
 
-/** Copies the state the deltas share with the part into a delta stream of their own, before the part's next change. */
+/** The delta stream copies the shared part state before the part's next change. */
 function separateDeltas(stream: PartStream): DeltaStream {
-    const deltas = {
-        held: stream.raw.slice(stream.held),
-        state: {
-            leading: stream.state.leading,
-            strippedOpeningTag: stream.state.strippedOpeningTag,
-        },
-    };
+    const deltas = { held: stream.raw.slice(stream.heldFrom), state: { ...stream.state } };
     stream.deltas = deltas;
     return deltas;
 }
 
-/** Advances one text part for an update and returns its released text. */
+/** Advances one text part for an update and returns its released text. For the part the update targets, it also sets `releasedDelta` to the released delta. */
 function streamPart(
     part: TextPart,
     index: number,
@@ -291,21 +282,21 @@ function streamPart(
     const ends = update?.type === "text_end" && index === update.contentIndex;
     let deltas = stream.deltas;
     if (deltas === undefined) {
-        const before = stream.raw;
+        const before = stream.raw.length;
         if (
             !ends &&
             (grew
                 ? piece !== undefined &&
-                  text.length === before.length + piece.length &&
-                  text.startsWith(piece, before.length)
+                  text.length === before + piece.length &&
+                  text.startsWith(piece, before)
                 : piece === undefined || piece === "")
         ) {
             if (!grew) {
                 if (piece !== undefined) releasedDelta = "";
             } else if (
                 piece !== undefined &&
-                stream.held === before.length &&
-                (!stream.view || stream.runEnd === before.length) &&
+                stream.heldFrom === before &&
+                (!stream.view || stream.runEnd === before) &&
                 !stream.state.leading &&
                 !piece.includes(SECTION)
             ) {
@@ -325,7 +316,7 @@ function streamPart(
     return stream.released;
 }
 
-/** Rewrites one Pi `message_start` or `message_update` event in place so its listeners render assistant text with `\u00a7N\u00a7` tags removed. An event without an `assistantMessageEvent` carries a whole message, which is stripped as complete text. Every text part, the content array, and an object-valued `partial` are replaced by snapshots, because the provider keeps appending to its own parts while later handlers and listeners run. `text_delta` updates receive newly released text in `delta`, and `text_end` updates receive the released part text in `content`. A trailing tag prefix is released at `text_end` into `content` and the message, after the last `text_delta`. Each `text_delta` delta is stripped in event order, since Pi can hand listeners an update after the provider has appended later text to the part: while every delta has matched the part's growth exactly, the delta is what the part released; from the first update that differs, the deltas pass through a stripper of their own. */
+/** Rewrites one Pi `message_start` or `message_update` event in place so its listeners render assistant text with `\u00a7N\u00a7` tags removed. An event without an `assistantMessageEvent` carries a whole message, which is stripped as complete text. Every text part, the content array, and an object-valued `partial` are replaced by snapshots, because the provider keeps appending to its own parts while later handlers and listeners run. `text_delta` updates receive newly released text in `delta`, and `text_end` updates receive the released part text in `content`. A trailing tag prefix is released at `text_end` into `content` and the message, after the last `text_delta`. Each `text_delta` delta is stripped in event order, since Pi can hand listeners an update after the provider has appended later text to the part. While every delta has matched the part's growth exactly, the delta is the text the part released; from the first update that differs, the deltas pass through a stripper of their own. */
 export function stripStreamedTags(event: {
     message: unknown;
     assistantMessageEvent?: unknown;
@@ -334,24 +325,24 @@ export function stripStreamedTags(event: {
     if (message === null || typeof message !== "object") return;
     if (message.role !== "assistant" || !Array.isArray(message.content)) return;
     const update = event.assistantMessageEvent as StreamUpdate | undefined;
-    let leading = true;
+    const outer = releasedDelta;
     releasedDelta = undefined;
+    let firstText = true;
     const content = message.content.map((part: unknown, index: number) => {
         if (!isTextPart(part)) return part;
-        const first = leading;
-        leading = false;
-        const text =
-            update === undefined
-                ? stripTags(part.text, first)
-                : streamPart(part, index, first, update);
-        return { ...part, text };
+        const leading = firstText;
+        firstText = false;
+        if (update === undefined) return { ...part, text: stripTags(part.text, leading) };
+        return { ...part, text: streamPart(part, index, leading, update) };
     });
     message.content = content;
+    const delta = releasedDelta;
+    releasedDelta = outer;
     if (update === undefined) {
         wholeContents.add(content);
         return;
     }
-    if (update.type === "text_delta" && releasedDelta !== undefined) update.delta = releasedDelta;
+    if (update.type === "text_delta" && delta !== undefined) update.delta = delta;
     if (update.type === "text_end" && typeof update.contentIndex === "number") {
         const part = content[update.contentIndex];
         if (isTextPart(part)) update.content = part.text;
