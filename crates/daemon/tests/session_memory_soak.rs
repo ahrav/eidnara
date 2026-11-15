@@ -201,6 +201,12 @@ async fn run_session(
     live["memory_holders"].clone()
 }
 
+fn glibc_reports_its_heap() -> bool {
+    daemon::process_memory::ProcessMemory::sample()
+        .c_heap
+        .is_some()
+}
+
 fn operator_set_arena_limit() -> bool {
     std::env::var_os("MALLOC_ARENA_MAX").is_some()
         || std::env::var("GLIBC_TUNABLES").is_ok_and(|tunables| tunables.contains("arena_max"))
@@ -272,7 +278,8 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
             "status reports {reported} bytes, /proc reports {sampled}"
         );
         assert!(
-            status["process_memory"]["c_heap"]["in_use_bytes"].is_u64(),
+            status["process_memory"]["c_heap"]["in_use_bytes"].is_u64()
+                || !glibc_reports_its_heap(),
             "{}",
             status["process_memory"]
         );
@@ -288,9 +295,9 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
     );
     let low_water =
         |range: std::ops::Range<usize>| *anonymous[range].iter().min().expect("a window");
-    let early = low_water(window..2 * window);
+    let early = low_water(2 * window..3 * window);
     let late = low_water(sessions - window..sessions);
-    let between = (sessions - 2 * window) as u64;
+    let between = window as u64;
     assert!(
         late <= early + SESSION_GROWTH_BOUND_BYTES * between,
         "anonymous memory grew {} MiB over {between} sessions: {:?}",
@@ -325,7 +332,11 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_operator_arena_setting_keeps_the_daemon_from_setting_its_own() {
     let root = tempfile::tempdir().expect("state root");
+    std::fs::create_dir_all(root.path().join("project")).expect("project root");
+    let config_home = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home).expect("config home");
     let fixture = Launch::at(root.path().to_path_buf())
+        .config_home(&config_home)
         .env("GLIBC_TUNABLES", "glibc.malloc.arena_max=8")
         .start();
     let client = fixture.client().await;

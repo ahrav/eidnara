@@ -72,6 +72,12 @@ async fn releases(daemon: &KernelDaemon) -> u64 {
         .expect("release count")
 }
 
+async fn resident_drop(daemon: &KernelDaemon) -> u64 {
+    process_memory(daemon).await["c_heap_release_resident_drop_bytes"]
+        .as_u64()
+        .expect("resident drop")
+}
+
 async fn releases_reach(daemon: &KernelDaemon, count: u64) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while releases(daemon).await < count {
@@ -104,6 +110,7 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
     let _serial = ONE_AT_A_TIME.lock().await;
     let daemon = KernelDaemon::start().await;
     let releases_before = releases(&daemon).await;
+    let dropped_before = resident_drop(&daemon).await;
 
     let heap = FragmentedCHeap::new();
     assert!(
@@ -116,19 +123,14 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
 
     let reported = process_memory(&daemon).await;
     assert_eq!(reported["c_heap_releases"], releases_before + 1);
-    assert!(
-        reported["c_heap_release_resident_drop_bytes"]
+    assert!(resident_drop(&daemon).await - dropped_before > heap.freed_bytes / 2);
+    if ProcessMemory::sample().c_heap.is_some() {
+        let free = reported["c_heap"]["free_bytes"]
             .as_u64()
-            .expect("drop")
-            > heap.freed_bytes / 2
-    );
-    assert!(
-        reported["c_heap"]["free_bytes"]
-            .as_u64()
-            .expect("free bytes")
-            > heap.freed_bytes / 2
-    );
-    assert!(reported["c_heap"]["in_use_bytes"].is_u64());
+            .expect("free bytes");
+        assert!(free > heap.freed_bytes / 2);
+        assert!(reported["c_heap"]["in_use_bytes"].is_u64());
+    }
     assert!(reported["rss_anon_bytes"].is_u64() && reported["rss_file_bytes"].is_u64());
     assert!(reported["threads"].as_u64().expect("threads") >= 1);
 

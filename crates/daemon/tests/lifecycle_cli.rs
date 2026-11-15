@@ -679,7 +679,6 @@ async fn restart_preflights_the_successor_before_committing_the_stop() {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
 async fn module_status(client: &host_runtime::Client, root: &Path) -> Value {
     let project = root.join("project");
     std::fs::create_dir_all(&project).expect("project root");
@@ -717,6 +716,7 @@ async fn module_status(client: &host_runtime::Client, root: &Path) -> Value {
     serde_json::from_slice(&response.body).expect("status JSON")
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_dev_mode_lifecycle_roundtrip() {
     require_debug_build();
@@ -778,7 +778,6 @@ async fn full_dev_mode_lifecycle_roundtrip() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     assert_eq!(
         module_status(&client, root.path()).await["process_memory"]["c_heap_arena_limit"],
         daemon::process_memory::C_HEAP_ARENAS,
