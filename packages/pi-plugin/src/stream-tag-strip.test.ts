@@ -107,7 +107,7 @@ describe("StreamTagStripper", () => {
             });
             expect(stripper.released).toBe(expected);
             expect(tests).toBeGreaterThanOrEqual(WHITESPACE_RUN.length);
-            expect(tests).toBeLessThanOrEqual(2 * WHITESPACE_RUN.length);
+            expect(tests).toBeLessThanOrEqual(WHITESPACE_RUN.length + 3 * (opening.length + 1));
         }
     });
 
@@ -452,6 +452,18 @@ describe("stripStreamedTags", () => {
         expect(send(" cd")).toEqual(["ab cd", " cd"]);
     });
 
+    it("keeps whitespace held in step out of deltas that then run behind the part", () => {
+        const part = { type: "text", text: "" };
+        const send = deltaSender(part);
+        for (const delta of [`${S}1${S}`, " ", " "]) {
+            part.text += delta;
+            expect(send(delta)).toEqual(["", ""]);
+        }
+        part.text += "xy";
+        expect(send("x")).toEqual(["xy", "x"]);
+        expect(send("y")).toEqual(["xy", "y"]);
+    });
+
     it("treats text a part gains after its end as interior text", () => {
         const part = { type: "text", text: "" };
         const partial = { role: "assistant", content: [part] as Part[] };
@@ -608,7 +620,9 @@ describe("stripStreamedTags", () => {
         expect(shown).toBe("x");
         expect(deltas).toBe("x");
         expect(tests).toBeGreaterThanOrEqual(WHITESPACE_RUN.length);
-        expect(tests).toBeLessThanOrEqual(3 * WHITESPACE_RUN.length);
+        const scans = ahead ? 2 : 1;
+        const others = text.length - WHITESPACE_RUN.length;
+        expect(tests).toBeLessThanOrEqual(scans * WHITESPACE_RUN.length + 3 * others);
     });
 
     it("streams random answers, in step, run ahead, or restarted, as prefixes of the whole-text strip", () => {

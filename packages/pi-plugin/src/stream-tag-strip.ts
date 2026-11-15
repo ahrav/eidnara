@@ -68,7 +68,7 @@ function keptText(input: string): string {
     return out;
 }
 
-/** The scanner records released ranges in `kept` and returns the start of held text, or `input.length` when none remains. After appending text, callers resume at the returned index with the same `state` to reuse its whitespace classification. */
+/** The scanner records released ranges in `kept` and returns the start of held text, or `input.length` when none remains. The next scan's `input[index..]` begins with this scan's held text and takes this scan's `state` or a copy of it. */
 function scan(input: string, index: number, final: boolean, state: ScanState): number {
     keptLength = 0;
     while (index < input.length) {
