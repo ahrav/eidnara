@@ -11,10 +11,10 @@
 //! - `Lifted (key): …`: a user constraint the user later lifted, stated as lifted.
 //!
 //! Waiting and constraint lines are open; decided and lifted lines settle the item with their key.
-//! The state of every key is derived from the stored segments, oldest to newest, each time the
+//! The state of every key is derived from the stored segments, newest to oldest, each time the
 //! renderer builds its rows, so it follows a session across folds with the rows themselves. The
 //! stored rows keep the lines as written, and the summarizer's reference window and search read
-//! them there. The rendered rows drop an open line under these rules:
+//! them there. A rendered row retires an open line under these rules:
 //!
 //! - **Own segment.** A segment's `p1` is its full statement and decides its keys: a key whose last
 //!   status line in `p1` settles it is settled in that segment, and the key's open lines leave every
@@ -22,16 +22,17 @@
 //! - **A later answer.** An open line leaves when a later segment's `p1` states a settling line with
 //!   its key and that segment stores a claim with the key. Claim validation admits a claim only when
 //!   its one citation resolves to a message inside the segment that holds it, so the claim is the
-//!   answering turn. The earlier line's own claim has no part in this.
+//!   answering turn. The settling line's claim alone carries the closure; the earlier line needs
+//!   no claim of its own.
 //! - **Constraints** stand in every tier until one of the two rules above settles them.
 //! - **Waiting lines** speak for the end of their own segment. A waiting line renders while its
-//!   segment is the newest tiered row among the rows rendered together. The fold of every later span
-//!   read that segment in its reference window and either stated the item again in a newer segment,
-//!   settled it, or passed over it; in each case the older line leaves.
+//!   segment is the newest tiered row among the rows rendered together. The fold of the next span
+//!   reads that segment in its reference window and states the item again in a newer segment,
+//!   settles it, or passes over it; in each case the older line leaves.
 //!
-//! The pass only removes lines. A `p2` or `p3` it empties renders the next denser tier, as a tier
+//! Retirement only removes lines. A `p2` or `p3` it empties renders the next denser tier, as a tier
 //! the summarizer left out does; an emptied `p1` or `p4` renders the heading alone. Corrections
-//! apply to the text that remains, so a superseded claim whose anchor stood in a removed line lists
+//! apply to the text that remains, so a superseded claim whose anchor stood in a retired line lists
 //! on the row's `[corrections: …]` line with the key's live value.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,20 +88,20 @@ fn tiered_p1(segment: &StoredHistorySegment) -> Option<&str> {
     (segment.legacy != 1 && !segment.is_archive()).then_some(p1)
 }
 
-/// What one row drops at render.
+/// The open lines one row retires at render.
 #[derive(Debug, Default)]
-struct Retired<'s> {
+struct Retired {
     /// A newer tiered row exists, so every waiting line leaves.
     waiting: bool,
-    /// The keys whose open lines leave: settled by the row's own `p1` or by a later row's
+    /// The keys whose open lines leave: settled by the row's own `p1`, or by a later row's
     /// settling line and claim.
-    settled: BTreeSet<&'s str>,
+    settled: BTreeSet<String>,
 }
 
-/// The lines each row drops, aligned with `segments`; `None` for a row that renders flat or
-/// states no key.
-fn retired(segments: &[StoredHistorySegment]) -> Vec<Option<Retired<'_>>> {
-    let mut out: Vec<Option<Retired<'_>>> = segments.iter().map(|_| None).collect();
+/// What each row retires, aligned with `segments`; `None` for a row that renders flat or states
+/// no key.
+fn retired(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
+    let mut out: Vec<Option<Retired>> = segments.iter().map(|_| None).collect();
     // The keys a newer row settles with a claim, and whether a newer tiered row exists.
     let mut settled_later: BTreeSet<&str> = BTreeSet::new();
     let mut newer = false;
@@ -108,6 +109,7 @@ fn retired(segments: &[StoredHistorySegment]) -> Vec<Option<Retired<'_>>> {
         let Some(p1) = tiered_p1(segment) else {
             continue;
         };
+        // Each key's last status in `p1`, and the keys `p1` settles at any point.
         let mut last: BTreeMap<&str, Status> = BTreeMap::new();
         let mut settles: BTreeSet<&str> = BTreeSet::new();
         for (status, key) in p1.lines().filter_map(status_line) {
@@ -116,9 +118,12 @@ fn retired(segments: &[StoredHistorySegment]) -> Vec<Option<Retired<'_>>> {
                 settles.insert(key);
             }
         }
-        // A key only a lower tier states still follows the later rows' settlements.
+        // A key that only a lower tier states still follows the later rows' settlements.
         let mut keys: BTreeSet<&str> = last.keys().copied().collect();
-        for tier in [&segment.p2, &segment.p3, &segment.p4].into_iter().flatten() {
+        for tier in [&segment.p2, &segment.p3, &segment.p4]
+            .into_iter()
+            .flatten()
+        {
             keys.extend(tier.lines().filter_map(status_line).map(|(_, key)| key));
         }
         if !keys.is_empty() {
@@ -130,6 +135,7 @@ fn retired(segments: &[StoredHistorySegment]) -> Vec<Option<Retired<'_>>> {
                         settled_later.contains(key)
                             || last.get(key).is_some_and(|status| !status.is_open())
                     })
+                    .map(str::to_owned)
                     .collect(),
             });
         }
@@ -143,10 +149,10 @@ fn retired(segments: &[StoredHistorySegment]) -> Vec<Option<Retired<'_>>> {
     out
 }
 
-/// `text` without the open lines `retired` drops and without each open line that a settling line
-/// with its key follows in `text`, or `None` when every line stays. A blank line that would open
-/// the text, close it, or follow another blank line after a removal goes with the removed line.
-fn without_retired(text: &str, retired: &Retired<'_>) -> Option<String> {
+/// `text` after `retired` takes its open lines and each open line that a settling line with its
+/// key follows in `text`, or `None` when every line stays. A blank line that would open the text,
+/// close it, or follow another blank line after a removal goes with the removed line.
+fn retire_lines(text: &str, retired: &Retired) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let parsed: Vec<Option<(Status, &str)>> = lines.iter().map(|line| status_line(line)).collect();
     let mut last_settling: BTreeMap<&str, usize> = BTreeMap::new();
@@ -167,7 +173,7 @@ fn without_retired(text: &str, retired: &Retired<'_>) -> Option<String> {
                 || last_settling.get(key).is_some_and(|&last| last > at))
     };
     let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
-    // Whether a line left since the last kept line that is not blank.
+    // Whether a line left since the last kept line that has text.
     let mut removed = false;
     let mut any = false;
     for (at, line) in lines.iter().enumerate() {
@@ -194,57 +200,54 @@ fn without_retired(text: &str, retired: &Retired<'_>) -> Option<String> {
     Some(kept.join("\n"))
 }
 
-/// Applies `retired` to one render row's tiers and keeps its flat `content` equal to its `p1`.
-fn retire_row(row: &mut DecayRenderHistorySegment, retired: &Retired<'_>) {
-    if let Some(p1) = row.p1.as_deref().and_then(|p1| without_retired(p1, retired)) {
+/// `row` with its tiers after retirement and its flat `content` equal to its `p1`.
+fn retire(
+    mut row: DecayRenderHistorySegment,
+    retired: Option<Retired>,
+) -> DecayRenderHistorySegment {
+    let Some(retired) = retired else {
+        return row;
+    };
+    if let Some(p1) = row.p1.as_deref().and_then(|p1| retire_lines(p1, &retired)) {
         row.content.clone_from(&p1);
         row.p1 = Some(p1);
     }
     for tier in [&mut row.p2, &mut row.p3] {
-        if let Some(text) = tier.as_deref().and_then(|text| without_retired(text, retired)) {
+        if let Some(text) = tier
+            .as_deref()
+            .and_then(|text| retire_lines(text, &retired))
+        {
             *tier = Some(text).filter(|text| !text.trim().is_empty());
         }
     }
-    if let Some(p4) = row.p4.as_deref().and_then(|p4| without_retired(p4, retired)) {
+    if let Some(p4) = row.p4.as_deref().and_then(|p4| retire_lines(p4, &retired)) {
         row.p4 = Some(p4);
     }
+    row
 }
 
-/// The render rows of `segments` in their given order, oldest first, without the open lines the
-/// module rules retire.
+/// The render rows of `segments` in their given order, oldest first, each with the tiers that
+/// retirement leaves.
 pub(crate) fn rows(
     segments: &[StoredHistorySegment],
 ) -> impl Iterator<Item = DecayRenderHistorySegment> + '_ {
-    let retired = retired(segments);
-    segments.iter().zip(retired).map(|(segment, retired)| {
-        let mut row = DecayRenderHistorySegment::from(segment);
-        if let Some(retired) = retired {
-            retire_row(&mut row, &retired);
-        }
-        row
-    })
+    segments
+        .iter()
+        .map(DecayRenderHistorySegment::from)
+        .zip(retired(segments))
+        .map(|(row, retired)| retire(row, retired))
 }
 
 /// [`rows`] over owned segments.
-pub(crate) fn owned_rows(segments: Vec<StoredHistorySegment>) -> Vec<DecayRenderHistorySegment> {
-    // The retirement plan borrows keys from the stored tiers, so each row's tiers are rewritten
-    // before the rows move.
-    let rewritten: Vec<Option<DecayRenderHistorySegment>> = retired(&segments)
-        .into_iter()
-        .zip(&segments)
-        .map(|(retired, segment)| {
-            retired.map(|retired| {
-                let mut row = DecayRenderHistorySegment::from(segment);
-                retire_row(&mut row, &retired);
-                row
-            })
-        })
-        .collect();
+pub(crate) fn owned_rows(
+    segments: Vec<StoredHistorySegment>,
+) -> impl Iterator<Item = DecayRenderHistorySegment> {
+    let retired = retired(&segments);
     segments
         .into_iter()
-        .zip(rewritten)
-        .map(|(segment, rewritten)| rewritten.unwrap_or_else(|| segment.into()))
-        .collect()
+        .map(DecayRenderHistorySegment::from)
+        .zip(retired)
+        .map(|(row, retired)| retire(row, retired))
 }
 
 #[cfg(test)]
@@ -373,7 +376,11 @@ mod tests {
     #[test]
     fn a_question_stated_again_in_the_newest_segment_stays_open_once() {
         let first = same(1, &format!("I drafted the steps.\n{WAITING}"), vec![]);
-        let second = same(2, &format!("I raised the file question again.\n{WAITING}"), vec![]);
+        let second = same(
+            2,
+            &format!("I raised the file question again.\n{WAITING}"),
+            vec![],
+        );
         let rendered = p1s(&[first, second]);
         assert_eq!(rendered[0], "I drafted the steps.");
         assert_eq!(
@@ -462,7 +469,10 @@ mod tests {
         let second = same(2, &format!("{DECIDED}\nThe file moved.\n{WAITING}"), vec![]);
         let rendered = p1s(&[first, second]);
         assert_eq!(rendered[0], DECIDED);
-        assert_eq!(rendered[1], format!("{DECIDED}\nThe file moved.\n{WAITING}"));
+        assert_eq!(
+            rendered[1],
+            format!("{DECIDED}\nThe file moved.\n{WAITING}")
+        );
     }
 
     #[test]
@@ -488,8 +498,7 @@ mod tests {
         let mut untiered = same(3, WAITING, vec![]);
         untiered.p1 = None;
         let tiered = same(2, WAITING, vec![]);
-        let rendered: Vec<DecayRenderHistorySegment> =
-            rows(&[legacy, tiered, untiered]).collect();
+        let rendered: Vec<DecayRenderHistorySegment> = rows(&[legacy, tiered, untiered]).collect();
         assert_eq!(rendered[0].content, WAITING);
         assert_eq!(rendered[1].p1.as_deref(), Some(WAITING));
         assert_eq!(rendered[2].content, WAITING);
@@ -505,10 +514,28 @@ mod tests {
             settled: BTreeSet::new(),
         };
         assert_eq!(
-            without_retired(&text, &retired).as_deref(),
+            retire_lines(&text, &retired).as_deref(),
             Some("First paragraph.\n\n  Indented line.")
         );
-        assert_eq!(without_retired("No status line.\n\n\nStill none.", &retired), None);
+        assert_eq!(
+            retire_lines("No status line.\n\n\nStill none.", &retired),
+            None
+        );
+    }
+
+    #[test]
+    fn an_open_line_leaves_a_tier_when_a_settling_line_with_its_key_follows_it_there() {
+        // The question is asked, answered, and asked again in one segment: the last line decides.
+        let p1 = format!("{WAITING}\n{DECIDED}\nThe file moved.\n{WAITING}");
+        // `p2` settles a key that `p1` leaves unstated.
+        let p2 = format!("{CONSTRAINT}\n{LIFTED}");
+        let only = row(1, [&p1, &p2, "", ""], vec![]);
+        let rendered: Vec<DecayRenderHistorySegment> = rows(&[only]).collect();
+        assert_eq!(
+            rendered[0].p1.as_deref(),
+            Some(format!("{DECIDED}\nThe file moved.\n{WAITING}").as_str())
+        );
+        assert_eq!(rendered[0].p2.as_deref(), Some(LIFTED));
     }
 
     #[test]
@@ -526,11 +553,13 @@ mod tests {
             .map(|row| (row.content, row.p1, row.p2, row.p3, row.p4))
             .collect();
         let owned: Vec<_> = owned_rows(segments)
-            .into_iter()
             .map(|row| (row.content, row.p1, row.p2, row.p3, row.p4))
             .collect();
         assert_eq!(borrowed, owned);
         assert_eq!(owned[0].1.as_deref(), Some(""));
-        assert_eq!(owned[2].1.as_deref(), Some(format!("{LIFTED}\n{WAITING}").as_str()));
+        assert_eq!(
+            owned[2].1.as_deref(),
+            Some(format!("{LIFTED}\n{WAITING}").as_str())
+        );
     }
 }

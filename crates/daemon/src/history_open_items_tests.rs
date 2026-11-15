@@ -102,28 +102,31 @@ fn fold(
         ..ValidateOptions::default()
     };
     let validated = validate_history_summarizer_output(text, chunk, &[], options).unwrap();
-    stored.extend(validated.history_segments.iter().map(|segment| {
-        StoredHistorySegment {
-            sequence: segment.sequence as i64,
-            start_message: segment.start_message as i64,
-            end_message: segment.end_message as i64,
-            start_message_id: segment.start_message_id.clone(),
-            end_message_id: segment.end_message_id.clone(),
-            start_date: None,
-            end_date: None,
-            title: segment.title.clone(),
-            content: segment.content.clone(),
-            p1: segment.p1.clone(),
-            p2: segment.p2.clone(),
-            p3: segment.p3.clone(),
-            p4: segment.p4.clone(),
-            importance: 50,
-            episode_type: segment.episode_type.clone(),
-            legacy: 0,
-            created_at: 0,
-            claims: segment.claims.clone(),
-        }
-    }));
+    stored.extend(
+        validated
+            .history_segments
+            .iter()
+            .map(|segment| StoredHistorySegment {
+                sequence: segment.sequence as i64,
+                start_message: segment.start_message as i64,
+                end_message: segment.end_message as i64,
+                start_message_id: segment.start_message_id.clone(),
+                end_message_id: segment.end_message_id.clone(),
+                start_date: None,
+                end_date: None,
+                title: segment.title.clone(),
+                content: segment.content.clone(),
+                p1: segment.p1.clone(),
+                p2: segment.p2.clone(),
+                p3: segment.p3.clone(),
+                p4: segment.p4.clone(),
+                importance: 50,
+                episode_type: segment.episode_type.clone(),
+                legacy: 0,
+                created_at: 0,
+                claims: segment.claims.clone(),
+            }),
+    );
     validated.history_segments
 }
 
@@ -201,10 +204,7 @@ impl Answered {
     fn asking(&self) -> Vec<IngressMessage> {
         vec![
             user(1, self.request),
-            assistant(
-                2,
-                &format!("{}{}", work_log("this request"), self.question),
-            ),
+            assistant(2, &format!("{}{}", work_log("this request"), self.question)),
         ]
     }
 
@@ -219,7 +219,11 @@ impl Answered {
     /// The first fold's answer: the question is open at the end of its span.
     fn first_output(&self) -> String {
         let p1 = format!("I worked through the request.\n{}", self.waiting_line());
-        output(&[segment_xml(1, 2, [&p1, &p1, "Worked on it.", ""])], &[], 3)
+        output(
+            &[segment_xml(1, 2, [&p1, &p1, "Worked on it.", ""])],
+            &[],
+            3,
+        )
     }
 }
 
@@ -228,7 +232,11 @@ fn a_question_pending_after_one_fold_closes_when_the_next_fold_holds_the_answer(
     for case in ANSWERED {
         let messages = case.answered();
         let mut stored = Vec::new();
-        fold(&mut stored, &case.first_output(), &chunk_of(&messages, 1, 3));
+        fold(
+            &mut stored,
+            &case.first_output(),
+            &chunk_of(&messages, 1, 3),
+        );
 
         // The question is open after the first fold, in the tiers a recent row renders.
         let after_first = rendered_tiers(&stored);
@@ -255,14 +263,25 @@ fn a_question_pending_after_one_fold_closes_when_the_next_fold_holds_the_answer(
         let history = rendered_tiers(&stored);
         for (row, tiers) in history.iter().enumerate() {
             for tier in tiers {
-                assert_eq!(open_lines(tier), Vec::<&str>::new(), "{} row {row}", case.key);
+                assert_eq!(
+                    open_lines(tier),
+                    Vec::<&str>::new(),
+                    "{} row {row}",
+                    case.key
+                );
             }
         }
         for tier in &history[1] {
             assert!(tier.contains(&case.decided_line()), "{tier}");
         }
         // The stored rows keep what the summarizer wrote.
-        assert!(stored[0].p1.as_deref().unwrap().contains(&case.waiting_line()));
+        assert!(
+            stored[0]
+                .p1
+                .as_deref()
+                .unwrap()
+                .contains(&case.waiting_line())
+        );
     }
 }
 
@@ -298,7 +317,10 @@ fn a_summary_that_records_the_answer_and_keeps_the_waiting_line_renders_the_answ
             "I worked through the request.\n{}\nI made the change.",
             case.decided_line()
         )));
-        assert!(consolidated.ends_with(&case.decided_line()), "{consolidated}");
+        assert!(
+            consolidated.ends_with(&case.decided_line()),
+            "{consolidated}"
+        );
         // The third tier held the waiting line alone, so the row renders its second tier there.
         assert_eq!(old, consolidated);
     }
@@ -308,10 +330,20 @@ fn a_summary_that_records_the_answer_and_keeps_the_waiting_line_renders_the_answ
 fn an_unanswered_question_stays_open_until_a_later_segment_passes_over_it() {
     let case = &ANSWERED[0];
     let mut messages = case.asking();
-    messages.push(user(3, "Separate task: add a changelog entry for the last release."));
-    messages.push(assistant(4, "The changelog has the entry for the last release."));
+    messages.push(user(
+        3,
+        "Separate task: add a changelog entry for the last release.",
+    ));
+    messages.push(assistant(
+        4,
+        "The changelog has the entry for the last release.",
+    ));
     let mut stored = Vec::new();
-    fold(&mut stored, &case.first_output(), &chunk_of(&messages, 1, 3));
+    fold(
+        &mut stored,
+        &case.first_output(),
+        &chunk_of(&messages, 1, 3),
+    );
     assert_eq!(
         open_lines(&rendered_tiers(&stored)[0][0]),
         [case.waiting_line()]
@@ -336,12 +368,23 @@ fn a_question_raised_again_in_a_later_segment_renders_once_there() {
     messages.push(user(3, "First show me the current poller logs."));
     messages.push(assistant(
         4,
-        &format!("Here are the logs. I still need your call: {}", case.question),
+        &format!(
+            "Here are the logs. I still need your call: {}",
+            case.question
+        ),
     ));
     let mut stored = Vec::new();
-    fold(&mut stored, &case.first_output(), &chunk_of(&messages, 1, 3));
+    fold(
+        &mut stored,
+        &case.first_output(),
+        &chunk_of(&messages, 1, 3),
+    );
     let p1 = format!("I showed the poller logs.\n{}", case.waiting_line());
-    let second = output(&[segment_xml(3, 4, [&p1, &p1, "Showed the logs.", ""])], &[], 5);
+    let second = output(
+        &[segment_xml(3, 4, [&p1, &p1, "Showed the logs.", ""])],
+        &[],
+        5,
+    );
     fold(&mut stored, &second, &chunk_of(&messages, 3, 5));
 
     let history = rendered_tiers(&stored);
@@ -376,7 +419,8 @@ fn constraint_session() -> Vec<IngressMessage> {
 /// The first two folds of [`constraint_session`]: the constraint, then unrelated work.
 fn constraint_then_other_work(messages: &[IngressMessage]) -> Vec<StoredHistorySegment> {
     let first_chunk = chunk_of(messages, 1, 3);
-    let p1 = format!("{CONSTRAINT_LINE}\nI measured the baseline and left two parser bugs unfixed.");
+    let p1 =
+        format!("{CONSTRAINT_LINE}\nI measured the baseline and left two parser bugs unfixed.");
     let first = output(
         &[segment_xml(1, 2, [&p1, &p1, &p1, ""])],
         &[claim(
@@ -444,7 +488,12 @@ fn a_lift_whose_claim_fails_validation_leaves_the_constraint_standing() {
     let p1 = format!("{LIFTED_LINE}\nI opened two pull requests.");
     let third = output(
         &[segment_xml(5, 6, [&p1, &p1, &p1, ""])],
-        &[claim("policy.baseline-fixes", &past_the_part, LIFT, LIFTED_LINE)],
+        &[claim(
+            "policy.baseline-fixes",
+            &past_the_part,
+            LIFT,
+            LIFTED_LINE,
+        )],
         7,
     );
     let rows = fold(&mut stored, &third, &third_chunk);
@@ -460,12 +509,18 @@ fn an_answer_and_a_lift_under_other_keys_age_out_the_question_and_keep_the_const
     let case = &ANSWERED[0];
     let messages = vec![
         user(1, &format!("{} {CONSTRAINT}.", case.request)),
-        assistant(2, &format!("{}{}", work_log("the migration"), case.question)),
+        assistant(
+            2,
+            &format!("{}{}", work_log("the migration"), case.question),
+        ),
         user(3, &format!("{}. Also, {LIFT}.", case.answer)),
         assistant(4, "Continuing with the remaining steps."),
     ];
     let first_chunk = chunk_of(&messages, 1, 3);
-    let p1 = format!("{CONSTRAINT_LINE}\nI started the migration.\n{}", case.waiting_line());
+    let p1 = format!(
+        "{CONSTRAINT_LINE}\nI started the migration.\n{}",
+        case.waiting_line()
+    );
     let first = output(&[segment_xml(1, 2, [&p1, &p1, &p1, ""])], &[], 3);
     let mut stored = Vec::new();
     fold(&mut stored, &first, &first_chunk);
@@ -473,7 +528,8 @@ fn an_answer_and_a_lift_under_other_keys_age_out_the_question_and_keep_the_const
     // The second fold names both outcomes with keys of its own.
     let second_chunk = chunk_of(&messages, 3, 5);
     let decided = format!("Decided (migration.step-order): {}", case.decision);
-    let lifted = "Lifted (policy.bug-fixes): The user wants each bug fixed in its own pull request.";
+    let lifted =
+        "Lifted (policy.bug-fixes): The user wants each bug fixed in its own pull request.";
     let p1 = format!("{decided}\n{lifted}");
     let second = output(
         &[segment_xml(3, 4, [&p1, &p1, &p1, ""])],
@@ -484,7 +540,12 @@ fn an_answer_and_a_lift_under_other_keys_age_out_the_question_and_keep_the_const
                 case.answer,
                 &decided,
             ),
-            claim("policy.bug-fixes", &cite(&second_chunk, 3, LIFT), LIFT, lifted),
+            claim(
+                "policy.bug-fixes",
+                &cite(&second_chunk, 3, LIFT),
+                LIFT,
+                lifted,
+            ),
         ],
         5,
     );
@@ -534,7 +595,10 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
     let log = work_log("the migration");
     let before = vec![
         user(1, &format!("{} {CONSTRAINT}.", case.request)),
-        assistant(2, &format!("{log}I finished the first step. {}", case.question)),
+        assistant(
+            2,
+            &format!("{log}I finished the first step. {}", case.question),
+        ),
     ];
     let added = vec![
         user(3, &format!("{}. Also, {LIFT}.", case.answer)),
@@ -560,7 +624,12 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
         &[segment_xml(
             1,
             2,
-            [&first_p1, &first_p1, "Finished the first migration step.", ""],
+            [
+                &first_p1,
+                &first_p1,
+                "Finished the first migration step.",
+                "",
+            ],
         )],
         &[claim(
             "policy.baseline-fixes",
@@ -635,7 +704,13 @@ async fn the_served_history_drops_a_question_and_a_constraint_a_later_fold_settl
     // The stored rows keep both folds as written.
     let rows = store.load_history_segments("ses").unwrap();
     assert_eq!(rows.len(), 2, "{rows:?}");
-    assert!(rows[0].p1.as_deref().unwrap().contains(&case.waiting_line()));
+    assert!(
+        rows[0]
+            .p1
+            .as_deref()
+            .unwrap()
+            .contains(&case.waiting_line())
+    );
     assert!(rows[0].p1.as_deref().unwrap().contains(CONSTRAINT_LINE));
 
     // The rows above the frozen baseline state both outcomes, and the update block names the
@@ -697,7 +772,11 @@ struct LiveSession {
 }
 
 impl LiveSession {
-    fn new(factory: &Arc<RealHistorySummarizerProducerFactory>, model: &str, wait: Duration) -> Self {
+    fn new(
+        factory: &Arc<RealHistorySummarizerProducerFactory>,
+        model: &str,
+        wait: Duration,
+    ) -> Self {
         let config = DaemonConfig {
             model_chain: vec![model.to_owned()],
             ..default_test_config()
@@ -806,7 +885,10 @@ async fn a_live_summarizer_settles_open_items_across_two_folds() {
     let log = work_log("the migration");
     let before = vec![
         user(1, &format!("{} {CONSTRAINT}.", case.request)),
-        assistant(2, &format!("{log}I finished the first step. {}", case.question)),
+        assistant(
+            2,
+            &format!("{log}I finished the first step. {}", case.question),
+        ),
     ];
     let mut session = LiveSession::new(&factory, &model, wait);
     let rows = session.fold(before.clone()).await;
@@ -819,9 +901,16 @@ async fn a_live_summarizer_settles_open_items_across_two_folds() {
         .any(|line| matches!(status_line(line), Some((Status::Waiting, _))));
     let stated_open = lines.iter().any(|line| {
         let line = line.to_lowercase();
-        ["still open", "undecided", "not answered", "unanswered", "no answer", "asked"]
-            .iter()
-            .any(|phrase| line.contains(phrase))
+        [
+            "still open",
+            "undecided",
+            "not answered",
+            "unanswered",
+            "no answer",
+            "asked",
+        ]
+        .iter()
+        .any(|phrase| line.contains(phrase))
     });
     assert!(waiting || stated_open, "{lines:#?}");
 
@@ -846,9 +935,15 @@ async fn a_live_summarizer_settles_open_items_across_two_folds() {
     assert!(
         lines.iter().any(|line| {
             let line = line.to_lowercase();
-            ["lifted", "own pull request", "separate pull request", "pr per", "each bug"]
-                .iter()
-                .any(|phrase| line.contains(phrase))
+            [
+                "lifted",
+                "own pull request",
+                "separate pull request",
+                "pr per",
+                "each bug",
+            ]
+            .iter()
+            .any(|phrase| line.contains(phrase))
         }),
         "{lines:#?}"
     );

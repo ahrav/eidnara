@@ -184,7 +184,7 @@ pub(crate) fn render_owned_rows(
             && segment.p1.as_deref().is_some_and(|p1| !p1.is_empty())
     });
     with_corrections(
-        crate::history_open_items::owned_rows(segments).into_iter(),
+        crate::history_open_items::owned_rows(segments),
         corrections,
         temporal_awareness,
     )
