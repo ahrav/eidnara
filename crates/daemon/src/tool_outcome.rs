@@ -305,9 +305,40 @@ fn push_clipped(out: &mut String, text: &str, max: usize) {
 }
 
 /// Every Unicode whitespace character outside ASCII starts with `0xC2`, `0xE1`, `0xE2`, or `0xE3` in UTF-8, and `0xC2` is the marker brackets' lead byte.
-fn starts_rewritten_character(byte: u8) -> bool {
+const fn starts_rewritten_character(byte: u8) -> bool {
     matches!(byte, b'"' | b'\t'..=b'\r' | 0xE1..=0xE3)
         || byte == crate::history_summarizer_chunk::ALIAS_LEAD_BYTE
+}
+
+/// A whole output's unchanged run ends at a space, which may begin a whitespace run, or at a byte for which [`starts_rewritten_character`] holds.
+static RUN_ENDS: [bool; 256] = {
+    let mut ends = [false; 256];
+    let mut byte = 0;
+    while byte < ends.len() {
+        ends[byte] = byte == b' ' as usize || starts_rewritten_character(byte as u8);
+        byte += 1;
+    }
+    ends
+};
+
+/// The length of the prefix of `bytes` that a whole output shows unchanged: bytes outside [`RUN_ENDS`], and each single space between two of them. The prefix ends on a character boundary, because every [`RUN_ENDS`] byte starts a character. A nonempty prefix begins and ends with a byte outside [`RUN_ENDS`].
+fn unchanged_run(bytes: &[u8]) -> usize {
+    let mut run = 0;
+    loop {
+        run += bytes[run..]
+            .iter()
+            .position(|&byte| RUN_ENDS[usize::from(byte)])
+            .unwrap_or(bytes.len() - run);
+        let inner_space = run > 0
+            && bytes.get(run) == Some(&b' ')
+            && bytes
+                .get(run + 1)
+                .is_some_and(|&next| !RUN_ENDS[usize::from(next)]);
+        if !inner_space {
+            return run;
+        }
+        run += 2;
+    }
 }
 
 /// `rewrite_character` keeps output text in one quoted field on one transcript line.
@@ -347,22 +378,42 @@ fn push_excerpt(out: &mut String, line: &str) {
 
 /// Appends `; output="<text>"` holding all of `text`. Each whitespace run, the joins between pieces included, becomes one space with none at either end, and a double quote or a marker bracket becomes a single quote, so the field stays one quoted value on the digest's transcript line and its value is at most as long as `text`. Text made only of whitespace appends nothing.
 fn push_whole(out: &mut String, text: &OutputText<'_>) {
-    let mut words = text.pieces().flat_map(str::split_whitespace).peekable();
-    if words.peek().is_none() {
-        return;
-    }
+    let label = out.len();
     out.push_str("; output=\"");
-    for (index, word) in words.enumerate() {
-        if index > 0 {
+    let value = out.len();
+    let end_word = |out: &mut String| {
+        if out.len() > value && !out.ends_with(' ') {
             out.push(' ');
         }
-        if !word.bytes().any(starts_rewritten_character) {
-            out.push_str(word);
-            continue;
+    };
+    for piece in text.pieces() {
+        let mut rest = piece;
+        loop {
+            let run = unchanged_run(rest.as_bytes());
+            out.push_str(&rest[..run]);
+            let mut characters = rest[run..].chars();
+            let Some(character) = characters.next() else {
+                break;
+            };
+            rest = characters.as_str();
+            match rewrite_character(character) {
+                ' ' => {
+                    end_word(out);
+                    rest = rest.trim_ascii_start();
+                }
+                kept => out.push(kept),
+            }
         }
-        out.extend(word.chars().map(rewrite_character));
+        end_word(out);
     }
-    out.push('"');
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    if out.len() == value {
+        out.truncate(label);
+    } else {
+        out.push('"');
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +644,30 @@ mod digest_tests {
     }
 
     #[test]
+    fn a_whole_output_joins_content_blocks_and_shows_serialized_json() {
+        use memory_store::{OutputKind, ResultBlock, ResultBlockKind, ToolOutput};
+        let blocks = ["a", "b", " c"]
+            .into_iter()
+            .map(|text| ResultBlock {
+                kind: ResultBlockKind::Text {
+                    text: text.to_owned(),
+                },
+                provider_extras: Default::default(),
+            })
+            .collect();
+        assert_eq!(
+            output_outcome(&ToolOutput::bare(OutputKind::ErrorContent { blocks })),
+            "; error; bytes=6; output=\"a b c\""
+        );
+        assert_eq!(
+            output_outcome(&ToolOutput::bare(OutputKind::Json {
+                value: serde_json::json!({ "k": "a b" }),
+            })),
+            "; completed; bytes=11; output=\"{'k':'a b'}\""
+        );
+    }
+
+    #[test]
     fn an_escaped_character_near_the_bound_escapes() {
         for prefix in CLAIM_VALUE_MAX_BYTES - 8..=CLAIM_VALUE_MAX_BYTES + 8 {
             for special in ['"', '\u{ab}', '\u{bb}', '\u{a0}', '\u{e9}'] {
@@ -652,6 +727,21 @@ mod digest_tests {
             }
             let lead = character.encode_utf8(&mut [0; 4]).as_bytes()[0];
             assert!(starts_rewritten_character(lead), "{character:?}");
+        }
+    }
+
+    /// The line-iterator reading treats whitespace as word separators, replaces double quotes and marker brackets with single quotes, and copies other characters.
+    #[test]
+    fn every_character_in_a_whole_output_matches_the_line_iterator_reading() {
+        for character in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
+            let text = format!(
+                "{character}a{character}b{character}{character}c {character}d\n{character}e{character}"
+            );
+            assert_eq!(
+                outcome_digest(ToolStatus::Completed, &OutputText::Text(&text)),
+                line_iterator_outcome(ToolStatus::Completed, &text),
+                "{character:?}"
+            );
         }
     }
 
