@@ -94,10 +94,14 @@ pub(crate) fn status_line(line: &str) -> Option<(Status, &str)> {
     (is_claim_key(key) && !text.trim().is_empty()).then_some((status, key))
 }
 
-/// Whether `claim` is the evidence of a lift: its anchor reads as the `Lifted` line of its own
-/// key.
+/// Whether `claim` is the evidence of a lift: its anchor is one line that reads as the `Lifted`
+/// line of its own key.
 fn lifts(claim: &Claim) -> bool {
-    claim.anchor.as_deref().and_then(status_line) == Some((Status::Lifted, claim.key.as_str()))
+    let one_line = claim
+        .anchor
+        .as_deref()
+        .filter(|anchor| !anchor.contains('\n'));
+    one_line.and_then(status_line) == Some((Status::Lifted, claim.key.as_str()))
 }
 
 /// The open lines one row retires at render.
@@ -291,30 +295,25 @@ pub(crate) fn beside_open_lines(
     row: &DecayRenderHistorySegment,
     mut corrections: Vec<Correction>,
 ) -> Vec<Correction> {
-    // Whether the first occurrence of `anchor` in `text`, the one a splice replaces, shares bytes
-    // with an open status line.
+    // Whether one of the lines that the first occurrence of `anchor` in `text` touches, the
+    // occurrence a splice replaces, is an open status line.
     let in_open_line = |text: &str, anchor: &str| {
         text.find(anchor).is_some_and(|start| {
-            let mut line_start = 0;
-            text.split('\n').any(|line| {
-                let line_end = line_start + line.len();
-                let overlaps = line_start < start + anchor.len() && start < line_end;
-                line_start = line_end + 1;
-                overlaps && status_line(line).is_some_and(|(status, _)| status.is_open())
-            })
+            let end = start + anchor.len();
+            let from = text[..start].rfind('\n').map_or(0, |at| at + 1);
+            let to = text[end..].find('\n').map_or(text.len(), |at| end + at);
+            text[from..to]
+                .lines()
+                .any(|line| status_line(line).is_some_and(|(status, _)| status.is_open()))
         })
     };
     for correction in &mut corrections {
-        let anchored_on_open_line = correction
-            .anchor
-            .as_deref()
-            .filter(|anchor| !anchor.is_empty())
-            .is_some_and(|anchor| {
-                [&row.p1, &row.p2, &row.p3, &row.p4]
-                    .into_iter()
-                    .flatten()
-                    .any(|text| in_open_line(text, anchor))
-            });
+        let anchored_on_open_line = correction.anchor.as_deref().is_some_and(|anchor| {
+            [&row.p1, &row.p2, &row.p3, &row.p4]
+                .into_iter()
+                .flatten()
+                .any(|text| in_open_line(text, anchor))
+        });
         if anchored_on_open_line {
             correction.anchor = None;
         }
@@ -539,12 +538,19 @@ mod tests {
                     Some("Note that Lifted (policy.measurement-fixes): is not the case."),
                 )],
             ),
-            // A claim with the key whose anchor holds the lifted line after other text.
+            // A claim with the key whose anchor holds the lifted line beside another line.
             (
                 LIFTED,
                 vec![claim(
                     "policy.measurement-fixes",
                     Some(&format!("Measured.\n{LIFTED}")),
+                )],
+            ),
+            (
+                LIFTED,
+                vec![claim(
+                    "policy.measurement-fixes",
+                    Some(&format!("{LIFTED}\nI opened two PRs.")),
                 )],
             ),
             // The constraint's own claim, restated in a later segment.
@@ -818,6 +824,60 @@ mod tests {
             render_history_segment_at_tier(&rendered[2], 1),
             format!("## 30-39 \u{b7} row 3\n{asked}\n[corrections: db.port = v @4]")
         );
+    }
+
+    #[test]
+    fn a_correction_splices_where_its_first_occurrence_touches_no_open_line() {
+        let heading = "## 10-19 \u{b7} row 1";
+        let freeze = "Constraint (policy.freeze): Freeze the schema!";
+        let p1 = format!(
+            "Line one of the narrative.\nSecond narrative line.\nThird narrative line.\n\
+             The server listens on port 5432\n{freeze}\nport 9 starts here.\n{DECIDED}\n\
+             Freeze and port 5432 again."
+        );
+        // Row 1 stores a claim anchored on `anchor`, and row 2 supersedes it.
+        let corrected = |tiers: [&str; 4], anchor: &str| {
+            let port = |ordinal| Claim {
+                ordinal,
+                ..claim("db.port", Some(anchor))
+            };
+            let first = row(1, tiers, vec![port(1)]);
+            render_rows(&[first, same(2, "Port moved.", vec![port(21)])], false).remove(0)
+        };
+        let marker = "[corrected @21: db.port = v]";
+        let footer = "[corrections: db.port = v @21]";
+
+        // Occurrences in the narrative before the open line, after it, and in a settling line.
+        for anchor in ["port 5432", "port 9", "separate file"] {
+            assert_eq!(
+                render_history_segment_at_tier(&corrected([&p1, "", "", ""], anchor), 1),
+                format!("{heading}\n{}", p1.replacen(anchor, marker, 1)),
+                "{anchor}"
+            );
+        }
+        // Occurrences at the start of the open line, at its end, inside it, and across the
+        // line break before it.
+        for anchor in ["Con", "!", "Freeze", "5432\nC"] {
+            assert_eq!(
+                render_history_segment_at_tier(&corrected([&p1, "", "", ""], anchor), 1),
+                format!("{heading}\n{p1}\n{footer}"),
+                "{anchor}"
+            );
+        }
+        // The open line holds the words in one tier only: the correction lists on the footer
+        // at that tier.
+        let narrative = "The server listens on port 5432";
+        let closed = "Constraint (policy.port): Keep port 5432 closed.";
+        for (tiers, tier) in [
+            ([narrative, closed, "", ""], 2),
+            ([narrative, "", "", closed], 4),
+        ] {
+            assert_eq!(
+                render_history_segment_at_tier(&corrected(tiers, "port 5432"), tier),
+                format!("{heading}\n{closed}\n{footer}"),
+                "tier {tier}"
+            );
+        }
     }
 
     #[test]
