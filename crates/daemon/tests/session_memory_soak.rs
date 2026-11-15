@@ -105,6 +105,8 @@ fn arena_heaps_are_counted_when_named_and_when_their_used_part_is_merged() {
 7f0070021000-7f0074000000 ---p 00021000 08:01 131 /usr/lib/libc.so.6
 7f0080001000-7f0080021000 rw-p 00000000 00:00 0
 7f0080021000-7f0084000000 ---p 00000000 00:00 0
+7f0090000000-7f0094021000 rw-p 00000000 00:00 0
+7f0094021000-7f0095000000 ---p 00000000 00:00 0
 ";
     assert_eq!(glibc_arena_heaps(&parse_mappings(maps)), 3);
 }
