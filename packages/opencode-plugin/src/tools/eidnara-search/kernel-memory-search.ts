@@ -14,6 +14,7 @@ import {
     type KernelClient,
     MAX_READ_OBJECT_IDS,
     type MemoryState,
+    type ReadDecision,
     type ReadRow,
     type RouteCausality,
     type Surface,
@@ -25,6 +26,7 @@ import {
     antiMemoryExpired,
     parseAntiMemoryContent,
 } from "../../shared/kernel-client/anti-memory";
+import { isRecord } from "../../shared/record-type-guard";
 import { splitQueryOperands } from "./bounds";
 
 export interface MemorySearchResult {
@@ -190,6 +192,34 @@ export function antiMemoryPayloadOfRow(row: ReadRow): AntiMemoryPayload | null |
     }
 }
 
+/** The source id of the rows automatic capture writes; capture records a contest in the rationale of those rows (host wire protocol, section 7.9). */
+const CAPTURE_SOURCE_ID = "memory_capture";
+
+/**
+ * The summary an explicit search shows for a memory. A user's statement that a later observation contradicts carries `contested_by` in its rationale, naming the contesting memory and its text; the summary then reads `<statement> (contested by <memory id>: <contesting text>)`, the contest wording of the `<project-memory>` block built from the fields a read row carries. The id is the contesting memory's own result id, so the two results read as one disagreement. Every other row shows its stored summary.
+ */
+function shownSummary(row: ReadRow, decision: ReadDecision): string {
+    const { summary, rationale } = decision.payload;
+    if (row.object.source_id !== CAPTURE_SOURCE_ID || !rationale.includes("contested_by")) {
+        return summary;
+    }
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(rationale);
+    } catch {
+        return summary;
+    }
+    const contest = isRecord(parsed) ? parsed.contested_by : undefined;
+    if (
+        !isRecord(contest) ||
+        typeof contest.memory !== "string" ||
+        typeof contest.text !== "string"
+    ) {
+        return summary;
+    }
+    return `${summary} (contested by ${contest.memory}: ${contest.text})`;
+}
+
 /** A rejected-approach row emits `anti_memory`. An unparseable stored summary becomes a warning carrying the raw summary as the rejected strategy. Callers pass a previously parsed `antiMemory` value to reuse the parse result. */
 export function memoryResultFromRow(
     row: ReadRow,
@@ -223,9 +253,11 @@ export function memoryResultFromRow(
     return {
         source: "memory",
         // `rowText` ranks the rationale, so the rationale renders too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated.
-        content: decision?.payload.rationale
-            ? `${decision.payload.summary}\n${decision.payload.rationale}`
-            : (decision?.payload.summary ?? ""),
+        content: decision
+            ? decision.payload.rationale
+                ? `${shownSummary(row, decision)}\n${decision.payload.rationale}`
+                : decision.payload.summary
+            : "",
         score,
         objectId: row.object.object_id,
         category: decision?.decision_kind ?? row.object.object_kind,

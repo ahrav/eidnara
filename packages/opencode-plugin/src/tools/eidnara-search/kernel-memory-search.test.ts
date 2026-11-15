@@ -22,6 +22,7 @@ function readRow(input: {
     rationale?: string;
     seq?: number;
     labeled?: boolean;
+    sourceId?: string;
 }): ReadRow {
     const seq = input.seq ?? 1;
     return {
@@ -30,7 +31,7 @@ function readRow(input: {
             object_kind: "decision",
             domain_id: "memory",
             source_kind: "assistant",
-            source_id: "eidnara_memory",
+            source_id: input.sourceId ?? "eidnara_memory",
             source_revision: 1,
             created_commit_seq: seq,
             invalidated_commit_seq: null,
@@ -241,6 +242,66 @@ describe("searchKernelMemoryRows baseline exclusion", () => {
             excludeObjectIds,
         });
         expect(hits?.map((hit) => hit.objectId)).toEqual([OBJECT_B]);
+    });
+});
+
+describe("a contested statement in explicit search", () => {
+    const statement = "User stated: The gateway admits at most 300 clients at once.";
+    const observation = "Assistant reported: The client limit in src/limits.rs is 500 now.";
+    const contestedBy = (contest: unknown) =>
+        JSON.stringify({ source: "memory_capture", session: "s1", contested_by: contest });
+    const contested = (rationale: string, sourceId = "memory_capture") =>
+        readRow({
+            objectId: OBJECT_A,
+            decisionKind: "CONFIG_VALUES",
+            summary: statement,
+            rationale,
+            seq: 9,
+            labeled: false,
+            sourceId,
+        });
+    const contentOf = (row: ReadRow) => {
+        const result = memoryResultFromRow(row, 1, "exact");
+        return result.source === "memory" ? result.content : "";
+    };
+
+    test("the statement names the contesting memory and its text, and both results are returned", () => {
+        const rationale = contestedBy({ memory: OBJECT_B, text: observation, stated_seq: 4 });
+        const rows = [
+            contested(rationale),
+            readRow({
+                objectId: OBJECT_B,
+                decisionKind: "CONFIG_VALUES",
+                summary: observation,
+                rationale: JSON.stringify({ source: "memory_capture", contests: [OBJECT_A] }),
+                seq: 8,
+                sourceId: "memory_capture",
+            }),
+        ];
+        expect(contentOf(rows[0] as ReadRow)).toBe(
+            `${statement} (contested by ${OBJECT_B}: ${observation})\n${rationale}`,
+        );
+        const hits = searchKernelMemoryRows({ rows, query: "gateway client limit", limit: 5 });
+        expect(hits?.map((hit) => hit.objectId).sort()).toEqual([OBJECT_A, OBJECT_B]);
+        const shown = hits?.find((hit) => hit.objectId === OBJECT_A);
+        expect(shown?.source === "memory" && shown.content.split("\n")[0]).toBe(
+            `${statement} (contested by ${OBJECT_B}: ${observation})`,
+        );
+    });
+
+    test("a row capture did not write, and a record without the contesting memory or its text, show the stored summary", () => {
+        const whole = contestedBy({ memory: OBJECT_B, text: observation, stated_seq: 4 });
+        expect(contentOf(contested(whole))).toContain("(contested by ");
+        for (const row of [
+            contested(whole, "eidnara_memory"),
+            contested(contestedBy({ memory: OBJECT_B, stated_seq: 4 })),
+            contested(contestedBy({ memory: 7, text: observation })),
+            contested(contestedBy("mem_b")),
+            contested(`{"contested_by":`),
+            contested(JSON.stringify({ source: "memory_capture", contests: [OBJECT_B] })),
+        ]) {
+            expect(contentOf(row).split("\n")[0]).toBe(statement);
+        }
     });
 });
 
