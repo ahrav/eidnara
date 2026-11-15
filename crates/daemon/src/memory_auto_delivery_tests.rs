@@ -1329,8 +1329,9 @@ const LIMIT_500: &str = "The gateway admits 500 clients now, not 300.";
 /// The user states a value. A later session's assistant message reports that
 /// a repository file now holds another value. The statement is contested:
 /// it stays live with its statement record, and the block shows it beside
-/// the observation with both dates. When the user confirms the new value,
-/// the correction replaces the contested statement and stays retrievable.
+/// the observation with both dates. A newer observation takes the first
+/// one's place on that line. When the user confirms a value, the correction
+/// replaces the contested statement and stays retrievable.
 #[tokio::test]
 async fn an_observation_that_contradicts_a_statement_contests_it_until_the_user_settles_it() {
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
@@ -1392,26 +1393,78 @@ async fn an_observation_that_contradicts_a_statement_contests_it_until_the_user_
         "the stated value appears once, on its contested line: {block}"
     );
 
-    // A second observation leaves the first contest in place.
-    let again = "The limit constant still reads 500 clients after the rebase.";
+    // The file changes again. The statement names the newer observation.
+    let newer = "After the rebase src/limits.rs sets the client limit to 800, above the 300 clients stated earlier.";
+    let contest_300 = |text: &'static str, duplicate_of: Option<&'static str>| {
+        move |_: &str, existing: &[Value]| {
+            vec![Extracted {
+                quote: text.to_string(),
+                contests: ids_containing(existing, "User stated: The gateway admits at most 300"),
+                duplicate_of: duplicate_of.map(|held| {
+                    let held = ids_containing(existing, held);
+                    assert_eq!(held.len(), 1, "{existing:?}");
+                    held[0].clone()
+                }),
+                ..Extracted::default()
+            }]
+        }
+    };
     capture(
         &handler,
         SECOND,
         "s2",
-        &[("m3", "assistant", again)],
-        |_, existing| {
-            vec![Extracted {
-                quote: again.to_string(),
-                contests: ids_containing(existing, "300 clients"),
-                ..Extracted::default()
-            }]
-        },
+        &[("m3", "assistant", newer)],
+        contest_300(newer, None),
+    )
+    .await;
+    let moved = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        moved.contains(&format!(
+            "{} (stated {today}; contested {today} by mem_",
+            stated(LIMIT_300)
+        )) && moved.contains(&format!(": Assistant reported: {newer})")),
+        "{moved}"
+    );
+    assert!(
+        !moved.contains("500 now"),
+        "the earlier observation leaves the contested line: {moved}"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(LIMIT_300)],
+        "the statement record outlives a second contest"
+    );
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project)
+            .await
+            .len(),
+        3,
+        "the statement and both observations are live"
+    );
+
+    // A message that repeats the newer observation names the memory that
+    // holds it. That memory is already the contest, so nothing is written.
+    let repeat =
+        "As noted, src/limits.rs sets the client limit to 800, not the 300 clients stated.";
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3b", "assistant", repeat)],
+        contest_300(repeat, Some("limit to 800")),
     )
     .await;
     assert_eq!(
         project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap(),
-        block,
-        "a statement keeps its first contest, so the block is unchanged"
+        moved,
+        "a contest by the observation already named leaves the block unchanged"
+    );
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project)
+            .await
+            .len(),
+        3,
+        "a repeated observation writes no row"
     );
 
     capture(
@@ -1443,6 +1496,110 @@ async fn an_observation_that_contradicts_a_statement_contests_it_until_the_user_
         "the correction record, which names both values, is retrievable: {rows:?}"
     );
     assert!(!rows.iter().any(|(text, _)| text == &stated(LIMIT_300)));
+}
+
+const LIMIT_NOTE: &str =
+    "src/limits.rs sets the gateway client limit to 500; the user stated 300 earlier.";
+
+/// The agent finds that a file holds another value than the user stated and
+/// stores a note of it with the host memory tool. The assistant's message of
+/// that turn repeats the note, so capture writes no second row for it. The
+/// note is still the observation that contests the statement: the block
+/// shows the statement beside the note. A repeat that names no contest
+/// leaves the statement as it was.
+#[tokio::test]
+async fn an_observation_the_store_already_holds_contests_the_statement_it_contradicts() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", LIMIT_300)],
+        |_, _| vec![fact(LIMIT_300)],
+    )
+    .await;
+    let written = body(
+        handler
+            .dispatch_value_for_test(
+                test_route(SECOND),
+                kernel_route_fixtures::commit_request(
+                    &project,
+                    "s2",
+                    "agent-write",
+                    vec![json!({"op": "insert_decision", "spec": {
+                        "decision_id": "dec-agent",
+                        "object_id": "mem-agent",
+                        "domain_id": "memory",
+                        "decision_kind": "PROJECT_RULES",
+                        "payload": {"summary": LIMIT_NOTE, "rationale": ""},
+                        "source_id": "eidnara_memory",
+                        "source_revision": 1,
+                    }})],
+                    Vec::new(),
+                ),
+            )
+            .await,
+    );
+    assert_eq!(written["state"]["kind"], "available", "{written}");
+    let report = "I saved the new figure: src/limits.rs sets the gateway client limit to 500, not the 300 clients you told me.";
+    let repeated = |contest: bool| {
+        move |_: &str, existing: &[Value]| {
+            let statement = ids_containing(existing, &stated(LIMIT_300));
+            assert_eq!(statement.len(), 1, "{existing:?}");
+            vec![Extracted {
+                quote: report.to_string(),
+                duplicate_of: Some("mem-agent".to_string()),
+                contests: if contest { statement } else { Vec::new() },
+                ..Extracted::default()
+            }]
+        }
+    };
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "assistant", report)],
+        repeated(false),
+    )
+    .await;
+    let plain = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        plain.contains(&stated(LIMIT_300)) && !plain.contains("contested"),
+        "a repeat that names no contest leaves the statement as stated: {plain}"
+    );
+
+    let again = format!("{report} Nothing else changed.");
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "assistant", &again)],
+        repeated(true),
+    )
+    .await;
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(LIMIT_300), "visible".to_string()),
+            (LIMIT_NOTE.to_string(), "labeled".to_string()),
+        ],
+        "the repeated observation writes no row; the statement and the note are live"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(LIMIT_300)]
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    assert!(
+        block.contains(&format!(
+            "{} (stated {today}; contested {today} by mem-agent: {LIMIT_NOTE})",
+            stated(LIMIT_300)
+        )),
+        "{block}"
+    );
 }
 
 /// A correction retires the earlier value whether that value was an
@@ -1617,6 +1774,78 @@ async fn a_correction_is_offered_the_short_statement_it_corrects_among_many_long
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
     assert!(
         block.contains(&format!("{} (stated ", stated(correction))) && block.contains("contested"),
+        "{block}"
+    );
+}
+
+/// A project holds one user statement about a limit and eighty assistant
+/// reports, each naming one handler of the same upload path. A long assistant
+/// message lists forty of those handlers and reports that the limit's file
+/// holds another value. Forty reports each share a rare name with the
+/// message, and every report shares more of its common words than the
+/// statement does, so one ranking over all memories fills with reports. The
+/// statement is still among the memories the extractor is offered, so the
+/// observation can contest it.
+#[tokio::test]
+async fn an_observation_is_offered_the_statement_it_bears_on_among_many_reports_of_its_topic() {
+    let (handler, _store, _dir, _project) = delivery_handler(capture_config()).await;
+    let statement = "A queued upload is held 30 seconds before the gateway gives up on it.";
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m0", "user", statement)],
+        |_, _| vec![fact(statement)],
+    )
+    .await;
+    let reports: Vec<(String, String)> = (0..80)
+        .map(|index| {
+            (
+                format!("r{index}"),
+                format!(
+                    "Checked handler{index:02}: gateway forwards each queued upload through stage{index:02}."
+                ),
+            )
+        })
+        .collect();
+    for batch in reports.chunks(16) {
+        let messages: Vec<(&str, &str, &str)> = batch
+            .iter()
+            .map(|(id, text)| (id.as_str(), "assistant", text.as_str()))
+            .collect();
+        capture(&handler, FIRST, "s1", &messages, |text, _| vec![fact(text)]).await;
+    }
+    let handlers: Vec<String> = (0..40).map(|index| format!("handler{index:02}")).collect();
+    let report = format!(
+        "Checked again: gateway forwards each queued upload through {}. gateway/backlog.rs now sets UPLOAD_BACKLOG_MS to 45000, so a queued upload stays in the backlog 45000 ms.",
+        handlers.join(", ")
+    );
+    let offered = std::cell::Cell::new(false);
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m1", "assistant", &report)],
+        |_, existing| {
+            let target = ids_containing(existing, &stated(statement));
+            offered.set(target.len() == 1);
+            vec![Extracted {
+                quote: report.clone(),
+                contests: target,
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    assert!(
+        offered.get(),
+        "the statement is offered among eighty reports that share more of the message's words"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        block.contains(&format!("{} (stated ", stated(statement)))
+            && block.contains("; contested ")
+            && block.contains("UPLOAD_BACKLOG_MS to 45000"),
         "{block}"
     );
 }

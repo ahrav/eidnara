@@ -1120,8 +1120,11 @@ project, was written by capture or the host memory tool, and is not served on
 32 are ranked by BM25 (k1 1.2, b 0.75, over the project's memory summaries)
 against each message of the batch on its own, a memory taking its best
 score, so the short statement a correction or an observation names ranks
-ahead of long memories that share common words with the batch; the rest are the memories sharing the
-most of the whole batch's words, newest first among ties. A proposal from any
+ahead of long memories that share common words with the batch. The first 16
+of those places go to facts served on `auto_inject`, ranked among themselves,
+so the reports of one topic cannot fill the share a statement needs; the rest
+of the 64 are the memories sharing the most of the whole batch's words,
+newest first among ties. A proposal from any
 role may name `contests`: reference memories whose value its observation
 contradicts without the user changing the fact, each sharing at least one
 content word with the quotation. A user quotation that does not meet the
@@ -1135,20 +1138,28 @@ with the quotation is released with its `also_replaces` targets; an
 `also_replaces` target that is unprovided, protected, claimed, or no
 restatement of the replaced fact is released alone; a `duplicate_of` target
 that is unprovided, or named beside `replaces`, is released; a `contests`
-target that is unprovided, shares no content word with the quotation, or is
-also replaced is released; and the `replaces` and `also_replaces` targets an
+target that is unprovided, shares no content word with the quotation, is
+also replaced, or is the proposal's `duplicate_of` target is released; and the `replaces` and `also_replaces` targets an
 assistant source names become contests under the contest check. A contested fact
-stays live, and its rationale records the contest under `contests`. When the
-contested fact is a capture-owned fact admitted on an approval and holds no
-earlier contest, the commit supersedes it with a fact of the same text,
-category, and approval whose rationale names the contesting fact, that fact's
-text, and the commit that recorded the statement, under `contested_by`; the
-statement record stays live, and a later contest of the same statement changes
-nothing. The `<project-memory>` block renders a contested statement as
+stays live, and its rationale records the contest under `contests`. A
+proposal that names `duplicate_of` and `contests` and writes no fact records
+the fact it duplicates as the contesting fact, so an observation the store
+already holds, such as a note the agent wrote in the same turn, contests what
+the message contradicts. When the contested fact is a capture-owned fact
+admitted on an approval, the commit supersedes it with a fact of the same
+text, category, and approval whose rationale names the contesting fact, that
+fact's text, and the commit that first recorded the statement, under
+`contested_by`; the statement record stays live. A later contest by another
+fact supersedes the statement again and names that newer fact, and a contest
+by the fact already named writes nothing. The `<project-memory>` block renders
+a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: <contesting text>)`,
-the dates being the UTC days on which the statement's commit and the contest's
-commit were recorded. A user statement that replaces the contested fact ends
-the contest. A host `kernel.commit` that supersedes or retires a
+the dates being the UTC days on which the statement's first commit and the
+newest contest's commit were recorded. `eidnara_search` renders the summary of
+a contested statement as
+`<statement> (contested by <fact id>: <contesting text>)`, built from the
+rationale a read row carries, the fact id being the contesting fact's own
+result id. A user statement that replaces the contested fact ends the contest. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
 and defaults to true; the daemon ignores a project-tier value with a warning,
