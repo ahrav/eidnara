@@ -28,13 +28,14 @@
 //!   with the constraint's key whose anchor reads as the `Lifted` line of that key. Claim
 //!   validation stores a claim only when its one citation resolves to a message inside the
 //!   segment that stores it, and keeps an anchor that reads as a `Lifted` line only when the
-//!   claim cites a user message and the anchor is a whole line of that segment's `p1`. The lift
-//!   holds while that claim is the key's live claim, the newest claim with the key among the
-//!   summarized segments rendered together. Such a claim in a later segment retires the
-//!   constraint line; in the constraint's own segment it retires the line when `Lifted` is the
-//!   key's last status line in `p1`. A `Decided` line, and any other claim, leaves the constraint
-//!   line standing: a correction whose anchor touches an open line of the row lists on the row's
-//!   `[corrections: …]` line, so only retirement takes an open line out of a tier.
+//!   claim cites the text of a user message and the anchor is a whole `Lifted` line of that
+//!   segment's `p1`. The lift holds while that claim is the key's live claim, the newest claim
+//!   with the key among the summarized segments rendered together. Such a claim in a later
+//!   segment retires the constraint line; in the constraint's own segment it retires the line
+//!   when `Lifted` is the key's last status line in `p1`. A `Decided` line, and any other claim,
+//!   leaves the constraint line standing: a correction whose anchor touches an open line of the
+//!   row lists on the row's `[corrections: …]` line, so only retirement takes an open line out
+//!   of a tier.
 //!
 //! The rules read the rows rendered together. The frozen baseline keeps its bytes between
 //! rebuilds and the rows above it render on their own, so an open line in the baseline stays
@@ -108,10 +109,11 @@ pub(crate) fn is_lifted_line(text: &str) -> bool {
     matches!(status_line(text), Some((Status::Lifted, _)))
 }
 
-/// Whether `anchor` is a whole line of `p1`, with or without the line's bullet.
-pub(crate) fn is_line_of(p1: &str, anchor: &str) -> bool {
-    p1.lines()
-        .any(|line| line.trim() == anchor || unbulleted(line).trim_end() == anchor)
+/// Whether `anchor` is a whole `Lifted` line of `p1`, with or without the line's bullet.
+pub(crate) fn is_lifted_line_of(p1: &str, anchor: &str) -> bool {
+    p1.lines().any(|line| {
+        is_lifted_line(line) && (line.trim() == anchor || unbulleted(line).trim_end() == anchor)
+    })
 }
 
 /// Whether `claim` is the evidence of a lift: its anchor is one line that reads as the `Lifted`
@@ -353,13 +355,34 @@ pub(crate) fn beside_open_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decay_render::{render_history_segment_at_tier, render_rows};
+    use crate::decay_render::{
+        render_history_segment_at_tier, render_owned_rows, render_rows as render_borrowed_rows,
+    };
     use proptest::prelude::*;
 
     const WAITING: &str = "Waiting on user (release.server-steps): Shared checklist or own file?";
     const DECIDED: &str = "Decided (release.server-steps): The user chose a separate file.";
     const CONSTRAINT: &str = "Constraint (policy.measurement-fixes): No bug fixes during the run.";
     const LIFTED: &str = "Lifted (policy.measurement-fixes): The user wants each bug fixed now.";
+
+    /// The rows of `segments` as the rows above the baseline render them, after checking that
+    /// the baseline's owned rows render the same text at every tier.
+    fn render_rows(
+        segments: &[StoredHistorySegment],
+        temporal_awareness: bool,
+    ) -> Vec<DecayRenderHistorySegment> {
+        let borrowed = render_borrowed_rows(segments, temporal_awareness);
+        let owned = render_owned_rows(segments.to_vec(), temporal_awareness);
+        for tier in 1..=4 {
+            let at_tier = |rows: &[DecayRenderHistorySegment]| -> Vec<String> {
+                rows.iter()
+                    .map(|row| render_history_segment_at_tier(row, tier))
+                    .collect()
+            };
+            assert_eq!(at_tier(&borrowed), at_tier(&owned), "tier {tier}");
+        }
+        borrowed
+    }
 
     /// A claim for `key` anchored on `anchor`.
     fn claim(key: &str, anchor: Option<&str>) -> Claim {
@@ -719,9 +742,19 @@ mod tests {
             ..StoredHistorySegment::default()
         };
         let newest = same(3, "Later work.", vec![]);
-        for lifting in [textless, same(2, LIFTED, vec![lift()])] {
+        for lifting in [textless.clone(), same(2, LIFTED, vec![lift()])] {
             assert_eq!(p1s(&[set.clone(), lifting, newest.clone()])[0], "Measured.");
         }
+        // A newer row loaded the same way supersedes the lift with another claim under the key.
+        let superseding = StoredHistorySegment {
+            sequence: 3,
+            claims: vec![claim("policy.measurement-fixes", Some("Later work."))],
+            ..StoredHistorySegment::default()
+        };
+        assert_eq!(
+            p1s(&[set, textless, superseding, same(4, "Later work.", vec![])])[0],
+            format!("Measured.\n{CONSTRAINT}")
+        );
     }
 
     #[test]

@@ -515,6 +515,26 @@ fn a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message() {
     // Part of the line.
     let part = &LIFTED_LINE[..LIFTED_LINE.len() - 20];
     assert_eq!(lifted(&line, 5, part), (None, 1));
+    // The anchor with the line's bullet, and a line that ends in spaces.
+    let bulleted = format!("- {LIFTED_LINE}");
+    assert_eq!(
+        lifted(&format!("- {line}"), 5, &bulleted),
+        (Some(bulleted.clone()), 0)
+    );
+    let spaced = format!("{LIFTED_LINE}   \nI opened two pull requests.");
+    assert_eq!(
+        lifted(&spaced, 5, LIFTED_LINE),
+        (Some(LIFTED_LINE.into()), 0)
+    );
+    // The rule reads `Lifted` lines alone: a decision's anchor stays on the assistant's
+    // message and as part of its line.
+    let decided = "Decided (policy.baseline-fixes): The assistant restated the plan.";
+    let narrative = format!("{decided}\nI opened two pull requests.");
+    assert_eq!(lifted(&narrative, 6, decided), (Some(decided.into()), 1));
+    assert_eq!(
+        lifted(&narrative, 6, "The assistant restated the plan."),
+        (Some("The assistant restated the plan.".into()), 1)
+    );
 }
 
 #[test]

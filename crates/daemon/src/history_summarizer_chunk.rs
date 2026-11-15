@@ -221,7 +221,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             transformed: transformed || escaped.is_some(),
             presented: escaped.unwrap_or(text),
-            user: message.role == "user",
+            user: message.role == "user" && has_meaningful_user_text(message),
         }
     }
 
@@ -3462,6 +3462,48 @@ mod digest_chunk_tests {
                 alias_marker(&alias.alias),
                 alias.presented
             )));
+        }
+    }
+
+    /// A part is marked user only when it renders the text of a user message: an assistant
+    /// message, a tool result under the tool role, and a user-role message that carries a tool
+    /// result alone are all unmarked.
+    #[test]
+    fn a_part_is_marked_user_only_when_it_renders_a_user_messages_text() {
+        let said = |text: &str| BlockKind::Text {
+            text: text.to_owned(),
+        };
+        let output = || OutputKind::Text {
+            text: "lift the rule".to_owned(),
+        };
+        let messages = vec![
+            msg("u1", 1, "user", vec![said("lift the rule")]),
+            msg(
+                "a2",
+                2,
+                "assistant",
+                vec![said("lift the rule"), call("c1")],
+            ),
+            msg("u3", 3, "user", vec![result("c1", output())]),
+            msg("a4", 4, "assistant", vec![call("c2")]),
+            msg("t5", 5, "tool", vec![result("c2", output())]),
+            msg("t6", 6, "tool", vec![said("lift the rule")]),
+        ];
+        let built = build(&messages, 10_000);
+        let marked: Vec<(u64, bool)> = built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .map(|alias| (alias.ordinal, alias.user))
+            .collect();
+        assert_eq!(marked.first(), Some(&(1, true)), "{}", built.text);
+        assert!(
+            marked.len() > 1 && marked[1..].iter().all(|(_, user)| !user),
+            "{marked:?}"
+        );
+        for ordinal in [3, 6] {
+            assert!(marked.iter().any(|(at, _)| *at == ordinal), "{marked:?}");
         }
     }
 }
