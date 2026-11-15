@@ -99,29 +99,31 @@ export interface SearchLifecycleStatus {
     progress: SearchProgress;
 }
 
-/** Any other answer of `search.lifecycle.status`: a terminal from a daemon with no lifecycle owner or one whose progress read failed, or a kernel state. */
-export interface SearchLifecycleRefusal {
-    kind?: string;
-    state?: unknown;
+/** Whether `answer` is the `status` answer, which alone carries `record` and `progress`; any other value, a `null` or a body of another shape among them, is not. */
+export function isSearchLifecycleStatus(answer: unknown): answer is SearchLifecycleStatus {
+    if (typeof answer !== "object" || answer === null) return false;
+    const { kind, record, admission, progress } = answer as Record<string, unknown>;
+    return (
+        kind === "status" &&
+        typeof record === "object" &&
+        record !== null &&
+        typeof admission === "object" &&
+        admission !== null &&
+        typeof progress === "object" &&
+        progress !== null
+    );
 }
 
-/** Whether `answer` is the `status` answer, which alone carries `record` and `progress`. */
-export function isSearchLifecycleStatus(
-    answer: SearchLifecycleStatus | SearchLifecycleRefusal,
-): answer is SearchLifecycleStatus {
-    return answer.kind === "status";
-}
-
-/** `search.lifecycle.status` of the host behind `connectionFile`, asked over a route bound to `projectRoot`. */
+/** `search.lifecycle.status` of the host behind `connectionFile`, asked over a route bound to `projectRoot`: the wire answer as received, for `isSearchLifecycleStatus` to judge. */
 export async function searchLifecycleStatus(
     connectionFile: string,
     projectRoot: string,
     sessionId: string,
-): Promise<SearchLifecycleStatus | SearchLifecycleRefusal> {
-    return (await contextRequest(connectionFile, projectRoot, sessionId, {
+): Promise<unknown> {
+    return contextRequest(connectionFile, projectRoot, sessionId, {
         method: "search.lifecycle.status",
         project_root: resolve(projectRoot),
-    })) as SearchLifecycleStatus | SearchLifecycleRefusal;
+    });
 }
 
 /** Polls `search.lifecycle.status` until the projection is Current, admitted, and at the kernel tip, and returns that status. */
@@ -132,7 +134,7 @@ export async function waitForSearchCaughtUp(
     timeoutMs: number,
 ): Promise<SearchLifecycleStatus> {
     const deadline = Date.now() + timeoutMs;
-    let last: SearchLifecycleStatus | SearchLifecycleRefusal | undefined;
+    let last: unknown;
     while (Date.now() < deadline) {
         last = await searchLifecycleStatus(host.connectionFile, projectRoot, sessionId);
         if (

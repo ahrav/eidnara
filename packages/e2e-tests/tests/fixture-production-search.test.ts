@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { disposeAll } from "../src/harness-primitives";
 import { RustTestHarness } from "../src/rust-harness";
 import { buildDirectHostFixture, HermeticHostStack } from "../src/rust-runner/hermetic-host";
@@ -206,7 +206,11 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
             HermeticHostStack.start({
                 dataDir: env.dataDir,
                 fixtureBin,
-                productionSearchManifest: join(payload, "payload-manifest.json"),
+                // A path relative to this process's directory, as a caller's own payload directory may be; the stack resolves it before the fixture starts from the repository root.
+                productionSearchManifest: relative(
+                    process.cwd(),
+                    join(payload, "payload-manifest.json"),
+                ),
             }),
         );
         started.push(productionHarness);

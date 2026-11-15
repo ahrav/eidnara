@@ -416,6 +416,11 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
     let _clock = CLOCK.lock().await;
     let descriptors = env_number("EIDNARA_SOAK_DESCRIPTORS", 4_400);
     let steady = Duration::from_secs(env_number("EIDNARA_SOAK_SECONDS", 30));
+    // The knobs scale the soak up. Below these values a class stays inside the unit-sized coverage bound of 682 live rows, or the steady phase ends before a clock step and a memory are sampled.
+    assert!(
+        descriptors >= 1_400 && steady >= Duration::from_secs(10),
+        "EIDNARA_SOAK_DESCRIPTORS is at least 1400 and EIDNARA_SOAK_SECONDS at least 10"
+    );
     let (daemon, route, scope) = daemon_with(fixture_manifest).await;
     let kernel = daemon.store();
     let lag_bound = i64::try_from(records::READER_LAG_COMMITS).unwrap();

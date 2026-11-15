@@ -901,6 +901,13 @@ impl SearchLifecycleOwner {
         }
     }
 
+    /// Records that no selected family was observed and none was expected, so the status reports no checkpoint and no coverage failure.
+    fn unobserved_by_design(&self) {
+        let mut progress = self.lock_progress();
+        progress.checkpoint = None;
+        progress.unobserved = None;
+    }
+
     /// Keeps what a slice's outcome says about the record for the status surface, and logs a build that reached Current, so a log reader sees each rebuild's end as well as its start. The logged time is monotonic and covers the attempt this process's slice loop recorded or renewed; any other completed attempt logs `unknown`.
     fn observe_outcome(&self, outcome: &SliceOutcome) {
         let completed = matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Current));
@@ -943,6 +950,13 @@ impl SearchLifecycleOwner {
             Recording::Registration | Recording::Rebuild(_) => progress.rebuilds_recorded += 1,
         }
         progress.building = Some((attempt_id.to_owned(), Instant::now()));
+        // The slice's reason asked for this recording, so it no longer describes the record.
+        progress.blocked = None;
+    }
+
+    /// Clears the last slice's reason once a handed-back supervisor has drained: the slice that asked for the rotation left the record as the next slice finds it.
+    fn rotated_maintenance(&self) {
+        self.lock_progress().blocked = None;
     }
 
     /// Keeps the refusal of a recording the last slice asked for, so the status surface shows why no build started.
@@ -1582,9 +1596,8 @@ impl SearchLifecycleOwner {
                     .map(|report| ProjectionCoverage::unjudged(report, tip))
             }
             _ => {
-                self.observed(Err(
-                    "no selected family is observable under the running identity".to_owned(),
-                ));
+                // No family is observed here by design: the home is unregistered, or its selection is quarantined, under another identity, or over another kernel, and the slice names that cause itself.
+                self.unobserved_by_design();
                 Some(ProjectionCoverage::unregistered(identity, tip))
             }
         };
@@ -2525,7 +2538,10 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
                     stopped = owner.stop_maintenance(&handle) => stopped,
                 };
                 match stopped {
-                    Ok(_) => continue,
+                    Ok(_) => {
+                        owner.rotated_maintenance();
+                        continue;
+                    }
                     Err(unresolved) => {
                         SliceOutcome::Blocked(format!("maintenance did not drain: {unresolved}"))
                     }
