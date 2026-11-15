@@ -315,8 +315,8 @@ pub(crate) fn owned_rows(
 }
 
 /// `corrections`, aligned with `segments`, with each one whose anchor touches an open line of
-/// its row listed on the footer: the line stays as written beside the key's live value, or
-/// leaves through retirement, and the correction marks no other text in its place.
+/// its row's stored tiers listed on the footer: the line stays as written beside the key's live
+/// value, or leaves through retirement, and the correction lists on the footer either way.
 pub(crate) fn beside_open_lines(
     segments: &[StoredHistorySegment],
     mut corrections: Vec<Vec<Correction>>,
@@ -896,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn a_correction_anchored_on_a_retired_line_marks_no_other_text() {
+    fn a_correction_anchored_on_a_retired_line_lists_on_the_footer() {
         // The claim's words stand in the waiting line and again in the narrative after it.
         let asked = "Waiting on user (db.port-move): Move the database off port 5432?";
         let port = |ordinal| Claim {
