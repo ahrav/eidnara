@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { StreamTagStripper, stripStreamedTags } from "./stream-tag-strip";
 
 const S = "\u00a7";
@@ -49,6 +49,18 @@ const TAGGED: [string, boolean, string][] = [
     [`${S}6">  tail`, true, "tail"],
 ];
 
+function whitespaceTests(run: () => void): number {
+    const test = spyOn(RegExp.prototype, "test");
+    try {
+        run();
+        return test.mock.calls.length;
+    } finally {
+        test.mockRestore();
+    }
+}
+
+const WHITESPACE_RUN = " \n".repeat(200);
+
 const PLAIN = [
     "See \u00a7 4 of the spec.",
     "Under \u00a742 of the Act the fee applies.",
@@ -78,6 +90,24 @@ describe("StreamTagStripper", () => {
                     expect(stream(chunks, leading).text, JSON.stringify(chunks)).toBe(text);
                 }
             }
+        }
+    });
+
+    it("classifies each character of a leading whitespace run once, one delta at a time", () => {
+        for (const [opening, expected] of [
+            ["", `${WHITESPACE_RUN}x`],
+            [`${S}1${S}`, "x"],
+        ] as const) {
+            const stripper = new StreamTagStripper(true);
+            const tests = whitespaceTests(() => {
+                stripper.push(opening);
+                for (const char of WHITESPACE_RUN) stripper.push(char);
+                stripper.push("x");
+                stripper.flush();
+            });
+            expect(stripper.released).toBe(expected);
+            expect(tests).toBeGreaterThanOrEqual(WHITESPACE_RUN.length);
+            expect(tests).toBeLessThanOrEqual(2 * WHITESPACE_RUN.length);
         }
     });
 
@@ -556,6 +586,29 @@ describe("stripStreamedTags", () => {
         stripStreamedTags(event);
         expect(caught.length).toBeGreaterThan(0);
         expect(event.assistantMessageEvent.delta).toBe("hi");
+    });
+
+    it.each([
+        ["keep step with the part", false],
+        ["run behind the part", true],
+    ])("classifies a leading whitespace run once while a tag after it arrives one character at a time and the deltas %s", (_pace, ahead) => {
+        const text = `${WHITESPACE_RUN}${S}${"7".repeat(19)}${S} x`;
+        const part = { type: "text", text: ahead ? text : "" };
+        const send = deltaSender(part);
+        let shown: string | undefined;
+        let deltas = "";
+        const tests = whitespaceTests(() => {
+            for (const char of text) {
+                if (!ahead) part.text += char;
+                const [partText, delta] = send(char);
+                shown = partText;
+                deltas += delta;
+            }
+        });
+        expect(shown).toBe("x");
+        expect(deltas).toBe("x");
+        expect(tests).toBeGreaterThanOrEqual(WHITESPACE_RUN.length);
+        expect(tests).toBeLessThanOrEqual(3 * WHITESPACE_RUN.length);
     });
 
     it("streams random answers, in step, run ahead, or restarted, as prefixes of the whole-text strip", () => {

@@ -42,6 +42,8 @@ function tagEnd(input: string, at: number, final: boolean): number | "open" | un
 interface ScanState {
     leading: boolean;
     strippedOpeningTag: boolean;
+    /** The next scan resumes held leading text after this many already-classified whitespace characters, counted from the held index. */
+    heldWhitespace: number;
 }
 
 /** The released ranges of the latest `scan` as `[from, to)` pairs of its input, in order and with adjacent ranges merged: `kept[0..keptLength)`. The array only grows, so a scan allocates only when it records more ranges than any earlier scan. */
@@ -66,20 +68,28 @@ function keptText(input: string): string {
     return out;
 }
 
-/** Resolves `input` from `index` under the stripping rule, records each released range in `kept`, and returns the index where held text begins (`input.length` when nothing is held). The scan reads only `input[index..]`, so a caller can rescan its held text in place once more text follows it. */
+/** The scanner records released ranges in `kept` and returns the start of held text, or `input.length` when none remains. After appending text, callers resume at the returned index with the same `state` to reuse its whitespace classification. */
 function scan(input: string, index: number, final: boolean, state: ScanState): number {
     keptLength = 0;
     while (index < input.length) {
         if (state.leading) {
             const start = index;
+            index += state.heldWhitespace;
+            state.heldWhitespace = 0;
             while (isWhitespace(input[index])) index += 1;
             if (index === input.length) {
-                if (!final) return start;
+                if (!final) {
+                    state.heldWhitespace = index - start;
+                    return start;
+                }
                 if (!state.strippedOpeningTag) keep(start, index);
                 return index;
             }
             const end = tagEnd(input, index, final);
-            if (end === "open") return start;
+            if (end === "open") {
+                state.heldWhitespace = index - start;
+                return start;
+            }
             if (end !== undefined) {
                 state.strippedOpeningTag = true;
                 index = end;
@@ -130,7 +140,10 @@ export class StreamTagStripper {
     #stream: DeltaStream;
 
     constructor(leading: boolean) {
-        this.#stream = { held: "", state: { leading, strippedOpeningTag: false } };
+        this.#stream = {
+            held: "",
+            state: { leading, strippedOpeningTag: false, heldWhitespace: 0 },
+        };
     }
 
     get released(): string {
@@ -187,7 +200,7 @@ function openPartStream(leading: boolean): PartStream {
     return {
         raw: "",
         heldFrom: 0,
-        state: { leading, strippedOpeningTag: false },
+        state: { leading, strippedOpeningTag: false, heldWhitespace: 0 },
         view: true,
         runStart: 0,
         runEnd: 0,
