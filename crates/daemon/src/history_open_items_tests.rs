@@ -471,8 +471,9 @@ fn a_lift_whose_claim_fails_validation_leaves_the_constraint_standing() {
     assert!(history[2][0].contains(LIFTED_LINE));
 }
 
-/// Claim validation keeps a lift's anchor only as a whole line of `p1` on a claim that cites a
-/// user message; every other lift claim stores no anchor and leaves the constraint standing.
+/// Claim validation keeps a lift's anchor only as a whole `Lifted` line of `p1`, with or without
+/// its bullet, on a claim that cites a user message; every other lift claim stores no anchor and
+/// leaves the constraint standing.
 #[test]
 fn a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message() {
     let mut messages = constraint_session();
@@ -526,6 +527,12 @@ fn a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message() {
         lifted(&spaced, 5, LIFTED_LINE),
         (Some(LIFTED_LINE.into()), 0)
     );
+    assert_eq!(
+        lifted(&format!("- {spaced}"), 5, LIFTED_LINE),
+        (Some(LIFTED_LINE.into()), 0)
+    );
+    // A line with two bullets is text, and its tail is no lift.
+    assert_eq!(lifted(&format!("- - {line}"), 5, &bulleted), (None, 1));
     // The rule reads `Lifted` lines alone: a decision's anchor stays on the assistant's
     // message and as part of its line.
     let decided = "Decided (policy.baseline-fixes): The assistant restated the plan.";

@@ -3488,6 +3488,14 @@ mod digest_chunk_tests {
             msg("a4", 4, "assistant", vec![call("c2")]),
             msg("t5", 5, "tool", vec![result("c2", output())]),
             msg("t6", 6, "tool", vec![said("lift the rule")]),
+            // A user message with text of its own beside a tool result.
+            msg("a7", 7, "assistant", vec![call("c3")]),
+            msg(
+                "u8",
+                8,
+                "user",
+                vec![said("lift the rule"), result("c3", output())],
+            ),
         ];
         let built = build(&messages, 10_000);
         let marked: Vec<(u64, bool)> = built
@@ -3497,11 +3505,12 @@ mod digest_chunk_tests {
             .iter()
             .map(|alias| (alias.ordinal, alias.user))
             .collect();
-        assert_eq!(marked.first(), Some(&(1, true)), "{}", built.text);
-        assert!(
-            marked.len() > 1 && marked[1..].iter().all(|(_, user)| !user),
-            "{marked:?}"
-        );
+        let user: Vec<u64> = marked
+            .iter()
+            .filter(|(_, user)| *user)
+            .map(|(ordinal, _)| *ordinal)
+            .collect();
+        assert_eq!(user, [1, 8], "{}", built.text);
         for ordinal in [3, 6] {
             assert!(marked.iter().any(|(at, _)| *at == ordinal), "{marked:?}");
         }
