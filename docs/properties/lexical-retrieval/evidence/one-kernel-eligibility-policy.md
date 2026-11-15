@@ -40,7 +40,7 @@ Callers outside the kernel, the complete set the scan allows:
   (`:1006`) and `revalidate` (`:1109`). Other product callers of the retrieval
   adapter: `crates/daemon/src/coverage.rs:189`,
   `crates/daemon/src/packing/mod.rs:397`,
-  `crates/daemon/src/search_replacement/selection.rs:1153`,
+  `crates/daemon/src/search_replacement/selection.rs:1249`,
   `crates/retrieval/src/exact/resolve.rs:427`.
 - `crates/retrieval/Cargo.toml:11` opens `[dependencies]`; `:12` names
   `kernel`; no `daemon` line appears before `[features]` at `:19`.
