@@ -41,7 +41,7 @@ D5.
   judges each row with `ProjectScope::names_project` and memoizes per scope
   id; `:212-213` returns `Ok(false)` for a `None` scope id.
 - `read.rs:201-219` comment: "The kernel keeps rows whose scope names another
-  project out of the snapshot"; `:220`: the row bound "cannot be a SQL
+  project out of the snapshot"; `:221`: the row bound "cannot be a SQL
   `LIMIT`" because the filter runs after SQL.
 - Test: `crates/kernel/tests/kernel_scope.rs:235-388`: four scopes (branch
   `main`, branch `release`, branch redacted, project only); filter `branch =

@@ -71,7 +71,7 @@ These are lower-level leads to reuse, not separate new retention properties.
 | [tools.test.ts:452-463](../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L452) | Full/light descriptions name memory and `mem_<32hex>`, not expansion, compacted history, commits, or notes. | cf-shipped-recovery-capabilities | unaudited |
 | [tools.test.ts:468-495](../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L468) | Blank queries are invalid; a direct-ID helper result and wrapper text agree, with one delivered result. | cf-visible-memory-recovery | unaudited |
 | [tools.test.ts:497-532](../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L497) | Packed-out hits remain in `prePack`, not `delivered` or returned text; a complete empty search has `empty-results`. | cf-unavailable-evidence-no-credit | unaudited |
-| [tools.test.ts:534-549](../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L534) | Returned token accounting includes the truncation note. | cf-visible-memory-recovery | unaudited |
+| [tools.test.ts:534-551](../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L534) | Returned token accounting includes the truncation note. | cf-visible-memory-recovery | unaudited |
 
 Search tests use a fake kernel/transport. Registry tests enumerate factories;
 search tests call the search wrapper/helper. Neither observation alone is

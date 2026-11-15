@@ -338,7 +338,7 @@ Required faults and enabling state: more than 8192 same-project visible rows;
 decisions whose payload sizes sum past `MAX_WIRE_BODY_BYTES / 8`; a decision
 row deleted out of band to force `CorruptCanonicalRow`.
 Confidence: high - [evidence](evidence/p5dep-daemon-bounds-rows-after-the-scope-filter.md).
-Read `read.rs:217-283`.
+Read `read.rs:219-284`.
 Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`,
 `bounded_selection_matches_a_full_sort_and_truncate`,
 `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`, and, for the
