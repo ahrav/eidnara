@@ -1,3 +1,5 @@
+#![cfg_attr(not(all(target_os = "linux", target_env = "gnu")), allow(dead_code))]
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::{Value, json};
@@ -146,6 +148,17 @@ fn release_is_due(
     }
 }
 
+fn release_is_due_past_floors(
+    free_bytes: Option<u64>,
+    resident_bytes: u64,
+    free_floor: &AtomicU64,
+    resident_floor: &AtomicU64,
+) -> bool {
+    let resident_floor = lowered(resident_floor, resident_bytes);
+    let free_floor = free_bytes.map_or(0, |free| lowered(free_floor, free));
+    release_is_due(free_bytes, free_floor, resident_bytes, resident_floor)
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(unsafe_code)]
 pub fn release_free_c_heap_when_due() {
@@ -155,9 +168,7 @@ pub fn release_free_c_heap_when_due() {
     let before = ProcessMemory::sample();
     let resident = before.rss_anon_bytes.unwrap_or(0);
     let free = before.c_heap.map(|heap| heap.free_bytes);
-    let resident_floor = lowered(&RESIDENT_FLOOR, resident);
-    let free_floor = free.map_or(0, |free| lowered(&FREE_FLOOR, free));
-    if release_is_due(free, free_floor, resident, resident_floor) {
+    if release_is_due_past_floors(free, resident, &FREE_FLOOR, &RESIDENT_FLOOR) {
         // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
         unsafe { libc::malloc_trim(0) };
         let after = ProcessMemory::sample();
@@ -231,6 +242,38 @@ mod tests {
         assert_eq!(lowered(&floor, 300), 300);
         assert_eq!(lowered(&floor, 400), 300);
         assert_eq!(floor.load(Ordering::Relaxed), 300);
+    }
+
+    #[test]
+    fn a_reading_under_its_floor_lowers_the_floor_the_next_reading_is_judged_against() {
+        let mib = 1024 * 1024;
+        let (free_floor, resident_floor) = (AtomicU64::new(0), AtomicU64::new(500 * mib));
+        assert!(!release_is_due_past_floors(
+            None,
+            300 * mib,
+            &free_floor,
+            &resident_floor
+        ));
+        assert!(release_is_due_past_floors(
+            None,
+            300 * mib + THRESHOLD,
+            &free_floor,
+            &resident_floor
+        ));
+
+        let (free_floor, resident_floor) = (AtomicU64::new(900 * mib), AtomicU64::new(0));
+        assert!(!release_is_due_past_floors(
+            Some(300 * mib),
+            0,
+            &free_floor,
+            &resident_floor
+        ));
+        assert!(release_is_due_past_floors(
+            Some(300 * mib + THRESHOLD),
+            0,
+            &free_floor,
+            &resident_floor
+        ));
     }
 
     #[test]

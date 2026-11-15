@@ -162,6 +162,9 @@ async fn closing_a_sessions_last_route_releases_freed_c_heap_pages() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn memory_freed_after_a_release_is_returned_when_the_session_ends() {
     let _serial = ONE_AT_A_TIME.lock().await;
+    if ProcessMemory::sample().c_heap.is_none() {
+        return;
+    }
     let daemon = KernelDaemon::start().await;
     let route = bind_session(&daemon, 41, "session-with-a-live-block").await;
     let releases_before = releases(&daemon).await;
