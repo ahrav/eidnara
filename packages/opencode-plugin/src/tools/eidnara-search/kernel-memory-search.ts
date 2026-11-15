@@ -331,8 +331,8 @@ function isSearchableMemoryRow(row: ReadRow, nowMs: number): boolean {
 }
 
 /**
- * The rows a scan carries from page to page, in rank order: the best `limit` rows that stay
- * eligible, and the best `limit` anti-memories that carry an expiry. A row's rank and its kind
+ * The rows a scan carries from page to page, in rank order: the best `limit` rows that cannot
+ * expire, and the best `limit` anti-memories that carry an expiry. A row's rank and its kind
  * depend on that row alone, so applying both caps to each page's merge keeps the best `limit` rows
  * of each kind over every page read. The final ranking reads the clock after the scan, and the
  * place of an anti-memory that expired meanwhile goes to the next row kept here, when one is left.
@@ -355,16 +355,17 @@ export type SnapshotScan =
 /**
  * Reads the surface page by page at the first page's snapshot. Among the rows of the pages read,
  * the retained rows, at most twice `limit`, hold the top `limit` lexical results of the rows
- * eligible at the scan's start. When retained anti-memories expire before the final ranking, every
- * row that cannot expire (a memory, or an anti-memory without an expiry) and ranks in the top
- * `limit` of the rows still live then is among the retained rows. Of the anti-memories that carry
- * an expiry, the scan retains the best `limit` among those eligible at its start.
+ * eligible at `nowMs`, the scan's start by default. When retained anti-memories expire before the
+ * final ranking, every row that cannot expire (a memory, or an anti-memory without an expiry) and
+ * ranks in the top `limit` of the rows still live then is among the retained rows. Of the
+ * anti-memories in the pages read that carry an expiry, the scan retains the best `limit` among
+ * those eligible at `nowMs`.
  *
  * Only the first page is gated; later pages read the snapshot that gate admitted. `truncated`
- * reports rows left unread: after `maxPages` pages, past the deadline, or when the daemon refuses a
- * later page or answers it from another snapshot, over another connection, or with a row at or
- * before the cursor. A search the caller's signal cancels answers its state, as a refused first
- * page does.
+ * reports rows left unread: after the first page for a query with no ranking term, after
+ * `maxPages` pages, past the deadline, or when the daemon refuses a later page or answers it from
+ * another snapshot, over another connection, or with a row at or before the cursor. A search the
+ * caller's signal cancels answers its state, as a refused first page does.
  */
 export async function scanSnapshotForLexicalSearch(args: {
     client: KernelClient;
