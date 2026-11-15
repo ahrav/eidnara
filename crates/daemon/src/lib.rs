@@ -39695,6 +39695,7 @@ mod tests {
 
         let fired = call_transform(&handler, big_messages()).await;
         assert_eq!(fired["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
         let after = status();
         let firing = &after["history_summarizer"]["recent_firings"][0];
@@ -42674,6 +42675,7 @@ mod tests {
         without_usage.as_object_mut().unwrap().remove("usage");
         let fired = call_transform_request(&handler, without_usage).await;
         assert_eq!(fired["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
         let firing = &store
             .load("ses")
