@@ -5,13 +5,15 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use daemon::process_memory::C_HEAP_ARENAS;
+use daemon::process_memory::{C_HEAP_ARENAS, C_HEAP_RELEASE_THRESHOLD_BYTES};
 use host_runtime::{Client, ClientRoute, TargetKind};
 use serde_json::{Value, json};
 use support::direct_host::{BUDGET, FixtureProcess, Launch, request_json, wait_for_store};
 
 const MIB: u64 = 1024 * 1024;
 const GLIBC_ARENA_HEAP_BYTES: u64 = 64 * MIB;
+/// The daemon keeps up to one release threshold of freed pages resident between releases.
+const PLATEAU_ALLOWANCE_BYTES: u64 = C_HEAP_RELEASE_THRESHOLD_BYTES;
 const SESSION_KEYED_HOLDERS: [&str; 4] = [
     "snapshots",
     "native_attach",
@@ -263,11 +265,16 @@ async fn status_after_teardown(client: &Client, route: ClientRoute) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_its_route() {
     let sessions = env_count("EIDNARA_SOAK_SESSIONS", 40);
-    let turns = env_count("EIDNARA_SOAK_TURNS", 6);
-    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 768 * 1024);
+    let turns = env_count("EIDNARA_SOAK_TURNS", 4);
+    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 1728 * 1024);
     let window = sessions / 4;
     assert!(window >= 2, "four windows of at least two sessions");
-    let session_bytes = (turns * output_bytes) as u64;
+    let between = (sessions - 2 * window) as u64;
+    let final_request_bytes = (turns * output_bytes) as u64;
+    assert!(
+        between * final_request_bytes >= 2 * PLATEAU_ALLOWANCE_BYTES,
+        "sessions that each kept their final request would retain at least twice the allowance"
+    );
 
     let root = tempfile::tempdir().expect("state root");
     std::fs::create_dir_all(root.path().join("project")).expect("project root");
@@ -326,13 +333,11 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
         |range: std::ops::Range<usize>| *anonymous[range].iter().min().expect("a window");
     let early = low_water(window..2 * window);
     let late = low_water(sessions - window..sessions);
-    let between = (sessions - 2 * window) as u64;
     assert!(
-        late <= early + between * session_bytes / 2,
-        "anonymous memory grew {} MiB over {between} sessions, more than half of the {} MiB \
-         those sessions sent: {:?}",
+        late <= early + PLATEAU_ALLOWANCE_BYTES,
+        "anonymous memory grew {} MiB over {between} sessions, past the {} MiB allowance: {:?}",
         late.saturating_sub(early) / MIB,
-        between * session_bytes / MIB,
+        PLATEAU_ALLOWANCE_BYTES / MIB,
         anonymous
             .iter()
             .map(|bytes| bytes / MIB)
