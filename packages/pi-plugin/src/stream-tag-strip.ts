@@ -223,7 +223,7 @@ function advance(stream: PartStream, text: string, final: boolean): void {
     stream.released = released;
 }
 
-/** EXTENDRUN_DOC */
+/** Releases the part's growth `piece` whole. The caller guarantees that nothing was held, the growth holds no section sign, the stream is past its leading text, and in view the growth continues the run. */
 function extendRun(stream: PartStream, text: string, piece: string): void {
     stream.raw = text;
     stream.heldFrom = text.length;
@@ -251,7 +251,7 @@ type StreamUpdate = {
     partial?: unknown;
 };
 
-/** The released delta for the text part targeted by the latest `streamPart` call. */
+/** The released delta of the update that the innermost running `stripStreamedTags` call strips. `streamPart` sets it for the targeted part, and each call restores the enclosing call's value before it returns or throws. */
 let releasedDelta: string | undefined;
 
 /** The delta stream copies the shared part state before the part's next change. */
@@ -316,6 +316,18 @@ function streamPart(
     return stream.released;
 }
 
+function snapshotContent(parts: unknown[], update: StreamUpdate | undefined): unknown[] {
+    let firstText = true;
+    return parts.map((part: unknown, index: number) => {
+        if (!isTextPart(part)) return part;
+        const leading = firstText;
+        firstText = false;
+        if (update === undefined) return { ...part, text: stripTags(part.text, leading) };
+        const text = streamPart(part, index, leading, update);
+        return { ...part, text };
+    });
+}
+
 /** Rewrites one Pi `message_start` or `message_update` event in place so its listeners render assistant text with `\u00a7N\u00a7` tags removed. An event without an `assistantMessageEvent` carries a whole message, which is stripped as complete text. Every text part, the content array, and an object-valued `partial` are replaced by snapshots, because the provider keeps appending to its own parts while later handlers and listeners run. `text_delta` updates receive newly released text in `delta`, and `text_end` updates receive the released part text in `content`. A trailing tag prefix is released at `text_end` into `content` and the message, after the last `text_delta`. Each `text_delta` delta is stripped in event order, since Pi can hand listeners an update after the provider has appended later text to the part. While every delta has matched the part's growth exactly, the delta is the text the part released; from the first update that differs, the deltas pass through a stripper of their own. */
 export function stripStreamedTags(event: {
     message: unknown;
@@ -327,17 +339,15 @@ export function stripStreamedTags(event: {
     const update = event.assistantMessageEvent as StreamUpdate | undefined;
     const outer = releasedDelta;
     releasedDelta = undefined;
-    let firstText = true;
-    const content = message.content.map((part: unknown, index: number) => {
-        if (!isTextPart(part)) return part;
-        const leading = firstText;
-        firstText = false;
-        if (update === undefined) return { ...part, text: stripTags(part.text, leading) };
-        return { ...part, text: streamPart(part, index, leading, update) };
-    });
-    message.content = content;
-    const delta = releasedDelta;
-    releasedDelta = outer;
+    let delta: string | undefined;
+    let content: unknown[];
+    try {
+        content = snapshotContent(message.content, update);
+        message.content = content;
+        delta = releasedDelta;
+    } finally {
+        releasedDelta = outer;
+    }
     if (update === undefined) {
         wholeContents.add(content);
         return;
