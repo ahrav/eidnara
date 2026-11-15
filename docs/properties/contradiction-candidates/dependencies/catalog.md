@@ -505,7 +505,7 @@ Type: safety
 Reachability: default-production - `decision_page_within_budget` is a public
 Kernel API with one production caller at HEAD: the claim materializer's
 bootstrap page (`crates/daemon/src/claim_sources.rs:802`), run from the
-search lifecycle owner (`crates/daemon/src/search_lifecycle_owner.rs:594`).
+search lifecycle owner (`crates/daemon/src/search_lifecycle_owner.rs:596`).
 Tests call it at `crates/kernel/tests/kernel_slice.rs:1637-1775`. P5 would be
 its second production caller. (Refinement R2 proposed `test-only`; the
 bundle pass found the production caller and kept the label.)

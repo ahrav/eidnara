@@ -553,6 +553,11 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
         json!(kernel.tip().unwrap()),
         "{after_steady}"
     );
+    assert_eq!(
+        after_steady["progress"]["tip"],
+        json!(kernel.tip().unwrap()),
+        "{after_steady}"
+    );
     freshness_ms.sort_unstable();
     latency_ms.sort_unstable();
 
