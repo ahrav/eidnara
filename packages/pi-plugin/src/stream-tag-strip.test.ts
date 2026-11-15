@@ -340,4 +340,105 @@ describe("stripStreamedTags", () => {
         stripStreamedTags(event);
         expect(event.message.content[0]?.text).toBe(`${S}1${S} hi`);
     });
+
+    it("strips each delta as its update carries it when the part grew by other text of that length", () => {
+        const part = { type: "text", text: "" };
+        const partial = { role: "assistant", content: [part] as Part[] };
+        const send = (grown: string, delta: string) => {
+            part.text += grown;
+            const event = {
+                message: { ...partial },
+                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
+            };
+            stripStreamedTags(event);
+            return [(event.message.content[0] as Part).text, event.assistantMessageEvent.delta];
+        };
+        expect(send("abc ", "abc ")).toEqual(["abc ", "abc "]);
+        expect(send(`${S}1${S}de`, `fg${S}2${S}`)).toEqual(["abc de", "fg"]);
+    });
+
+    it("streams random answers, in step, run ahead, or restarted, as prefixes of the whole-text strip", () => {
+        let seed = 0x7a11;
+        const next = (bound: number) => {
+            seed = (seed * 1_103_515_245 + 12_345) & 0x7fffffff;
+            return seed % bound;
+        };
+        const alphabet = [
+            S,
+            S,
+            S,
+            "1",
+            "2",
+            "0",
+            "9",
+            "a",
+            " ",
+            " ",
+            "\n",
+            ".",
+            '"',
+            ">",
+            "\u2014",
+        ];
+        const randomText = (max: number) => {
+            let text = "";
+            for (let i = next(max); i > 0; i -= 1) text += alphabet[next(alphabet.length)];
+            return text;
+        };
+        for (let round = 0; round < 2_000; round += 1) {
+            const part = { type: "text", text: "" };
+            const partial = {
+                role: "assistant",
+                content: [{ type: "thinking", thinking: "" }, part] as Part[],
+            };
+            const emit = (update: { type: string; delta?: string; content?: string }) => {
+                const event = {
+                    message: { ...partial },
+                    assistantMessageEvent: { ...update, contentIndex: 1, partial },
+                };
+                stripStreamedTags(event);
+                const shownPart = event.message.content[1] as Part;
+                expect(event.assistantMessageEvent.partial.content[1]).toBe(shownPart);
+                expect(shownPart).not.toBe(part);
+                return { shown: shownPart.text ?? "", update: event.assistantMessageEvent };
+            };
+            const restartAt = next(3) === 0 ? next(16) : -1;
+            const pending: string[] = [];
+            let shown = "";
+            let deltas = "";
+            const deliver = (lag: number) => {
+                while (pending.length > lag) {
+                    const piece = pending.shift() ?? "";
+                    const event = emit({ type: "text_delta", delta: piece });
+                    const whole = reference(part.text, true);
+                    const context = JSON.stringify({ round, text: part.text, shown: event.shown });
+                    expect(whole.startsWith(event.shown), context).toBe(true);
+                    expect(event.shown.startsWith(shown), context).toBe(true);
+                    shown = event.shown;
+                    if (restartAt < 0) {
+                        deltas += event.update.delta;
+                        expect(whole.startsWith(deltas), context).toBe(true);
+                    }
+                }
+            };
+            const steps = 2 + next(20);
+            for (let step = 0; step < steps; step += 1) {
+                if (step === restartAt) {
+                    deliver(0);
+                    part.text = randomText(10);
+                    shown = "";
+                }
+                const piece = randomText(7);
+                part.text += piece;
+                pending.push(piece);
+                deliver(next(3));
+            }
+            deliver(0);
+            const end = emit({ type: "text_end", content: part.text });
+            const whole = reference(part.text, true);
+            expect(end.shown, JSON.stringify({ round, text: part.text })).toBe(whole);
+            expect(end.update.content).toBe(whole);
+            expect(whole.startsWith(deltas)).toBe(true);
+        }
+    });
 });
