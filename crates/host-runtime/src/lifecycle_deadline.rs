@@ -184,7 +184,8 @@ mod tests {
         let (release, released) = tokio::sync::oneshot::channel::<u8>();
         let wait = tokio::spawn(within(DEADLINE, released));
         tokio::task::yield_now().await;
-        tokio::time::advance(DEADLINE * 4).await;
+        jump(DEADLINE * 4).await;
+        assert!(!wait.is_finished(), "the jump charges nothing");
         release.send(9).expect("the wait holds the receiver");
         let output = wait
             .await
@@ -287,8 +288,8 @@ mod tests {
     async fn a_poll_that_burns_cpu_is_charged_from_the_thread_clock() {
         let polls = PollTime::default();
         let burning = polls.clone().timing(std::future::poll_fn(|_| {
-            let started = std::time::Instant::now();
-            while started.elapsed() < Duration::from_millis(200) {
+            let started = thread_cpu_time();
+            while thread_cpu_time() - started < Duration::from_millis(20) {
                 std::hint::spin_loop();
             }
             Poll::Ready(())

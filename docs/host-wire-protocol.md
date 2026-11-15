@@ -1261,7 +1261,7 @@ Handler health is host-internal. Host invokes `Handler::health` on a dedicated c
 Host bounds each handler lifecycle callback (`initialize`, `bind`, `route_gone`, `health`, `shutdown`) by `lifecycle_callback_deadline` (default 30 s); expiry is host-fatal for that incarnation. The wait charges the deadline in steps of at most 1 s:
 
 - A step whose wake arrives at most 1 s late charges its elapsed time.
-- A step whose wake arrives more than 1 s late, after subtracting the thread CPU time the callback's polls used, charges that CPU time, capped at 2 s.
+- A step whose wake arrives more than 1 s late, after subtracting the thread CPU time the callback's polls used, charges that CPU time, capped at the step's length plus 1 s.
 - A late step that follows a late step charges at least its scheduled length.
 
 A host process that the system stops, freezes, or stalls for longer than the deadline (job control, a cgroup freeze, a paused virtual machine, a host-wide I/O stall) therefore keeps a callback's remaining budget across the stall, and its health probe continues after it resumes. A callback that stays pending expires after `deadline` of charged time and within `2 × ⌈deadline / 1 s⌉` steps. The wait has no wall-clock bound: each late step adds its own length. The `initialize` and `shutdown` waits read the callback's poll CPU time when a poll returns, so a stall in the step in which a poll of several CPU-seconds returns is charged up to that poll's length. The 1 s limit separates a stall from scheduling latency: host timers resolve to 1 ms, a runnable task on a scheduled process is polled within milliseconds of its timer, and 1 s is one thirtieth of the default deadline, so one forgiven step withholds at most that share of the budget.
