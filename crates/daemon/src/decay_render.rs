@@ -158,15 +158,15 @@ fn splice_passes_scanner(key: &str, live: &Claim) -> bool {
         .is_empty()
 }
 
-/// Render rows for `segments` in their given order, each carrying its corrections. The
-/// corrections are computed here, once per compose, so every tier choice and pressure retry
-/// renders the same set.
+/// Render rows for `segments` in their given order, each carrying its corrections and the
+/// tiers that open-item retirement leaves. Both are computed here, once per compose, so every
+/// tier choice and pressure retry renders the same set.
 pub(crate) fn render_rows(
     segments: &[StoredHistorySegment],
     temporal_awareness: bool,
 ) -> Vec<DecayRenderHistorySegment> {
     with_corrections(
-        segments.iter().map(DecayRenderHistorySegment::from),
+        crate::history_open_items::rows(segments),
         corrections_for(segments),
         temporal_awareness,
     )
@@ -184,7 +184,7 @@ pub(crate) fn render_owned_rows(
             && segment.p1.as_deref().is_some_and(|p1| !p1.is_empty())
     });
     with_corrections(
-        segments.into_iter().map(DecayRenderHistorySegment::from),
+        crate::history_open_items::owned_rows(segments).into_iter(),
         corrections,
         temporal_awareness,
     )
