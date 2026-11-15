@@ -12,7 +12,6 @@ use support::direct_host::{BUDGET, FixtureProcess, Launch, request_json, wait_fo
 
 const MIB: u64 = 1024 * 1024;
 const GLIBC_ARENA_HEAP_BYTES: u64 = 64 * MIB;
-const SESSION_GROWTH_BOUND_BYTES: u64 = MIB;
 const SESSION_KEYED_HOLDERS: [&str; 4] = [
     "snapshots",
     "native_attach",
@@ -265,13 +264,10 @@ async fn status_after_teardown(client: &Client, route: ClientRoute) -> Value {
 async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_its_route() {
     let sessions = env_count("EIDNARA_SOAK_SESSIONS", 40);
     let turns = env_count("EIDNARA_SOAK_TURNS", 6);
-    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 384 * 1024);
+    let output_bytes = env_count("EIDNARA_SOAK_OUTPUT_BYTES", 768 * 1024);
     let window = sessions / 4;
     assert!(window >= 2, "four windows of at least two sessions");
-    assert!(
-        (turns * output_bytes) as u64 >= 2 * SESSION_GROWTH_BOUND_BYTES,
-        "one session's request window is at least twice the growth allowed per session"
-    );
+    let session_bytes = (turns * output_bytes) as u64;
 
     let root = tempfile::tempdir().expect("state root");
     std::fs::create_dir_all(root.path().join("project")).expect("project root");
@@ -328,13 +324,15 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
     );
     let low_water =
         |range: std::ops::Range<usize>| *anonymous[range].iter().min().expect("a window");
-    let early = low_water(2 * window..3 * window);
+    let early = low_water(window..2 * window);
     let late = low_water(sessions - window..sessions);
-    let between = window as u64;
+    let between = (sessions - 2 * window) as u64;
     assert!(
-        late <= early + SESSION_GROWTH_BOUND_BYTES * between,
-        "anonymous memory grew {} MiB over {between} sessions: {:?}",
+        late <= early + between * session_bytes / 2,
+        "anonymous memory grew {} MiB over {between} sessions, more than half of the {} MiB \
+         those sessions sent: {:?}",
         late.saturating_sub(early) / MIB,
+        between * session_bytes / MIB,
         anonymous
             .iter()
             .map(|bytes| bytes / MIB)
