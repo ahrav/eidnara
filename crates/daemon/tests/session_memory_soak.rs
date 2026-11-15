@@ -201,12 +201,6 @@ async fn run_session(
     live["memory_holders"].clone()
 }
 
-fn glibc_reports_its_heap() -> bool {
-    daemon::process_memory::ProcessMemory::sample()
-        .c_heap
-        .is_some()
-}
-
 fn operator_set_arena_limit() -> bool {
     std::env::var_os("MALLOC_ARENA_MAX").is_some()
         || std::env::var("GLIBC_TUNABLES").is_ok_and(|tunables| tunables.contains("arena_max"))
@@ -259,6 +253,7 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
         .await;
     wait_for_store(&observer, observer_route, "soak-observer").await;
 
+    let heap_reported = support::glibc::exports_mallinfo2();
     let mut anonymous = Vec::with_capacity(sessions);
     for session in 0..sessions {
         let live = run_session(&fixture, session, turns, output_bytes).await;
@@ -277,9 +272,9 @@ async fn anonymous_memory_plateaus_across_sessions_and_session_state_ends_with_i
             reported.abs_diff(sampled) <= sampled / 2,
             "status reports {reported} bytes, /proc reports {sampled}"
         );
-        assert!(
-            status["process_memory"]["c_heap"]["in_use_bytes"].is_u64()
-                || !glibc_reports_its_heap(),
+        assert_eq!(
+            status["process_memory"]["c_heap"]["in_use_bytes"].is_u64(),
+            heap_reported,
             "{}",
             status["process_memory"]
         );

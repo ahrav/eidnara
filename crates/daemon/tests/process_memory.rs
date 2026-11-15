@@ -124,7 +124,7 @@ async fn a_health_probe_releases_freed_c_heap_pages_once_per_growth_past_the_thr
     let reported = process_memory(&daemon).await;
     assert_eq!(reported["c_heap_releases"], releases_before + 1);
     assert!(resident_drop(&daemon).await - dropped_before > heap.freed_bytes / 2);
-    if ProcessMemory::sample().c_heap.is_some() {
+    if support::glibc::exports_mallinfo2() {
         let free = reported["c_heap"]["free_bytes"]
             .as_u64()
             .expect("free bytes");
@@ -162,9 +162,11 @@ async fn closing_a_sessions_last_route_releases_freed_c_heap_pages() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn memory_freed_after_a_release_is_returned_when_the_session_ends() {
     let _serial = ONE_AT_A_TIME.lock().await;
-    if ProcessMemory::sample().c_heap.is_none() {
+    if !support::glibc::exports_mallinfo2() {
+        eprintln!("skipped: this glibc reports no heap, so freed bytes start no release");
         return;
     }
+    assert!(ProcessMemory::sample().c_heap.is_some());
     let daemon = KernelDaemon::start().await;
     let route = bind_session(&daemon, 41, "session-with-a-live-block").await;
     let releases_before = releases(&daemon).await;
