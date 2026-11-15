@@ -184,7 +184,9 @@ impl<H: HostHandler> HostShared<H> {
         what: &'static str,
         mut task: JoinHandle<T>,
     ) -> Result<T, LifecycleFailure<T>> {
-        match timeout(self.timing.lifecycle_callback_deadline, &mut task).await {
+        match crate::lifecycle_deadline::within(self.timing.lifecycle_callback_deadline, &mut task)
+            .await
+        {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(join_err)) => {
                 let kind = if join_err.is_panic() {
@@ -197,7 +199,6 @@ impl<H: HostHandler> HostShared<H> {
                 Err(LifecycleFailure { running: None })
             }
             Err(_) => {
-                // `timeout` cannot expire while a future fails to yield.
                 // `shared.tracker.wait()` reaps the detached task.
                 task.abort();
                 self.fatal
@@ -745,7 +746,10 @@ pub async fn run_with_publish_hook<H: HostHandler>(
         let joined = tokio::select! {
             biased;
             () = shutdown.cancelled() => None,
-            joined = timeout(config.timing.lifecycle_callback_deadline, init_task) => {
+            joined = crate::lifecycle_deadline::within(
+                config.timing.lifecycle_callback_deadline,
+                init_task,
+            ) => {
                 Some(joined)
             }
         };
@@ -1063,7 +1067,10 @@ fn spawn_health_task<H: HostHandler>(shared: &Arc<HostShared<H>>) {
                     // A probe that ignores shutdown keeps its tracker until the joining loop exits.
                     // shutdown budget.
                     () = watchdog.shutdown.cancelled() => None,
-                    result = timeout(deadline, crate::panic_boundary::redact(callback)) => {
+                    result = crate::lifecycle_deadline::within(
+                        deadline,
+                        crate::panic_boundary::redact(callback),
+                    ) => {
                         match result {
                             Ok(report) => Some(report),
                             Err(_) => {
@@ -1229,7 +1236,9 @@ async fn run_handler_shutdown<H: HostHandler>(shared: &Arc<HostShared<H>>) -> bo
         let callback = crate::panic_boundary::redact_sync(|| handler.shutdown());
         crate::panic_boundary::redact(callback).await;
     });
-    match timeout(shared.timing.lifecycle_callback_deadline, &mut task).await {
+    match crate::lifecycle_deadline::within(shared.timing.lifecycle_callback_deadline, &mut task)
+        .await
+    {
         Ok(Ok(())) => true,
         Ok(Err(join_err)) => {
             let kind = if join_err.is_panic() {
