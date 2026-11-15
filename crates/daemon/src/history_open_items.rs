@@ -401,7 +401,13 @@ mod tests {
             status_line(LIFTED),
             Some((Status::Lifted, "policy.measurement-fixes"))
         );
+        // One bullet, with any space after it.
+        assert_eq!(
+            status_line(&format!("-   {DECIDED}")),
+            Some((Status::Decided, "release.server-steps"))
+        );
         for line in [
+            "- - Waiting on user (a.b): two bullets",
             "I am Waiting on user (a.b): not a line start",
             "Waiting on user (nodot): key without a dot",
             "Waiting on user (A.b): uppercase key",
@@ -944,6 +950,11 @@ mod tests {
         assert_eq!(
             retire_lines(&format!("First.\n{WAITING}\n\n\nSecond."), &aged).as_deref(),
             Some("First.\n\n\nSecond.")
+        );
+        // A line of spaces is blank: the one after the removed line goes with it.
+        assert_eq!(
+            retire_lines(&format!("First.\n  \n{WAITING}\n  \nSecond."), &aged).as_deref(),
+            Some("First.\n  \nSecond.")
         );
         // A blank line at the end stays when the removed line stood elsewhere.
         assert_eq!(
