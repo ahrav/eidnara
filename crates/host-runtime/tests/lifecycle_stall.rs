@@ -382,6 +382,7 @@ struct TimedHealthHandler {
     inner: TestHandler,
     probes: AtomicUsize,
     hang_from: Option<usize>,
+    hung_at: Arc<std::sync::OnceLock<std::time::Instant>>,
     spin: bool,
 }
 
@@ -418,6 +419,7 @@ impl HostHandler for TimedHealthHandler {
         let probe = self.probes.fetch_add(1, Ordering::SeqCst) + 1;
         announce(&format!("ENTER {probe}"));
         if self.hang_from.is_some_and(|first| probe >= first) {
+            self.hung_at.get_or_init(std::time::Instant::now);
             std::future::pending::<()>().await;
         }
         if self.spin {
@@ -451,10 +453,12 @@ fn stall_role_host() {
         return;
     };
     let data_root = tempfile::tempdir().expect("temp data root");
+    let hung_at = Arc::new(std::sync::OnceLock::new());
     let handler = TimedHealthHandler {
         inner: TestHandler::new(),
         probes: AtomicUsize::new(0),
         hang_from: (role == ROLE_HUNG_PROBE).then_some(3),
+        hung_at: Arc::clone(&hung_at),
         spin: role == ROLE_SPINNING_PROBE,
     };
     let config = host_config(
@@ -477,7 +481,11 @@ fn stall_role_host() {
         .enable_all()
         .build()
         .expect("host runtime");
-    match runtime.block_on(host_runtime::run(handler, config, shutdown)) {
+    let result = runtime.block_on(host_runtime::run(handler, config, shutdown));
+    if let Some(hung_at) = hung_at.get() {
+        announce(&format!("HUNG_MS {}", hung_at.elapsed().as_millis()));
+    }
+    match result {
         Ok(()) => announce("STOPPED graceful"),
         Err(err) => announce(&format!("STOPPED {err}")),
     }
@@ -549,12 +557,18 @@ impl HostProcess {
         panic!("no stop landed before a `{marker}` line");
     }
 
+    fn is_stopped(&self) -> bool {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.child.id()))
+            .expect("host process stat");
+        let state = stat.rsplit_once(") ").expect("state field").1;
+        state.starts_with('T')
+    }
+
     fn resume_after(&mut self, stopped_in: usize, stopped_for: Duration) {
         std::thread::sleep(stopped_for);
-        assert_eq!(
-            self.lines.try_iter().next(),
-            None,
-            "a stopped host writes nothing"
+        assert!(
+            self.is_stopped(),
+            "the host stays stopped until it is resumed"
         );
         self.signal(rustix::process::Signal::CONT);
 
@@ -594,14 +608,14 @@ fn a_host_process_stopped_past_the_deadline_inside_a_health_callback_poll_keeps_
 fn a_host_process_whose_health_callback_hangs_stops_with_the_fatal_diagnostic() {
     let host = HostProcess::spawn(ROLE_HUNG_PROBE);
     host.expect_line("ENTER 3");
-    let hung = std::time::Instant::now();
-    let stopped = host.expect_line("STOPPED");
-    assert_eq!(
-        stopped,
-        "STOPPED fatal lifecycle callback failure: health callback deadline expired"
-    );
+    let hung = host.expect_line("HUNG_MS ");
+    let hung_ms: u128 = hung["HUNG_MS ".len()..].parse().expect("milliseconds");
     assert!(
-        hung.elapsed() >= CHILD_DEADLINE - Duration::from_millis(500),
-        "the latch trips once the callback has hung for the deadline"
+        hung_ms >= (CHILD_DEADLINE - Duration::from_millis(100)).as_millis(),
+        "the latch trips once the callback has hung for the deadline, after {hung_ms} ms"
+    );
+    assert_eq!(
+        host.expect_line("STOPPED"),
+        "STOPPED fatal lifecycle callback failure: health callback deadline expired"
     );
 }
