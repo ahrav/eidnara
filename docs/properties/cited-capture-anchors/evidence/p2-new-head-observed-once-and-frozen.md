@@ -10,11 +10,11 @@ that each anchor's oid equals its plan's frozen head.
 
 ## Evidence trail
 
-`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:600`)
+`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:642`)
 parses the submission's output, then calls `observe_head` once
 (`:614`) on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
-same `head` value (`crates/daemon/src/memory_capture.rs:1015`), serialized
+same `head` value (`crates/daemon/src/memory_capture.rs:9`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
 (`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:32`)
 resolves HEAD once through `head_id` (`:62`), which follows a branch that
@@ -23,11 +23,11 @@ branch, to the end of its chain, as the Kernel's checkout snapshot
 (`head_id`, `crates/kernel/src/applicability/checkout.rs:699`) does; when its first store lookup exhausts the store's index
 slots, only the object lookup repeats, for the same id, in a store opened
 with the default slot sizing (`reopened_kind`, `:70`). The store freezes a plan
-once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:394`,
+once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:414`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
-(`crates/daemon/src/memory_capture.rs:1603`), so the receipt covers the head.
+(`crates/daemon/src/memory_capture.rs:2136`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
 handler (`crates/daemon/src/memory_capture/native.rs:407`), before `publish`
@@ -87,7 +87,7 @@ aliased branch loose and in `packed-refs`.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:2897`).
+  (`crates/daemon/src/memory_capture.rs:4168`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
@@ -97,6 +97,6 @@ aliased branch loose and in `packed-refs`.
   and the publish closure at the U3 branch.
 - Findings: the anchor's oid is the plan's `FrozenHead::Commit`; the U3
   tests compare each anchor row's oid with the fixture HEAD at submit
-  (`crates/daemon/src/source_capture_tests.rs:3498`, `:3662`).
+  (`crates/daemon/src/source_capture_tests.rs:3501`, `:3667`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.

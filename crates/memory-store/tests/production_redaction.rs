@@ -326,6 +326,45 @@ fn active_scan_audit_expires_with_its_capture_source_text() {
         "an abandoned source releases its text and the scan audit of that text"
     );
 
+    // A plan the Kernel keeps refusing is abandoned with its frozen output.
+    let refused = accepted_capture(
+        store
+            .enqueue_memory_capture(capture_source("native-refused"), 3)
+            .unwrap(),
+    );
+    let source_audit = scan_audit_counts(temp.path());
+    assert_ne!(source_audit, ScanAuditCounts::EMPTY);
+    store
+        .begin_memory_capture_attempt("/project", &refused, 0)
+        .unwrap();
+    store
+        .prepare_memory_capture("/project", &refused, "[]")
+        .unwrap();
+    assert_ne!(
+        scan_audit_counts(temp.path()),
+        source_audit,
+        "the frozen output records its own audit"
+    );
+    let mut outcome = memory_store::memory_capture::CaptureRefusal::Retried;
+    for _ in 1..MAX_CAPTURE_ATTEMPTS {
+        assert_eq!(
+            outcome,
+            memory_store::memory_capture::CaptureRefusal::Retried
+        );
+        outcome = store
+            .refuse_memory_capture_commit("/project", &refused, "[]", "kernel_write_refused", 0, 60)
+            .unwrap();
+    }
+    assert_eq!(
+        outcome,
+        memory_store::memory_capture::CaptureRefusal::Abandoned
+    );
+    assert_eq!(
+        scan_audit_counts(temp.path()),
+        ScanAuditCounts::EMPTY,
+        "an abandoned refused plan releases the audits of its text and its frozen output"
+    );
+
     accepted_capture(
         store
             .enqueue_memory_capture(capture_source("native-3"), 3)
@@ -370,7 +409,7 @@ fn reconciliation_retry_retires_the_frozen_output_audit_and_keeps_the_source_aud
             "frozen output records its own audit"
         );
         store
-            .retry_memory_capture_reconciliation("/project", &job, "[]")
+            .retry_memory_capture_reconciliation("/project", &job, "[]", 0, 50)
             .unwrap();
         assert_eq!(
             scan_audit_counts(temp.path()),

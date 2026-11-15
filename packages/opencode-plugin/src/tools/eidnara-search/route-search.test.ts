@@ -414,8 +414,34 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).not.toContain("Use Redis");
         expect(execution.text).not.toContain("Still current.");
         expect(execution.text).toContain(
-            "Memory: 4 ranked memories changed or became unreadable after ranking and were not rendered.",
+            "Memory: 3 ranked memories changed or became unreadable after ranking and were not rendered.",
         );
+    });
+
+    it("gives a ranked decision of another domain no result place and no stale note", async () => {
+        const { kernel, run } = harness();
+        // Each memory is ranked beside the statement record that approves it and repeats its text.
+        const ranked: { object: string }[] = [];
+        for (const index of [1, 2, 3]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `User stated: fact ${index}.`,
+            });
+            kernel.seedDecision({
+                object_id: id(index + 10),
+                decision_kind: "adr_accepted",
+                summary: `User stated: fact ${index}.`,
+                domain_id: "user-statements",
+            });
+            ranked.push({ object: id(index + 10) }, { object: id(index) });
+        }
+        kernel.routeReply = () => fused(ranked);
+        const execution = await run({ query: "fact", limit: 2 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(1), id(2)]);
+        expect(execution.text).not.toContain("changed or became unreadable");
+        expect(execution.text).not.toContain(id(11));
     });
 
     it("labels a result the route validated as labeled", async () => {

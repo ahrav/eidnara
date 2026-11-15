@@ -420,7 +420,10 @@ impl HandlerCore {
 /// Memories of one source sharing a category and quotation freeze as one.
 /// A replacement target survives the collapse so the correction it carries
 /// is not lost; one quotation superseding two memories keeps one entry per
-/// target, since a decision supersedes exactly one predecessor.
+/// target, since a decision supersedes exactly one predecessor. The
+/// collapsed memory is a duplicate only when every memory it joins names
+/// the same duplicate target: a memory that names none carries a fact the
+/// store does not hold, and that fact is written.
 pub(super) fn collapse_quotations(
     attribution: &str,
     proposed: Vec<CapturedMemory>,
@@ -436,18 +439,52 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                if kept.replaces.is_none()
-                    && (kept.duplicate_of.is_none() || memory.replaces.is_some())
-                {
+                if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
-                    kept.duplicate_of = memory.duplicate_of;
+                    kept.duplicate_of = None;
+                } else if kept.duplicate_of != memory.duplicate_of {
+                    kept.duplicate_of = None;
                 }
             }
             None => memories.push(memory),
         }
     }
     memories
+}
+
+/// Widens each cut quotation of a user message to the whole sentences that
+/// hold it, so the stored statement keeps a lead-in, a negation, or a
+/// condition the extractor left out.
+///
+/// A proposal that replaces or retires memories is widened by a lead-in
+/// only (see [`Widening::LeadIn`]). Two proposals of different categories
+/// that widen to one sentence keep their own quotations, so one sentence is
+/// stored once per category at most and each clause stays its own memory.
+fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) {
+    let widened: Vec<Option<&str>> = proposed
+        .iter()
+        .map(|memory| {
+            let widening = if memory.replaces.is_some() || !memory.also_replaces.is_empty() {
+                Widening::LeadIn
+            } else {
+                Widening::Sentences
+            };
+            enclosing_statement(prose, &memory.quote, widening)
+        })
+        .collect();
+    for index in 0..proposed.len() {
+        let Some(statement) = widened[index] else {
+            continue;
+        };
+        let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
+            other.category != proposed[index].category
+                && other_widened.unwrap_or(other.quote.as_str()) == statement
+        });
+        if !shared {
+            proposed[index].quote = statement.to_owned();
+        }
+    }
 }
 
 impl CaptureWork {
@@ -529,16 +566,21 @@ impl CaptureWork {
             .pending_memory_captures(&project, &self.binding.harness, now_ms())
             .map_err(|_| "store_failed")?;
         let mut unprepared = Vec::new();
+        // The frozen plans share one budget, so a busy Kernel writer delays
+        // the extraction window by that budget at most. A plan the budget
+        // does not reach stays ripe for the next call.
+        let budget = Instant::now() + super::PLAN_COMMIT_BUDGET;
         for job in jobs {
-            if job.prepared.is_some() {
+            if job.prepared.is_none() {
+                unprepared.push(job);
+            } else if Instant::now() < budget {
                 // A replayed plan reads its session's record without waiting.
                 let settlement = super::cite::settlement_key(&job)
                     .map_or(SettlementOutcome::Settled, |key| {
                         self.source_capture.settlement_now(&key)
                     });
-                self.publish_or_recover(&job, settlement)?;
-            } else {
-                unprepared.push(job);
+                let deadline = budget.min(Instant::now() + super::COMMIT_WAIT);
+                self.publish_or_recover(&job, settlement, deadline)?;
             }
         }
         if unprepared.is_empty() {
@@ -627,22 +669,29 @@ impl CaptureWork {
             } else {
                 "Assistant reported"
             };
+            let prose = super::Prose::of(&job.text);
             let mut proposed = decision.memories;
-            // A user's statement is stored as its whole sentences, so a
-            // quotation that cuts a lead-in or a qualifier is widened first.
-            if job.role == "user" && holds_whole_message(&job) {
-                for memory in &mut proposed {
-                    if let Some(statement) = enclosing_statement(&job.text, &memory.quote) {
-                        memory.quote = statement.to_owned();
-                    }
-                }
+            if job.role == "user" && !super::cite::is_hashed_source_id(&job.message_id) {
+                widen_cut_quotations(&prose, &mut proposed);
             }
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
-            let memories = collapse_quotations(attribution, proposed);
+            let mut memories = collapse_quotations(attribution, proposed);
+            // A user's statement that repeats an approved memory word for
+            // word duplicates that memory, whichever copy the extractor named.
+            for memory in &mut memories {
+                if memory.duplicate_of.is_some()
+                    && let Some(approved) = plan
+                        .existing
+                        .iter()
+                        .find(|previous| previous.automatic && previous.content == memory.content)
+                {
+                    memory.duplicate_of = Some(approved.id.clone());
+                }
+            }
             if memories.iter().any(|memory| {
-                !user_attributed(&job, memory)
+                !user_attributed(&job, &prose, memory)
                     && memory
                         .replaces
                         .iter()
@@ -694,7 +743,14 @@ impl CaptureWork {
                 };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
-                self.publish_or_recover(&job, job_settlement(settlements, &job))?;
+                // The plan's copy of the job predates the dispatch that
+                // produced this output; the backoff counts that dispatch.
+                job.attempts += 1;
+                self.publish_or_recover(
+                    &job,
+                    job_settlement(settlements, &job),
+                    Instant::now() + super::COMMIT_WAIT,
+                )?;
             }
         }
         Ok(())

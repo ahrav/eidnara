@@ -132,6 +132,13 @@ pub fn claim_units(
         out.exclusions.push(ClaimExclusion::Unscoped);
         return Ok(out);
     }
+    // A statement record approves one captured memory and repeats its text.
+    // The memory's own units carry that text, so the record publishes none
+    // and a statement is ranked once.
+    if subject.domain_id == crate::memory_capture::STATEMENT_DOMAIN_ID {
+        out.exclusions.push(ClaimExclusion::OutsideMemoryDomain);
+        return Ok(out);
+    }
     let promoted = if subject.domain_id != MEMORY_DOMAIN_ID {
         out.exclusions.push(ClaimExclusion::OutsideMemoryDomain);
         false

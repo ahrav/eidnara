@@ -52,10 +52,14 @@ async function memoryObjectIds(host: HermeticHostStack, identity: BindIdentity):
     const rows = (read.rows ?? []) as Array<{
         object?: { domain_id?: unknown };
         token?: { object_id?: unknown };
+        decision?: unknown;
     }>;
-    // The surface also shows the statement record that approves a captured user statement; it is a row of another domain and no memory.
+    // The classify route takes memory decisions. The surface also shows the statement record that approves a captured user statement, a row of another domain, and the classifier's own memory-domain observations, which carry no decision.
     return rows.flatMap((row) =>
-        row.object?.domain_id === "memory" && typeof row.token?.object_id === "string"
+        row.object?.domain_id === "memory" &&
+        typeof row.decision === "object" &&
+        row.decision !== null &&
+        typeof row.token?.object_id === "string"
             ? [row.token.object_id]
             : [],
     );

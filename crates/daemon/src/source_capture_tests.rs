@@ -3469,7 +3469,10 @@ const CITED_SOURCES: [(&str, &str); 6] = [
     // Two questions: a quotation cut from one stays a fragment, since capture
     // widens a cut quotation only to sentences that are statements.
     ("pi-span", "Does the cache live in\nthe shared volume?"),
-    ("pi-edge", "Are retries capped?\nDoes backoff double each time?"),
+    (
+        "pi-edge",
+        "Are retries capped?\nDoes backoff double each time?",
+    ),
     (
         "pi-first",
         concat!(

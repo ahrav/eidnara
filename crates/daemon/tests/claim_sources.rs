@@ -1582,6 +1582,53 @@ fn anchor_commits_pass_through_the_claim_materializer() {
     );
 }
 
+/// A statement record repeats the text of the memory it approves, so it publishes no unit and records one exclusion; the memory publishes its canonical summary, canonical rationale, and promoted summary.
+#[test]
+fn a_statement_record_publishes_no_units_and_its_memory_publishes_all_three() {
+    let units = |object_id: &str, domain_id: &str, kind: &str| {
+        let object = kernel::ObjectRow {
+            object_id: object_id.to_string(),
+            object_kind: "decision".to_string(),
+            domain_id: domain_id.to_string(),
+            source_kind: "user".to_string(),
+            source_id: "memory_capture_statement:0123456789abcdef0123456789abcdef".to_string(),
+            source_revision: 1,
+            created_commit_seq: 1,
+            invalidated_commit_seq: None,
+            superseded_by: None,
+            sensitivity: Sensitivity::Normal,
+        };
+        let decision = DecisionRow {
+            decision_id: format!("{object_id}-decision"),
+            object_id: object_id.to_string(),
+            proposition_id: None,
+            scope_id: Some(SCOPE.to_string()),
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: kind.to_string(),
+            payload: DecisionPayload {
+                summary: "User stated: Use pnpm for installs.".to_string(),
+                rationale: r#"{"source":"memory_capture"}"#.to_string(),
+            },
+            created_commit_seq: 1,
+            sensitivity: Sensitivity::Normal,
+        };
+        claim_units(&ClaimSubject::from_object(&object).unwrap(), &decision).unwrap()
+    };
+    let statement = units("stm-1", "user-statements", "adr_accepted");
+    assert!(statement.units.is_empty(), "{:?}", statement.units);
+    assert_eq!(statement.exclusions, [ClaimExclusion::OutsideMemoryDomain]);
+    let memory = units("mem-1", MEMORY, "PROJECT_RULES");
+    assert_eq!(memory.units.len(), 3);
+    assert!(memory.exclusions.is_empty());
+    let other = units("note-1", "notes", "PROJECT_RULES");
+    assert_eq!(
+        other.units.len(),
+        2,
+        "a decision of another domain keeps its canonical units"
+    );
+}
+
 /// A subject and decision naming different objects, or a non-decision registry row, are refused rather than mapped.
 #[test]
 fn mismatched_object_and_decision_are_refused() {

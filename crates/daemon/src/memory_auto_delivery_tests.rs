@@ -47,6 +47,8 @@ struct Extracted {
     quote: String,
     replaces: Vec<String>,
     duplicate_of: Option<String>,
+    /// The memory category; `PROJECT_RULES` when absent.
+    category: Option<&'static str>,
 }
 
 fn fact(quote: &str) -> Extracted {
@@ -129,7 +131,7 @@ async fn drain(
                     .into_iter()
                     .map(|memory| {
                         let mut value = json!({
-                            "category": "PROJECT_RULES",
+                            "category": memory.category.unwrap_or("PROJECT_RULES"),
                             "content": format!("A project fact: {}", memory.quote),
                             "quote": memory.quote,
                         });
@@ -1027,25 +1029,121 @@ fn fill_statement_lineage(handler: &Handler, project: &Path, job: &str) {
         .unwrap();
 }
 
+const CITATION_COUNTERS: [&str; 5] = [
+    "decisions_cited",
+    "decisions_source_capture_off",
+    "decisions_source_id_unjoinable",
+    "decisions_publish_budget_expired",
+    "decisions_descriptor_not_found",
+];
+const ANCHOR_COUNTERS: [&str; 2] = ["decisions_anchored", "decisions_head_unavailable"];
+
+/// The project's rows on explicit search, its live statement records, and
+/// the approval-refused, citation, and anchor counts.
+type Published = (Vec<(String, String)>, Vec<String>, u64, u64, u64);
+
+async fn published(handler: &Handler, project: &Path) -> Published {
+    let mut rows = explicit_search(handler, (SECOND, "s2"), project).await;
+    rows.sort();
+    let sum = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| capture_counter(handler, name))
+            .sum()
+    };
+    let mut records = live_statement_records(handler, project);
+    records.retain(|record| record.starts_with("User stated: "));
+    records.sort();
+    (
+        rows,
+        records,
+        capture_counter(handler, "decisions_approval_refused"),
+        sum(&CITATION_COUNTERS),
+        sum(&ANCHOR_COUNTERS),
+    )
+}
+
+/// One message states two facts and its lineage is full, so the approving
+/// commit is refused and the plan commits labeled. The completion write of
+/// that job fails once: the plan stays queued, and the next drain replays the
+/// labeled receipt and completes the source with the same rows and counts.
 #[tokio::test]
 async fn a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_search_and_counted() {
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
-    let messages = [("m1", "user", THURSDAY), ("m2", "user", PNPM)];
+    let both = format!("{THURSDAY} {TUESDAY}");
+    let messages = [("m1", "user", both.as_str()), ("m2", "user", PNPM)];
     let jobs = enqueue(&handler, FIRST, "s1", &messages).await;
     fill_statement_lineage(&handler, &project, &jobs[0]);
-    drain(&handler, FIRST, "s1", &messages, |text, _| vec![fact(text)]).await;
+    store
+        .execute_tag_sql_for_test(&format!(
+            "CREATE TRIGGER hold_plans BEFORE UPDATE ON memory_capture_jobs
+             WHEN NEW.commit_seq IS NOT NULL AND NEW.job_id='{}'
+             BEGIN SELECT RAISE(ABORT,'held'); END",
+            jobs[0]
+        ))
+        .unwrap();
+    drain(&handler, FIRST, "s1", &messages, |text, _| {
+        if text == PNPM {
+            vec![fact(PNPM)]
+        } else {
+            vec![fact(THURSDAY), fact(TUESDAY)]
+        }
+    })
+    .await;
 
-    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
-    rows.sort();
+    let committed = published(&handler, &project).await;
     assert_eq!(
-        rows,
+        committed.0,
         [
             (stated(THURSDAY), "labeled".to_string()),
             (stated(PNPM), "visible".to_string()),
+            (stated(TUESDAY), "labeled".to_string()),
         ],
-        "the refused statement is stored for explicit search; the other is approved"
+        "the refused message's statements are stored for explicit search; the other is approved"
     );
-    assert_eq!(capture_counter(&handler, "decisions_approval_refused"), 1);
+    assert_eq!(
+        committed.1,
+        [stated(PNPM)],
+        "a labeled statement has no statement record"
+    );
+    assert_eq!(
+        committed.2, 2,
+        "each statement of the refused plan is counted once"
+    );
+    assert_eq!(
+        (committed.3, committed.4),
+        (3, 3),
+        "the refused attempt adds no citation or anchor count: one of each per committed decision"
+    );
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let held = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (held.pending, held.prepared, held.completed),
+        (1, 1, 1),
+        "the labeled commit is durable and its completion write failed"
+    );
+    store
+        .execute_tag_sql_for_test(
+            "DROP TRIGGER hold_plans; UPDATE memory_capture_jobs SET retry_at_ms=0",
+        )
+        .unwrap();
+    let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    let replayed = body(
+        handler
+            .handle_native_capture_next(test_route(FIRST), &next)
+            .await,
+    );
+    assert_eq!(
+        replayed["state"], "ready",
+        "the frozen plan replays its labeled receipt and asks the model for nothing: {replayed}"
+    );
+    assert_eq!(
+        published(&handler, &project).await,
+        committed,
+        "a replayed receipt writes no row, no statement record, and no count"
+    );
     let status = store
         .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
         .unwrap();
@@ -1216,7 +1314,7 @@ async fn quoted_introduced_and_assistant_text_never_gets_a_statement_record() {
 /// the note, and a later repeat of the approved statement writes nothing.
 #[tokio::test]
 async fn a_user_statement_that_restates_an_agent_written_memory_gets_a_statement_record() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
     let written = body(
         handler
             .dispatch_value_for_test(
@@ -1282,19 +1380,637 @@ async fn a_user_statement_that_restates_an_agent_written_memory_gets_a_statement
     assert!(block.contains(&stated(THURSDAY)), "{block}");
     assert!(!block.contains("on Thursdays"), "{block}");
 
+    let restated: Vec<Value> = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .into_iter()
+        .filter(|rationale| !rationale["restates"].is_null())
+        .collect();
+    assert_eq!(restated.len(), 1, "{restated:?}");
+    assert_eq!(
+        restated[0]["restates"], "mem-agent",
+        "the statement names the note it was recorded beside"
+    );
+
+    // A repeat writes no second copy, whichever of the two the extractor
+    // names as the duplicate: the approved statement, or the agent's note.
+    for (message, names_statement) in [("m2", true), ("m3", false)] {
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[(message, "user", THURSDAY)],
+            |_, existing| duplicate(existing, names_statement),
+        )
+        .await;
+        let mut repeated = explicit_search(&handler, (SECOND, "s2"), &project).await;
+        repeated.sort();
+        assert_eq!(
+            repeated, rows,
+            "a repeat of an approved statement writes no second row"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(THURSDAY)]
+        );
+    }
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+        .unwrap();
+    assert_eq!(
+        (status.pending, status.failed),
+        (0, 0),
+        "each repeat completed its source"
+    );
+    assert!(status.completed >= 3, "{status:?}");
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert_eq!(block.matches(&stated(THURSDAY)).count(), 1, "{block}");
+}
+
+/// The rationale of each memory row on explicit search, as JSON; a row whose
+/// rationale is not JSON reads as null.
+async fn memory_rationales(
+    handler: &Handler,
+    (channel, session): (u16, &str),
+    project: &Path,
+) -> Vec<Value> {
+    let request = kernel_route_fixtures::read_request(project, session, "explicit_search", None);
+    let body = body(
+        handler
+            .dispatch_value_for_test(test_route(channel), request)
+            .await,
+    );
+    body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["object"]["domain_id"] == "memory")
+        .map(|row| {
+            serde_json::from_str(row["decision"]["payload"]["rationale"].as_str().unwrap())
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+const CUT: &str = "deploy on Fridays.";
+const NEVER_FRIDAYS: &str = "Never deploy on Fridays.";
+
+/// The extractor cuts the same clause out of three sources. The user's
+/// message held whole stores the whole sentence as an approved statement.
+/// An assistant's message and a fragment of a long user message store the
+/// clause as quoted, labeled.
+#[tokio::test]
+async fn a_cut_quotation_widens_only_for_a_user_message_held_whole() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let fragment = format!("{}:0", "a".repeat(64));
+    let assistant = format!("As you said, we never {CUT}");
+    let messages = [
+        ("m1", "user", NEVER_FRIDAYS),
+        ("m2", "assistant", assistant.as_str()),
+        (fragment.as_str(), "user", NEVER_FRIDAYS),
+    ];
+    for message in messages {
+        capture(&handler, FIRST, "s1", &[message], |_, _| vec![fact(CUT)]).await;
+    }
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (format!("Assistant reported: {CUT}"), "labeled".to_string()),
+            (stated(NEVER_FRIDAYS), "visible".to_string()),
+            (stated(CUT), "labeled".to_string()),
+        ]
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(NEVER_FRIDAYS)]
+    );
+}
+
+/// One sentence carries a fact the store holds and a new one, and the
+/// extractor quotes each clause. Both quotations widen to the sentence. The
+/// sentence is written, in either proposal order: a duplicate of the stored
+/// fact does not absorb the new fact.
+#[tokio::test]
+async fn a_new_fact_in_the_sentence_of_a_stored_one_is_written() {
+    for stored_first in [true, false] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", PNPM)], |_, _| {
+            vec![fact(PNPM)]
+        })
+        .await;
+        let both = "Use pnpm for installs in this repository, and keep build logs for 30 days.";
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", both)],
+            |_, existing| {
+                let mut proposals = vec![
+                    Extracted {
+                        quote: "Use pnpm for installs in this repository".to_string(),
+                        duplicate_of: ids_containing(existing, &stated(PNPM)).pop(),
+                        ..Extracted::default()
+                    },
+                    fact("keep build logs for 30 days."),
+                ];
+                if !stored_first {
+                    proposals.reverse();
+                }
+                proposals
+            },
+        )
+        .await;
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let mut expected = [
+            (stated(PNPM), "visible".to_string()),
+            (stated(both), "visible".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected, "stored first: {stored_first}");
+    }
+}
+
+/// The extractor files two clauses of one sentence under two categories.
+/// Each clause stays its own labeled memory: the sentence is approved once
+/// per category at most, and these two would be the same statement twice.
+#[tokio::test]
+async fn clauses_of_one_sentence_in_two_categories_stay_as_quoted() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let sentence = "The gateway service is named harbor and listens on port 4321.";
+    let (name, port) = (
+        "The gateway service is named harbor",
+        "listens on port 4321.",
+    );
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", sentence)],
+        |_, _| {
+            vec![
+                Extracted {
+                    quote: name.to_string(),
+                    category: Some("NAMING"),
+                    ..Extracted::default()
+                },
+                Extracted {
+                    quote: port.to_string(),
+                    category: Some("CONFIG_VALUES"),
+                    ..Extracted::default()
+                },
+            ]
+        },
+    )
+    .await;
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(name), "labeled".to_string()),
+            (stated(port), "labeled".to_string()),
+        ]
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
+
+    // One category for both clauses is one statement.
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", NEVER_FRIDAYS)],
+        |_, _| vec![fact("Never deploy"), fact(CUT)],
+    )
+    .await;
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(NEVER_FRIDAYS)]
+    );
+}
+
+/// A correction the extractor cut after its lead-in replaces the statement
+/// it corrects, and the stored correction is the user's whole sentence. A
+/// quotation cut after a negation replaces nothing: the clause the extractor
+/// judged is not what the sentence says.
+#[tokio::test]
+async fn a_cut_correction_replaces_through_a_lead_in_and_never_through_a_cut_negation() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let negated = "Never move the release cut from Thursday to Tuesday.";
+    let replacing = |quote: &'static str| {
+        move |_: &str, existing: &[Value]| {
+            let target = ids_containing(existing, &stated(THURSDAY));
+            assert_eq!(target.len(), 1, "{existing:?}");
+            vec![Extracted {
+                quote: quote.to_string(),
+                replaces: target,
+                ..Extracted::default()
+            }]
+        }
+    };
     capture(
         &handler,
         SECOND,
         "s2",
-        &[("m2", "user", THURSDAY)],
-        |_, existing| duplicate(existing, true),
+        &[("m2", "user", negated)],
+        replacing("move the release cut from Thursday to Tuesday."),
     )
     .await;
     assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(THURSDAY), "visible".to_string())],
+        "the cut negation is refused and the statement stays"
+    );
+
+    let corrected = "Quick correction: the release cut moved from Thursday to Tuesday.";
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "user", corrected)],
+        replacing("the release cut moved from Thursday to Tuesday."),
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(corrected), "visible".to_string())],
+        "the correction keeps its lead-in and replaces the statement"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(corrected)]
+    );
+}
+
+/// A sentence that reports what someone wrote after a colon is the user's
+/// sentence. Widening stores it whole, the reporting clause included, so a
+/// reader sees whose words follow the colon.
+#[tokio::test]
+async fn a_reporting_clause_before_a_colon_stays_in_the_stored_statement() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let reported = "My teammate wrote: always rebase before merging.";
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", reported)],
+        |_, _| vec![fact("always rebase before merging.")],
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(reported), "visible".to_string())]
+    );
+}
+
+/// One row of the capture queue: dispatches, retry deadline, last error,
+/// abandonment time, stored text, and frozen plan.
+type QueueRow = (
+    u32,
+    i64,
+    Option<String>,
+    Option<i64>,
+    String,
+    Option<String>,
+);
+
+fn queue_row(store: &MemoryStore, job: &str) -> QueueRow {
+    store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT attempts,retry_at_ms,last_error,abandoned_at_ms,text,prepared_json FROM memory_capture_jobs WHERE job_id=?1",
+                [job],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+        })
+        .unwrap()
+}
+
+/// A frozen plan decodes and names a replacement target it was never
+/// offered, which the Kernel refuses as invalid input. Each drain that
+/// commits it records one dispatch and doubles the wait, and the refusal on
+/// the ninth dispatch abandons the source and releases its text and plan.
+#[tokio::test]
+async fn a_plan_the_kernel_refuses_spends_a_dispatch_per_commit_and_is_abandoned_at_the_cap() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let jobs = enqueue(&handler, FIRST, "s1", &[("m1", "user", THURSDAY)]).await;
+    let job = jobs[0].as_str();
+    assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
+    let plan = json!({"version": 1, "model": "test/model", "memories": [{
+        "category": "PROJECT_RULES",
+        "content": stated(THURSDAY),
+        "quote": THURSDAY,
+        "replaces": "mem_never_offered",
+    }]})
+    .to_string();
+    assert!(
+        store
+            .prepare_memory_capture(&digest, job, &plan)
+            .unwrap()
+            .is_some()
+    );
+    let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    let drain_once = || async {
+        body(
+            handler
+                .handle_native_capture_next(test_route(FIRST), &next)
+                .await,
+        )
+    };
+
+    let before = now_ms();
+    assert_eq!(drain_once().await["state"], "pending");
+    let after = now_ms();
+    let (attempts, retry_at, error, abandoned, text, frozen) = queue_row(&store, job);
+    assert_eq!(attempts, 2, "the refused commit is the second dispatch");
+    assert_eq!(error.as_deref(), Some("kernel_write_refused"));
+    assert!(
+        (before + 2_000..=after + 2_000).contains(&retry_at),
+        "the wait after the first dispatch is two seconds: {retry_at} in {before}..{after}"
+    );
+    assert_eq!((abandoned, text.as_str()), (None, THURSDAY));
+    assert_eq!(frozen.as_deref(), Some(plan.as_str()), "the plan is kept");
+    assert_eq!(
+        drain_once().await["state"],
+        "pending",
+        "a plan that is waiting is left alone"
+    );
+    assert_eq!(queue_row(&store, job).0, 2);
+
+    store
+        .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+        .unwrap();
+    let before = now_ms();
+    drain_once().await;
+    let (attempts, retry_at, ..) = queue_row(&store, job);
+    assert_eq!(attempts, 3);
+    assert!(
+        retry_at >= before + 4_000,
+        "the wait doubles with the dispatch count: {retry_at} from {before}"
+    );
+
+    store
+        .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0,attempts=8")
+        .unwrap();
+    assert_eq!(drain_once().await["state"], "ready");
+    let (attempts, _, error, abandoned, text, frozen) = queue_row(&store, job);
+    assert_eq!(attempts, 9);
+    assert!(
+        abandoned.is_some(),
+        "the ninth dispatch abandons the source"
+    );
+    assert_eq!(error.as_deref(), Some("kernel_write_refused"));
+    assert_eq!(
+        (text.as_str(), frozen),
+        ("", None),
+        "its text and plan are released"
+    );
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!((status.pending, status.failed), (0, 1));
+    assert!(
         explicit_search(&handler, (SECOND, "s2"), &project)
             .await
-            .len(),
-        2,
-        "a repeat of an approved statement writes no second row"
+            .is_empty()
     );
+}
+
+/// One user message states as many facts as one extraction may return. Each
+/// gets its own statement record on the message's lineage, and the Kernel
+/// approves every one.
+#[tokio::test]
+async fn every_statement_of_one_message_fits_the_message_lineage() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let statements: Vec<String> = (0..crate::memory_capture::MAX_CAPTURE_MEMORIES)
+        .map(|index| format!("Service {index} listens on port {}.", 4000 + index))
+        .collect();
+    let message = statements.join(" ");
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", &message)],
+        |_, _| statements.iter().map(|statement| fact(statement)).collect(),
+    )
+    .await;
+    let mut expected: Vec<String> = statements
+        .iter()
+        .map(|statement| stated(statement))
+        .collect();
+    expected.sort();
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        expected
+            .iter()
+            .map(|text| (text.clone(), "visible".to_string()))
+            .collect::<Vec<_>>(),
+        "every statement is approved"
+    );
+    let mut records = live_statement_records(&handler, &project);
+    records.sort();
+    assert_eq!(records, expected);
+    assert_eq!(capture_counter(&handler, "decisions_approval_refused"), 0);
+}
+
+/// The reading session wrote the project's newest statements, more of them
+/// than one bounded read keeps. Its block still carries the older statement
+/// of another session: the session's own rows spend none of the read's row
+/// cap or byte cap.
+#[tokio::test]
+async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m0", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let own = numbered(6, "billing");
+    let messages: Vec<(&str, &str, &str)> = own
+        .iter()
+        .map(|(id, text)| (id.as_str(), "user", text.as_str()))
+        .collect();
+    capture(&handler, SECOND, "s2", &messages, |text, _| {
+        vec![fact(text)]
+    })
+    .await;
+
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let tip = kernel.tip().unwrap();
+    let read = |session: &str, caps: (usize, usize)| -> (Vec<String>, bool) {
+        let response =
+            crate::canonical_memory::read_other_sessions(&kernel, &binding, session, tip, caps)
+                .unwrap();
+        let mut summaries: Vec<String> = response
+            .rows
+            .iter()
+            .map(|row| {
+                response.decisions[&row.object.object_id]
+                    .payload
+                    .summary
+                    .clone()
+            })
+            .collect();
+        summaries.sort();
+        (summaries, response.truncated)
+    };
+    const ROWS: usize = 1_000;
+    const BYTES: usize = 1 << 20;
+    let unbounded = (ROWS, BYTES);
+    assert_eq!(
+        read("s2", unbounded),
+        (vec![stated(THURSDAY)], false),
+        "every other row is the reading session's own"
+    );
+    assert_eq!(read("s3", unbounded).0.len(), 7);
+    // Two rows fit the row cap; the six newest rows are the session's own.
+    assert_eq!(
+        read("s2", (2, BYTES)).0,
+        [stated(THURSDAY)],
+        "the row cap is spent on rows of other sessions"
+    );
+    let (other_session, truncated) = read("s3", (2, BYTES));
+    assert_eq!(
+        other_session.len(),
+        2,
+        "another session reads the newest two"
+    );
+    assert!(truncated);
+    assert!(!other_session.contains(&stated(THURSDAY)));
+    // One statement's payload is under 1 KiB; two do not fit 1 KiB.
+    assert_eq!(
+        read("s2", (ROWS, 1024)).0,
+        [stated(THURSDAY)],
+        "the byte cap is spent on rows of other sessions"
+    );
+    assert!(!read("s3", (ROWS, 1024)).0.contains(&stated(THURSDAY)));
+}
+
+/// A source commits, its queue row is pruned, and the same message is
+/// captured again with another extraction. The Kernel holds the first
+/// receipt for the source, so every new plan conflicts. Each conflict
+/// releases the plan and waits out the dispatch backoff, the ninth dispatch
+/// abandons the source, and a later source is extracted.
+#[tokio::test]
+async fn a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let message = [("m1", "user", THURSDAY)];
+    capture(&handler, FIRST, "s1", &message, |_, _| vec![fact(THURSDAY)]).await;
+    store
+        .execute_tag_sql_for_test("DELETE FROM memory_capture_jobs")
+        .unwrap();
+    handler.purge_session_state("s1", "session_delete");
+    let jobs = enqueue(&handler, FIRST, "s1", &message).await;
+    let job = jobs[0].as_str();
+
+    let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    // Each dispatch answers with no memory, a plan the first receipt's digest does not match.
+    let dispatch = || async {
+        let work = body(
+            handler
+                .handle_native_capture_next(test_route(FIRST), &next)
+                .await,
+        );
+        if work["state"] != "work" {
+            return work["state"].as_str().unwrap().to_string();
+        }
+        let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+        let decisions: Vec<Value> = prompt["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| json!({"message_id": message["id"], "memories": []}))
+            .collect();
+        let submission = json!({
+            "method": "memory.capture.submit",
+            "session_id": "s1",
+            "lease": work["lease"],
+            "model": work["model"],
+            "output": json!({"version": 1, "decisions": decisions}).to_string(),
+        });
+        body(
+            handler
+                .handle_native_capture_submit(test_route(FIRST), &submission)
+                .await,
+        )["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let before = now_ms();
+    assert_eq!(dispatch().await, "processed");
+    let (attempts, retry_at, error, abandoned, text, frozen) = queue_row(&store, job);
+    assert_eq!(
+        (attempts, error.as_deref(), abandoned, frozen),
+        (1, Some("reconciliation_conflict"), None, None),
+        "the conflicting plan is released"
+    );
+    assert_eq!(text, THURSDAY);
+    assert!(
+        retry_at >= before + 2_000,
+        "the source waits out the dispatch backoff: {retry_at} from {before}"
+    );
+    assert_eq!(
+        dispatch().await,
+        "pending",
+        "the waiting source is not issued"
+    );
+
+    for expected in 2..=9 {
+        store
+            .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+            .unwrap();
+        assert_eq!(dispatch().await, "processed", "dispatch {expected}");
+        assert_eq!(queue_row(&store, job).0, expected);
+    }
+    let (_, _, error, abandoned, text, _) = queue_row(&store, job);
+    assert!(
+        abandoned.is_some(),
+        "the ninth dispatch abandons the source"
+    );
+    assert_eq!(error.as_deref(), Some("reconciliation_conflict"));
+    assert_eq!(text, "", "the abandoned source releases its text");
+    assert_eq!(dispatch().await, "ready", "no tenth dispatch is issued");
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!((status.pending, status.failed), (0, 1));
+
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "assistant", ASSISTANT_NOTE)],
+        |_, _| vec![fact(ASSISTANT_NOTE)],
+    )
+    .await;
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rows.len(), 2, "the later source is extracted: {rows:?}");
 }

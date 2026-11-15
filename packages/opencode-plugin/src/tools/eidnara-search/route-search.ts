@@ -122,7 +122,7 @@ export async function searchThroughRoute(args: {
             causality: reference.causality,
         });
     }
-    const selected = [...decisions.values()].slice(0, args.limit);
+    const ranking = [...decisions.values()];
     const notes: string[] = [];
     if (ranked.entries.length > 0 && decisions.size === 0) {
         notes.push("Memory: the fused ranking matched no current memory decisions.");
@@ -131,49 +131,64 @@ export async function searchThroughRoute(args: {
     if (ranked.truncated) {
         notes.push("Memory: the fused ranking was truncated at the route's result bound.");
     }
-    if (selected.length === 0) return { kind: "ranked", results: [], notes };
+    if (ranking.length === 0) return { kind: "ranked", results: [], notes };
 
-    const read = await readObjectRowsChunked({
-        client: args.client,
-        surface: "explicit_search",
-        gated: false,
-        objectIds: selected.map((decision) => decision.objectId),
-        signal: args.signal,
-        deadline,
-    });
-    if (!read.ok) return refusedState(read.state);
-    if (args.client.connectionIdentity() !== connection) {
-        return refusedState(unavailable("snapshot_diverged"));
-    }
-    const rows = new Map(read.rows.map((row) => [row.object.object_id, row]));
+    // The limit counts memory decisions. A ranked decision of another domain, such as the statement record that approves a memory and repeats its text, takes no place: each read names as many of the next ranked decisions as places remain, at the snapshot of the first read.
     const nowMs = args.nowMs ?? Date.now();
     const results: KernelMemorySearchResult[] = [];
     const stale: string[] = [];
-    const unresolved = new Set(read.unresolvedObjectIds);
-    for (const decision of selected) {
-        if (unresolved.has(decision.objectId)) continue;
-        const row = rows.get(decision.objectId);
-        if (decision.conflicting || !servesRevision(row, decision.revision)) {
-            stale.push(decision.objectId);
-            continue;
-        }
-        const antiMemory = antiMemoryPayloadOfRow(row);
-        if (antiMemory && antiMemoryExpired(antiMemory, nowMs)) continue;
-        const result = memoryResultFromRow(row, 1 / (results.length + 1), "fused", antiMemory);
-        results.push({
-            ...result,
-            lanes: ROUTE_LANES.filter((lane) => decision.lanes.has(lane)),
-            ...(decision.labeled ? { policyLabel: "labeled" } : {}),
-            provenance: decision.causality,
+    const unresolvedObjectIds: string[] = [];
+    let places = args.limit;
+    let snapshot: number | null = null;
+    for (let next = 0; places > 0 && next < ranking.length; ) {
+        const selected = ranking.slice(next, next + places);
+        next += selected.length;
+        const read = await readObjectRowsChunked({
+            client: args.client,
+            surface: "explicit_search",
+            gated: false,
+            objectIds: selected.map((decision) => decision.objectId),
+            signal: args.signal,
+            deadline,
         });
+        if (!read.ok) return refusedState(read.state);
+        if (
+            args.client.connectionIdentity() !== connection ||
+            (snapshot !== null && read.knownAsOf !== snapshot)
+        ) {
+            return refusedState(unavailable("snapshot_diverged"));
+        }
+        snapshot = read.knownAsOf;
+        unresolvedObjectIds.push(...read.unresolvedObjectIds);
+        const rows = new Map(read.rows.map((row) => [row.object.object_id, row]));
+        const unresolved = new Set(read.unresolvedObjectIds);
+        for (const decision of selected) {
+            const row = rows.get(decision.objectId);
+            if (row !== undefined && !isMemoryDecisionRow(row)) continue;
+            places -= 1;
+            if (unresolved.has(decision.objectId)) continue;
+            if (decision.conflicting || !servesRevision(row, decision.revision)) {
+                stale.push(decision.objectId);
+                continue;
+            }
+            const antiMemory = antiMemoryPayloadOfRow(row);
+            if (antiMemory && antiMemoryExpired(antiMemory, nowMs)) continue;
+            const result = memoryResultFromRow(row, 1 / (results.length + 1), "fused", antiMemory);
+            results.push({
+                ...result,
+                lanes: ROUTE_LANES.filter((lane) => decision.lanes.has(lane)),
+                ...(decision.labeled ? { policyLabel: "labeled" } : {}),
+                provenance: decision.causality,
+            });
+        }
     }
     if (stale.length > 0) {
         notes.push(
             `Memory: ${stale.length} ranked ${stale.length === 1 ? "memory" : "memories"} changed or became unreadable after ranking and ${stale.length === 1 ? "was" : "were"} not rendered.`,
         );
     }
-    if (read.unresolvedObjectIds.length > 0) {
-        notes.push(`Memory: unresolved ranked memory ids: ${read.unresolvedObjectIds.join(", ")}`);
+    if (unresolvedObjectIds.length > 0) {
+        notes.push(`Memory: unresolved ranked memory ids: ${unresolvedObjectIds.join(", ")}`);
     }
     return { kind: "ranked", results, notes };
 }
