@@ -13,10 +13,33 @@ type LeaseKey = (String, String);
 #[derive(Default)]
 pub(crate) struct NativeCaptureState {
     leases: HashMap<LeaseKey, NativeLease>,
+    waits: CaptureWaits,
+}
+
+/// How long capture publication waits: one call's shared allowance for
+/// committing frozen plans, and the longest one publication waits for the
+/// capture gate and the Kernel writer.
+#[derive(Clone, Copy)]
+pub(crate) struct CaptureWaits {
+    pub(crate) plan_commit_budget: Duration,
+    pub(crate) commit_wait: Duration,
+}
+
+impl Default for CaptureWaits {
+    fn default() -> Self {
+        Self {
+            plan_commit_budget: super::PLAN_COMMIT_BUDGET,
+            commit_wait: super::COMMIT_WAIT,
+        }
+    }
 }
 
 #[cfg(test)]
 impl NativeCaptureState {
+    pub(crate) fn set_waits_for_test(&mut self, waits: CaptureWaits) {
+        self.waits = waits;
+    }
+
     pub(crate) fn expire_ready_for_test(&mut self) {
         for lease in self.leases.values_mut() {
             if lease.plan.is_some() {
@@ -150,6 +173,11 @@ impl HandlerCore {
     }
 
     fn native_capture_work(&self, store: Arc<MemoryStore>, binding: SessionBinding) -> CaptureWork {
+        let waits = self
+            .native_capture
+            .lock()
+            .expect("native capture mutex")
+            .waits;
         CaptureWork {
             store,
             kernel: Arc::clone(&self.kernel),
@@ -158,6 +186,8 @@ impl HandlerCore {
             cancel: self.cancel.clone(),
             commit_gate: Arc::clone(&self.capture_commit_gate),
             source_capture: Arc::clone(&self.source_capture),
+            plan_commit_budget: waits.plan_commit_budget,
+            commit_wait: waits.commit_wait,
         }
     }
 
@@ -238,7 +268,9 @@ impl HandlerCore {
         let state = Arc::clone(&self.native_capture);
         // The guard travels with the blocking work: a request future dropped
         // mid-claim keeps the reservation until that work has finished, and
-        // the dispatch is recorded only once the work is issued.
+        // the batch's model dispatch is recorded only once the work is
+        // issued. A frozen plan the claim commits and the Kernel refuses
+        // records its own dispatch during the claim and keeps it.
         kernel_routes::blocking(move || {
             let mut guard = guard;
             let (plan, prompt) = match work.claim(primary.as_deref()) {
@@ -532,7 +564,7 @@ impl CaptureWork {
         // The frozen plans share one budget, so a busy Kernel writer delays
         // the extraction window by that budget at most. A plan the budget
         // does not reach stays ripe for the next call.
-        let budget = Instant::now() + super::PLAN_COMMIT_BUDGET;
+        let budget = Instant::now() + self.plan_commit_budget;
         for job in jobs {
             if job.prepared.is_none() {
                 unprepared.push(job);
@@ -542,7 +574,7 @@ impl CaptureWork {
                     .map_or(SettlementOutcome::Settled, |key| {
                         self.source_capture.settlement_now(&key)
                     });
-                let deadline = budget.min(Instant::now() + super::COMMIT_WAIT);
+                let deadline = budget.min(Instant::now() + self.commit_wait);
                 self.publish_or_recover(&job, settlement, deadline)?;
             }
         }
@@ -567,7 +599,7 @@ impl CaptureWork {
             return Err("invalid_model_configuration");
         }
         let mut messages = messages_for(&unprepared);
-        let mut existing = self.existing_memories(&messages)?;
+        let mut existing = self.existing_memories(&messages, &unprepared)?;
         let prompt = loop {
             let prompt = render_capture_prompt_with_existing(&messages, &existing)?;
             if prompt.len() <= MAX_NATIVE_PROMPT_BYTES {
@@ -618,6 +650,7 @@ impl CaptureWork {
         };
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
+        let budget = Instant::now() + self.plan_commit_budget;
         for (mut job, decision) in plan.jobs.into_iter().zip(decisions) {
             let decision = match decision {
                 Ok(decision) => decision,
@@ -630,7 +663,7 @@ impl CaptureWork {
             let attribution = if job.role == "user" {
                 USER_STATED
             } else {
-                "Assistant reported"
+                super::ASSISTANT_REPORTED
             };
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
@@ -693,11 +726,16 @@ impl CaptureWork {
                 // The plan's copy of the job predates the dispatch that
                 // produced this output; the backoff counts that dispatch.
                 job.attempts += 1;
-                self.publish_or_recover(
-                    &job,
-                    job_settlement(settlements, &job),
-                    Instant::now() + super::COMMIT_WAIT,
-                )?;
+                // The batch shares one budget: every plan is frozen, and a
+                // plan the budget does not reach is committed by the next
+                // drain's plan window.
+                if Instant::now() < budget {
+                    self.publish_or_recover(
+                        &job,
+                        job_settlement(settlements, &job),
+                        budget.min(Instant::now() + self.commit_wait),
+                    )?;
+                }
             }
         }
         Ok(())

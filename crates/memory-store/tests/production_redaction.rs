@@ -346,13 +346,20 @@ fn active_scan_audit_expires_with_its_capture_source_text() {
         "the frozen output records its own audit"
     );
     let mut outcome = memory_store::memory_capture::CaptureRefusal::Retried;
-    for _ in 1..MAX_CAPTURE_ATTEMPTS {
+    for attempts in 1..MAX_CAPTURE_ATTEMPTS {
         assert_eq!(
             outcome,
             memory_store::memory_capture::CaptureRefusal::Retried
         );
         outcome = store
-            .refuse_memory_capture_commit("/project", &refused, "[]", "kernel_write_refused", 0, 60)
+            .refuse_memory_capture_commit(
+                "/project",
+                &refused,
+                ("[]", attempts),
+                "kernel_write_refused",
+                0,
+                60,
+            )
             .unwrap();
     }
     assert_eq!(
@@ -394,7 +401,7 @@ fn reconciliation_retry_retires_the_frozen_output_audit_and_keeps_the_source_aud
     let source_audit = scan_audit_counts(temp.path());
     assert_ne!(source_audit, ScanAuditCounts::EMPTY);
 
-    for _ in 0..3 {
+    for attempt in 1..=3 {
         assert!(
             store
                 .begin_memory_capture_attempt("/project", &job, 0)
@@ -409,7 +416,7 @@ fn reconciliation_retry_retires_the_frozen_output_audit_and_keeps_the_source_aud
             "frozen output records its own audit"
         );
         store
-            .retry_memory_capture_reconciliation("/project", &job, "[]", 0, 50)
+            .retry_memory_capture_reconciliation("/project", &job, ("[]", attempt), 0, 50)
             .unwrap();
         assert_eq!(
             scan_audit_counts(temp.path()),

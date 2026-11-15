@@ -667,7 +667,9 @@ object describing source capture (Section 7.9), the background publication of
 consented message text, tool results, and configured repository documents as
 Kernel source descriptors. The block also counts the memory-capture
 decisions each committed capture publish wrote, by citation reason and by
-anchor reason; a replayed publish adds nothing. The
+anchor reason, and the user statements a publish stored labeled after the
+Kernel's admission policy refused their approval; a replayed publish adds
+nothing. The
 counters are process-local and start at zero when the daemon starts. The block
 is sanitized field by field: any object survives, a non-object drops the block
 whole, and every field is kept or dropped on its own. Every field is
@@ -899,8 +901,10 @@ boundaries. Reasoning, tool output, and synthetic summaries are excluded.
 A `pi` transform also checkpoints the text of its window. Pi gives the wire
 role `user` to bash executions, extension messages, and branch and compaction
 summaries; a window message is a source only when its own native row's role
-is `user` or `assistant`, and a window whose native rows and messages differ
-in number yields no source.
+is `user` or `assistant`. A transform of another serializer profile, one that
+carries no native rows, and one whose native rows and messages differ in
+number each yield no source. The native role names the kind of Pi entry; it
+does not show who composed the text of a `user` entry.
 Optional `model` is a nonempty provider/model identifier of at most 512 bytes
 without control characters. A checkpoint never invokes a model, with or
 without this hint.
@@ -1027,10 +1031,15 @@ dispatch abandons the source with the error `kernel_write_refused` or
 plan or the Kernel holds another receipt for the source, releases the plan
 with the error `reconciliation_conflict`; the source is extracted again after
 the delay of its count, and the conflict met on the ninth dispatch abandons
-it. Each recovery applies to the plan the commit read, so a late answer about
-an earlier plan leaves a newer one as it is. Any other Kernel failure keeps
-the plan, records `kernel_write_failed`, and retries after the delay of the
-current count. An
+it. Any other Kernel failure keeps the plan, records `kernel_write_failed`,
+and retries after the delay of the current count. Each of the three
+recoveries applies to the freeze of the plan the commit read, which the plan
+bytes and the dispatch count read beside them name, so a late answer about an
+earlier plan, or about an earlier freeze of the same bytes, leaves the newer
+one as it is. A publication waits for the capture gate and the Kernel writer
+inside the allowance of its call, 10 seconds for the frozen plans of one
+`memory.capture.next` and 10 seconds for the plans one submission froze; a
+plan the allowance does not reach stays frozen for the next call. An
 abandoned source keeps
 its replay identity and its last error, releases its text and frozen plan, no longer counts
 toward the pending quota or the `pending` status count, is never returned as
@@ -1064,7 +1073,8 @@ tier. `memory.auto_capture` and
 A captured fact is the user's statement when its source message has the user
 role and reaches capture under its own message id (a source id of the form
 `<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
-and hashed ids, never qualifies); its stored text is `User stated: ` followed
+and hashed ids, never qualifies, and neither does a `pi` source whose id is
+in the `eidnara:` space Pi reserves for the rows it derives); its stored text is `User stated: ` followed
 by a verbatim quotation of that message; and the quotation is one or more
 whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
 (closed by a run of the opener's character at least as long), each block a
@@ -1103,12 +1113,13 @@ for explicit search, not human approval or automatic-context eligibility. The
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. Those facts
-are left out of the bounded read of the newest 8,192 facts and 8 MiB, so they
-take no place from another session's facts; the read is repeated at the same
-snapshot at most four times to pass over them. The extractor's reference
-memories are ranked from two such reads at one snapshot, the newest facts on
-`explicit_search` and the newest on `auto_inject`; a fact older than both
-windows is not offered. A user message may correct earlier facts, and only
+are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
+however many of them are newer, they take no place from another session's
+facts. The extractor's reference memories are ranked from two bounded reads
+at one snapshot: the newest facts on `explicit_search`, and the facts a
+transform would deliver to each session whose messages the batch holds, so a
+fact a session is shown is a fact its correction can name; a fact older than
+both windows is not offered. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces` (which must share its category
 and at least one content word), retires each further fact it names

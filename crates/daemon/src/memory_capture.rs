@@ -14,6 +14,8 @@ pub(crate) use cite::CITATION_EVENT_KIND;
 pub(crate) use head::fixtures as head_fixtures;
 pub(crate) use head::{FrozenHead, observe_head};
 #[cfg(test)]
+pub(crate) use native::CaptureWaits;
+#[cfg(test)]
 pub(crate) use native::LEASE_DURATION;
 pub(crate) use native::NativeCaptureState;
 
@@ -359,9 +361,9 @@ const FUNCTION_WORDS: [&str; 24] = [
 ];
 
 fn content_words(content: &str) -> BTreeSet<String> {
-    let content = ["User stated: ", "Assistant reported: "]
+    let content = [USER_STATED, ASSISTANT_REPORTED]
         .iter()
-        .find_map(|attribution| content.strip_prefix(attribution))
+        .find_map(|attribution| content.strip_prefix(attribution)?.strip_prefix(": "))
         .unwrap_or(content);
     content
         .split(|ch: char| !ch.is_alphanumeric())
@@ -768,10 +770,13 @@ impl HandlerCore {
     /// `\n` exactly as `native_capture_fragments` does and marks synthetic text
     /// per message. Pi also gives the wire role `user` to bash executions,
     /// extension messages, and branch and compaction summaries, which the user
-    /// did not type. A request that carries its native rows holds one row per
-    /// message, and a message is a source only when its own row's role is
-    /// `user` or `assistant`; a request whose rows and messages differ in
-    /// number yields no source. OpenCode marks synthetic text per part (`@file` contents,
+    /// did not type. A `pi` request carries its native rows, one per message,
+    /// and a message is a source only when its own row's role is `user` or
+    /// `assistant`. The row's role names the kind of Pi entry; it is the
+    /// provenance the wire carries, and it does not show who composed a
+    /// `user` entry's text. A request of another serializer profile, one that
+    /// carries no rows, and one whose rows and messages differ in number
+    /// each yield no source. OpenCode marks synthetic text per part (`@file` contents,
     /// reminders) and that flag is not carried on the wire, so only the OpenCode
     /// plugin's own derivation is authoritative there; a daemon copy would
     /// enqueue different text for the same message id and store scaffolding as
@@ -796,17 +801,16 @@ impl HandlerCore {
             return None;
         }
         let start = request.messages.len().saturating_sub(trailing_messages);
-        let native = request.native_messages.as_deref();
-        if native.is_some_and(|rows| rows.len() != request.messages.len()) {
-            return None;
-        }
-        let typed_or_spoken = |index: usize| {
-            native.is_none_or(|rows| {
-                matches!(
-                    rows[index].pointer("/message/role").and_then(Value::as_str),
-                    Some("user" | "assistant")
-                )
-            })
+        let native = request.native_messages.as_deref().filter(|rows| {
+            request.serializer_profile == "pi" && rows.len() == request.messages.len()
+        })?;
+        let native_role_is_a_source = |index: usize| {
+            matches!(
+                native[index]
+                    .pointer("/message/role")
+                    .and_then(Value::as_str),
+                Some("user" | "assistant")
+            )
         };
         let project = capture_project(binding);
         let mut fragments = Vec::new();
@@ -815,7 +819,7 @@ impl HandlerCore {
             let mut memo = self.capture_memo.lock().expect("capture memo mutex");
             for (index, message) in request.messages.iter().enumerate().skip(start) {
                 if !matches!(message.ck.role.as_str(), "user" | "assistant")
-                    || !typed_or_spoken(index)
+                    || !native_role_is_a_source(index)
                     || message.ck.meta.synthetic
                     || message.ck.meta.summary
                     || message.ck.meta.errored
@@ -1017,6 +1021,10 @@ struct CaptureWork {
     cancel: CancellationToken,
     commit_gate: Arc<Mutex<()>>,
     source_capture: Arc<crate::source_capture::SourceCapture>,
+    /// The allowance one drain or one submission spends committing plans.
+    plan_commit_budget: Duration,
+    /// The longest one publication waits for the gate and the writer.
+    commit_wait: Duration,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1044,7 +1052,11 @@ impl CaptureWork {
     fn existing_memories(
         &self,
         messages: &[CaptureMessage],
+        jobs: &[CaptureJob],
     ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
+        let mut sessions: Vec<&str> = jobs.iter().map(|job| job.session_id.as_str()).collect();
+        sessions.sort_unstable();
+        sessions.dedup();
         let kernel = self
             .kernel
             .kernel_store()
@@ -1059,6 +1071,7 @@ impl CaptureWork {
             &kernel,
             &self.binding.kernel_project,
             &words,
+            &sessions,
             (
                 kernel_routes::read::MAX_READ_ROWS,
                 kernel_routes::read::MAX_READ_ROW_BYTES,
@@ -1093,34 +1106,58 @@ impl CaptureWork {
     }
 
     /// `settlement` is what the session's source publish reached when the
-    /// submit took its citation lookup. The Kernel writer is awaited until
-    /// `deadline`. A failure carries the plan bytes the commit read, so the
-    /// recovery acts on that plan and on no later one.
+    /// submit took its citation lookup. The capture gate and the Kernel
+    /// writer are awaited until `deadline`; a gate still held then leaves
+    /// the plan as it is for the next drain. A failure carries the plan the
+    /// commit read and the dispatch count read beside it, so the recovery
+    /// acts on that freeze of the plan and on no later one. A failure before
+    /// the plan is read carries none.
     fn publish(
         &self,
         job: &CaptureJob,
         settlement: SettlementOutcome,
         deadline: Instant,
-    ) -> Result<(), (Unpublished, String)> {
-        let retained = || (Unpublished::Retained, String::new());
-        let kernel = self.kernel.kernel_store().map_err(|_| retained())?;
+    ) -> Result<(), (Unpublished, Option<Frozen>)> {
+        let unread = || (Unpublished::Retained, None);
         // Session deletion takes the same gate. No await occurs while it is
         // held, and deletion cannot race a post-check capture publication.
-        let _gate = self.commit_gate.lock().expect("capture publication mutex");
-        let Some(prepared) = self
+        let _gate = loop {
+            match self.commit_gate.try_lock() {
+                Ok(gate) => break gate,
+                Err(std::sync::TryLockError::Poisoned(_)) => panic!("capture publication mutex"),
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() >= deadline => {
+                    return Ok(());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(GATE_POLL),
+            }
+        };
+        let Some(plan) = self
             .store
             .prepare_memory_capture(
                 &job.project,
                 &job.job_id,
-                job.prepared.as_deref().ok_or_else(retained)?,
+                job.prepared.as_deref().ok_or_else(unread)?,
             )
-            .map_err(|_| retained())?
+            .map_err(|_| unread())?
         else {
             return Ok(());
         };
-        let output = match serde_json::from_str::<PreparedCapture>(&prepared) {
+        let Some(attempts) = self
+            .store
+            .frozen_memory_capture_attempts(&job.project, &job.job_id)
+            .map_err(|_| unread())?
+        else {
+            return Ok(());
+        };
+        let frozen = Frozen { plan, attempts };
+        let prepared = frozen.plan.as_str();
+        let kernel = match self.kernel.kernel_store() {
+            Ok(kernel) => kernel,
+            Err(_) => return Err((Unpublished::Retained, Some(frozen))),
+        };
+        let output = match serde_json::from_str::<PreparedCapture>(prepared) {
             Ok(output) if output.version == CAPTURE_SCHEMA_VERSION => output,
-            _ => return Err((Unpublished::Refused("invalid_preparation"), prepared)),
+            _ => return Err((Unpublished::Refused("invalid_preparation"), Some(frozen))),
         };
         let settlement = if citation_consent(&self.binding.config) {
             settlement
@@ -1139,31 +1176,36 @@ impl CaptureWork {
             &self.binding.kernel_project,
             job,
             &output,
-            &prepared,
+            prepared,
             settlement,
             deadline,
             &mut reasons,
         ) {
             Ok(receipt) => receipt,
-            Err(error) => return Err((unpublished(error), prepared)),
+            Err(error) => return Err((unpublished(error), Some(frozen))),
         };
         if !receipt.replayed {
             self.source_capture.record_capture_decisions(&reasons);
         }
-        self.store
+        if self
+            .store
             .complete_memory_capture(&job.project, &job.job_id, receipt.commit_seq)
-            .map_err(|_| retained())?;
+            .is_err()
+        {
+            return Err((Unpublished::Retained, Some(frozen)));
+        }
         Ok(())
     }
 
     /// A rejected kernel transaction wrote nothing, and each recovery acts
-    /// on the plan the commit read. A conflict means a target moved under the
+    /// on the freeze of the plan the commit read. A conflict means a target moved under the
     /// frozen plan or the Kernel holds another receipt for the job: the plan
     /// is released and the source is extracted again after the dispatch
     /// backoff, until the dispatch cap abandons it. A refusal of the plan as
     /// frozen counts as a dispatch, so its backoff doubles and the source is
     /// abandoned at the dispatch cap. Any other failure keeps the plan and
-    /// retries on the dispatch backoff.
+    /// retries on the dispatch backoff. A failure before the plan was read
+    /// sets the backoff on the job as the queue read it.
     fn publish_or_recover(
         &self,
         job: &CaptureJob,
@@ -1175,13 +1217,27 @@ impl CaptureWork {
             return Ok(());
         };
         let now = now_ms();
-        let retry_at = now.saturating_add(capture_retry_delay_ms(job.attempts));
+        let Some(frozen) = frozen else {
+            return self
+                .store
+                .fail_memory_capture(
+                    &job.project,
+                    &job.job_id,
+                    "kernel_write_failed",
+                    now.saturating_add(capture_retry_delay_ms(job.attempts)),
+                    false,
+                    now,
+                )
+                .map_err(|_| "store_failed");
+        };
+        let retry_at = now.saturating_add(capture_retry_delay_ms(frozen.attempts));
+        let freeze = (frozen.plan.as_str(), frozen.attempts);
         let (outcome, code) = match recovery {
             Unpublished::Replan => (
                 self.store.retry_memory_capture_reconciliation(
                     &job.project,
                     &job.job_id,
-                    &frozen,
+                    freeze,
                     retry_at,
                     now,
                 ),
@@ -1191,26 +1247,23 @@ impl CaptureWork {
                 self.store.refuse_memory_capture_commit(
                     &job.project,
                     &job.job_id,
-                    &frozen,
+                    freeze,
                     code,
                     retry_at,
                     now,
                 ),
                 code,
             ),
-            Unpublished::Retained => {
-                return self
-                    .store
-                    .fail_memory_capture(
-                        &job.project,
-                        &job.job_id,
-                        "kernel_write_failed",
-                        retry_at,
-                        false,
-                        now,
-                    )
-                    .map_err(|_| "store_failed");
-            }
+            Unpublished::Retained => (
+                self.store.retain_memory_capture_plan(
+                    &job.project,
+                    &job.job_id,
+                    freeze,
+                    "kernel_write_failed",
+                    retry_at,
+                ),
+                "kernel_write_failed",
+            ),
         };
         if outcome.map_err(|_| "store_failed")? == CaptureRefusal::Abandoned {
             eprintln!("daemon: memory capture source abandoned: {code}");
@@ -1218,6 +1271,16 @@ impl CaptureWork {
         Ok(())
     }
 }
+
+/// One freeze of a plan: the bytes a publication read from the queue and the
+/// job's dispatch count read beside them.
+struct Frozen {
+    plan: String,
+    attempts: u32,
+}
+
+/// How often a publication checks the capture gate while another holds it.
+const GATE_POLL: Duration = Duration::from_millis(5);
 
 /// How the capture queue recovers a publication that did not commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1267,9 +1330,9 @@ fn unpublished(error: kernel::KernelError) -> Unpublished {
 /// How long one capture commit waits for the Kernel writer.
 pub(super) const COMMIT_WAIT: Duration = Duration::from_secs(5);
 /// How long one drain call spends committing frozen plans before it prepares
-/// the extraction window: a third of the 30 s a harness allows one
-/// `memory.capture.next` exchange. Plans the budget does not reach stay
-/// queued for the next call.
+/// the extraction window, and how long one submission spends committing the
+/// plans it froze: a third of the 30 s a harness allows one exchange. Plans
+/// the budget does not reach stay queued for the next call.
 pub(super) const PLAN_COMMIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// The error code of a frozen plan the Kernel refuses on policy, input, or a
@@ -1277,7 +1340,9 @@ pub(super) const PLAN_COMMIT_BUDGET: Duration = Duration::from_secs(10);
 /// unless canonical state changes.
 const COMMIT_REFUSED: &str = "kernel_write_refused";
 
-/// The source lineage of every decision capture publishes.
+/// The source lineage of every capture decision, the memory-domain rows a
+/// capture publishes. A statement record has its own lineage
+/// ([`statement_source_id`]).
 pub(crate) const CAPTURE_SOURCE_ID: &str = "memory_capture";
 const CAPTURE_SOURCE_KIND: &str = "assistant";
 
@@ -1287,12 +1352,16 @@ const REPLACEABLE_SOURCES: [&str; 2] = [CAPTURE_SOURCE_ID, "eidnara_memory"];
 
 /// The attribution native capture prefixes to a user message's quotation.
 const USER_STATED: &str = "User stated";
+/// The attribution native capture prefixes to an assistant message's
+/// quotation.
+const ASSISTANT_REPORTED: &str = "Assistant reported";
 
 /// The plain-prose paragraphs of one message, parsed when first needed, so
 /// every check of one job's memories shares a single parse.
 pub(super) struct Prose<'a> {
     text: &'a str,
     paragraphs: std::cell::OnceCell<Vec<(usize, usize)>>,
+    colons: std::cell::OnceCell<Vec<usize>>,
 }
 
 impl<'a> Prose<'a> {
@@ -1300,20 +1369,46 @@ impl<'a> Prose<'a> {
         Self {
             text,
             paragraphs: std::cell::OnceCell::new(),
+            colons: std::cell::OnceCell::new(),
         }
     }
 
+    /// The paragraphs as byte ranges, ascending and disjoint.
     fn paragraphs(&self) -> &[(usize, usize)] {
         self.paragraphs.get_or_init(|| prose_paragraphs(self.text))
+    }
+
+    /// For each paragraph, the offset of its first colon, or its end when it
+    /// holds none. Each paragraph is scanned once for the message.
+    fn colons(&self) -> &[usize] {
+        self.colons.get_or_init(|| {
+            self.paragraphs()
+                .iter()
+                .map(|&(first, last)| {
+                    #[cfg(test)]
+                    COLON_BYTES.with(|bytes| bytes.set(bytes.get() + (last - first)));
+                    self.text[first..last]
+                        .find([':', '\u{ff1a}'])
+                        .map_or(last, |at| first + at)
+                })
+                .collect()
+        })
     }
 }
 
 /// A captured memory qualifies as the user's own words when it is an
 /// attributed quotation spanning whole statements of a user message that the
 /// job holds whole. `prose` is the job's text.
+///
+/// Pi reserves the `eidnara:` id space for the rows it derives: extension
+/// messages and branch and compaction summaries. A queued Pi job with such an
+/// id is one of those rows whichever path or build enqueued it, so it is
+/// published labeled. A bash execution keeps its host id and is told apart
+/// only where the native row is at hand, at the transform checkpoint.
 fn user_attributed(job: &CaptureJob, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     job.role == "user"
         && !cite::is_hashed_source_id(&job.message_id)
+        && !(job.harness == "pi" && crate::codec::pi::is_reserved_id(&job.message_id))
         && memory
             .content
             .strip_prefix(USER_STATED)
@@ -1354,8 +1449,12 @@ fn statement_source_id(job: &CaptureJob) -> String {
     format!("{STATEMENT_SOURCE_ID}:{message}")
 }
 
-/// Whether `object` is a statement record: a user-sourced decision of the
-/// statement domain whose source id names a capture job.
+/// Whether `object` has the shape of a statement record: a user-sourced
+/// decision of the statement domain whose source id joins
+/// [`STATEMENT_SOURCE_ID`] and 32 lowercase hex digits, as
+/// [`statement_source_id`] writes for a capture job id. The check reads the
+/// row's structure; a Kernel writer that reproduces the whole shape is
+/// treated as capture.
 fn is_statement_record(object: &kernel::ObjectRow) -> bool {
     object.source_kind == "user"
         && object.domain_id == STATEMENT_DOMAIN_ID
@@ -1363,7 +1462,12 @@ fn is_statement_record(object: &kernel::ObjectRow) -> bool {
             .source_id
             .strip_prefix(STATEMENT_SOURCE_ID)
             .and_then(|rest| rest.strip_prefix(':'))
-            .is_some_and(|message| !message.is_empty())
+            .is_some_and(|message| {
+                message.len() == 32
+                    && message
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
 }
 
 /// The decision kind the Kernel's approval predicate requires.
@@ -1443,16 +1547,22 @@ fn quotes_whole_statements(prose: &Prose<'_>, quote: &str) -> bool {
     }
     let lead = quote.len() - quote.trim_start().len();
     let paragraphs = prose.paragraphs();
+    let colons = prose.colons();
     text.match_indices(quote).any(|(at, _)| {
         let start = at + lead;
         let end = start + trimmed.len();
-        paragraphs.iter().any(|&(first, last)| {
-            first <= start
-                && end <= last
-                && !text[first..start].contains([':', '\u{ff1a}'])
-                && sentence_starts_at(&text[first..start], trimmed)
-                && sentence_ends_at(trimmed, &text[end..last])
-        })
+        // The one paragraph that can hold the occurrence is the last that
+        // starts at or before it.
+        paragraphs
+            .partition_point(|&(first, _)| first <= start)
+            .checked_sub(1)
+            .is_some_and(|index| {
+                let (first, last) = paragraphs[index];
+                end <= last
+                    && colons[index] >= start
+                    && sentence_starts_at(&text[first..start], trimmed)
+                    && sentence_ends_at(trimmed, &text[end..last])
+            })
     })
 }
 
@@ -1467,6 +1577,8 @@ const QUOTATION_MARKS: [char; 24] = [
 thread_local! {
     /// How many times this thread parsed a message into paragraphs.
     static PROSE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many bytes this thread examined for a paragraph's first colon.
+    static COLON_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
@@ -1655,36 +1767,47 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
 /// the most of the batch's lowercase words, newest first among ties.
 ///
 /// The candidates are ranked from two bounded reads at one tip, each under
-/// `caps`: the newest memories served on explicit search, and the newest
-/// served on `auto_inject`. A project's assistant reports outnumber its
-/// approved statements, so the second read reaches statements older than the
-/// first read's window, and a correction can still name the statement it
-/// corrects.
+/// `caps`: the newest memories served on explicit search, and the memories
+/// a transform pass delivers to each of `sessions`, the sessions whose
+/// messages the batch holds. A project's assistant reports outnumber its
+/// approved statements, and a session's own statements are left out of its
+/// delivery, so the second read reaches statements older than the first
+/// read's window: a memory a session is shown is a memory its correction can
+/// name.
 fn select_existing_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
     words: &HashSet<String>,
+    sessions: &[&str],
     caps: (usize, usize),
 ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
     let tip = kernel.tip().map_err(|_| "kernel_unavailable")?;
-    let window = |surface: kernel::Surface| {
-        kernel_routes::read::read_visible_within(
-            kernel,
-            project,
-            surface,
-            Some(tip),
-            kernel_routes::read::RowSelection::DomainDecisions("memory"),
-            caps,
+    let read = kernel_routes::read::read_visible_within(
+        kernel,
+        project,
+        kernel::Surface::ExplicitSearch,
+        Some(tip),
+        kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        caps,
+    )
+    .map_err(|_| "kernel_unavailable")?;
+    // A search window that reached no cap holds every memory the project
+    // serves, the delivered ones among them.
+    let served = if read.truncated {
+        Some(
+            crate::canonical_memory::read_other_sessions(kernel, project, sessions, tip, caps)
+                .map_err(|_| "kernel_unavailable")?,
         )
-        .map_err(|_| "kernel_unavailable")
+    } else {
+        None
     };
-    let read = window(kernel::Surface::ExplicitSearch)?;
-    let served = window(kernel::Surface::AutoInject)?;
-    let older = served
-        .rows
-        .iter()
-        .filter(|row| !read.decisions.contains_key(&row.object.object_id))
-        .filter_map(|row| Some((row, served.decisions.get(&row.object.object_id)?)));
+    let older = served.iter().flat_map(|served| {
+        served
+            .rows
+            .iter()
+            .filter(|row| !read.decisions.contains_key(&row.object.object_id))
+            .filter_map(|row| Some((row, served.decisions.get(&row.object.object_id)?)))
+    });
     // Score borrows the reads; only the 64 kept candidates are materialized.
     let mut lowered = String::new();
     let mut candidates: Vec<(usize, &kernel::VisibleRow, &kernel::DecisionRow)> = read
@@ -1783,8 +1906,9 @@ fn checked_capture_target(
 }
 
 /// Commits one source's frozen plan. `reasons` receives one citation reason
-/// and one anchor reason per decision the commit writes; a replayed receipt
-/// writes nothing and adds none.
+/// and one anchor reason per capture decision the commit writes; a statement
+/// record has its own lineage and no anchor and adds neither. A replayed
+/// receipt writes nothing and adds none.
 ///
 /// When the Kernel's admission policy refuses a statement record, or the
 /// admission that rests on one, the refused transaction has written nothing,
@@ -2119,6 +2243,40 @@ mod tests {
             ("user", STATEMENT_DOMAIN_ID, "memory_capture_statement"),
             ("user", STATEMENT_DOMAIN_ID, "memory_capture_statement:"),
             ("user", STATEMENT_DOMAIN_ID, "memory_capture_statements:ab"),
+            (
+                "user",
+                STATEMENT_DOMAIN_ID,
+                "memory_capture_statement:job-refused",
+            ),
+            (
+                "user",
+                STATEMENT_DOMAIN_ID,
+                &format!("memory_capture_statement:{}", "a".repeat(31)),
+            ),
+            (
+                "user",
+                STATEMENT_DOMAIN_ID,
+                &format!("memory_capture_statement:{}", "a".repeat(33)),
+            ),
+            (
+                "user",
+                STATEMENT_DOMAIN_ID,
+                &format!("memory_capture_statement:{}", "A".repeat(32)),
+            ),
+            (
+                "user",
+                STATEMENT_DOMAIN_ID,
+                &format!("memory_capture_statement:{}", "g".repeat(32)),
+            ),
+            (
+                "user",
+                STATEMENT_DOMAIN_ID,
+                &format!(
+                    "memory_capture_statement:{}:{}",
+                    "a".repeat(15),
+                    "a".repeat(16)
+                ),
+            ),
             ("user", STATEMENT_DOMAIN_ID, "memory_capture"),
             ("user", STATEMENT_DOMAIN_ID, "eidnara_memory"),
         ] {
@@ -2718,6 +2876,111 @@ mod tests {
         ));
     }
 
+    /// Pi derives extension messages and summaries under ids it reserves,
+    /// and gives them the role `user`. A queued Pi job with a reserved id is
+    /// published labeled; the same id from another harness is that harness's
+    /// own message id.
+    #[test]
+    fn a_pi_row_with_a_reserved_id_is_not_the_users_statement() {
+        let memory = CapturedMemory {
+            content: format!("{USER_STATED}: Deploys happen on Fridays."),
+            ..memory("Deploys happen on Fridays.")
+        };
+        let job = |harness: &str, message_id: &str| CaptureJob {
+            harness: harness.into(),
+            message_id: message_id.into(),
+            text: "Deploys happen on Fridays.".into(),
+            ..job("reserved")
+        };
+        assert!(user_attributed_alone(&job("pi", "5e6f7081"), &memory));
+        for reserved in [
+            "eidnara:custom:5e6f7081",
+            "eidnara:branchSummary:6f708192",
+            "eidnara:compactionSummary:708192a3",
+        ] {
+            assert!(
+                !user_attributed_alone(&job("pi", reserved), &memory),
+                "{reserved}"
+            );
+            assert!(
+                user_attributed_alone(&job("opencode", reserved), &memory),
+                "{reserved}"
+            );
+        }
+
+        // A plan frozen for such a row publishes one labeled memory and no
+        // statement record.
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let statement = "Deploys happen on Fridays.".to_string();
+        let publish = |key: &str, message_id: &str| {
+            let (mut source, output) = stated_job(key, std::slice::from_ref(&statement));
+            source.message_id = message_id.into();
+            publish_now(
+                &kernel,
+                &project,
+                &source,
+                &output,
+                &serde_json::to_string(&output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        };
+        let served = || -> (usize, usize) {
+            let rows = |surface| {
+                kernel_routes::read::read_visible(
+                    &kernel,
+                    &project,
+                    surface,
+                    None,
+                    kernel_routes::read::RowSelection::DomainDecisions("memory"),
+                )
+                .unwrap()
+                .rows
+                .into_iter()
+                .filter(|row| row.visibility == kernel::SurfaceVisibility::Visible)
+                .count()
+            };
+            (
+                rows(kernel::Surface::AutoInject),
+                rows(kernel::Surface::ExplicitSearch),
+            )
+        };
+        publish("job-custom", "eidnara:custom:5e6f7081");
+        assert_eq!(
+            served(),
+            (0, 0),
+            "the extension message's memory is labeled on both surfaces"
+        );
+        publish("job-typed", "5e6f7081");
+        assert_eq!(
+            served().0,
+            1,
+            "the same sentence in a user message is approved"
+        );
+    }
+
+    /// Every occurrence of a quotation is judged against its paragraph's
+    /// first colon, which is found once for the message: a paragraph of many
+    /// rejected occurrences is scanned for its colon once.
+    #[test]
+    fn a_paragraph_is_scanned_for_its_colon_once_however_often_the_quote_occurs() {
+        let text = "A. a. ".repeat(2_000);
+        let prose = Prose::of(&text);
+        let before = COLON_BYTES.with(std::cell::Cell::get);
+        assert!(!quotes_whole_statements(&prose, "A."));
+        assert!(!quotes_whole_statements(&prose, "a."));
+        assert_eq!(
+            COLON_BYTES.with(std::cell::Cell::get) - before,
+            text.len(),
+            "one scan of the one paragraph serves every occurrence and both quotations"
+        );
+        let labeled = format!("Note: {text}");
+        assert!(!quotes_whole_statements(&Prose::of(&labeled), "A."));
+    }
+
     #[test]
     fn further_targets_need_a_replacement_and_each_must_be_replaceable() {
         let target = |id: &str, can_replace: bool| ExistingCaptureMemory {
@@ -2951,9 +3214,11 @@ mod tests {
         );
     }
 
+    /// A job whose id has the store's shape: the hex SHA-256 of `key`.
     fn job(key: &str) -> CaptureJob {
+        use sha2::{Digest, Sha256};
         CaptureJob {
-            job_id: key.into(),
+            job_id: format!("{:x}", Sha256::digest(key.as_bytes())),
             project: "/project".into(),
             harness: "pi".into(),
             session_id: "session".into(),
@@ -3234,13 +3499,14 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect();
-        let offered = |caps| -> Vec<(String, bool)> {
-            select_existing_memories(&kernel, &project, &words, caps)
+        let offered_to = |session: &str, caps| -> Vec<(String, bool)> {
+            select_existing_memories(&kernel, &project, &words, &[session], caps)
                 .unwrap()
                 .into_iter()
                 .map(|candidate| (candidate.content, candidate.automatic))
                 .collect()
         };
+        let offered = |caps| offered_to("another-session", caps);
         let stated = (format!("{USER_STATED}: {statement}"), true);
         let all = offered((1_000, 1 << 20));
         assert_eq!(all.len(), 6);
@@ -3258,6 +3524,44 @@ mod tests {
                 .all(|(content, automatic)| { content.starts_with("Run ") && !automatic }),
             "{windowed:?}"
         );
+
+        // A second session then states three things, which fill both newest
+        // windows. A transform pass delivers the older statement to that
+        // session in their place, so a batch of its messages is offered the
+        // statement; a batch of a third session is offered the newest three.
+        for index in 0..3 {
+            let own = format!("Deploy window {index} opens on Monday.");
+            let (mut source, output) =
+                stated_job(&format!("job-own-{index}"), std::slice::from_ref(&own));
+            source.session_id = "writing-session".into();
+            publish(&source, &output);
+        }
+        let delivered = crate::canonical_memory::read_other_sessions(
+            &kernel,
+            &project,
+            &["writing-session"],
+            kernel.tip().unwrap(),
+            (3, 1 << 20),
+        )
+        .unwrap();
+        assert_eq!(
+            delivered
+                .rows
+                .iter()
+                .map(|row| delivered.decisions[&row.object.object_id]
+                    .payload
+                    .summary
+                    .as_str())
+                .collect::<Vec<_>>(),
+            [stated.0.as_str()],
+            "the writing session is delivered the older statement"
+        );
+        let own_session = offered_to("writing-session", (3, 1 << 20));
+        assert_eq!(own_session[0], stated, "{own_session:?}");
+        assert_eq!(own_session.len(), 4);
+        let third = offered((3, 1 << 20));
+        assert!(!third.contains(&stated), "{third:?}");
+        assert_eq!(third.len(), 3);
     }
 
     /// A publish refused after its anchor and first decision were written

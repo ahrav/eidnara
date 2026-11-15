@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`job_id` (`crates/memory-store/src/memory_capture.rs:135`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:384`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:412`). Each written decision's object id is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:1948`).
+`job_id` (`crates/memory-store/src/memory_capture.rs:135`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:386`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:414`). Each written decision's object id is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:2072`).
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ The same source enqueued twice; a secret-bearing source; an out-of-grammar id; a
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/memory-store/src/memory_capture.rs:834`; `crates/daemon/src/memory_capture.rs:2827`, `:2876`, `:3382`, `:3404`, `:3499`; `crates/daemon/src/lib.rs:24528`, `:25852`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/memory-store/src/memory_capture.rs:881`; `crates/daemon/src/memory_capture.rs:3090`, `:3139`, `:3686`, `:3708`, `:3803`; `crates/daemon/src/lib.rs:24528`, `:25876`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

@@ -1152,6 +1152,7 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
         .digest()
         .to_owned();
     let refused = numbered(40, "billing");
+    let mut plans = Vec::new();
     for batch in refused.chunks(20) {
         let messages: Vec<(&str, &str, &str)> = batch
             .iter()
@@ -1167,6 +1168,7 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
                 .prepare_memory_capture(&digest, &job, r#"{"version":0}"#)
                 .unwrap();
             assert!(frozen.is_some(), "the plan is frozen");
+            plans.push(job);
         }
     }
     enqueue(
@@ -1178,11 +1180,13 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
     .await;
 
     let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    let before = now_ms();
     let work = body(
         handler
             .handle_native_capture_next(test_route(SECOND), &next)
             .await,
     );
+    let after = now_ms();
     assert_eq!(work["state"], "work", "{work}");
     let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
     assert_eq!(
@@ -1200,6 +1204,350 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
         (status.pending, status.prepared, status.failed),
         (41, 40, 32),
         "one drain call attempted one window of refused plans and kept them queued"
+    );
+    // A plan that does not decode is refused as frozen: one dispatch, the
+    // wait that follows the first dispatch, and the plan kept.
+    for job in &plans[..32] {
+        let (attempts, retry_at, error, abandoned, _, frozen) = queue_row(&store, job);
+        assert_eq!(attempts, 2, "the refused commit is the second dispatch");
+        assert_eq!(error.as_deref(), Some("invalid_preparation"));
+        assert!(
+            (before + 2_000..=after + 2_000).contains(&retry_at),
+            "the wait after the first dispatch is two seconds: {retry_at} in {before}..{after}"
+        );
+        assert_eq!(abandoned, None);
+        assert_eq!(frozen.as_deref(), Some(r#"{"version":0}"#));
+    }
+    for job in &plans[32..] {
+        let (attempts, retry_at, error, ..) = queue_row(&store, job);
+        assert_eq!(
+            (attempts, retry_at, error),
+            (1, 0, None),
+            "a plan beyond the window is as it was"
+        );
+    }
+
+    // The refusal on the ninth dispatch abandons the source.
+    let last = plans[0].as_str();
+    store
+        .execute_tag_sql_for_test(&format!(
+            "UPDATE memory_capture_jobs SET retry_at_ms=CASE WHEN job_id='{last}' THEN 0 ELSE {} END, attempts=CASE WHEN job_id='{last}' THEN 8 ELSE attempts END WHERE prepared_json IS NOT NULL",
+            i64::MAX
+        ))
+        .unwrap();
+    handler.native_capture.lock().unwrap().expire_all_for_test();
+    body(
+        handler
+            .handle_native_capture_next(test_route(SECOND), &next)
+            .await,
+    );
+    let (attempts, _, error, abandoned, text, frozen) = queue_row(&store, last);
+    assert_eq!(attempts, 9);
+    assert!(
+        abandoned.is_some(),
+        "the ninth dispatch abandons the source"
+    );
+    assert_eq!(error.as_deref(), Some("invalid_preparation"));
+    assert_eq!((text.as_str(), frozen), ("", None));
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!((status.pending, status.prepared), (40, 39));
+}
+
+/// Sets short publication waits, so a test that holds the gate or the Kernel
+/// writer finishes in well under a second.
+fn short_waits(handler: &Handler) {
+    handler.native_capture.lock().unwrap().set_waits_for_test(
+        crate::memory_capture::CaptureWaits {
+            plan_commit_budget: Duration::from_millis(300),
+            commit_wait: Duration::from_millis(200),
+        },
+    );
+}
+
+fn production_waits(handler: &Handler) {
+    handler
+        .native_capture
+        .lock()
+        .unwrap()
+        .set_waits_for_test(crate::memory_capture::CaptureWaits::default());
+}
+
+/// A plan that decodes and that the Kernel accepts once it has the writer.
+fn statement_plan(quote: &str) -> String {
+    json!({"version": 1, "model": "test/model", "memories": [{
+        "category": "PROJECT_RULES",
+        "content": stated(quote),
+        "quote": quote,
+    }]})
+    .to_string()
+}
+
+/// Holds the Kernel writer on its own thread until the returned sender is
+/// sent to or dropped.
+fn hold_writer(
+    kernel: &Arc<kernel::KernelStore>,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (entered, held) = std::sync::mpsc::channel::<()>();
+    let kernel = Arc::clone(kernel);
+    let holder = std::thread::spawn(move || {
+        kernel
+            .commit(
+                kernel::CommitIntent {
+                    producer: "capture-wait-test".to_owned(),
+                    operation_key: "hold-the-writer".to_owned(),
+                    request_digest: kernel::source_identity::identity_digest(b"hold-the-writer"),
+                    actor: "test".to_owned(),
+                    cause: "fixture".to_owned(),
+                },
+                |_| {
+                    entered.send(()).unwrap();
+                    let _ = released.recv();
+                    Ok(String::new())
+                },
+            )
+            .unwrap();
+    });
+    held.recv().unwrap();
+    (release, holder)
+}
+
+/// Three plans the Kernel would accept are ripe, a later source waits for
+/// extraction, and another writer holds the Kernel for the whole call. The
+/// plans share the call's allowance: the ones it reaches each record a write
+/// failure and keep their dispatch count, the one it does not reach is as it
+/// was, and the same call issues the later source.
+#[tokio::test]
+async fn a_held_kernel_writer_costs_one_allowance_and_the_drain_still_issues_sources() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    short_waits(&handler);
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let statements = numbered(3, "billing");
+    let messages: Vec<(&str, &str, &str)> = statements
+        .iter()
+        .map(|(id, text)| (id.as_str(), "user", text.as_str()))
+        .collect();
+    let jobs = enqueue(&handler, FIRST, "s1", &messages).await;
+    let mut plans = Vec::new();
+    for (job, (_, text)) in jobs.iter().zip(&statements) {
+        assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
+        let plan = statement_plan(text);
+        assert!(
+            store
+                .prepare_memory_capture(&digest, job, &plan)
+                .unwrap()
+                .is_some()
+        );
+        plans.push(plan);
+    }
+    enqueue(
+        &handler,
+        SECOND,
+        "s2",
+        &[("later", "assistant", ASSISTANT_NOTE)],
+    )
+    .await;
+
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let (release, holder) = hold_writer(&kernel);
+    let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    let work = body(
+        handler
+            .handle_native_capture_next(test_route(SECOND), &next)
+            .await,
+    );
+    assert_eq!(work["state"], "work", "{work}");
+    let rows: Vec<QueueRow> = jobs.iter().map(|job| queue_row(&store, job)).collect();
+    for (row, plan) in rows.iter().zip(&plans) {
+        assert_eq!(row.0, 1, "a write failure records no dispatch");
+        assert_eq!(row.5.as_deref(), Some(plan.as_str()), "the plan is kept");
+        assert_eq!(row.3, None);
+    }
+    assert_eq!(
+        rows[0].2.as_deref(),
+        Some("kernel_write_failed"),
+        "the first plan waited for the writer"
+    );
+    assert_eq!(
+        (rows[2].1, rows[2].2.as_deref()),
+        (0, None),
+        "the allowance ends before the third plan, which is still ripe"
+    );
+
+    drop(release);
+    holder.join().unwrap();
+    production_waits(&handler);
+    store
+        .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+        .unwrap();
+    handler.native_capture.lock().unwrap().expire_all_for_test();
+    body(
+        handler
+            .handle_native_capture_next(test_route(SECOND), &next)
+            .await,
+    );
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.pending, status.prepared),
+        (1, 0),
+        "with the writer free the next drain commits all three"
+    );
+}
+
+/// A session deletion holds the capture gate for the whole call. The plan
+/// waits for the gate inside the call's allowance and is left as it was, and
+/// the same call issues the later source.
+#[tokio::test]
+async fn a_held_capture_gate_leaves_the_plan_as_it_was_and_the_drain_still_issues_sources() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    short_waits(&handler);
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let jobs = enqueue(&handler, FIRST, "s1", &[("m1", "user", THURSDAY)]).await;
+    let job = jobs[0].as_str();
+    assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
+    let plan = statement_plan(THURSDAY);
+    assert!(
+        store
+            .prepare_memory_capture(&digest, job, &plan)
+            .unwrap()
+            .is_some()
+    );
+    enqueue(
+        &handler,
+        SECOND,
+        "s2",
+        &[("later", "assistant", ASSISTANT_NOTE)],
+    )
+    .await;
+
+    let gate = Arc::clone(&handler.capture_commit_gate);
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (entered, held) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _gate = gate.lock().unwrap();
+        entered.send(()).unwrap();
+        let _ = released.recv();
+    });
+    held.recv().unwrap();
+    let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    let work = body(
+        handler
+            .handle_native_capture_next(test_route(SECOND), &next)
+            .await,
+    );
+    assert_eq!(
+        work["state"], "work",
+        "the source is issued while the gate is held: {work}"
+    );
+    let (attempts, retry_at, error, abandoned, text, frozen) = queue_row(&store, job);
+    assert_eq!(
+        (attempts, retry_at, error, abandoned),
+        (1, 0, None, None),
+        "the plan is as it was"
+    );
+    assert_eq!(
+        (text.as_str(), frozen.as_deref()),
+        (THURSDAY, Some(plan.as_str()))
+    );
+    drop(release);
+    holder.join().unwrap();
+}
+
+/// One submission answers three sources while another writer holds the
+/// Kernel. Every answer is frozen, the submission returns inside one
+/// allowance, the plan the allowance did not reach is as frozen, and the
+/// next drain commits all three.
+#[tokio::test]
+async fn a_submission_under_a_held_writer_freezes_every_plan_inside_one_allowance() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    short_waits(&handler);
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let statements = numbered(3, "billing");
+    let messages: Vec<(&str, &str, &str)> = statements
+        .iter()
+        .map(|(id, text)| (id.as_str(), "user", text.as_str()))
+        .collect();
+    let jobs = enqueue(&handler, FIRST, "s1", &messages).await;
+    let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    let work = body(
+        handler
+            .handle_native_capture_next(test_route(FIRST), &next)
+            .await,
+    );
+    assert_eq!(work["state"], "work", "{work}");
+    let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+    let decisions: Vec<Value> = prompt["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| {
+            json!({"message_id": message["id"], "memories": [{
+                "category": "PROJECT_RULES",
+                "content": format!("A project fact: {}", message["text"].as_str().unwrap()),
+                "quote": message["text"],
+            }]})
+        })
+        .collect();
+    assert_eq!(decisions.len(), 3);
+    let submission = json!({
+        "method": "memory.capture.submit",
+        "session_id": "s1",
+        "lease": work["lease"],
+        "model": work["model"],
+        "output": json!({"version": 1, "decisions": decisions}).to_string(),
+    });
+
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let (release, holder) = hold_writer(&kernel);
+    let answer = body(
+        handler
+            .handle_native_capture_submit(test_route(FIRST), &submission)
+            .await,
+    );
+    assert_eq!(answer["state"], "processed", "{answer}");
+    let rows: Vec<QueueRow> = jobs.iter().map(|job| queue_row(&store, job)).collect();
+    assert!(
+        rows.iter().all(|row| row.5.is_some() && row.0 == 1),
+        "every answer is frozen on its one dispatch: {rows:?}"
+    );
+    assert_eq!(
+        rows[0].2.as_deref(),
+        Some("kernel_write_failed"),
+        "the first plan waited for the writer"
+    );
+    assert_eq!(
+        (rows[2].1, rows[2].2.as_deref()),
+        (0, None),
+        "the allowance ends before the third plan, which is ripe"
+    );
+
+    drop(release);
+    holder.join().unwrap();
+    production_waits(&handler);
+    store
+        .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+        .unwrap();
+    assert_eq!(
+        body(
+            handler
+                .handle_native_capture_next(test_route(FIRST), &next)
+                .await
+        )["state"],
+        "ready"
+    );
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!((status.pending, status.prepared), (0, 0));
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        3
     );
 }
 
@@ -1380,7 +1728,7 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         |_, _| vec![fact(THURSDAY)],
     )
     .await;
-    let own = numbered(6, "billing");
+    let own = numbered(12, "billing");
     let messages: Vec<(&str, &str, &str)> = own
         .iter()
         .map(|(id, text)| (id.as_str(), "user", text.as_str()))
@@ -1393,9 +1741,9 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     let kernel = handler.kernel.kernel_store().unwrap();
     let binding = kernel_routes::ProjectBinding::new(&project);
     let tip = kernel.tip().unwrap();
-    let read = |session: &str, caps: (usize, usize)| -> (Vec<String>, bool) {
+    let read_for = |sessions: &[&str], caps: (usize, usize)| -> (Vec<String>, bool) {
         let response =
-            crate::canonical_memory::read_other_sessions(&kernel, &binding, session, tip, caps)
+            crate::canonical_memory::read_other_sessions(&kernel, &binding, sessions, tip, caps)
                 .unwrap();
         let mut summaries: Vec<String> = response
             .rows
@@ -1410,6 +1758,7 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         summaries.sort();
         (summaries, response.truncated)
     };
+    let read = |session: &str, caps: (usize, usize)| read_for(&[session], caps);
     const ROWS: usize = 1_000;
     const BYTES: usize = 1 << 20;
     let unbounded = (ROWS, BYTES);
@@ -1418,11 +1767,12 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         (vec![stated(THURSDAY)], false),
         "every other row is the reading session's own"
     );
-    assert_eq!(read("s3", unbounded).0.len(), 7);
-    // Two rows fit the row cap; the six newest rows are the session's own.
+    assert_eq!(read("s3", unbounded).0.len(), 13);
+    // Two rows fit the row cap; the twelve newest rows are the session's
+    // own, six times what the cap holds.
     assert_eq!(
-        read("s2", (2, BYTES)).0,
-        [stated(THURSDAY)],
+        read("s2", (2, BYTES)),
+        (vec![stated(THURSDAY)], false),
         "the row cap is spent on rows of other sessions"
     );
     let (other_session, truncated) = read("s3", (2, BYTES));
@@ -1433,13 +1783,46 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     );
     assert!(truncated);
     assert!(!other_session.contains(&stated(THURSDAY)));
-    // One statement's payload is under 1 KiB; two do not fit 1 KiB.
+    // The byte cap is the stored size of the other session's statement.
+    let rows =
+        crate::canonical_memory::read_other_sessions(&kernel, &binding, &["s3"], tip, unbounded)
+            .unwrap();
+    let ids: Vec<String> = rows
+        .rows
+        .iter()
+        .map(|row| row.object.object_id.clone())
+        .collect();
+    let sizes: HashMap<String, u64> = kernel
+        .decision_payload_sizes_as_of(&ids, tip)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let thursday = rows
+        .rows
+        .iter()
+        .find(|row| rows.decisions[&row.object.object_id].payload.summary == stated(THURSDAY))
+        .map(|row| sizes[&row.object.object_id])
+        .unwrap();
+    assert!(
+        sizes.values().sum::<u64>() - thursday > 5 * thursday,
+        "the newer own rows hold more than five times the byte cap"
+    );
+    let exact = usize::try_from(thursday).unwrap();
     assert_eq!(
-        read("s2", (ROWS, 1024)).0,
-        [stated(THURSDAY)],
+        read("s2", (ROWS, exact)),
+        (vec![stated(THURSDAY)], false),
         "the byte cap is spent on rows of other sessions"
     );
-    assert!(!read("s3", (ROWS, 1024)).0.contains(&stated(THURSDAY)));
+    let (other_session, truncated) = read("s3", (ROWS, exact));
+    assert!(truncated);
+    assert!(!other_session.contains(&stated(THURSDAY)));
+    // A read for two sessions holds what either is delivered: the newest
+    // two rows for the session that wrote none, and the older statement for
+    // the session that wrote the twelve.
+    let (both, truncated) = read_for(&["s2", "s3"], (2, BYTES));
+    assert!(truncated);
+    assert_eq!(both.len(), 3);
+    assert!(both.contains(&stated(THURSDAY)));
 }
 
 /// A source commits, its queue row is pruned, and the same message is
