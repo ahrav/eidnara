@@ -610,6 +610,51 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
     daemon.shutdown().await;
 }
 
+/// A reader lag bound smaller than one idle period's commits, as an operator's manifest may set: growth pushes the family past the bound at a slice's observation, the status reports readers refused as stale, and the family's own catch-up episode still applies the commits, so the projection returns to the tip with no rebuild once the commits stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_family_past_a_small_reader_lag_bound_is_refused_to_readers_and_catches_up() {
+    let _clock = CLOCK.lock().await;
+    let (daemon, route, scope) = daemon_with(|identity| {
+        let mut manifest = fixture_manifest(identity);
+        manifest["limits"]["catchup_lag_commits"] = json!(8);
+        manifest
+    })
+    .await;
+    let kernel = daemon.store();
+    let grower = tokio::task::spawn_blocking(move || {
+        for first in (0..400_u64).step_by(4) {
+            publish(&kernel, &scope, first, 4);
+        }
+    });
+    let mut refused_as_stale = false;
+    while !grower.is_finished() {
+        let observed = status(&daemon, route).await;
+        refused_as_stale |= observed["admission"]["reason"] == "coverage_stale";
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    grower.await.unwrap();
+    assert!(
+        refused_as_stale,
+        "growth of five hundred commits never put the family past a bound of 8, so the test reached no stale family"
+    );
+    let (caught_up_status, _) = status_until(
+        &daemon,
+        route,
+        2 * SLICE_IDLE + Duration::from_secs(20),
+        "catch-up of the stale family",
+        caught_up,
+    )
+    .await;
+    assert_eq!(
+        caught_up_status["progress"]["rebuilds"],
+        json!({"recorded": 1, "completed": 1, "renewed": 0}),
+        "{caught_up_status}"
+    );
+    assert_eq!(caught_up_status["progress"]["blocked"], Value::Null);
+    assert!(query(&daemon, &marker(0)).await.is_ok());
+    daemon.shutdown().await;
+}
+
 /// Positive control for the soak's oracle: under the daemon integration tests' unit-sized limits a class of the same store passes its coverage bound of 682 live rows, the gate withdraws admission, searches stop being served, and the status surface names the bound that refused the family.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unit_sized_limits_stop_serving_a_grown_store_and_the_status_names_the_bound() {
