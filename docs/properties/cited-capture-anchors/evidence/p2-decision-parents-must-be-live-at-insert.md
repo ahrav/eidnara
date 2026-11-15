@@ -8,7 +8,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 `insert_decision` (`crates/kernel/src/slice/write.rs:920`) calls `require_parents` (`:1095`), which runs `require_live` for the domain and `require_optional_live` for proposition, scope, anchor, and evidence. Each query requires `invalidated_commit_seq IS NULL` inside the envelope's transaction and returns `NotFound` otherwise. The parent check runs before the registry insert, so a refusal leaves no registry row.
 
-At U1 and U2 memory capture passed `anchor_id: None`, so no production decision reached the anchor clause. Since U3, `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:1588`) inserts the job's anchor before the job's first decision and names it on every decision of the job (`:1673`, `:1703`), so every publish that writes a decision reaches the clause in production order; a job whose memories are all `duplicate_of` writes no decision and no anchor (`:1634`). `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
+At U1 and U2 memory capture passed `anchor_id: None`, so no production decision reached the anchor clause. Since U3, `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:2698`) inserts the job's anchor before the job's first decision and names it on every decision of the job (`:2914`, `:2950`), so every publish that writes a decision reaches the clause in production order; a job whose memories are all skipped duplicates writes no decision and no anchor (`:2866`). A duplicate is skipped unless it is the user's own statement of a memory the Kernel does not serve automatically; that statement is written as its own decision and takes the job's anchor. `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
 
 ## Failure scenario
 
@@ -37,11 +37,14 @@ A decision naming a missing domain; a decision naming an anchor inserted after i
 - Findings: at U1 and U2 every production `DecisionSpec` set `anchor_id: None`.
   At U3 the capture publish inserts the job's anchor before the job's first
   decision and names it on every decision of the job
-  (`crates/daemon/src/memory_capture.rs:1673`), so the clause is reached on
+  (`crates/daemon/src/memory_capture.rs:2914`), so the clause is reached on
   every publish that writes a decision
-  (`crates/daemon/src/source_capture_tests.rs:3498`); a job whose memories
+  (`crates/daemon/src/source_capture_tests.rs:3501`); a job whose memories
   are all `duplicate_of` writes no decision and no anchor
-  (`crates/daemon/src/memory_capture.rs:1634`).
+  (`crates/daemon/src/memory_capture.rs:2866`). Since the statement-boundary
+  change, a `duplicate_of` memory that is the user's own statement of a
+  memory the Kernel does not serve automatically is written as a decision
+  and takes the job's anchor; every other duplicate is skipped as before.
 - Missing evidence: none.
 - Conclusion: resolved with answer: R1's `always-or-unreached` label is
   reversed to `always` at U3.

@@ -29,6 +29,12 @@ import {
 import { isRecord } from "../../shared/record-type-guard";
 import { splitQueryOperands } from "./bounds";
 
+/** The observation that contests a user's statement: the contesting memory's own result id and the quoted excerpt of its text. */
+export interface MemoryContest {
+    memory: string;
+    excerpt: string;
+}
+
 export interface MemorySearchResult {
     source: "memory";
     content: string;
@@ -46,6 +52,8 @@ export interface MemorySearchResult {
     provenance?: RouteCausality;
     /** Exact SHA-256 digest of the served revision's content bytes. */
     contentDigest?: string;
+    /** Present when capture recorded an observation that contradicts this user statement. */
+    contestedBy?: MemoryContest;
 }
 
 export interface AntiMemorySearchResult {
@@ -195,19 +203,31 @@ export function antiMemoryPayloadOfRow(row: ReadRow): AntiMemoryPayload | null |
 /** The source id of the rows automatic capture writes; capture records a contest in the rationale of those rows (host wire protocol, section 7.9). */
 const CAPTURE_SOURCE_ID = "memory_capture";
 
-/**
- * The summary an explicit search shows for a memory. A user's statement that a later observation contradicts carries `contested_by` in its rationale, naming the contesting memory and its text; the summary then reads `<statement> (contested by <memory id>: <contesting text>)`, the contest wording of the `<project-memory>` block built from the fields a read row carries. The id is the contesting memory's own result id, so the two results read as one disagreement. Every other row shows its stored summary.
- */
-function shownSummary(row: ReadRow, decision: ReadDecision): string {
-    const { summary, rationale } = decision.payload;
+/** The longest contest text a result shows, in characters; the daemon cuts the `<project-memory>` block's contest text at the same length (host wire protocol, section 7.9). */
+export const CONTEST_EXCERPT_CHARS = 240;
+
+/** The contesting text as one bounded, quoted literal: whitespace runs and line breaks fold to single spaces, the text is cut to `CONTEST_EXCERPT_CHARS` characters with an ellipsis, and the result is a JSON string, so the text stays inside its quotation marks whatever it holds. */
+export function contestExcerpt(text: string): string {
+    const folded = text.split(/\s+/u).filter(Boolean).join(" ");
+    const chars = Array.from(folded);
+    const shown =
+        chars.length > CONTEST_EXCERPT_CHARS
+            ? `${chars.slice(0, CONTEST_EXCERPT_CHARS).join("")}\u2026`
+            : folded;
+    return JSON.stringify(shown);
+}
+
+/** The observation a capture recorded as contradicting a user's statement: the contesting memory's id and the excerpt of its text. `undefined` for a row capture did not write and for a rationale that holds no contest with both members. */
+function contestOf(row: ReadRow, decision: ReadDecision): MemoryContest | undefined {
+    const { rationale } = decision.payload;
     if (row.object.source_id !== CAPTURE_SOURCE_ID || !rationale.includes("contested_by")) {
-        return summary;
+        return undefined;
     }
     let parsed: unknown;
     try {
         parsed = JSON.parse(rationale);
     } catch {
-        return summary;
+        return undefined;
     }
     const contest = isRecord(parsed) ? parsed.contested_by : undefined;
     if (
@@ -215,9 +235,9 @@ function shownSummary(row: ReadRow, decision: ReadDecision): string {
         typeof contest.memory !== "string" ||
         typeof contest.text !== "string"
     ) {
-        return summary;
+        return undefined;
     }
-    return `${summary} (contested by ${contest.memory}: ${contest.text})`;
+    return { memory: contest.memory, excerpt: contestExcerpt(contest.text) };
 }
 
 /** A rejected-approach row emits `anti_memory`. An unparseable stored summary becomes a warning carrying the raw summary as the rejected strategy. Callers pass a previously parsed `antiMemory` value to reuse the parse result. */
@@ -253,16 +273,15 @@ export function memoryResultFromRow(
     return {
         source: "memory",
         // `rowText` ranks the rationale, so the rationale renders too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated.
-        content: decision
-            ? decision.payload.rationale
-                ? `${shownSummary(row, decision)}\n${decision.payload.rationale}`
-                : decision.payload.summary
-            : "",
+        content: decision?.payload.rationale
+            ? `${decision.payload.summary}\n${decision.payload.rationale}`
+            : (decision?.payload.summary ?? ""),
         score,
         objectId: row.object.object_id,
         category: decision?.decision_kind ?? row.object.object_kind,
         matchType,
         ...(row.labeled ? { policyLabel: "labeled" } : {}),
+        ...(decision && contestOf(row, decision) ? { contestedBy: contestOf(row, decision) } : {}),
     };
 }
 

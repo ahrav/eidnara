@@ -51,6 +51,22 @@ pub struct M1RevisionReadTimings {
     pub notes_ms: f64,
 }
 
+/// The user-profile version an m1 revision signal hashes: the stored version
+/// while the profile block is composed or memory is disabled, and 0 while an
+/// enabled memory has automatic injection switched off, so a profile the
+/// request does not carry moves no revision.
+pub(crate) fn signalled_user_profile_version(
+    memory_auto_inject: bool,
+    memory_enabled: bool,
+    stored: u64,
+) -> u64 {
+    if memory_auto_inject || !memory_enabled {
+        stored
+    } else {
+        0
+    }
+}
+
 /// Computes nonzero in-session and external revision hashes.
 ///
 /// The in-session hash covers the project-memory revision when memory is

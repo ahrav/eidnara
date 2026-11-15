@@ -1894,11 +1894,11 @@ fn revision_signal_for_context(
         store,
         note_project_path,
         session_id,
-        if ctx.memory_auto_inject || !ctx.memory_enabled {
-            user_profile_version
-        } else {
-            0
-        },
+        crate::m1_compose::signalled_user_profile_version(
+            ctx.memory_auto_inject,
+            ctx.memory_enabled,
+            user_profile_version,
+        ),
         memory_enabled,
         ctx.project_memory_revision(),
         timings,
@@ -2832,11 +2832,7 @@ fn compose_additive_m0(
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<AdditiveM0Composition, TransformError> {
-    let selected_memories = if ctx.injects_memory() {
-        ctx.project_memory_rows()
-    } else {
-        &[]
-    };
+    let selected_memories = ctx.project_memory_rows();
     let user_profile = if ctx.injects_memory() {
         store.load_active_user_memories()?
     } else {

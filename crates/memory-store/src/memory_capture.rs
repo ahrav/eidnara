@@ -18,12 +18,16 @@ use crate::{
 
 pub const MAX_CAPTURE_SOURCE_BYTES: usize = 64 * 1024;
 pub const MAX_CAPTURE_PREPARED_BYTES: usize = 512 * 1024;
+/// The text and frozen-plan bytes one drain window of
+/// `pending_memory_captures` retains. The extraction window is also held to
+/// [`MAX_CAPTURE_SOURCE_BYTES`] of source text.
 const MAX_CAPTURE_BATCH_RETAINED_BYTES: usize = 1024 * 1024;
 pub const MAX_PENDING_CAPTURE_PER_PROJECT: i64 = 1024;
 pub const MAX_PENDING_CAPTURE_TOTAL: i64 = 8192;
 pub const MAX_CAPTURE_FAILURES: u32 = 3;
 pub const MAX_CAPTURE_ATTEMPTS: u32 = 9;
-/// One drain batch: the `LIMIT` of `pending_memory_captures`.
+/// The jobs in one drain window of `pending_memory_captures`, the `LIMIT` of
+/// each window's statement, and the sources one extraction dispatch records.
 const MAX_CAPTURE_BATCH_JOBS: usize = 32;
 /// Mirrors `kernel::source_identity::HARNESSES`; a daemon test pins the two equal.
 pub const CAPTURE_HARNESSES: [&str; 2] = ["opencode", "pi"];
@@ -39,10 +43,15 @@ const CAPTURE_PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// `pending` excludes abandoned jobs; they still count as failed.
 const STATUS_SQL: &str = "SELECT COALESCE(SUM(commit_seq IS NULL AND abandoned_at_ms IS NULL),0),COALESCE(SUM(prepared_json IS NOT NULL),0),COALESCE(SUM(commit_seq IS NOT NULL),0),COALESCE(SUM(commit_seq IS NULL AND last_error IS NOT NULL),0) FROM memory_capture_jobs WHERE project=?1";
-/// One drain window: the oldest 32 ripe jobs that hold a frozen plan (`?4` = 1)
-/// or await extraction (`?4` = 0). Index order is
-/// `(project,harness,created_at_ms,rowid)`, so the ORDER BY needs no sorter.
-const PENDING_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL)=?4 AND (prepared_json IS NOT NULL OR paused_until_ms<=?3) ORDER BY created_at_ms,rowid LIMIT 32";
+/// The frozen-plan window: the oldest 32 ripe jobs that hold a frozen plan.
+/// Index order is `(project,harness,created_at_ms,rowid)`, so the ORDER BY
+/// needs no sorter. The `NULL` test is a top-level term ahead of the deadline
+/// term, so SQLite decides a row of the other window from its record header
+/// and reads no plan bytes for it.
+const PENDING_PLANS_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL AND retry_at_ms<=?3 ORDER BY created_at_ms,rowid LIMIT 32";
+/// The extraction window: the oldest 32 ripe sources that hold no plan and
+/// whose model-failure pause has ended.
+const PENDING_SOURCES_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND retry_at_ms<=?3 AND paused_until_ms<=?3 ORDER BY created_at_ms,rowid LIMIT 32";
 /// Without statistics the planner prefers the covering project index, which
 /// holds every completed row; the partial index holds only the pending ones.
 const PENDING_COUNTS_SQL: &str = "SELECT COALESCE(SUM(project=?1),0),COUNT(*) FROM memory_capture_jobs INDEXED BY idx_memory_capture_pending WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL";
@@ -107,6 +116,18 @@ pub struct CaptureQueueStatus {
     pub prepared: i64,
     pub completed: i64,
     pub failed: i64,
+}
+
+/// What a refused or conflicting kernel commit did to its capture job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureRefusal {
+    /// The job holds another plan or none, is complete, or is abandoned; it
+    /// is left as it is.
+    Stale,
+    /// The job stays queued for its next retry.
+    Retried,
+    /// The job reached [`MAX_CAPTURE_ATTEMPTS`] and released its payload.
+    Abandoned,
 }
 
 /// A raw-text digest stored beside the redacted row would confirm guesses
@@ -300,26 +321,23 @@ impl MemoryStore {
     ) -> Result<Vec<CaptureJob>, MemoryStoreError> {
         self.inner
             .with_conn(|conn| {
-                let mut statement = conn.prepare_cached(PENDING_SQL)?;
                 let mut jobs = Vec::new();
-                for prepared in [true, false] {
-                    let rows = statement.query_map(
-                        params![project, harness, now_ms, prepared],
-                        |row| {
-                            Ok(CaptureJob {
-                                job_id: row.get(0)?,
-                                project: row.get(1)?,
-                                harness: row.get(2)?,
-                                session_id: row.get(3)?,
-                                message_id: row.get(4)?,
-                                role: row.get(5)?,
-                                text: row.get(6)?,
-                                prepared: row.get(7)?,
-                                attempts: row.get(8)?,
-                                failures: row.get(9)?,
-                            })
-                        },
-                    )?;
+                for (prepared, sql) in [(true, PENDING_PLANS_SQL), (false, PENDING_SOURCES_SQL)] {
+                    let mut statement = conn.prepare_cached(sql)?;
+                    let rows = statement.query_map(params![project, harness, now_ms], |row| {
+                        Ok(CaptureJob {
+                            job_id: row.get(0)?,
+                            project: row.get(1)?,
+                            harness: row.get(2)?,
+                            session_id: row.get(3)?,
+                            message_id: row.get(4)?,
+                            role: row.get(5)?,
+                            text: row.get(6)?,
+                            prepared: row.get(7)?,
+                            attempts: row.get(8)?,
+                            failures: row.get(9)?,
+                        })
+                    })?;
                     let mut bytes = 0;
                     let mut retained_bytes = 0;
                     for row in rows {
@@ -429,21 +447,33 @@ impl MemoryStore {
         })
     }
 
-    /// A rejected kernel transaction made no write. Reconcile again only if
-    /// this is still the same frozen plan; a committed source is immutable.
+    /// A rejected kernel transaction made no write. When the job still holds
+    /// `frozen`, its plan is released and the source is extracted again after
+    /// `retry_at_ms`. Each extraction records a dispatch, so a conflict that
+    /// planning again cannot clear ends at [`MAX_CAPTURE_ATTEMPTS`]: the
+    /// source is abandoned, which releases its text and keeps its identity
+    /// and error. A committed source is immutable.
     pub fn retry_memory_capture_reconciliation(
         &self,
         project: &str,
         job: &str,
         frozen: &str,
-    ) -> Result<(), MemoryStoreError> {
+        retry_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<CaptureRefusal, MemoryStoreError> {
         prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let tx = tx.tx();
-            let changed = tx.execute("UPDATE memory_capture_jobs SET prepared_json=NULL,last_error='reconciliation_conflict',retry_at_ms=0 WHERE project=?1 AND job_id=?2 AND prepared_json=?3 AND commit_seq IS NULL", params![project, job, frozen])?;
-            if changed == 1 {
-                retire_prepared_output_scans(tx, project, job)?;
+            let changed = tx.execute("UPDATE memory_capture_jobs SET prepared_json=NULL,last_error='reconciliation_conflict',retry_at_ms=?4 WHERE project=?1 AND job_id=?2 AND prepared_json=?3 AND commit_seq IS NULL AND abandoned_at_ms IS NULL", params![project, job, frozen, retry_at_ms])?;
+            if changed == 0 {
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Stale));
             }
-            Ok(WriteDisposition::Applied(()))
+            retire_prepared_output_scans(tx, project, job)?;
+            let abandoned = tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='' WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND attempts>=?4", params![project, job, now_ms, MAX_CAPTURE_ATTEMPTS])?;
+            if abandoned == 1 {
+                retire_capture_scans(tx, project, job)?;
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Abandoned));
+            }
+            Ok(WriteDisposition::Applied(CaptureRefusal::Retried))
         })
     }
 
@@ -499,28 +529,34 @@ impl MemoryStore {
         })
     }
 
-    /// Records a kernel refusal of a frozen plan as one dispatch: the refusal
-    /// is deterministic for the plan as frozen, so it draws on the same
-    /// [`MAX_CAPTURE_ATTEMPTS`] allowance a model dispatch does. Reaching the
-    /// allowance abandons the source, which releases its text and plan and
-    /// keeps its identity and `code`. Returns whether the source was abandoned.
+    /// Records a kernel refusal of the frozen plan `frozen` as one dispatch.
+    /// The same plan meets the same refusal until canonical state changes, so
+    /// it draws on the [`MAX_CAPTURE_ATTEMPTS`] allowance a model dispatch
+    /// does. Reaching the allowance abandons the source, which releases its
+    /// text and plan and keeps its identity and `code`. A job that holds
+    /// another plan, or none, is left as it is.
     pub fn refuse_memory_capture_commit(
         &self,
         project: &str,
         job: &str,
+        frozen: &str,
         code: &str,
         retry_at_ms: i64,
         now_ms: i64,
-    ) -> Result<bool, MemoryStoreError> {
+    ) -> Result<CaptureRefusal, MemoryStoreError> {
         valid_error_code(code)?;
         prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let tx = tx.tx();
-            tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,attempts=attempts+1 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL",params![project,job,code,retry_at_ms])?;
-            let abandoned = tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='',prepared_json=NULL WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL AND attempts>=?4",params![project,job,now_ms,MAX_CAPTURE_ATTEMPTS])?;
+            let charged = tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,attempts=attempts+1 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json=?5",params![project,job,code,retry_at_ms,frozen])?;
+            if charged == 0 {
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Stale));
+            }
+            let abandoned = tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='',prepared_json=NULL WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json=?5 AND attempts>=?4",params![project,job,now_ms,MAX_CAPTURE_ATTEMPTS,frozen])?;
             if abandoned == 1 {
                 retire_capture_scans(tx, project, job)?;
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Abandoned));
             }
-            Ok(WriteDisposition::Applied(abandoned == 1))
+            Ok(WriteDisposition::Applied(CaptureRefusal::Retried))
         })
     }
 
@@ -967,6 +1003,240 @@ mod tests {
         );
     }
 
+    /// Each window holds 1 MiB of retained bytes of its own, and the 64 KiB
+    /// source-text bound applies to the extraction window alone.
+    #[test]
+    fn each_drain_window_spends_its_own_byte_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        // Three plans of 400 KiB: two fit the plan window's 1 MiB, the third waits.
+        let plan = format!("\"{}\"", "p".repeat(400 * 1024));
+        // Two plan jobs hold 80 KiB of text, past the 64 KiB the extraction
+        // window admits.
+        let plan_text = "plan text ".repeat(4 * 1024);
+        let source_text = "source text ".repeat(16 * 1024 / 12);
+        let mut plans = Vec::new();
+        for index in 0..3 {
+            let id = accepted(
+                store
+                    .enqueue_memory_capture(numbered_source(index, &plan_text), 1)
+                    .unwrap(),
+            );
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, &plan)
+                    .unwrap()
+                    .is_some()
+            );
+            plans.push(id);
+        }
+        let mut sources = Vec::new();
+        for index in 3..9 {
+            sources.push(accepted(
+                store
+                    .enqueue_memory_capture(numbered_source(index, &source_text), 2)
+                    .unwrap(),
+            ));
+        }
+        let jobs = store.pending_memory_captures("/project", "pi", 10).unwrap();
+        let ids = |prepared: bool| -> Vec<&str> {
+            jobs.iter()
+                .filter(|job| job.prepared.is_some() == prepared)
+                .map(|job| job.job_id.as_str())
+                .collect()
+        };
+        assert_eq!(
+            ids(true),
+            plans[..2],
+            "the plan window stops at its retained-byte bound"
+        );
+        assert!(
+            jobs.iter()
+                .filter(|job| job.prepared.is_some())
+                .map(|job| job.text.len())
+                .sum::<usize>()
+                > MAX_CAPTURE_SOURCE_BYTES,
+            "the source-text bound applies to the extraction window alone"
+        );
+        assert_eq!(
+            ids(false),
+            sources[..4],
+            "the extraction window holds 64 KiB of source text whatever the plan window retained"
+        );
+    }
+
+    /// A refusal names the plan the Kernel refused. A job that has since
+    /// frozen another plan keeps its dispatch count, its plan, and its text.
+    #[test]
+    fn a_refusal_of_a_plan_the_job_no_longer_holds_charges_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let id = accepted(
+            store
+                .enqueue_memory_capture(source("Use staging port 4321."), 1)
+                .unwrap(),
+        );
+        let freeze = |plan: &str| {
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, plan)
+                    .unwrap()
+                    .is_some()
+            );
+        };
+        let row = || -> (u32, Option<String>, String, Option<String>) {
+            store
+                .with_conn_for_test(|conn| {
+                    conn.query_row(
+                        "SELECT attempts,prepared_json,text,last_error FROM memory_capture_jobs WHERE job_id=?1",
+                        [&id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                })
+                .unwrap()
+        };
+        freeze("[1]");
+        assert_eq!(
+            store
+                .retry_memory_capture_reconciliation("/project", &id, "[1]", 0, 10)
+                .unwrap(),
+            CaptureRefusal::Retried
+        );
+        // The second plan is frozen on the dispatch before the cap.
+        for _ in 2..MAX_CAPTURE_ATTEMPTS - 1 {
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+        }
+        freeze("[2]");
+        let before = row();
+        assert_eq!(before.0, MAX_CAPTURE_ATTEMPTS - 1);
+        assert_eq!(
+            store
+                .refuse_memory_capture_commit(
+                    "/project",
+                    &id,
+                    "[1]",
+                    "kernel_write_refused",
+                    99,
+                    20
+                )
+                .unwrap(),
+            CaptureRefusal::Stale,
+            "a late refusal of the first plan"
+        );
+        assert_eq!(row(), before, "the second plan is untouched");
+        assert_eq!(
+            store
+                .retry_memory_capture_reconciliation("/project", &id, "[1]", 99, 20)
+                .unwrap(),
+            CaptureRefusal::Stale
+        );
+        assert_eq!(row(), before);
+        assert_eq!(
+            store
+                .refuse_memory_capture_commit(
+                    "/project",
+                    &id,
+                    "[2]",
+                    "kernel_write_refused",
+                    99,
+                    30
+                )
+                .unwrap(),
+            CaptureRefusal::Abandoned,
+            "a refusal of the plan the job holds reaches the cap"
+        );
+        assert_eq!(
+            row(),
+            (
+                MAX_CAPTURE_ATTEMPTS,
+                None,
+                String::new(),
+                Some("kernel_write_refused".into())
+            )
+        );
+    }
+
+    /// A conflict releases the plan and waits for its retry deadline. The
+    /// conflict met on the last dispatch of the allowance abandons the source.
+    #[test]
+    fn a_conflict_backs_off_and_is_abandoned_at_the_dispatch_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let id = accepted(
+            store
+                .enqueue_memory_capture(source("Use staging port 4321."), 1)
+                .unwrap(),
+        );
+        let later = accepted(
+            store
+                .enqueue_memory_capture(numbered_source(1, "The build uses cargo."), 2)
+                .unwrap(),
+        );
+        for dispatch in 1..=MAX_CAPTURE_ATTEMPTS {
+            let now = i64::from(dispatch) * 100;
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, "[]")
+                    .unwrap()
+                    .is_some()
+            );
+            let outcome = store
+                .retry_memory_capture_reconciliation("/project", &id, "[]", now + 50, now)
+                .unwrap();
+            if dispatch < MAX_CAPTURE_ATTEMPTS {
+                assert_eq!(outcome, CaptureRefusal::Retried, "dispatch {dispatch}");
+                let ripe = |at: i64| -> Vec<String> {
+                    store
+                        .pending_memory_captures("/project", "pi", at)
+                        .unwrap()
+                        .into_iter()
+                        .map(|job| job.job_id)
+                        .collect()
+                };
+                assert_eq!(
+                    ripe(now + 49),
+                    std::slice::from_ref(&later),
+                    "the released source waits for its retry deadline"
+                );
+                assert_eq!(ripe(now + 50), [id.as_str(), later.as_str()]);
+            } else {
+                assert_eq!(outcome, CaptureRefusal::Abandoned);
+            }
+        }
+        let status = store.memory_capture_status("/project").unwrap();
+        assert_eq!((status.pending, status.prepared, status.failed), (1, 0, 1));
+        let (text, error): (String, String) = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT text,last_error FROM memory_capture_jobs WHERE job_id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(text, "", "an abandoned source releases its text bytes");
+        assert_eq!(error, "reconciliation_conflict");
+    }
+
     #[test]
     fn a_refused_plan_backs_off_by_its_dispatch_count_and_is_abandoned_at_the_cap() {
         let dir = tempfile::tempdir().unwrap();
@@ -990,16 +1260,18 @@ mod tests {
         // One model dispatch is recorded; each refusal is one more.
         for refusal in 1..MAX_CAPTURE_ATTEMPTS - 1 {
             let retry_at = i64::from(refusal) * 100;
-            assert!(
-                !store
+            assert_eq!(
+                store
                     .refuse_memory_capture_commit(
                         "/project",
                         &id,
+                        "{}",
                         "kernel_write_refused",
                         retry_at,
                         retry_at
                     )
                     .unwrap(),
+                CaptureRefusal::Retried,
                 "refusal {refusal} leaves the plan queued"
             );
             assert!(
@@ -1016,10 +1288,18 @@ mod tests {
             assert_eq!(jobs[0].attempts, refusal + 1);
             assert!(jobs[0].prepared.is_some(), "the frozen plan is kept");
         }
-        assert!(
+        assert_eq!(
             store
-                .refuse_memory_capture_commit("/project", &id, "kernel_write_refused", 0, 5_000)
+                .refuse_memory_capture_commit(
+                    "/project",
+                    &id,
+                    "{}",
+                    "kernel_write_refused",
+                    0,
+                    5_000
+                )
                 .unwrap(),
+            CaptureRefusal::Abandoned,
             "the refusal that reaches the dispatch cap abandons the source"
         );
         assert!(
@@ -1045,10 +1325,18 @@ mod tests {
             .unwrap();
         assert_eq!(text, "", "an abandoned source releases its text bytes");
         assert_eq!(error, "kernel_write_refused");
-        assert!(
-            !store
-                .refuse_memory_capture_commit("/project", &id, "kernel_write_refused", 0, 6_000)
+        assert_eq!(
+            store
+                .refuse_memory_capture_commit(
+                    "/project",
+                    &id,
+                    "{}",
+                    "kernel_write_refused",
+                    0,
+                    6_000
+                )
                 .unwrap(),
+            CaptureRefusal::Stale,
             "an abandoned source records no further refusal"
         );
     }
@@ -1105,14 +1393,15 @@ mod tests {
                 .any(|step| step.contains("SCAN memory_capture_jobs")),
             "{status:?}"
         );
-        let pending = plan(PENDING_SQL, &["", "pi", "0", "0"]);
-        assert_eq!(
-            pending,
-            [
-                "SEARCH memory_capture_jobs USING INDEX idx_memory_capture_pending (project=? AND harness=?)"
-            ],
-            "the partial index must supply the ORDER BY without a sorter"
-        );
+        for window in [PENDING_PLANS_SQL, PENDING_SOURCES_SQL] {
+            assert_eq!(
+                plan(window, &["", "pi", "0"]),
+                [
+                    "SEARCH memory_capture_jobs USING INDEX idx_memory_capture_pending (project=? AND harness=?)"
+                ],
+                "the partial index must supply the ORDER BY without a sorter"
+            );
+        }
         let counts = plan(PENDING_COUNTS_SQL, &[""]);
         assert_eq!(
             counts,

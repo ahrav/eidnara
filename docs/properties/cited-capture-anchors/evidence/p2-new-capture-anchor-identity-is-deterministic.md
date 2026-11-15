@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed ob
 
 ## Evidence trail
 
-`anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:403`) returns no anchor for a `HeadUnavailable` plan and otherwise builds `anchor_<32 hex>` and `anchorobj_<32 hex>` from the SHA-256 of `job_id:oid`, with domain `memory`, source `assistant`/`memory_capture`, revision 1, class `Normal`, and a `reachable_from` value with no captures (OQ2-9 default). `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:1588`) takes the spec once and inserts it before the job's first written decision (`:1673`); a job whose memories are all `duplicate_of` writes no anchor. Every decision of the job, a superseding one included, names the same `anchor_id`. The job id is stable (`crates/memory-store/src/memory_capture.rs:114`) and the head is frozen (U2), so a retry rebuilds the same spec, and `insert_anchor` refuses a second row with one id as `Conflict`.
+`anchor_spec` (`crates/daemon/src/memory_capture/cite.rs:403`) returns no anchor for a `HeadUnavailable` plan and otherwise builds `anchor_<32 hex>` and `anchorobj_<32 hex>` from the SHA-256 of `job_id:oid`, with domain `memory`, source `assistant`/`memory_capture`, revision 1, class `Normal`, and a `reachable_from` value with no captures (OQ2-9 default). `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:2698`) takes the spec once and inserts it before the job's first written decision (`:2914`); a job whose memories are all skipped duplicates writes no anchor; a duplicate that is the user's own statement of a memory the Kernel does not serve automatically is written and takes the anchor. Every decision of the job, a superseding one included, names the same `anchor_id`. The job id is stable (`crates/memory-store/src/memory_capture.rs:135`) and the head is frozen (U2), so a retry rebuilds the same spec, and `insert_anchor` refuses a second row with one id as `Conflict`.
 
 Citation events carry `recorded_at` from the publishing attempt's clock, so a retry's events match the rolled-back attempt's in kind and evidence id, not in `recorded_at`. That match follows from the deterministic inputs (the frozen plan, the job row, and the descriptors in the envelope's view); no test yet retries a publish that cites a descriptor.
 
@@ -20,7 +20,7 @@ A retry after a rolled-back commit, or a replay after a lost reply.
 
 ## What a test must construct
 
-One job and plan published into two fresh Kernels, comparing anchor and decision rows (`crates/daemon/src/memory_capture.rs:2647`); a publish refused after its anchor and first decision were written, then retried into the same Kernel (`:2685`); a committed publish whose completion the store refuses, then a retry that replays the receipt (`crates/daemon/src/source_capture_tests.rs:3844`); five jobs in one submission writing five anchors (`crates/daemon/src/source_capture_tests.rs:3498`).
+One job and plan published into two fresh Kernels, comparing anchor and decision rows (`crates/daemon/src/memory_capture.rs:4787`); a publish refused after its anchor and first decision were written, then retried into the same Kernel (`:5018`); a committed publish whose completion the store refuses, then a retry that replays the receipt (`crates/daemon/src/source_capture_tests.rs:3849`); five jobs in one submission writing five anchors (`crates/daemon/src/source_capture_tests.rs:3501`).
 
 ## Investigation log
 
