@@ -1148,7 +1148,11 @@ export class HermeticHostStack {
         this.daemonEnv = options.daemonEnv;
         this.daemonConfig = options.daemonConfig;
         this.harnessRuntime = options.harnessRuntime;
-        this.productionSearchManifest = options.productionSearchManifest;
+        // The fixture runs with the repository root as its working directory, so a manifest path given relative to the caller's directory is resolved here.
+        this.productionSearchManifest =
+            options.productionSearchManifest === undefined
+                ? undefined
+                : resolve(options.productionSearchManifest);
         this.credentialSource = options.credentialSource;
         this.connectionFile = connectionFilePath(this.dataDir);
         this.controlPath = join(this.dataDir, CONTROL_FILE);

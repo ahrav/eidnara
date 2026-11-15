@@ -410,7 +410,7 @@ fn percentile(sorted: &[u128], percent: usize) -> u128 {
     sorted[(sorted.len() * percent / 100).min(sorted.len() - 1)]
 }
 
-/// Under the fixture's production-route records, a store grown past the unit-sized bounds stays within the reader lag bound through commits at many times a coding session's rate and wall-clock steps of minutes to days inside the hold's lifetime: at most one search in a hundred fails, every new memory is ranked within two idle periods, the status lag moves with the commits and returns to zero at the kernel's own tip, and no rebuild is recorded. A step past the hold lifetime then costs one rebuild, which completes while the workload keeps committing and serves again; searches during the build slice may answer `deadline`, and nothing else.
+/// Under the fixture's production-route records, a store grown past the unit-sized bounds stays within the reader lag bound through several commits a second and wall-clock steps of minutes to days inside the hold's lifetime: at most one search in a hundred fails, every new memory is ranked within two idle periods, the status lag moves with the commits and returns to zero at the kernel's own tip, and no rebuild is recorded. A step past the hold lifetime then costs one rebuild, which completes while the workload keeps committing and serves again; searches during the build slice may answer `deadline`, and nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches() {
     let _clock = CLOCK.lock().await;
@@ -449,7 +449,7 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
         "growth is applied by catch-up under the first build's hold: {grown}"
     );
 
-    // Steady phase: four commits a second (a descriptor publication, and a memory every fifth tick), one search per tick, and a wall-clock step every five seconds.
+    // Steady phase: each tick of at least 250 ms publishes two descriptors (three kernel commits), commits a memory every fifth tick, and searches once; the wall clock steps every five seconds.
     let steps_ms: [i64; 8] = [
         20 * 60 * 1000,
         2 * 60 * 60 * 1000,
