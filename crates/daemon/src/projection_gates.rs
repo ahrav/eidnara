@@ -714,7 +714,7 @@ pub enum Renewal {
 enum Freshness {
     /// The family's coverage observation is within `catchup_lag_commits` of the kernel.
     Required,
-    /// The admitted work applies the commits the family trails by.
+    /// The admitted work applies the commits the family trails by, or replaces the family.
     Restored,
 }
 
@@ -754,12 +754,12 @@ impl EvidenceEvaluator {
         self.compression()
     }
 
-    /// Judges `hook` for the catch-up episode of the selected family: every gate [`Self::judge`] applies, with a family that trails the kernel past `catchup_lag_commits` admitted. The episode applies the commits the family trails by, so it is the work that brings a family back inside the freshness limit, and its readers stay judged by [`Self::judge`].
+    /// Judges `hook` for the lifecycle owner's own work on the projection: catching the Current family up, and recording, building, selecting, and completing its replacement. Every gate [`Self::judge`] applies is judged, with a family that trails the kernel past `catchup_lag_commits` admitted, because that work applies the commits the family trails by or replaces it. Readers and maintenance stay judged by [`Self::judge`].
     ///
     /// # Errors
     ///
     /// Returns the [`Denial`].
-    pub fn judge_catch_up(&self, hook: ProjectionHook) -> Result<(), Denial> {
+    pub fn judge_lifecycle_work(&self, hook: ProjectionHook) -> Result<(), Denial> {
         if !self.manifest.enabled.get(&hook).copied().unwrap_or(false) {
             return Err(Denial::Disabled(hook));
         }
@@ -786,7 +786,7 @@ impl EvidenceEvaluator {
         self.class_coverage(hook, coverage)?;
         match (self.freshness(coverage), freshness) {
             (Ok(()), _) => {}
-            // Catch-up applies the commits a trailing family lacks. A checkpoint past the observed tip has none to apply and is refused for catch-up as for a reader.
+            // Lifecycle work applies the commits a trailing family lacks or replaces the family. A checkpoint past the observed tip is refused for it as for a reader.
             (Err(Denial::Stale { lag, .. }), Freshness::Restored) if lag > 0 => {}
             (Err(denial), _) => return Err(denial),
         }
@@ -1038,6 +1038,13 @@ fn judge_all(evaluator: &EvidenceEvaluator) -> Vec<Result<(), Denial>> {
         .collect()
 }
 
+fn judge_all_lifecycle_work(evaluator: &EvidenceEvaluator) -> Vec<Result<(), Denial>> {
+    ProjectionHook::ALL
+        .iter()
+        .map(|hook| evaluator.judge_lifecycle_work(*hook))
+        .collect()
+}
+
 /// One admission request the gate judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
@@ -1050,6 +1057,10 @@ struct GateState {
     evaluator: Option<EvidenceEvaluator>,
     /// `evaluator`'s [`EvidenceEvaluator::judge`] verdict for each hook, in [`ProjectionHook::ALL`] order, judged when `evaluator` is set. A verdict depends on the evaluator alone, so it holds until the evaluator is replaced.
     verdicts: Vec<Result<(), Denial>>,
+    /// `evaluator`'s [`EvidenceEvaluator::judge_lifecycle_work`] verdict for each hook, in the same order: what `lifecycle_thread` is admitted on.
+    lifecycle_verdicts: Vec<Result<(), Denial>>,
+    /// The thread running the lifecycle owner's own work, set by [`HookGate::lifecycle_work`] for the life of its guard. Its admissions read `lifecycle_verdicts`; every other thread reads `verdicts`.
+    lifecycle_thread: Option<std::thread::ThreadId>,
     /// Activation admissions reuse this [`EvidenceEvaluator::judge_compressed_activation`] verdict until `evaluator` is replaced.
     activation: Result<(), Denial>,
     /// What admissions keep between them to read the control record.
@@ -1062,6 +1073,9 @@ struct GateState {
 impl GateState {
     fn set_evaluator(&mut self, evaluator: Option<EvidenceEvaluator>) {
         self.verdicts = evaluator.as_ref().map_or_else(Vec::new, judge_all);
+        self.lifecycle_verdicts = evaluator
+            .as_ref()
+            .map_or_else(Vec::new, judge_all_lifecycle_work);
         self.activation = evaluator
             .as_ref()
             .map_or(Err(Denial::NoManifest), |evaluator| {
@@ -1070,12 +1084,17 @@ impl GateState {
         self.evaluator = evaluator;
     }
 
-    /// The installed evaluator's verdict for `hook`; [`Denial::NoManifest`] without one.
+    /// The installed evaluator's verdict for `hook` on the calling thread: the lifecycle-work verdict for the thread running the lifecycle owner's work, the reader's verdict for every other; [`Denial::NoManifest`] without an evaluator.
     fn verdict(&self, hook: ProjectionHook) -> Result<(), Denial> {
+        let verdicts = if self.lifecycle_thread == Some(std::thread::current().id()) {
+            &self.lifecycle_verdicts
+        } else {
+            &self.verdicts
+        };
         ProjectionHook::ALL
             .iter()
             .position(|known| *known == hook)
-            .and_then(|index| self.verdicts.get(index))
+            .and_then(|index| verdicts.get(index))
             .cloned()
             .unwrap_or(Err(Denial::NoManifest))
     }
@@ -1084,6 +1103,23 @@ impl GateState {
     fn invalidate_grants(&mut self) {
         self.invalidated.cancel();
         self.invalidated = CancellationToken::new();
+    }
+}
+
+/// The mark [`HookGate::lifecycle_work`] sets; dropping it restores the mark it replaced. It stays on the thread that took it.
+pub(crate) struct LifecycleWork<'a> {
+    gate: &'a HookGate,
+    previous: Option<std::thread::ThreadId>,
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+impl Drop for LifecycleWork<'_> {
+    fn drop(&mut self) {
+        self.gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .lifecycle_thread = self.previous;
     }
 }
 
@@ -1126,6 +1162,8 @@ impl HookGate {
             state: Mutex::new(GateState {
                 evaluator: None,
                 verdicts: Vec::new(),
+                lifecycle_verdicts: Vec::new(),
+                lifecycle_thread: None,
                 activation: Err(Denial::NoManifest),
                 control_cache: Default::default(),
                 disabled: false,
@@ -1149,17 +1187,21 @@ impl HookGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let verdicts = judge_all(&evaluator);
+        let lifecycle_verdicts = judge_all_lifecycle_work(&evaluator);
         let activation = evaluator.judge_compressed_activation();
+        // A grant is kept only while the verdict it was issued on still admits its hook: a reader's on `verdicts`, the lifecycle thread's on `lifecycle_verdicts`.
+        let still_admitted = |old: &[Result<(), Denial>], new: &[Result<(), Denial>]| {
+            old.iter()
+                .zip(new)
+                .all(|(old, new)| old.is_err() || new.is_ok())
+        };
         let renewal = if state.disabled {
             Renewal::Disabled
         } else if state.evaluator.as_ref().is_none_or(|old| {
             old.manifest == evaluator.manifest
                 && old.current == evaluator.current
-                && state
-                    .verdicts
-                    .iter()
-                    .zip(&verdicts)
-                    .all(|(old, new)| old.is_err() || new.is_ok())
+                && still_admitted(&state.verdicts, &verdicts)
+                && still_admitted(&state.lifecycle_verdicts, &lifecycle_verdicts)
                 && (state.activation.is_err()
                     || (activation.is_ok() && old.binding == evaluator.binding))
         }) {
@@ -1170,9 +1212,24 @@ impl HookGate {
         };
         state.evaluator = Some(evaluator);
         state.verdicts = verdicts;
+        state.lifecycle_verdicts = lifecycle_verdicts;
         state.activation = activation;
         self.advance();
         renewal
+    }
+
+    /// Marks the calling thread as running the lifecycle owner's own work until the guard drops. While it holds, this thread's admissions are judged by [`EvidenceEvaluator::judge_lifecycle_work`], so the owner catches up, rebuilds, and completes a family that trails the kernel past `catchup_lag_commits`; every other thread's admissions, a reader's pin and a supervisor's dispatch among them, stay judged by [`EvidenceEvaluator::judge`]. The owner takes the guard while it holds its manager, which admits one slice or request at a time.
+    pub(crate) fn lifecycle_work(&self) -> LifecycleWork<'_> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = state.lifecycle_thread.replace(std::thread::current().id());
+        LifecycleWork {
+            gate: self,
+            previous,
+            _thread: std::marker::PhantomData,
+        }
     }
 
     /// `renew` for tests of the refresh path, which keeps grants whose verdicts did not change and withdraws the rest.
@@ -1365,73 +1422,6 @@ impl HookGate {
                     }),
             );
         verdicts.into_iter().collect()
-    }
-
-    /// Admits `hooks` for the catch-up episode of the selected family and checks `expected` and `requested` as [`Self::check_limits`] does, under one gate state. Each hook is judged by [`EvidenceEvaluator::judge_catch_up`], so a family that trails the kernel past `catchup_lag_commits` is still caught up while every other admission refuses it as stale. The grants carry the invalidation token every grant carries. With `test-support`, the ledger records each verdict at [`EntryPoint::Dispatch`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the first [`Denial`] in `hooks` order, then the identity or limit denial.
-    pub(crate) fn admit_catch_up(
-        &self,
-        hooks: &[ProjectionHook],
-        expected: &ProjectionIdentity,
-        requested: &[(&str, u64)],
-    ) -> Result<Vec<Admission>, Denial> {
-        if hooks.is_empty() {
-            return Err(Denial::NoManifest);
-        }
-        let entry = EntryPoint::Dispatch;
-        let mut state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
-        let observed = self.observe_stop(state.as_deref_mut());
-        let verdicts: Vec<Result<Admission, Denial>> = hooks
-            .iter()
-            .map(|hook| {
-                observed.clone()?;
-                let state = state.as_deref().ok_or(Denial::NoManifest)?;
-                if state.disabled {
-                    return Err(Denial::RecoveryRequired);
-                }
-                let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
-                evaluator.judge_catch_up(*hook)?;
-                Ok(Admission {
-                    hook: *hook,
-                    entry,
-                    invalidated: state.invalidated.clone(),
-                })
-            })
-            .collect();
-        let limits = state
-            .as_deref()
-            .and_then(|state| state.evaluator.as_ref())
-            .ok_or(Denial::NoManifest)
-            .and_then(|evaluator| {
-                if evaluator.current != *expected {
-                    return Err(Denial::EvidenceIdentity);
-                }
-                requested_within(evaluator, requested)
-            });
-        drop(state);
-        #[cfg(feature = "test-support")]
-        self.ledger
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend(
-                hooks
-                    .iter()
-                    .zip(&verdicts)
-                    .map(|(hook, verdict)| LedgerEntry {
-                        hook: *hook,
-                        entry,
-                        verdict: verdict.as_ref().map(|_| ()).map_err(Clone::clone),
-                    }),
-            );
-        let grants: Vec<Admission> = verdicts.into_iter().collect::<Result<_, _>>()?;
-        limits?;
-        if grants.iter().any(|grant| grant.invalidated.is_cancelled()) {
-            return Err(Denial::Invalidated);
-        }
-        Ok(grants)
     }
 
     /// # Errors

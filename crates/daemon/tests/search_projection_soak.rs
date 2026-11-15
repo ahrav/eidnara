@@ -2,6 +2,8 @@
 //!
 //! The daemon runs in process with the admission records the direct-host fixture installs for its production search route, the production query route limits, the claim-source runner, and the scheduled slice loop. The workload writes what a coding session writes to the kernel: source descriptors for messages and tool output, and memory decisions the claim-source runner publishes. The wall clock steps through `kernel::test_clock`, which the kernel's hold expiries and the daemon's record deadlines both read, while monotonic time keeps its pace, as after a host suspend.
 //!
+//! What the soak establishes is bounded by two conditions on the wall clock. The projection stays caught up without a rebuild while the clock has moved forward by less than the source hold's lifetime since the family was built (30 days under the fixture records); the steady phase keeps its steps inside that lifetime. Past it the hold expires and the next commit costs one rebuild of the whole store, which the last phase exercises with the workload still committing. A forward step longer than a rebuild record's remaining time that lands after the rebuild staged its seed leaves that record for the operator (`docs/search-projection.md`, *Expiry and renewal*); the soak takes no step during its rebuild.
+//!
 //! `EIDNARA_SOAK_DESCRIPTORS` and `EIDNARA_SOAK_SECONDS` scale the store and the steady phase; the defaults finish in a few minutes.
 
 mod support;
@@ -28,6 +30,23 @@ use support::projection_gate::{self, campaign_json, manifest_json_with, write_re
 
 /// The stepped wall clock is process-wide, so the tests of this binary run one at a time.
 static CLOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The wall-clock steps one test made; dropping it steps the clock back by their sum, so the next test of the binary starts from the system clock.
+#[derive(Default)]
+struct ClockSteps(i64);
+
+impl ClockSteps {
+    fn step(&mut self, by_ms: i64) {
+        kernel::test_clock::step(by_ms);
+        self.0 += by_ms;
+    }
+}
+
+impl Drop for ClockSteps {
+    fn drop(&mut self) {
+        kernel::test_clock::step(-self.0);
+    }
+}
 
 const DOMAIN: &str = "soak-capture";
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -391,7 +410,7 @@ fn percentile(sorted: &[u128], percent: usize) -> u128 {
     sorted[(sorted.len() * percent / 100).min(sorted.len() - 1)]
 }
 
-/// Under the fixture's production-route records, a store grown past the unit-sized bounds stays within the reader lag bound through commits at several times a coding session's rate and wall-clock steps of minutes to days: no search errors, every new memory is ranked within two idle periods, and no rebuild is recorded. A step past the hold lifetime then costs one rebuild, which completes and serves again.
+/// Under the fixture's production-route records, a store grown past the unit-sized bounds stays within the reader lag bound through commits at many times a coding session's rate and wall-clock steps of minutes to days inside the hold's lifetime: at most one search in a hundred fails, every new memory is ranked within two idle periods, the status lag moves with the commits and returns to zero at the kernel's own tip, and no rebuild is recorded. A step past the hold lifetime then costs one rebuild, which completes while the workload keeps committing and serves again; searches during the build slice may answer `deadline`, and nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches() {
     let _clock = CLOCK.lock().await;
@@ -400,6 +419,8 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
     let (daemon, route, scope) = daemon_with(fixture_manifest).await;
     let kernel = daemon.store();
     let lag_bound = i64::try_from(records::READER_LAG_COMMITS).unwrap();
+    let hold_ms = i64::try_from(records::HOLD_MS).unwrap();
+    let mut clock = ClockSteps::default();
 
     // Growth: descriptors arrive four to a commit while the slice loop catches up behind them.
     let growth_started = Instant::now();
@@ -490,9 +511,11 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
                 .as_i64()
                 .unwrap_or(i64::MAX),
         );
-        if last_step.elapsed() >= Duration::from_secs(5) {
-            let by = steps_ms[step % steps_ms.len()];
-            kernel::test_clock::step(by);
+        // Steps stop two days short of the hold's lifetime, so a longer steady phase keeps testing a family under its first hold.
+        let by = steps_ms[step % steps_ms.len()];
+        if last_step.elapsed() >= Duration::from_secs(5) && stepped_ms + by <= hold_ms - 2 * DAY_MS
+        {
+            clock.step(by);
             stepped_ms += by;
             step += 1;
             last_step = Instant::now();
@@ -516,17 +539,41 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let after_steady = status(&daemon, route).await;
+    // With the workload stopped, the status lag returns to zero at the tip the kernel itself reports.
+    let (after_steady, _) = status_until(
+        &daemon,
+        route,
+        2 * SLICE_IDLE + Duration::from_secs(5),
+        "the steady phase's last commits",
+        caught_up,
+    )
+    .await;
+    assert_eq!(
+        after_steady["progress"]["checkpoint"],
+        json!(kernel.tip().unwrap()),
+        "{after_steady}"
+    );
     freshness_ms.sort_unstable();
     latency_ms.sort_unstable();
 
-    // Hold expiry: the wall clock steps past the hold's lifetime, which costs one rebuild of the whole store.
-    kernel::test_clock::step(31 * DAY_MS);
+    // Hold expiry: the wall clock steps past the hold's lifetime, which costs one rebuild of the whole store. The workload keeps committing at the steady rate while the rebuild runs.
+    clock.step(hold_ms + DAY_MS - stepped_ms);
     remember(&daemon, memory).await;
     let expiry_started = Instant::now();
     let mut rebuild_errors: Vec<String> = Vec::new();
     let mut rebuild_searches = 0_u64;
+    let mut rebuild_commits = 0_u64;
     let rebuilt = loop {
+        {
+            let kernel = Arc::clone(&kernel);
+            let scope = scope.clone();
+            let first = next;
+            tokio::task::spawn_blocking(move || publish(&kernel, &scope, first, 2))
+                .await
+                .unwrap();
+            next += 2;
+            rebuild_commits += 3;
+        }
         rebuild_searches += 1;
         let answer = query(&daemon, &marker(memory)).await;
         if let Err(code) = &answer {
@@ -534,7 +581,8 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
         }
         let observed = status(&daemon, route).await;
         if observed["progress"]["rebuilds"]["completed"] == 2
-            && caught_up(&observed)
+            && observed["record"]["state"] == "current"
+            && observed["admission"]["state"] == "admitted"
             && answer.is_ok_and(|answer| ranks(&answer, memory))
         {
             break observed;
@@ -570,6 +618,7 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
             "rebuilds_after_steady": after_steady["progress"]["rebuilds"],
             "hold_expiry_rebuild_seconds": rebuilt_in.as_secs_f64(),
             "hold_expiry_searches": rebuild_searches,
+            "hold_expiry_commits": rebuild_commits,
             "hold_expiry_search_errors": rebuild_errors.len(),
             "hold_expiry_search_error_codes": rebuild_errors.iter().collect::<std::collections::BTreeSet<_>>(),
             "rebuilds_at_end": rebuilt["progress"]["rebuilds"],
@@ -585,6 +634,14 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
     assert!(
         max_lag <= lag_bound,
         "the projection trailed the kernel by {max_lag} commits, above {lag_bound}"
+    );
+    assert!(
+        max_lag > 0,
+        "the status lag stayed at zero while every tick committed, so it did not measure the lag"
+    );
+    assert!(
+        rebuild_errors.iter().all(|code| code == "deadline:"),
+        "a search during the rebuild failed other than by waiting out the build slice: {rebuild_errors:?}"
     );
     let slowest = *freshness_ms.last().unwrap();
     assert!(
@@ -626,16 +683,17 @@ async fn a_family_past_a_small_reader_lag_bound_is_refused_to_readers_and_catche
             publish(&kernel, &scope, first, 4);
         }
     });
+    // The status is polled without a pause, so the interval in which a slice has observed the family past the bound and its episode has yet to end is seen.
     let mut refused_as_stale = false;
     while !grower.is_finished() {
         let observed = status(&daemon, route).await;
         refused_as_stale |= observed["admission"]["reason"] == "coverage_stale";
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
     grower.await.unwrap();
     assert!(
         refused_as_stale,
-        "growth of five hundred commits never put the family past a bound of 8, so the test reached no stale family"
+        "no status showed the family past a bound of 8 during five hundred commits, so this run reached no stale family"
     );
     let (caught_up_status, _) = status_until(
         &daemon,
@@ -655,7 +713,7 @@ async fn a_family_past_a_small_reader_lag_bound_is_refused_to_readers_and_catche
     daemon.shutdown().await;
 }
 
-/// Positive control for the soak's oracle: under the daemon integration tests' unit-sized limits a class of the same store passes its coverage bound of 682 live rows, the gate withdraws admission, searches stop being served, and the status surface names the bound that refused the family.
+/// Positive control for the soak's oracle: under the records the fixture installed before they were sized for a growing store (the integration tests' values with catch-up windows of 4,096 rows and 8 MiB), a class of the same workload passes its coverage bound of 682 live rows, the gate withdraws admission, searches stop being served, and the status surface names the bound that refused the family.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unit_sized_limits_stop_serving_a_grown_store_and_the_status_names_the_bound() {
     let _clock = CLOCK.lock().await;
@@ -687,8 +745,10 @@ async fn unit_sized_limits_stop_serving_a_grown_store_and_the_status_names_the_b
         &daemon,
         route,
         Duration::from_secs(120),
-        "a refused family",
-        |status| status["admission"]["state"] == "refused",
+        "a refused family with its reason",
+        |status| {
+            status["admission"]["state"] == "refused" && status["progress"]["blocked"].is_string()
+        },
     )
     .await;
     assert_eq!(

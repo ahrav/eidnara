@@ -304,11 +304,21 @@ describe.skipIf(!PAYLOAD_DIR)("direct-host fixture with the production search ro
                 ranks,
             };
             console.log(`[paraphrase-recall] ${JSON.stringify(report)}`);
-            // The recall numbers are reported, and the test holds the route to the scan's recall at depth 10: a route that ranked fewer paraphrase targets than the keyword scan over the same memories would be a regression of the mechanism. How far the route exceeds the scan depends on the questions, so that margin is read from the report.
+            // The recall numbers are reported, and the test holds the route to the scan's recall at both depths: a route that ranked fewer paraphrase targets than the keyword scan over the same memories would be a regression of the mechanism. How far the route exceeds the scan depends on the questions, so that margin is read from the report.
             expect(report.production.recall_at_10).toBeGreaterThanOrEqual(
                 report.legacy.recall_at_10,
             );
+            expect(report.production.recall_at_5).toBeGreaterThanOrEqual(report.legacy.recall_at_5);
             expect(denseRanked).toBeGreaterThan(0);
+            // The searches committed nothing the projection indexes, so it ends the run as it began: at the tip, on its first build.
+            const after = await waitForSearchCaughtUp(
+                arms.production.harness.host,
+                arms.production.harness.env.workdir,
+                arms.production.session,
+                CATCH_UP_TIMEOUT_MS,
+            );
+            expect(after.progress.rebuilds).toEqual(status.progress.rebuilds);
+            expect(after.progress.blocked).toBeNull();
         },
         SUITE_TIMEOUT_MS,
     );

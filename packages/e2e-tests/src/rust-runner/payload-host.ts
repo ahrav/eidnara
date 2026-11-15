@@ -38,12 +38,13 @@ export interface SearchAdmission {
     reason?: string;
 }
 
-/** The `search_admission` block `session.status` reports for a session of `projectRoot` on the host behind `connectionFile`. */
-export async function searchAdmission(
+/** One request over a Context route bound to `projectRoot` on the host behind `connectionFile`; the route and the connection are closed before the answer returns. */
+async function contextRequest(
     connectionFile: string,
     projectRoot: string,
     sessionId: string,
-): Promise<SearchAdmission | undefined> {
+    body: Record<string, unknown>,
+): Promise<unknown> {
     const identity = {
         project_root: resolve(projectRoot),
         harness: "opencode",
@@ -60,17 +61,25 @@ export async function searchAdmission(
             identity,
         );
         try {
-            const status = (await client.request(route, {
-                method: "session.status",
-                session_id: sessionId,
-            })) as { search_admission?: SearchAdmission } | null;
-            return status?.search_admission;
+            return await client.request(route, { ...body, session_id: sessionId });
         } finally {
             await client.closeRoute(route).catch(() => undefined);
         }
     } finally {
         await client.closeAsync().catch(() => undefined);
     }
+}
+
+/** The `search_admission` block `session.status` reports for a session of `projectRoot` on the host behind `connectionFile`. */
+export async function searchAdmission(
+    connectionFile: string,
+    projectRoot: string,
+    sessionId: string,
+): Promise<SearchAdmission | undefined> {
+    const status = (await contextRequest(connectionFile, projectRoot, sessionId, {
+        method: "session.status",
+    })) as { search_admission?: SearchAdmission } | null;
+    return status?.search_admission;
 }
 
 /** The `progress` block of `search.lifecycle.status`: the projection's lag behind the kernel tip and the slice loop's rebuild outcomes. */
@@ -78,17 +87,29 @@ export interface SearchProgress {
     tip: number | null;
     checkpoint: number | null;
     lag_commits: number | null;
-    observed_at: number | null;
     rebuilds: { recorded: number; completed: number; renewed: number };
     blocked: string | null;
 }
 
-/** The answer of `search.lifecycle.status`. */
+/** The `status` answer of `search.lifecycle.status`. */
 export interface SearchLifecycleStatus {
-    kind: string;
+    kind: "status";
     record: { state: string; cause?: string };
     admission: SearchAdmission;
     progress: SearchProgress;
+}
+
+/** Any other answer of `search.lifecycle.status`: a terminal from a daemon with no lifecycle owner, or a kernel state. */
+export interface SearchLifecycleRefusal {
+    kind?: string;
+    state?: unknown;
+}
+
+/** Whether `answer` is the `status` answer, which alone carries `record` and `progress`. */
+export function isSearchLifecycleStatus(
+    answer: SearchLifecycleStatus | SearchLifecycleRefusal,
+): answer is SearchLifecycleStatus {
+    return answer.kind === "status";
 }
 
 /** `search.lifecycle.status` of the host behind `connectionFile`, asked over a route bound to `projectRoot`. */
@@ -96,34 +117,11 @@ export async function searchLifecycleStatus(
     connectionFile: string,
     projectRoot: string,
     sessionId: string,
-): Promise<SearchLifecycleStatus> {
-    const identity = {
+): Promise<SearchLifecycleStatus | SearchLifecycleRefusal> {
+    return (await contextRequest(connectionFile, projectRoot, sessionId, {
+        method: "search.lifecycle.status",
         project_root: resolve(projectRoot),
-        harness: "opencode",
-        session: sessionId,
-    };
-    const client = await HostClient.connect({
-        connectionFile,
-        identity,
-        targetKind: "tool_provider",
-    });
-    try {
-        const route = await client.routeOpen(
-            { kind: "tool_provider", module_id: "context" },
-            identity,
-        );
-        try {
-            return (await client.request(route, {
-                method: "search.lifecycle.status",
-                session_id: sessionId,
-                project_root: identity.project_root,
-            })) as SearchLifecycleStatus;
-        } finally {
-            await client.closeRoute(route).catch(() => undefined);
-        }
-    } finally {
-        await client.closeAsync().catch(() => undefined);
-    }
+    })) as SearchLifecycleStatus | SearchLifecycleRefusal;
 }
 
 /** Polls `search.lifecycle.status` until the projection is Current, admitted, and at the kernel tip, and returns that status. */
@@ -134,10 +132,11 @@ export async function waitForSearchCaughtUp(
     timeoutMs: number,
 ): Promise<SearchLifecycleStatus> {
     const deadline = Date.now() + timeoutMs;
-    let last: SearchLifecycleStatus | undefined;
+    let last: SearchLifecycleStatus | SearchLifecycleRefusal | undefined;
     while (Date.now() < deadline) {
         last = await searchLifecycleStatus(host.connectionFile, projectRoot, sessionId);
         if (
+            isSearchLifecycleStatus(last) &&
             last.record.state === "current" &&
             last.admission.state === "admitted" &&
             last.progress.lag_commits === 0

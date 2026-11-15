@@ -266,12 +266,13 @@ is a built payload's `payload-manifest.json`. The fixture then:
   records carry no qualification measurement, and the repository carries no
   production manifest to copy. They admit the projection under every hook,
   and `search_admission_records/records.rs` sizes their limits for a data
-  home as large as the kernel admits: 4 GiB of evidence, 1,048,576 source
-  descriptor revisions, a source hold of the kernel's 30-day maximum, one
-  hour for a rebuild slice, and a reader lag of 1,024 commits. A rebuild scans
-  every descriptor, holds the whole decoded corpus as one batch, and stages
-  the whole projection file, so each of those limits scales with the store;
-  the file states each derivation.
+  home that fills the kernel's 4 GiB artifact cap at a mean of 4 KiB of
+  evidence per source descriptor revision (1,048,576 revisions), with a
+  source hold of the kernel's 30-day maximum, one hour for a rebuild slice,
+  and a reader lag of 1,024 commits. A rebuild scans every descriptor, holds
+  the whole decoded corpus as one batch, and stages the whole projection
+  file, so the row, byte, and disk limits scale with the store; the file
+  states each derivation.
 
 ModelExecution side calls keep the fixture's own routing: its controlled
 backend, a cassette, or the closures `--harness-runtime` names. The memory
@@ -287,7 +288,7 @@ which stages `packages/host-linux-x64-gnu/payload-manifest.json` and
 `payload/` from that cache without a network. A cache copied from another
 machine, or passed with `--inputs-dir <dir>`, is re-verified against the lock.
 
-The route in use is observable three ways:
+The route in use is observable four ways:
 
 - the fixture prints `direct_host_fixture: search route production, embedding
   model <model>, payload <path>, admission from fixture records` on stderr at
@@ -298,8 +299,8 @@ The route in use is observable three ways:
   `--state-root`, prints the lifecycle record, the admission, and a `progress`
   block with the projection's lag behind the kernel tip (`lag_commits`), the
   counts of rebuilds recorded, completed, and renewed since the fixture
-  started, and the reason the last slice gave when the record is short of
-  Current (`blocked`);
+  started, and the reason the last slice gave for leaving the record or its
+  Current family where it was (`blocked`);
 - each result the route ranks renders `match=fused lanes=<lanes>`. A search
   the route cannot serve, before admission or while the lane starts, carries
   `Memory: the fused search route is unavailable (<reason>); results come

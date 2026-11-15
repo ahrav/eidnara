@@ -128,7 +128,7 @@ actually configure.
   to 365 days. **Correction:** the catalog's third candidate, per-file hashing
   of a large generation, does *not* extend the `starting` phase. The per-file
   SHA-256 loop (`generation.rs:432-444`, driven per manifest entry at
-  `:657-664`) runs from `serve`'s revalidation at `serve.rs:542-546`, and
+  `:657-664`) runs from `serve`'s revalidation at `serve.rs:1213-1218`, and
   `serve.rs:6-8` states that lock acquisition and the `starting` record all live
   inside `host_runtime::run`, which is entered afterwards. That hashing precedes the
   record's existence rather than ageing it.

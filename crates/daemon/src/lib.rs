@@ -14759,7 +14759,7 @@ impl HandlerCore {
                     self.handle_review_candidates(channel, request).await
                 }
                 search_lifecycle_wire::STATUS => {
-                    self.handle_search_lifecycle_status(channel, request)
+                    self.handle_search_lifecycle_status(channel, request).await
                 }
                 search_lifecycle_wire::REBUILD => {
                     self.handle_search_lifecycle_rebuild(channel, request).await

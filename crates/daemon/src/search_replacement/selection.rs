@@ -340,36 +340,16 @@ impl SearchSelection {
         gate: &HookGate,
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
-        self.check_selected_for(kernel, gate, budget, Use::Read)
-    }
-
-    /// [`Self::check_selected`] for the family's own catch-up episode, admitted as [`Self::pin_for_catch_up`] admits it: a family that trails the kernel past the freshness limit passes, and a damaged family or one over another kernel is refused as it is for a reader.
-    pub fn check_selected_for_catch_up(
-        &self,
-        kernel: &KernelStore,
-        gate: &HookGate,
-        budget: &EvalBudget,
-    ) -> Result<(), BuildError> {
-        self.check_selected_for(kernel, gate, budget, Use::CatchUp)
-    }
-
-    fn check_selected_for(
-        &self,
-        kernel: &KernelStore,
-        gate: &HookGate,
-        budget: &EvalBudget,
-        family_use: Use,
-    ) -> Result<(), BuildError> {
         let family = self
             .selected
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
         family.check_kernel(kernel, budget)?;
-        self.admit_use(gate, budget, &family.certificate, family_use)?;
+        self.admit(gate, budget)?;
         if family.projection.quarantine().is_some() {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
-        Ok(())
+        admit_transition_hook(gate, &family.certificate)
     }
 
     /// The identity the selected seed was built under, read from the selected family's durable bootstrap certificate. `None` when nothing is selected or the selector or certificate cannot be read.
@@ -408,37 +388,7 @@ impl SearchSelection {
         gate: &HookGate,
         budget: &EvalBudget,
     ) -> Result<SearchReader, BuildError> {
-        self.pin_for(kernel, gate, budget, Use::Read)
-    }
-
-    /// Pins the selected family for its own catch-up episode. The pin makes every check [`Self::pin`] makes and takes its admission through [`HookGate::admit_catch_up`], which judges every gate except freshness: the episode applies the commits the family trails by, so a family past the freshness limit is caught up while [`Self::pin`] keeps refusing its readers.
-    ///
-    /// # Errors
-    ///
-    /// Returns what [`Self::pin`] returns, except a staleness denial.
-    pub fn pin_for_catch_up(
-        &self,
-        kernel: &KernelStore,
-        gate: &HookGate,
-        budget: &EvalBudget,
-    ) -> Result<SearchReader, BuildError> {
-        self.pin_for(kernel, gate, budget, Use::CatchUp)
-    }
-
-    fn pin_for(
-        &self,
-        kernel: &KernelStore,
-        gate: &HookGate,
-        budget: &EvalBudget,
-        family_use: Use,
-    ) -> Result<SearchReader, BuildError> {
-        let grant = match family_use {
-            Use::Read => self.admit(gate, budget)?,
-            Use::CatchUp => {
-                deadline(budget)?;
-                self.admit_catch_up(gate, None)?
-            }
-        };
+        let grant = self.admit(gate, budget)?;
         let family = self
             .selected
             .load_full()
@@ -454,31 +404,8 @@ impl SearchSelection {
         if family.projection.quarantine().is_some() {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
-        match family_use {
-            Use::Read => admit_transition_hook(gate, &family.certificate)?,
-            Use::CatchUp => drop(self.admit_catch_up(gate, Some(&family.certificate))?),
-        }
+        admit_transition_hook(gate, &family.certificate)?;
         Ok(SearchReader { family, grant })
-    }
-
-    /// The admission `family_use` takes over the selected family and the hook its certificate's transition names.
-    fn admit_use(
-        &self,
-        gate: &HookGate,
-        budget: &EvalBudget,
-        certificate: &Bootstrap,
-        family_use: Use,
-    ) -> Result<(), BuildError> {
-        match family_use {
-            Use::Read => {
-                self.admit(gate, budget)?;
-                admit_transition_hook(gate, certificate)
-            }
-            Use::CatchUp => {
-                deadline(budget)?;
-                self.admit_catch_up(gate, Some(certificate)).map(drop)
-            }
-        }
     }
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
@@ -495,17 +422,6 @@ impl SearchSelection {
         admit_transition_hook(gate, &family.certificate)
     }
 
-    /// The limits every admission over this manager's family charges: its coverage observation's rows.
-    fn family_charges(&self) -> [(&'static str, u64); 2] {
-        [
-            ("local_transaction_rows", self.bounds.max_rows() as u64),
-            (
-                "export_page_rows",
-                self.bounds.max_live_per_class.get() as u64,
-            ),
-        ]
-    }
-
     /// The admission every reader of this manager's family takes: the gate's hook admission for this data home, then the family's limits.
     ///
     /// # Errors
@@ -517,26 +433,14 @@ impl SearchSelection {
             ProjectionHook::EmbeddingBootstrap,
             EntryPoint::Reload,
             &self.identity,
-            &self.family_charges(),
+            &[
+                ("local_transaction_rows", self.bounds.max_rows() as u64),
+                (
+                    "export_page_rows",
+                    self.bounds.max_live_per_class.get() as u64,
+                ),
+            ],
         )?)
-    }
-
-    /// The admission the family's catch-up episode takes: the reader's hook and limits, and the hook of `certificate`'s transition when one is given, each judged on every gate except freshness.
-    fn admit_catch_up(
-        &self,
-        gate: &HookGate,
-        certificate: Option<&Bootstrap>,
-    ) -> Result<Admission, BuildError> {
-        gate.require_selection_home(&self.data_home)?;
-        let mut hooks = vec![ProjectionHook::EmbeddingBootstrap];
-        if let Some(hook) = certificate.map(|certificate| certificate.intent.transition.hook())
-            && hook != ProjectionHook::EmbeddingBootstrap
-        {
-            hooks.push(hook);
-        }
-        Ok(gate
-            .admit_catch_up(&hooks, &self.identity, &self.family_charges())?
-            .swap_remove(0))
     }
 
     /// Publishes the durable pointer before swapping the in-process family; errors require reconciliation through `reopen`.
@@ -1500,15 +1404,6 @@ pub(crate) fn damages_family(error: &BuildError) -> bool {
 }
 
 /// Authorized recovery also needs the hook its transition names, as construction did.
-/// What an admission over the selected family is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Use {
-    /// A reader's pin, judged on every gate.
-    Read,
-    /// The family's own catch-up episode, judged on every gate except freshness.
-    CatchUp,
-}
-
 fn admit_transition_hook(gate: &HookGate, certificate: &Bootstrap) -> Result<(), BuildError> {
     let hook = certificate.intent.transition.hook();
     if hook != ProjectionHook::EmbeddingBootstrap {

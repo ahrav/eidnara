@@ -521,7 +521,7 @@ async fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing
     assert!(done.episodes.consumed <= done.episodes.allowance);
 }
 
-/// A Current family within the freshness limit catches up in the next slice under the hold its checkpoint names and is at the tip afterwards; after the kernel lease changes, the hold is dead, so the same slice reports the blocked episode while the family still serves; and a family that trails the kernel past the freshness limit is denied on its own coverage, so nothing runs on stale rows until a rebuild is requested.
+/// A Current family within the freshness limit catches up in the next slice under the hold its checkpoint names and is at the tip afterwards; after the kernel lease changes, the hold is dead, so the same slice reports the blocked episode while the family still serves; and a family that trails the kernel past the freshness limit is refused to readers on its own coverage while the owner's slice still runs its episode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
     let root = tempfile::tempdir().unwrap();
@@ -5142,9 +5142,9 @@ async fn shutdown_with_no_grace_releases_a_free_manager() {
     owner.shutdown().await.unwrap();
 }
 
-/// A Current family that trails the kernel past the freshness limit is judged on its own coverage: the slice refuses it as stale, as a reader's pin is refused, and still runs the family's catch-up episode, which applies the commits it trails by. Readers pin it again at the tip once the slice ends.
+/// A Current family that trails the kernel past the freshness limit is judged on its own coverage. While the slice runs the family's catch-up episode, a hook asked for on another thread, as a reader's pin or a supervisor's dispatch is, is refused as stale, and the slice's own thread is admitted as lifecycle work. The episode applies the commits the family trails by, and readers pin it again at the tip once the slice ends.
 #[test]
-fn a_current_family_that_trails_the_kernel_past_the_limit_is_refused_as_stale_and_caught_up() {
+fn a_current_family_that_trails_the_kernel_past_the_limit_is_refused_to_readers_and_caught_up() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
@@ -5176,32 +5176,42 @@ fn a_current_family_that_trails_the_kernel_past_the_limit_is_refused_as_stale_an
     }
     let lag = corpus.tip() - checkpoint;
     assert!(lag > i64::try_from(LAG_LIMIT).unwrap());
+    // At the episode's first event, the gate is asked for a maintenance hook from the slice's thread and from another thread.
+    type Verdicts = (Result<(), Denial>, Result<(), Denial>);
+    let during: Arc<std::sync::Mutex<Option<Verdicts>>> = Arc::default();
+    let observed = Arc::clone(&during);
+    let gate = Arc::clone(owner.admission().gate());
+    owner.tap_slice_events_for_test(move |event| {
+        let mut observed = observed.lock().unwrap();
+        if !matches!(event, SliceEvent::Episode(_)) || observed.is_some() {
+            return;
+        }
+        let admit = || {
+            gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+                .map(drop)
+        };
+        let here = admit();
+        let elsewhere = std::thread::scope(|scope| scope.spawn(admit).join().unwrap());
+        *observed = Some((here, elsewhere));
+    });
     let outcome = owner.run_slice(&slice_budget());
     assert!(
         matches!(&outcome, SliceOutcome::CaughtUp(report) if report.batches_applied > 0),
         "{outcome:?}"
     );
-    let gate = owner.admission().gate();
-    let ledger = gate.ledger();
-    let stale = Denial::Stale {
-        lag,
-        max: LAG_LIMIT,
-    };
-    assert!(
-        ledger.iter().any(|entry| {
-            entry.hook == ProjectionHook::EmbeddingBootstrap
-                && entry.entry == EntryPoint::Reload
-                && entry.verdict == Err(stale.clone())
+    let (here, elsewhere) = during
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the slice ran an episode");
+    assert_eq!(here, Ok(()), "the slice's own thread is admitted");
+    assert_eq!(
+        elsewhere,
+        Err(Denial::Stale {
+            lag,
+            max: LAG_LIMIT
         }),
-        "the slice judged the family on its own coverage and refused it as stale: {ledger:?}"
-    );
-    assert!(
-        ledger.iter().any(|entry| {
-            entry.hook == ProjectionHook::GitDurableRows
-                && entry.entry == EntryPoint::Dispatch
-                && entry.verdict == Ok(())
-        }),
-        "the catch-up episode was admitted past the limit: {ledger:?}"
+        "another thread is refused while the family trails"
     );
     // The slice observed the family again after its episode, so readers and maintenance are admitted at the tip.
     assert_eq!(
@@ -5214,8 +5224,63 @@ fn a_current_family_that_trails_the_kernel_past_the_limit_is_refused_as_stale_an
             .checkpoint_commit_seq,
         corpus.tip()
     );
-    gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+    owner
+        .admission()
+        .gate()
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
         .expect("the caught-up family is fresh");
+}
+
+/// A Current family that trails the kernel past the freshness limit and whose hold belongs to an earlier lease cannot catch up, so the slice asks for a rebuild. The rebuild is recorded, built, selected, and completed while its predecessor stays past the limit, and the replacement serves the commits the predecessor lacked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restarted_family_past_the_freshness_limit_rebuilds_to_current() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    converge_once(home, &corpus).await;
+    let (before, _) = current_attempt(home).unwrap();
+
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let later: Vec<String> = (0..=LAG_LIMIT)
+        .map(|index| corpus.publish(&format!("later-{index}"), "later text"))
+        .collect();
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        owner.admission_state(),
+        Err("coverage_stale"),
+        "readers are refused on the family that trails past the limit"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(
+        slices < 20,
+        "the rebuild of the stale family reached Current"
+    );
+    assert_eq!(current_attempt(home).unwrap().1, Cause::CatchUpHoldLost);
+    let indexed = indexed_objects(&owner);
+    for object in &later {
+        assert!(
+            indexed.contains(object),
+            "{object} is served after the rebuild"
+        );
+    }
+    assert_eq!(owner.admission_state(), Ok(()));
+    owner.shutdown().await.unwrap();
 }
 
 /// Disabling `EmbeddingBootstrap` blocks that hook without stopping the coverage observation the enabled hooks are judged on; restoring the manifest re-admits it in the same process.
@@ -7374,6 +7439,18 @@ async fn the_slice_loop_renews_an_expired_rebuild_found_after_a_restart() {
     }
     cancel.cancel();
     loop_task.await.unwrap();
+    // The status surface counts what this process's loop did: one renewal of the record it inherited, and its completion.
+    let (progress, tip) = restarted.progress(&slice_budget());
+    assert_eq!(
+        (
+            progress.rebuilds_recorded,
+            progress.rebuilds_renewed,
+            progress.rebuilds_completed
+        ),
+        (0, 1, 1),
+        "{progress:?}"
+    );
+    assert_eq!(tip, Some(corpus.tip()));
     let mut settled = false;
     for _ in 0..10 {
         if matches!(restarted.run_slice(&slice_budget()), SliceOutcome::Current) {

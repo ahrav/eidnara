@@ -96,7 +96,7 @@ provided the loader actually verifies.
 
 Fault class H6: a directory replacement between the pin and the use, under the
 transaction lock. The `serve.rs` window is wider than the in-store ones, since it
-spans from `validate` in `serve::run` (`serve.rs:542-545`) to whenever the loader
+spans from `validate` in `serve::run` (`serve.rs:1213-1218`) to whenever the loader
 resolves the pathname, in a process that holds `lifetime.lock` rather than
 `transaction.lock`.
 
@@ -118,7 +118,7 @@ prevents a fourth instance appearing at the `path()` boundary.
   `renameat`, `renameat_with`, `Dir::read_from`), production code only;
   `git show a9489c35` and `git show 0827dbc8` for both diffs; all consumers of
   `ValidatedGeneration::path()` and `open_verified_file`
-  (`eidnara-host.rs:929-945`, `serve.rs:490-531`).
+  (`eidnara-host.rs:929-945`, `serve.rs:1167-1202`, `payload_local_embeddings.rs:8-24`).
 - Findings: as above. Zero remaining instances of the directory-level shape
   inside `generation.rs`; two pathname handoffs of store objects at
   `payload_local_embeddings.rs:18-19`; three entry-level double resolutions under an

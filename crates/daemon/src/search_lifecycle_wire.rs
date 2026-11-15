@@ -116,7 +116,7 @@ impl HandlerCore {
         Ok((owner, parsed))
     }
 
-    pub(crate) fn handle_search_lifecycle_status(
+    pub(crate) async fn handle_search_lifecycle_status(
         &self,
         channel: RouteHandle,
         request: Value,
@@ -129,16 +129,23 @@ impl HandlerCore {
             Ok(()) => json!({ "state": "admitted" }),
             Err(reason) => json!({ "state": "refused", "reason": reason }),
         };
-        let (progress, tip) = owner.progress(&budget());
+        let record = record_json(&owner.lifecycle_record());
+        // The tip read waits for one of the kernel's pooled readers, so it runs off the async workers.
+        let budget = budget();
+        let Ok((progress, tip)) = blocking(move || owner.progress(&budget)).await else {
+            return terminal("unavailable");
+        };
+        let lag = tip
+            .zip(progress.checkpoint)
+            .map(|(tip, checkpoint)| tip.saturating_sub(checkpoint).max(0));
         response(json!({
             "kind": "status",
-            "record": record_json(&owner.lifecycle_record()),
+            "record": record,
             "admission": admission,
             "progress": {
                 "tip": tip,
                 "checkpoint": progress.checkpoint,
-                "lag_commits": tip.zip(progress.checkpoint).map(|(tip, checkpoint)| tip.saturating_sub(checkpoint).max(0)),
-                "observed_at": progress.observed_at,
+                "lag_commits": lag,
                 "rebuilds": {
                     "recorded": progress.rebuilds_recorded,
                     "completed": progress.rebuilds_completed,
