@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { stripStreamedTags } from "./stream-tag-strip";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 
 describe("stripTagPrefixFromAssistantMessage", () => {
@@ -47,6 +48,8 @@ describe("stripTagPrefixFromAssistantMessage", () => {
                 "§42§ The pattern §40827§ appeared.",
                 "The pattern  appeared.",
             ],
+            ["keeps edge whitespace that no opening tag owns", "  a §5§ b  ", "  a  b  "],
+            ["keeps the whitespace before a trailing tag", "Tail tag §99§", "Tail tag "],
         ] as Array<[string, string, string]>)("%s", (_title, input, expected) => {
             const msg = {
                 role: "assistant",
@@ -69,10 +72,26 @@ describe("stripTagPrefixFromAssistantMessage", () => {
         }
     });
 
+    it("leaves text that holds no tag untouched, edge whitespace included", () => {
+        const messages = [
+            ["  Under §42 of the Act  "],
+            ["\n\nSee § 4 of the spec.\n"],
+            [" price§§ ", " and §12a "],
+        ].map((texts) => ({
+            role: "assistant",
+            content: texts.map((text) => ({ type: "text", text })),
+        }));
+        for (const msg of messages) {
+            const original = structuredClone(msg);
+            expect(stripTagPrefixFromAssistantMessage(msg), JSON.stringify(original)).toBe(false);
+            expect(msg, JSON.stringify(original)).toEqual(original);
+        }
+    });
+
     describe("multi-part messages", () => {
         // Each row is one assistant message spread over several text parts: the scrub must
         // report a mutation, strip a well-formed leading tag only from the first part, and
-        // keep the whitespace around removed interior tags so joined words stay separated.
+        // keep the whitespace around every other removed tag, as the stream shows it.
         it.each([
             [
                 "keeps the separator that follows a tag at the start of a later part",
@@ -82,7 +101,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             [
                 "keeps interior boundary whitespace while scrubbing tags from a middle part",
                 ["§4§ Hello ", " §5§ big ", " world §6§ "],
-                ["Hello ", "  big ", " world"],
+                ["Hello ", "  big ", " world  "],
             ],
             ["empties an edge part that held only tag notation", ["§4§ ", "Hello"], ["", "Hello"]],
             [
@@ -98,7 +117,6 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
             const texts = (msg.content as Array<{ text: string }>).map((part) => part.text);
             expect(texts).toEqual(expected);
-            expect(texts.join("")).toMatch(/^\S.*\S$/);
             expect(texts.join("")).not.toContain("§");
         });
 
@@ -127,6 +145,30 @@ describe("stripTagPrefixFromAssistantMessage", () => {
             expect((msg.content[0] as { type: string; thinking: string }).thinking).toBe(
                 "§4§ pretend reasoning, not stripped",
             );
+        });
+    });
+
+    describe("after message_start showed the message", () => {
+        // Pi hands message_start and message_end the same object for a whole message, or a
+        // copy that shares the content array; either way the saved text is one complete strip.
+        it.each([
+            ["a trailing tag prefix", "§1§ see §§1§2§ and §4", "see §2§ and ", "see §2§ and §4"],
+            ["trailing whitespace", "§1§ hi \n", "hi \n", "hi \n"],
+            ["leading whitespace alone", " \n", "", " \n"],
+        ])("holds %s at message_start and saves the complete strip", (_title, text, start, end) => {
+            const same = { role: "assistant", content: [{ type: "text", text }] };
+            stripStreamedTags({ message: same });
+            expect(same.content[0]?.text).toBe(start);
+            stripTagPrefixFromAssistantMessage(same);
+            expect(same.content[0]?.text).toBe(end);
+
+            const final = { role: "assistant", content: [{ type: "text", text }] };
+            const copy = { ...final };
+            stripStreamedTags({ message: copy });
+            expect(copy.content[0]?.text).toBe(start);
+            expect(final.content[0]?.text).toBe(text);
+            stripTagPrefixFromAssistantMessage(final);
+            expect(final.content[0]?.text).toBe(end);
         });
     });
 

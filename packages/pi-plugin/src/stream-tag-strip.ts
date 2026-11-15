@@ -249,11 +249,13 @@ function extendRun(stream: PartStream, text: string, piece: string): void {
 /** Stream continuity requires the provider to reuse each part object as its text grows. */
 const streams = new WeakMap<object, PartStream>();
 
-/** Content arrays already stripped as whole messages, so `message_end`, which Pi hands the same message object, strips them once. */
-const wholeContents = new WeakSet<object>();
+/** Each content snapshot made for an event without a stream update, with the content array it replaced. Pi hands `message_end` the same message object for a whole message, and `message_end` strips that original content. */
+const replacedContents = new WeakMap<object, unknown[]>();
 
-export function isStrippedWholeContent(content: unknown): boolean {
-    return typeof content === "object" && content !== null && wholeContents.has(content);
+export function replacedContent(content: unknown): unknown[] | undefined {
+    return typeof content === "object" && content !== null
+        ? replacedContents.get(content)
+        : undefined;
 }
 
 type StreamUpdate = {
@@ -279,7 +281,7 @@ function streamPart(
     part: TextPart,
     index: number,
     leading: boolean,
-    update: StreamUpdate | null,
+    update: StreamUpdate | null | undefined,
 ): PartStream {
     const text = part.text;
     let stream = streams.get(part);
@@ -329,20 +331,19 @@ function streamPart(
     return stream;
 }
 
-/** `snapshotContent` returns a copy of `parts` with each text part replaced by its stripped snapshot. For updates, `streamPart` advances each text part's stream before the snapshot spread reads the part's accessors, and the snapshot reads text from that captured stream after the spread. A string `delta` for a text part sets `releasedDelta`. */
+/** `snapshotContent` returns a copy of `parts` with each text part replaced by its stripped snapshot. `streamPart` advances each text part's stream before the snapshot spread reads the part's accessors, and the snapshot reads text from that captured stream after the spread. A string `delta` for a text part sets `releasedDelta`. */
 function snapshotContent(parts: unknown[], update: StreamUpdate | undefined): unknown[] {
     let firstText = true;
     return parts.map((part: unknown, index: number) => {
         if (!isTextPart(part)) return part;
         const leading = firstText;
         firstText = false;
-        if (update === undefined) return { ...part, text: stripTags(part.text, leading) };
         const stream = streamPart(part, index, leading, update);
         return { ...part, text: stream.released };
     });
 }
 
-/** Rewrites one Pi `message_start` or `message_update` event in place so its listeners render assistant text with `\u00a7N\u00a7` tags removed. An event without an `assistantMessageEvent` carries a whole message, which is stripped as complete text. Every text part, the content array, and an object-valued `partial` are replaced by snapshots, because the provider keeps appending to its own parts while later handlers and listeners run. `text_delta` updates receive newly released text in `delta`, and `text_end` updates receive the released part text in `content`. A trailing tag prefix is released at `text_end` into `content` and the message, after the last `text_delta`. Each `text_delta` delta is stripped in event order, since Pi can hand listeners an update after the provider has appended later text to the part. While every delta has matched the part's growth exactly, the delta is the text the part released; from the first update that differs, the deltas pass through a stripper of their own. */
+/** Rewrites one Pi `message_start` or `message_update` event in place so its listeners render assistant text with `\u00a7N\u00a7` tags removed. An event without an `assistantMessageEvent` is a `message_start`, which carries a whole message or a copy of a provider's partial message whose parts can already hold text; its text parts are streamed like an update's, so a trailing tag prefix waits for the next update or for the `message_end` strip. Every text part, the content array, and an object-valued `partial` are replaced by snapshots, because the provider keeps appending to its own parts while later handlers and listeners run. `text_delta` updates receive newly released text in `delta`, and `text_end` updates receive the released part text in `content`. A trailing tag prefix is released at `text_end` into `content` and the message, after the last `text_delta`. Each `text_delta` delta is stripped in event order, since Pi can hand listeners an update after the provider has appended later text to the part. While every delta has matched the part's growth exactly, the delta is the text the part released; from the first update that differs, the deltas pass through a stripper of their own. */
 export function stripStreamedTags(event: {
     message: unknown;
     assistantMessageEvent?: unknown;
@@ -351,19 +352,20 @@ export function stripStreamedTags(event: {
     if (message === null || typeof message !== "object") return;
     if (message.role !== "assistant" || !Array.isArray(message.content)) return;
     const update = event.assistantMessageEvent as StreamUpdate | undefined;
+    const original = message.content;
     const outer = releasedDelta;
     releasedDelta = undefined;
     let delta: string | undefined;
     let content: unknown[];
     try {
-        content = snapshotContent(message.content, update);
+        content = snapshotContent(original, update);
         message.content = content;
         delta = releasedDelta;
     } finally {
         releasedDelta = outer;
     }
     if (update === undefined) {
-        wholeContents.add(content);
+        replacedContents.set(content, original);
         return;
     }
     if (update.type === "text_delta" && delta !== undefined) update.delta = delta;

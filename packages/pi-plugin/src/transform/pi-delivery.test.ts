@@ -10,7 +10,7 @@ import { defaultTransformCaptureAdmission } from "@eidnara/opencode/hooks/contex
 import { HALF_CAP_BLOCKS } from "@eidnara/opencode/hooks/context/window-cap";
 
 import { createTestAgentSession, type TestAgentSession } from "../__tests__/agent-session";
-import { textOf, userMessage } from "../__tests__/test-utils";
+import { createCountingPi, textOf, userMessage } from "../__tests__/test-utils";
 import eidnaraPiExtension, { __test } from "../index";
 import { EIDNARA_PI_SUBAGENT_ENV } from "../subagent-runner";
 
@@ -391,7 +391,7 @@ describe("Pi context handler in compaction-off mode", () => {
         for (const update of updates) expect(update).not.toMatch(/\u00a7\d/u);
     });
 
-    it("strips a whole assistant message at message_start in a compaction-on process", async () => {
+    it("holds a whole assistant message's trailing tag prefix from message_start to message_end", async () => {
         await streamedTurns(CHAIN, "warm-up answer", [0]);
         const message = {
             role: "assistant",
@@ -403,10 +403,10 @@ describe("Pi context handler in compaction-off mode", () => {
             ],
         };
         await harness?.session.extensionRunner?.emit({ type: "message_start", message } as never);
-        const shown = "hi, see \u00a7 4 and \u00a72\u00a7 \u00a742";
+        const shown = "hi, see \u00a7 4 and \u00a72\u00a7 ";
         expect(message.content[0]?.text).toBe(shown);
         await harness?.session.extensionRunner?.emit({ type: "message_end", message } as never);
-        expect(message.content[0]?.text).toBe(shown);
+        expect(message.content[0]?.text).toBe(`${shown}\u00a742`);
     });
 
     it("streams and saves an answer as written once the daemon serves under native authority", async () => {
@@ -670,6 +670,168 @@ describe("Pi context handler in compaction-off mode", () => {
             expect(served(h.requests[2])).toEqual(["first", "ok", "second", "ok", "third"]);
         } finally {
             call.mockRestore();
+        }
+    });
+});
+
+describe("Pi tag strips at the edges of a message", () => {
+    it("hands message_start listeners no part of a tag the provider has begun", async () => {
+        writeUserConfig(CHAIN);
+        const { call } = daemon((body) =>
+            additive(body, { mid: rowsOf(body).at(-1)?.id, sequence: 1 }),
+        );
+        // pi-ai's Anthropic adapter pushes `start` with its live output message and appends each
+        // block and delta to that message, so a handler that awaits sees text at message_start.
+        const sse = (events: Json[]) =>
+            events
+                .map((event) => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`)
+                .join("");
+        const textDelta = (text: string) => ({
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text },
+        });
+        const head = sse([
+            {
+                type: "message_start",
+                message: {
+                    id: "msg_1",
+                    type: "message",
+                    role: "assistant",
+                    content: [],
+                    model: "claude-test",
+                    usage: { input_tokens: 1, output_tokens: 0 },
+                },
+            },
+            { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+            textDelta("\u00a723"),
+        ]);
+        const tail = sse([
+            textDelta("0\u00a7 I reran the suite, see \u00a7 4."),
+            { type: "content_block_stop", index: 0 },
+            {
+                type: "message_delta",
+                delta: { stop_reason: "end_turn" },
+                usage: { output_tokens: 5 },
+            },
+            { type: "message_stop" },
+        ]);
+        const started = Promise.withResolvers<void>();
+        const server = Bun.serve({
+            port: 0,
+            hostname: "127.0.0.1",
+            fetch: () =>
+                new Response(
+                    new ReadableStream({
+                        async start(controller) {
+                            const encoder = new TextEncoder();
+                            controller.enqueue(encoder.encode(head));
+                            await started.promise;
+                            controller.enqueue(encoder.encode(tail));
+                            controller.close();
+                        },
+                    }),
+                    { headers: { "content-type": "text/event-stream" } },
+                ),
+        });
+        const live: string[] = [];
+        const events: string[] = [];
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [
+                    (pi: Parameters<typeof eidnaraPiExtension>[0]) =>
+                        pi.on("message_start", async (event) => {
+                            if (event.message.role !== "assistant") return;
+                            const content = event.message.content as { text?: string }[];
+                            for (let wait = 0; wait < 2_000 && !content[0]?.text; wait += 1)
+                                await Bun.sleep(1);
+                            live.push(content[0]?.text ?? "");
+                        }),
+                    eidnaraPiExtension,
+                ],
+                settings: PI_SETTINGS,
+            });
+            harness.authStorage.setRuntimeApiKey("anthropic", "test-key");
+            await harness.session.setModel({
+                id: "claude-test",
+                name: "claude-test",
+                api: "anthropic-messages",
+                provider: "anthropic",
+                baseUrl: `http://127.0.0.1:${server.port}`,
+                reasoning: false,
+                input: ["text"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: 200_000,
+                maxTokens: 8_192,
+            } as never);
+            const unsubscribe = harness.session.subscribe((event) => {
+                if (event.type !== "message_start" && event.type !== "message_update") return;
+                if (event.message.role !== "assistant") return;
+                events.push(JSON.stringify(event));
+                if (event.type === "message_start") started.resolve();
+            });
+            await harness.session.prompt(`turn ${"x".repeat(400)}`);
+            unsubscribe();
+        } finally {
+            started.resolve();
+            call.mockRestore();
+            await server.stop(true);
+        }
+        const shown = "I reran the suite, see \u00a7 4.";
+        expect(live).toEqual(["\u00a723"]);
+        for (const event of events) expect(event).not.toMatch(/\u00a7\d/u);
+        const seen = events.map(
+            (event) =>
+                JSON.parse(event) as {
+                    type: string;
+                    message: { content: { text?: string }[] };
+                    assistantMessageEvent?: { type: string; delta?: string; content?: string };
+                },
+        );
+        expect(seen[0]?.type).toBe("message_start");
+        expect(seen[0]?.message.content.map((part) => part.text)).toEqual([""]);
+        const updates = seen.flatMap((event) => event.assistantMessageEvent ?? []);
+        expect(updates.map((update) => update.delta ?? "").join("")).toBe(shown);
+        expect(updates.at(-1)).toMatchObject({ type: "text_end", content: shown });
+        expect(assistantTexts(harness)).toEqual([shown]);
+    });
+
+    it("saves the text the stream showed at its end, trailing whitespace included", async () => {
+        const { h, updates } = await streamedTurns(CHAIN, "  Tail tag \u00a799\u00a7 ", [0]);
+        const end = updates
+            .map((update) => JSON.parse(update) as { assistantMessageEvent: Json })
+            .find((update) => update.assistantMessageEvent.type === "text_end");
+        expect(end?.assistantMessageEvent.content).toBe("  Tail tag  ");
+        expect(assistantTexts(h)).toEqual(["  Tail tag  "]);
+    });
+
+    it("leaves an answer as written for a context that names no session or fails to", async () => {
+        writeUserConfig(CHAIN);
+        const registrations = createCountingPi();
+        await eidnaraPiExtension(registrations.pi);
+        const stale = {
+            get sessionManager(): never {
+                throw new Error("stale context");
+            },
+        };
+        for (const ctx of [{ sessionManager: { getSessionId: () => "" } }, {}, stale]) {
+            for (const type of ["message_start", "message_update", "message_end"]) {
+                const message = { role: "assistant", content: [{ type: "text", text: TAGGED }] };
+                const update = { type: "text_delta", contentIndex: 0, delta: TAGGED };
+                const handler = registrations.handlers.get(type) as unknown as (
+                    event: unknown,
+                    ctx: unknown,
+                ) => unknown;
+                await handler(
+                    type === "message_update"
+                        ? { type, message, assistantMessageEvent: update }
+                        : { type, message },
+                    ctx,
+                );
+                expect(message.content[0]?.text).toBe(TAGGED);
+                expect(update.delta).toBe(TAGGED);
+            }
         }
     });
 });

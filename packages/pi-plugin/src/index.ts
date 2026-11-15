@@ -987,16 +987,15 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     const servesTags = (ctx: unknown): boolean => {
         if (compactionOff) return false;
         const sessionId = sessionIdFromContext(ctx);
-        return sessionId === undefined || taggedSessions.has(sessionId);
+        return sessionId !== undefined && taggedSessions.has(sessionId);
     };
     const stripStream = (
         type: string,
         event: { message: unknown; assistantMessageEvent?: unknown },
         ctx: unknown,
     ) => {
-        if (!servesTags(ctx)) return;
         try {
-            stripStreamedTags(event);
+            if (servesTags(ctx)) stripStreamedTags(event);
         } catch (err) {
             warn(`${type}: stripStreamedTags threw:`, err);
         }

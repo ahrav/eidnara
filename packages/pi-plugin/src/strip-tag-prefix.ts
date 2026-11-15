@@ -1,14 +1,15 @@
-import { isStrippedWholeContent, isTextPart, stripTags } from "./stream-tag-strip";
+import { isTextPart, replacedContent, stripTags } from "./stream-tag-strip";
 
 const TAG_SECTION_CHAR = "\u00a7";
 
 /**
- * Interior boundary whitespace separates joined words.
- * Every part keeps the whitespace around removed tag notation; only the first text part loses a
- * leading tag prefix with its following whitespace and only the last loses trailing whitespace.
+ * Strips each text part as complete text by the rule the stream applies (`stripTags`): every
+ * `§N§` tag and mangled `§N">` tag is removed, and the first text part also loses its opening
+ * tags with the whitespace around them. All other text stays, whitespace and every other `§`
+ * included, so the saved answer is the text the stream showed at its end.
  * Parts without a `§` carry no tag notation and stay untouched.
- * Tags are removed by the rule the stream applies (`stripTags`), the mangled `§N">` form
- * included; every other `§` is text and stays, so the saved answer matches what streamed.
+ * When `message.content` is the snapshot `message_start` installed, which happens when Pi hands
+ * both events the same message object, the content it replaced is put back and stripped.
  *
  * Mutates in place; returns `true` after modifying at least one part.
  */
@@ -17,8 +18,8 @@ export function stripTagPrefixFromAssistantMessage(message: {
     content: unknown;
 }): boolean {
     if (message.role !== "assistant") return false;
+    message.content = replacedContent(message.content) ?? message.content;
     if (!Array.isArray(message.content)) return false;
-    if (isStrippedWholeContent(message.content)) return false;
 
     const textParts = message.content.filter(isTextPart);
     const last = textParts.length - 1;
@@ -29,10 +30,7 @@ export function stripTagPrefixFromAssistantMessage(message: {
         const text = textPart.text;
         if (!text.includes(TAG_SECTION_CHAR)) continue;
 
-        let stripped = stripTags(text, index === 0);
-        if (index === 0) stripped = stripped.trimStart();
-        if (index === last) stripped = stripped.trimEnd();
-
+        const stripped = stripTags(text, index === 0);
         if (stripped !== text) {
             textPart.text = stripped;
             mutated = true;

@@ -369,7 +369,7 @@ describe("stripStreamedTags", () => {
         expect((update.partial.content[0] as Part).text).toBe("hi");
     });
 
-    it("strips a whole message an event carries without a stream update", () => {
+    it("holds a trailing tag prefix of a message an event carries without a stream update", () => {
         const event = {
             message: {
                 role: "assistant",
@@ -377,7 +377,21 @@ describe("stripStreamedTags", () => {
             },
         };
         stripStreamedTags(event);
-        expect(event.message.content[0]?.text).toBe(`see ${S}4`);
+        expect(event.message.content[0]?.text).toBe("see ");
+    });
+
+    it("streams a part that held the start of a tag before its first update", () => {
+        const part = { type: "text", text: `${S}23` };
+        const partial = { role: "assistant", content: [part] as Part[] };
+        const start = { message: { ...partial } };
+        stripStreamedTags(start);
+        expect((start.message.content[0] as Part).text).toBe("");
+        part.text += `0${S} hi`;
+        const send = deltaSender(part);
+        expect(send(`${S}23`)).toEqual(["hi", ""]);
+        expect(send(`0${S} hi`)).toEqual(["hi", "hi"]);
+        expect((start.message.content[0] as Part).text).toBe("");
+        expect(part.text).toBe(`${S}230${S} hi`);
     });
 
     it("treats only the first text part as leading", () => {
@@ -527,7 +541,7 @@ describe("stripStreamedTags", () => {
         expect(inner.assistantMessageEvent.delta).toBe("zz");
     });
 
-    it("copies a streamed part after streaming it, and a whole message's part before stripping it", () => {
+    it("copies a part after streaming it, with or without a stream update", () => {
         const growing = () => {
             const part = { type: "text", text: "ab" };
             Object.defineProperty(part, "extra", {
@@ -547,7 +561,7 @@ describe("stripStreamedTags", () => {
         expect(streamed.message.content[0]?.text).toBe("ab");
         const whole = { message: { role: "assistant", content: [growing()] } };
         stripStreamedTags(whole);
-        expect(whole.message.content[0]?.text).toBe("abcd");
+        expect(whole.message.content[0]?.text).toBe("ab");
     });
 
     it("shows what a strip of the same part from its accessor released", () => {
