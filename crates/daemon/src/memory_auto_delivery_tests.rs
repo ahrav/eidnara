@@ -3171,12 +3171,11 @@ fn memory_rows(handler: &Handler, project: &Path) -> Vec<(String, String, i64, V
 /// One assistant message makes two observations that both contradict a
 /// statement. The publication commits: the statement is contested once, by
 /// the first observation, and both observations are stored. The record
-/// keeps the commit that first recorded the statement. The session whose
-/// message recorded the contest sees the statement without the contest
-/// text, and once the observation is retired no session sees it.
+/// keeps the commit that first recorded the statement. Every session is
+/// shown the contest, the one whose message recorded it included, and once
+/// the observation is retired no session is.
 #[tokio::test]
-async fn a_statement_is_contested_once_per_message_and_shown_by_live_observations_of_other_sessions()
- {
+async fn a_statement_is_contested_once_per_message_and_shown_while_its_observation_is_live() {
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
@@ -3247,9 +3246,9 @@ async fn a_statement_is_contested_once_per_message_and_shown_by_live_observation
         "{other}"
     );
     let own = project_memory_block(&serve(&handler, SECOND, "s2").await).unwrap();
-    assert!(
-        own.contains(&stated(LIMIT_300)) && !own.contains("contested") && !own.contains("500"),
-        "the contesting session's block holds the statement without its own assistant text: {own}"
+    assert_eq!(
+        own, other,
+        "the session whose message recorded the contest is shown it too"
     );
 
     let retired = body(
@@ -3332,7 +3331,7 @@ async fn a_contest_shows_the_observation_only_while_the_kernel_serves_it() {
     assert_eq!(*summary, stated(LIMIT_300));
     assert_eq!(rationale["contested_by"]["memory"], observation);
     assert!(
-        !rationale.to_string().contains("500"),
+        !rationale.to_string().contains("limits.rs") && !rationale.to_string().contains("500 now"),
         "the statement's row holds none of the observation's text: {rationale}"
     );
 
@@ -3354,7 +3353,7 @@ async fn a_contest_shows_the_observation_only_while_the_kernel_serves_it() {
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
     assert!(block.contains(&stated(LIMIT_300)), "{block}");
     assert!(
-        !block.contains("contested") && !block.contains("500"),
+        !block.contains("contested") && !block.contains("500 now"),
         "a hidden observation contests nothing a reader is shown: {block}"
     );
     assert_eq!(

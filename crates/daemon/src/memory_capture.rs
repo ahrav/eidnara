@@ -1964,7 +1964,8 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
             continue;
         }
         let (before, after) = (&paragraph[from..start], &paragraph[end..to]);
-        if !adds_plain_words(before) || !adds_plain_words(after.trim_end_matches(['.', '!'])) {
+        // The statement's own closing marks end it and add no sentence.
+        if !adds_plain_words(before) || !adds_plain_words(after.trim_end_matches(is_terminator)) {
             return None;
         }
         if statement.len() <= MAX_CAPTURE_MEMORY_BYTES
@@ -2037,14 +2038,18 @@ fn plain_sentence_end(after: &str) -> usize {
 
 /// Whether the words widening adds on one side of a quotation are plainly
 /// part of the quotation's own line and sentence: they hold no line break,
-/// no `.`, `!`, or `?` before whitespace, and no terminator of another
-/// script. An ASCII terminator inside a token, such as the dots of `v1.2`
-/// or `a.b.c`, is part of that token.
+/// no `.`, `!`, or `?` except directly before a letter or digit, and no
+/// terminator of another script. An ASCII terminator inside a token, such
+/// as the dots of `v1.2` or `a.b.c`, is part of that token; one before
+/// whitespace, a closing bracket, or an emphasis mark may end a sentence.
 fn adds_plain_words(added: &str) -> bool {
     let mut chars = added.chars().peekable();
     while let Some(ch) = chars.next() {
         let ends = if ch.is_ascii() {
-            is_terminator(ch) && chars.peek().is_some_and(|next| next.is_whitespace())
+            // A letter or digit after the mark keeps it inside a token; a
+            // closing bracket, an emphasis mark, or whitespace after it
+            // leaves it a sentence end.
+            is_terminator(ch) && chars.peek().is_none_or(|next| !next.is_alphanumeric())
         } else {
             // Scripts that write these marks often write no space after one.
             is_terminator(ch)
@@ -2143,6 +2148,7 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
                             || start.trim_end().chars().all(|ch| ch == '-')))
                     || line.starts_with("    ")
                     || line.starts_with('\t')
+                    || line.contains(is_line_break)
                     || line.contains(is_quotation_mark)
                     || opens_single_quotation(line)
             });
@@ -2182,6 +2188,16 @@ fn is_quotation_mark(ch: char) -> bool {
     QUOTATION_FAMILIES.iter().any(|family| family.contains(&ch))
 }
 
+/// Marks every script that uses them writes at the start of a quotation:
+/// the corner brackets, the low-9 mark, and the heavy ornaments.
+const OPENING_ONLY: [char; 6] = [
+    '\u{300c}', '\u{300e}', '\u{201e}', '\u{301d}', '\u{275d}', '\u{276e}',
+];
+/// Marks every script that uses them writes at the end of a quotation.
+const CLOSING_ONLY: [char; 6] = [
+    '\u{300d}', '\u{300f}', '\u{301e}', '\u{301f}', '\u{275e}', '\u{276f}',
+];
+
 /// Whether every quotation mark of one paragraph opens or closes a
 /// quotation in turn and every quotation it opens is closed in it. A mark
 /// opens when it follows the line start, whitespace, an opening bracket, or
@@ -2189,9 +2205,10 @@ fn is_quotation_mark(ch: char) -> bool {
 /// A mark closes when it follows a letter, closing punctuation, or a mark
 /// that closed, and no letter or digit follows it. An opening mark while
 /// its family is open is a nested quotation; a closing mark while it is
-/// closed, a mark in any other place, and a mark after a number, which may
-/// be an inch or seconds sign, leave the paragraph's quotations unknown. A
-/// paragraph with no mark passes.
+/// closed, a mark in any other place, a mark after a number or a letter
+/// that is a number, which may be an inch or seconds sign, and a glyph of
+/// [`OPENING_ONLY`] or [`CLOSING_ONLY`] on the other side leave the
+/// paragraph's quotations unknown. A paragraph with no mark passes.
 fn quotations_close_in_turn(block: &[(usize, &str)]) -> bool {
     let mut open = [false; QUOTATION_FAMILIES.len()];
     for (_, line) in block {
@@ -2210,11 +2227,15 @@ fn quotations_close_in_turn(block: &[(usize, &str)]) -> bool {
                 }) && next.is_some_and(|after| !after.is_whitespace());
                 let closes = previous.is_some_and(|before| {
                     !previous_opened
-                        && (before.is_alphabetic()
+                        && ((before.is_alphabetic() && !before.is_numeric())
                             || matches!(before, '.' | ',' | '!' | '?' | ';' | ')' | ']')
                             || is_quotation_mark(before))
                 }) && next.is_none_or(|after| !after.is_alphanumeric());
-                if opens == closes || opens == open[family] {
+                // A glyph that every script writes on one side of a
+                // quotation takes that side only.
+                let misplaced =
+                    (opens && CLOSING_ONLY.contains(&ch)) || (closes && OPENING_ONLY.contains(&ch));
+                if opens == closes || opens == open[family] || misplaced {
                     return false;
                 }
                 open[family] = opens;
@@ -2250,6 +2271,9 @@ fn leaves_single_quotation_open(block: &[(usize, &str)]) -> bool {
                 }) && chars.peek().is_none_or(|after| !after.is_alphanumeric());
                 if open > 0 && ends_word && !several_words {
                     open -= 1;
+                    // An outer quotation that held a nested one holds
+                    // several words.
+                    several_words = open > 0;
                 } else if previous.is_none_or(|before| !before.is_alphanumeric()) {
                     open += 1;
                     several_words = false;
@@ -2323,7 +2347,7 @@ fn sentence_starts_at(before: &str, quote: &str) -> bool {
     let word = ended.rsplit(char::is_whitespace).next().unwrap_or_default();
     before.ends_with(char::is_whitespace)
         && (ended.ends_with(['.', '!']) || ended.ends_with(QUESTION_MARKS))
-        && !is_abbreviation(word, quote)
+        && !(ended.ends_with('.') && is_abbreviation(word, quote))
         && !quote.starts_with(|ch: char| ch.is_lowercase())
 }
 
@@ -2632,7 +2656,7 @@ fn select_existing_memories(
             content: decision.payload.summary.clone(),
             can_replace: REPLACEABLE_SOURCES.contains(&row.object.source_id.as_str()),
             automatic: row.visibility == kernel::SurfaceVisibility::Visible,
-            contested: row.object.source_id == CAPTURE_SOURCE_ID
+            contested: is_capture_memory(&row.object)
                 && decision.payload.rationale.contains("contested_by")
                 && capture_rationale(decision).contested_by.is_some(),
             source_revision: row.object.source_revision,
@@ -2675,9 +2699,7 @@ fn checked_capture_target(
     {
         return Err(kernel::KernelError::Conflict);
     }
-    Ok((state.object.source_id == CAPTURE_SOURCE_ID
-        && state.object.source_kind == CAPTURE_SOURCE_KIND)
-        .then_some(previous.source_revision))
+    Ok(is_capture_memory(&state.object).then_some(previous.source_revision))
 }
 
 /// The fields of a capture decision's rationale that later captures and the
@@ -2703,8 +2725,7 @@ pub(crate) struct Contest {
     pub(crate) memory: String,
     /// The commit that recorded the statement before it was contested.
     pub(crate) stated_seq: i64,
-    /// The session whose message recorded the contest. That session's own
-    /// block shows the statement without it.
+    /// The session whose message recorded the contest.
     #[serde(default)]
     pub(crate) session: Option<String>,
 }
@@ -3910,6 +3931,18 @@ mod tests {
                 "4321\u{3067}\u{3059}\u{3002}",
                 None,
             ),
+            // A period before a closing bracket or an emphasis mark may end
+            // a sentence.
+            (
+                "(See the wiki.) never deploy on Fridays",
+                "deploy on Fridays",
+                None,
+            ),
+            (
+                "**Thanks.** never deploy on Fridays",
+                "deploy on Fridays",
+                None,
+            ),
             // A period inside a token is part of the token.
             (
                 "Pin the toolchain to v1.98.0 in CI",
@@ -4092,6 +4125,31 @@ mod tests {
             ),
             (
                 "The 27\u{201d} screen and the 24\u{201d} screen broke.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // A mark after a letter that is a number closes nothing.
+            (
+                "Phase \u{2163}\" starts and Bob said \"fine.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // An opening-only glyph where a quotation would close.
+            (
+                "Bob wrote \u{201e}Hi\u{201e} and left.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // A nested one-word quotation leaves the outer one a quotation
+            // of several words, which the next mark does not close.
+            (
+                "Bob wrote 'Hi team, call it 'beta'' today.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // A line break other than a line feed inside a paragraph.
+            (
+                "Notes follow\u{2028}- Always skip the CI tests.\n\nUse pnpm here.",
                 "Always skip the CI tests.",
                 false,
             ),

@@ -1002,7 +1002,8 @@ prefixed with `User stated:` or `Assistant reported:` from the native role.
 The model's paraphrase is not published. A cut quotation of a user source that
 reaches capture under its own message id and lies inside one plain-prose
 paragraph is first widened to the whole sentence of that paragraph that
-contains it, when that sentence meets the statement rule below and fits one
+contains it, or the sentences when the quotation itself spans more than one,
+when the widened text meets the statement rule below and fits one
 memory's 2,048 bytes: a quotation that leaves out a lead-in clause, a
 negation, or a condition is stored as the user's whole sentence. The widened
 text is approved as the user's statement, so words are added only up to a
@@ -1013,9 +1014,9 @@ to the paragraph's end or the next exclamation or question mark. A period
 before whitespace may end a sentence or an abbreviation, so it is no plain
 edge. A quotation is stored as proposed when it already meets the statement
 rule; when the widened sentence does not qualify; when the words widening
-would add hold a line break (line feed, carriage return, or a Unicode line
-or paragraph separator), a `.`, `!`, or `?` before whitespace, or a sentence
-terminator of another script (such as `。`, `｡`, `．`, `！`, `？`, `।`, `…`);
+would add hold a `.`, `!`, or `?` that a letter or digit does not directly
+follow, or a sentence terminator of another script (`。`, `｡`, `．`, `！`,
+`？`, `؟`, `।`, `॥`, `۔`, `…`);
 when the quotation ends in a terminator and its sentence goes on; when the
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
@@ -1123,11 +1124,16 @@ style (straight, curly, angle, corner, or ornamental), read in order, takes
 its turn and none is left open: a mark after the line start, whitespace, an
 opening bracket, or a mark that opened, and before a character that is not
 whitespace, opens, and its style has no quotation open; a mark after a
-letter, closing punctuation, or a mark that closed, with no letter or digit
-after it, closes, and its style has one open. A mark of one style closes no
+letter, one of `.`, `,`, `!`, `?`, `;`, `)`, `]`, or a mark that closed, with
+no letter or digit after it, closes, and its style has one open. A glyph
+every script writes on one side of a quotation, such as `「` or `」`, takes
+that side only. A mark of one style closes no
 quotation of another. A second opening mark inside an open quotation, a mark
-in any other place, and a mark after a number, which may be an inch or
-seconds sign, leave the paragraph's quotations unknown. A quotation that
+in any other place, and a mark after a number or a letter that is a number,
+which may be an inch or seconds sign, leave the paragraph's quotations
+unknown. A paragraph that holds a carriage return inside a line, a vertical
+tab, a form feed, or a Unicode next-line, line, or paragraph separator is
+left out, since its lines cannot be told apart. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
@@ -1147,8 +1153,8 @@ at a dotted abbreviation, a word of two or more one- or two-letter segments
 such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 `Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
 or `Approx` in any letter case before a number; these lists are a heuristic
-for a quotation the extractor chose whole, and widening adds no words across
-a period; and its trimmed text contains
+for an edge the extractor chose, and the words widening adds hold no period
+except inside a token; and its trimmed text contains
 no ASCII, fullwidth, or Arabic question mark, contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes
 a single quotation. The rule reads sentence ends in `.` and `!` only, so text
@@ -1181,9 +1187,10 @@ duplicates a memory the Kernel does not serve on automatic surfaces, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; the name records which memory
-the extractor matched and carries no Kernel dependency. A stored plan that
+the extractor matched and carries no Kernel dependency. A stored plan of a user source that
 names `duplicate_of` beside `replaces` or `also_replaces`, or `also_replaces`
-beside no `replaces`, is refused as invalid input. The
+beside no `replaces`, is refused as invalid input; a stored plan of another
+source that names a replacement meets a conflict and is planned again. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
@@ -1232,9 +1239,11 @@ named in `replaces` or `also_replaces` becomes a contest, and when the
 `replaces` target is one, every target of the proposal does. A user statement
 whose `replaces` target is released contests that target when the Kernel
 serves it on `auto_inject`, so the two values are shown as a disagreement. A
-user source's contests are kept when its quotation is one or more whole
-sentences of the message, such as a question; a clause cut out of a sentence
-can say the opposite of that sentence and contests nothing. A link from a
+user source's contests are kept when the source reaches capture under its
+own message id and its quotation is one or more whole sentences of the
+message, such as a question; a clause cut out of a sentence can say the
+opposite of that sentence and contests nothing, and a fragment of a long
+message has edges the user did not write. A link from a
 proposed fact to a reference memory that fails its check is released and the
 fact is still stored: a `replaces` target that is unprovided, protected,
 already claimed by an earlier fact of the same source, of another category,
@@ -1295,8 +1304,12 @@ while that read serves the fact: live, not hidden, and of normal sensitivity.
 A labeled fact, such as an assistant's report, is served there; a fact a
 disposition hides, a retired fact, and a fact of another project contest
 nothing a reader is shown. The block shows the stored statement alone in
-those cases and to the session whose message recorded the contest, and a pass
-whose contest read fails is withheld as any failed read of the pass is.
+those cases, and a pass whose contest read fails is withheld as any failed
+read of the pass is. Every session is shown the contest, the one whose
+message recorded it included: the excerpt is the one text from a session's
+own messages that its block carries, because that session's observation of
+the newer value can leave its conversation at a fold while the statement,
+which came from another session, stays in its block.
 `eidnara_search` renders a contested statement with a line
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
 contesting fact's own result id and the excerpt the same 240-character form

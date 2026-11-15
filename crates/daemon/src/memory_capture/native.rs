@@ -878,10 +878,13 @@ impl CaptureWork {
             // statement, so it is kept for a quotation that is whole
             // sentences, such as a question. A clause cut out of a sentence
             // can say the opposite of that sentence and contests nothing.
+            // A fragment of a long message has edges the user did not
+            // write, so no quotation of it is known to be whole.
             if super::is_user_source(job) {
+                let fragment = super::cite::is_hashed_source_id(&job.message_id);
                 for memory in &mut memories {
                     if !memory.contests.is_empty()
-                        && !super::quotes_whole_sentences(prose, &memory.quote)
+                        && (fragment || !super::quotes_whole_sentences(prose, &memory.quote))
                     {
                         memory.contests.clear();
                     }

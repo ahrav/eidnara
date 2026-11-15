@@ -234,7 +234,7 @@ pub(crate) fn read_project_memory(
         tip,
         (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
     ) {
-        Ok(mut response) => match show_contests(&store, project, session_id, &mut response) {
+        Ok(mut response) => match show_contests(&store, project, &mut response) {
             Ok(()) => {
                 CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
             }
@@ -417,11 +417,15 @@ fn contested_line(
 }
 
 /// The contest a pass shows beside capture-written statement `row`: the
-/// record in its rationale, unless the reading session's own message
-/// recorded it. `None` for a decision that is not contested and for a row
-/// capture did not write.
+/// record in its rationale. `None` for a decision that is not contested and
+/// for a row capture did not write.
+///
+/// Every session is shown the contest, the one whose message recorded it
+/// included. The statement came from another session, and that session's
+/// own observation of the newer value can leave its conversation at a
+/// fold; the contest line is then what keeps it from reading the stated
+/// value as current.
 fn shown_contest(
-    session_id: &str,
     row: &kernel::VisibleRow,
     decision: &kernel::DecisionRow,
 ) -> Option<crate::memory_capture::Contest> {
@@ -430,9 +434,7 @@ fn shown_contest(
     {
         return None;
     }
-    crate::memory_capture::capture_rationale(decision)
-        .contested_by
-        .filter(|contest| contest.session.as_deref() != Some(session_id))
+    crate::memory_capture::capture_rationale(decision).contested_by
 }
 
 /// Rewrites each contested statement of `response` to [`contested_line`]'s
@@ -446,7 +448,6 @@ fn shown_contest(
 fn show_contests(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
-    session_id: &str,
     response: &mut ReadResponse,
 ) -> Result<(), kernel::KernelError> {
     let contests: Vec<(String, i64, crate::memory_capture::Contest)> = response
@@ -458,7 +459,7 @@ fn show_contests(
             Some((
                 decision.object_id.clone(),
                 row.object.created_commit_seq,
-                shown_contest(session_id, row, decision)?,
+                shown_contest(row, decision)?,
             ))
         })
         .collect();
