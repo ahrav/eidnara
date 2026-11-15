@@ -237,24 +237,65 @@ pub(crate) fn read_project_memory(
             response.rows.retain(|row| {
                 row.object.source_id != crate::memory_capture::CAPTURE_SOURCE_ID
                     || decisions.get(&row.object.object_id).is_none_or(|decision| {
-                        capture_session(&decision.payload.rationale).as_deref() != Some(session_id)
+                        crate::memory_capture::capture_rationale(decision)
+                            .session
+                            .as_deref()
+                            != Some(session_id)
                     })
             });
+            let contested: Vec<(String, String)> = response
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    let decision = response.decisions.get(&row.object.object_id)?;
+                    Some((
+                        decision.object_id.clone(),
+                        contested_content(&store, row, decision)?,
+                    ))
+                })
+                .collect();
+            for (object_id, content) in contested {
+                if let Some(decision) = response.decisions.get_mut(&object_id) {
+                    decision.payload.summary = content;
+                }
+            }
             CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
         }
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
 }
 
-fn capture_session(rationale: &str) -> Option<std::borrow::Cow<'_, str>> {
-    #[derive(serde::Deserialize)]
-    struct CaptureRationale<'a> {
-        #[serde(borrow)]
-        session: Option<std::borrow::Cow<'a, str>>,
+/// The text the block shows for a statement an observation contests: the
+/// statement, then the observation, each with the date its commit was
+/// recorded, so the reader sees that the two disagree and which is newer.
+/// `None` for a decision that is not contested.
+fn contested_content(
+    kernel: &kernel::KernelStore,
+    row: &kernel::VisibleRow,
+    decision: &kernel::DecisionRow,
+) -> Option<String> {
+    if !decision.payload.rationale.contains("contested_by") {
+        return None;
     }
-    serde_json::from_str::<CaptureRationale<'_>>(rationale)
-        .ok()
-        .and_then(|rationale| rationale.session)
+    let contest = crate::memory_capture::capture_rationale(decision).contested_by?;
+    // A commit the log cannot date renders with an empty date.
+    let date = |commit_seq: i64| {
+        kernel
+            .commit_recorded_at(commit_seq)
+            .ok()
+            .flatten()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|at| at.format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    };
+    Some(format!(
+        "{} (stated {}; contested {} by {}: {})",
+        decision.payload.summary,
+        date(contest.stated_seq),
+        date(row.object.created_commit_seq),
+        contest.memory,
+        contest.text
+    ))
 }
 
 /// The domain filter the injectable memory surface applies to canonical rows:

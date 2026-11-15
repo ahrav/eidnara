@@ -1112,7 +1112,32 @@ least half of its distinct words of three or more characters other than
 common English function words, of which it must have at least one) and a replaced
 memory the host memory tool wrote, and
 retires the statement record of each fact it removes; no surface serves a
-superseded or retired fact. A host `kernel.commit` that supersedes or retires a
+superseded or retired fact. When the replaced fact's rationale names a memory
+under `restates`, that memory is retired with it if it is live, belongs to the
+project, was written by capture or the host memory tool, and is not served on
+`auto_inject`. The extractor is offered at most 64 reference memories. Up to
+32 are ranked by BM25 (k1 1.2, b 0.75, over the project's memory summaries)
+against each user message of the batch on its own, a memory taking its best
+score, so the short statement a correction names ranks ahead of long memories
+that share common words with the batch; the rest are the memories sharing the
+most of the whole batch's words, newest first among ties. A proposal from any
+role may name `contests`: reference memories whose value its observation
+contradicts without the user changing the fact, each sharing at least one
+content word with the quotation. A user quotation that does not meet the
+statement rule replaces no fact served on `auto_inject`: each such target
+named in `replaces` or `also_replaces` becomes a contest, and when the
+`replaces` target is one, every target of the proposal does. A contested fact
+stays live, and its rationale records the contest under `contests`. When the
+contested fact is a capture-owned fact admitted on an approval and holds no
+earlier contest, the commit supersedes it with a fact of the same text,
+category, and approval whose rationale names the contesting fact, that fact's
+text, and the commit that recorded the statement, under `contested_by`; the
+statement record stays live, and a later contest of the same statement changes
+nothing. The `<project-memory>` block renders a contested statement as
+`<statement> (stated <date>; contested <date> by <fact id>: <contesting text>)`,
+the dates being the UTC days on which the statement's commit and the contest's
+commit were recorded. A user statement that replaces the contested fact ends
+the contest. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
 and defaults to true; the daemon ignores a project-tier value with a warning,

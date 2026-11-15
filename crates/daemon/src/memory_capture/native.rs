@@ -443,6 +443,11 @@ pub(super) fn collapse_quotations(
                     kept.also_replaces = memory.also_replaces;
                     kept.duplicate_of = memory.duplicate_of;
                 }
+                for target in memory.contests {
+                    if !kept.contests.contains(&target) {
+                        kept.contests.push(target);
+                    }
+                }
             }
             None => memories.push(memory),
         }
@@ -640,24 +645,29 @@ impl CaptureWork {
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
-            let memories = collapse_quotations(attribution, proposed);
-            if memories.iter().any(|memory| {
-                !user_attributed(&job, memory)
-                    && memory
-                        .replaces
+            let mut memories = collapse_quotations(attribution, proposed);
+            // A user quotation that is not a whole statement cannot retire the
+            // user's approved statement. Its targets among those become
+            // contests: the statement stays and is shown beside the quotation.
+            for memory in &mut memories {
+                if user_attributed(&job, memory) {
+                    continue;
+                }
+                let automatic = |target: &String| {
+                    plan.existing
                         .iter()
-                        .chain(&memory.also_replaces)
-                        .any(|target| {
-                            plan.existing
-                                .iter()
-                                .any(|previous| previous.id == *target && previous.automatic)
-                        })
-            }) {
-                eprintln!(
-                    "daemon: native memory capture source rejected: only a whole user statement may replace an automatic memory"
-                );
-                self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
-                continue;
+                        .any(|previous| previous.id == *target && previous.automatic)
+                };
+                if memory.replaces.as_ref().is_some_and(automatic) {
+                    memory.contests.extend(memory.replaces.take());
+                    memory.contests.append(&mut memory.also_replaces);
+                } else {
+                    let (contested, retired) = std::mem::take(&mut memory.also_replaces)
+                        .into_iter()
+                        .partition(|target| automatic(target));
+                    memory.also_replaces = retired;
+                    memory.contests.extend::<Vec<String>>(contested);
+                }
             }
             let existing = plan
                 .existing
@@ -667,6 +677,7 @@ impl CaptureWork {
                         memory.replaces.as_deref() == Some(&previous.id)
                             || memory.also_replaces.contains(&previous.id)
                             || memory.duplicate_of.as_deref() == Some(&previous.id)
+                            || memory.contests.contains(&previous.id)
                     })
                 })
                 .cloned()

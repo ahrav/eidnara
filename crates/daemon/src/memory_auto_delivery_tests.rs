@@ -47,6 +47,7 @@ struct Extracted {
     quote: String,
     replaces: Vec<String>,
     duplicate_of: Option<String>,
+    contests: Vec<String>,
 }
 
 fn fact(quote: &str) -> Extracted {
@@ -141,6 +142,9 @@ async fn drain(
                         }
                         if let Some(target) = memory.duplicate_of {
                             value["duplicate_of"] = json!(target);
+                        }
+                        if !memory.contests.is_empty() {
+                            value["contests"] = json!(memory.contests);
                         }
                         value
                     })
@@ -314,9 +318,13 @@ fn live_statement_records(handler: &Handler, project: &Path) -> Vec<String> {
         .collect()
 }
 
+/// A question is no statement, so it cannot retire what the user stated. The
+/// extractor names the statement as replaced anyway; the question is stored
+/// for explicit search, the statement stays live, and the block shows the
+/// statement as contested by the question, with both dates.
 #[tokio::test]
-async fn only_a_whole_user_statement_replaces_a_delivered_statement() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+async fn a_user_quotation_that_is_no_statement_contests_the_statement_it_names() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
         FIRST,
@@ -340,24 +348,39 @@ async fn only_a_whole_user_statement_replaces_a_delivered_statement() {
         },
     )
     .await;
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
     assert_eq!(
-        explicit_search(&handler, (SECOND, "s2"), &project).await,
-        [(stated(THURSDAY), "visible".to_string())],
-        "a question cannot retire the user's statement"
+        rows,
+        [
+            (stated(question), "labeled".to_string()),
+            (stated(THURSDAY), "visible".to_string()),
+        ],
+        "the question is stored; the statement it named stays live"
     );
     assert_eq!(
         live_statement_records(&handler, &project),
         [stated(THURSDAY)]
     );
-    let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+        .unwrap();
     assert_eq!(
-        body(
-            handler
-                .handle_native_capture_next(test_route(SECOND), &next)
-                .await
-        )["state"],
-        "pending",
-        "the refused source backs off as a failed extraction instead of re-planning at once"
+        (status.pending, status.failed),
+        (0, 0),
+        "the source completes instead of failing extraction"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the contested statement is delivered");
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let contested = format!(
+        "{} (stated {today}; contested {today} by mem_",
+        stated(THURSDAY)
+    );
+    assert!(block.contains(&contested), "{block}");
+    assert!(
+        block.contains(&format!(": {})", stated(question))),
+        "{block}"
     );
 }
 
@@ -1297,4 +1320,273 @@ async fn a_user_statement_that_restates_an_agent_written_memory_gets_a_statement
         2,
         "a repeat of an approved statement writes no second row"
     );
+}
+
+const LIMIT_300: &str = "The gateway admits at most 300 clients at once.";
+const LIMIT_OBSERVED: &str = "The client limit in src/limits.rs is 500 now, so the gateway admits more than the 300 stated earlier.";
+const LIMIT_500: &str = "The gateway admits 500 clients now, not 300.";
+
+/// The user states a value. A later session's assistant message reports that
+/// a repository file now holds another value. The statement is contested:
+/// it stays live with its statement record, and the block shows it beside
+/// the observation with both dates. When the user confirms the new value,
+/// the correction replaces the contested statement and stays retrievable.
+#[tokio::test]
+async fn an_observation_that_contradicts_a_statement_contests_it_until_the_user_settles_it() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", LIMIT_300)],
+        |_, _| vec![fact(LIMIT_300)],
+    )
+    .await;
+    let plain = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(plain.contains(&stated(LIMIT_300)), "{plain}");
+    assert!(!plain.contains("contested"), "{plain}");
+
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "assistant", LIMIT_OBSERVED)],
+        |_, existing| {
+            vec![Extracted {
+                quote: LIMIT_OBSERVED.to_string(),
+                contests: ids_containing(existing, "300 clients"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let observed = format!("Assistant reported: {LIMIT_OBSERVED}");
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (observed.clone(), "labeled".to_string()),
+            (stated(LIMIT_300), "visible".to_string()),
+        ],
+        "nothing is deleted: the statement and the observation are both live"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(LIMIT_300)],
+        "the contested statement keeps its statement record"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    assert!(
+        block.contains(&format!(
+            "{} (stated {today}; contested {today} by mem_",
+            stated(LIMIT_300)
+        )),
+        "{block}"
+    );
+    assert!(block.contains(&format!(": {observed})")), "{block}");
+    assert_eq!(
+        block.matches("300 clients at once").count(),
+        1,
+        "the stated value appears once, on its contested line: {block}"
+    );
+
+    // A second observation leaves the first contest in place.
+    let again = "The limit constant still reads 500 clients after the rebase.";
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "assistant", again)],
+        |_, existing| {
+            vec![Extracted {
+                quote: again.to_string(),
+                contests: ids_containing(existing, "300 clients"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    assert_eq!(
+        project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap(),
+        block,
+        "a statement keeps its first contest, so the block is unchanged"
+    );
+
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m4", "user", LIMIT_500)],
+        |_, existing| {
+            vec![Extracted {
+                quote: LIMIT_500.to_string(),
+                replaces: ids_containing(existing, "User stated: The gateway admits at most 300"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let settled = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(settled.contains(&stated(LIMIT_500)), "{settled}");
+    assert!(!settled.contains("contested"), "{settled}");
+    assert!(!settled.contains(LIMIT_300), "{settled}");
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(LIMIT_500)],
+        "the contested statement's record is retired with it"
+    );
+    let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    assert!(
+        rows.contains(&(stated(LIMIT_500), "visible".to_string())),
+        "the correction record, which names both values, is retrievable: {rows:?}"
+    );
+    assert!(!rows.iter().any(|(text, _)| text == &stated(LIMIT_300)));
+}
+
+/// A correction retires the earlier value whether that value was an
+/// assistant's labeled report or a note the agent wrote that the user's
+/// earlier statement was recorded beside. The correction names both values
+/// and is the one row left.
+#[tokio::test]
+async fn a_correction_retires_search_only_and_agent_written_earlier_values() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let written = body(
+        handler
+            .dispatch_value_for_test(
+                test_route(FIRST),
+                kernel_route_fixtures::commit_request(
+                    &project,
+                    "s1",
+                    "agent-write",
+                    vec![json!({"op": "insert_decision", "spec": {
+                        "decision_id": "dec-agent",
+                        "object_id": "mem-agent",
+                        "domain_id": "memory",
+                        "decision_kind": "PROJECT_RULES",
+                        "payload": {"summary": "Release branches are cut from main on Thursdays.", "rationale": ""},
+                        "source_id": "eidnara_memory",
+                        "source_revision": 1,
+                    }})],
+                    Vec::new(),
+                ),
+            )
+            .await,
+    );
+    assert_eq!(written["state"]["kind"], "available", "{written}");
+    let report = "Release branches are cut every Thursday, per the release checklist.";
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY), ("m2", "assistant", report)],
+        |text, existing| {
+            if text == report {
+                return vec![fact(report)];
+            }
+            vec![Extracted {
+                quote: THURSDAY.to_string(),
+                duplicate_of: Some("mem-agent".to_string()),
+                ..Extracted::default()
+            }]
+            .into_iter()
+            .filter(|_| ids_containing(existing, "on Thursdays") == ["mem-agent"])
+            .collect()
+        },
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        3,
+        "the agent's note, the user's statement, and the assistant's report"
+    );
+
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "user", TUESDAY)],
+        |_, existing| {
+            let statement = ids_containing(existing, &stated(THURSDAY));
+            let report = ids_containing(existing, "Assistant reported");
+            assert_eq!((statement.len(), report.len()), (1, 1), "{existing:?}");
+            vec![Extracted {
+                quote: TUESDAY.to_string(),
+                replaces: statement.into_iter().chain(report).collect(),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(TUESDAY), "visible".to_string())],
+        "the statement, the report, and the note it restated are retired; the correction record stays"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(block.contains(&stated(TUESDAY)), "{block}");
+    assert!(!block.contains("every Thursday"), "{block}");
+}
+
+/// A project holds eighty long assistant reports that share most of their
+/// words with a long user message, and one short statement. The message
+/// corrects the statement in one sentence. The statement is among the
+/// memories the extractor is offered, so the correction can replace it.
+#[tokio::test]
+async fn a_correction_is_offered_the_short_statement_it_corrects_among_many_long_memories() {
+    let (handler, _store, _dir, _project) = delivery_handler(capture_config()).await;
+    let statement = "The staging cluster alias is harbor-east.";
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m0", "user", statement)],
+        |_, _| vec![fact(statement)],
+    )
+    .await;
+    let reports: Vec<(String, String)> = (0..80)
+        .map(|index| {
+            (
+                format!("r{index}"),
+                format!(
+                    "Run {index}: the upload handler retries each failed request three times, the retry budget resets when a request succeeds, the subscriber test blocks during shutdown, and the worker pool drains before the listener closes."
+                ),
+            )
+        })
+        .collect();
+    for batch in reports.chunks(16) {
+        let messages: Vec<(&str, &str, &str)> = batch
+            .iter()
+            .map(|(id, text)| (id.as_str(), "assistant", text.as_str()))
+            .collect();
+        capture(&handler, FIRST, "s1", &messages, |text, _| vec![fact(text)]).await;
+    }
+    let correction = "The staging cluster alias changed: it is harbor-west now, not harbor-east.";
+    let message = format!(
+        "The subscriber test that blocks during shutdown is the one I would question: the upload handler retries each failed request, the retry budget resets when a request succeeds, and the worker pool drains before the listener closes, so look at the drain order again.\n\n{correction}"
+    );
+    let offered = std::cell::Cell::new(false);
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m1", "user", &message)],
+        |_, existing| {
+            let target = ids_containing(existing, statement);
+            offered.set(target.len() == 1);
+            vec![Extracted {
+                quote: correction.to_string(),
+                replaces: target,
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    assert!(offered.get(), "the statement is among the offered memories");
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(block.contains(&stated(correction)), "{block}");
+    assert!(!block.contains(&stated(statement)), "{block}");
 }

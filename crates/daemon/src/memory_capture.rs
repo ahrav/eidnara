@@ -85,6 +85,10 @@ pub struct CapturedMemory {
     pub also_replaces: Vec<String>,
     #[serde(default)]
     pub duplicate_of: Option<String>,
+    /// `contests` identifies provided memories whose value this memory's
+    /// observation contradicts. A contested memory stays live.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contests: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -143,6 +147,7 @@ For each source message, return its exact id and a memories array. Every source 
 - quote: an exact nonempty substring of that same message supporting the fact. This quotation, not your paraphrase, will be stored as the memory. Include the complete statement with its actor, scope, negation, conditions, and qualifications. Never select a positive phrase out of a negated, conditional, or hypothetical statement. Never invent a quote. Use a complete supporting clause rather than a value alone. Preserve Markdown backticks, whitespace, and typographic punctuation exactly; do not rewrite the quotation.
 - replaces: optional id from existing_memories, ONLY for a user source message, when can_replace is true and the user explicitly changes or resolves that same fact in the same scope. Assistant messages may add attributed observations but must never replace memories. Preserve unrelated qualifications. Different environments or hypothetical alternatives do not replace each other. Use each replacement target at most once. For a correction, quote the whole correcting statement, including the old value when the user names it.
 - also_replaces: optional array of further existing_memories ids, ONLY with replaces, each with can_replace true, that state the same old value of the fact being replaced, such as an earlier duplicate or an assistant's restatement of it. Never list a memory that states a different fact or another scope.
+- contests: optional array of existing_memories ids, from any source message, whose value this message's observation contradicts without the user changing the fact: for example an assistant message that reports what a repository file, a command, or a tool result now shows, when that differs from a stored fact in the same scope. The stored fact stays and is shown as contested beside this observation. A user message that itself changes the fact uses replaces instead. A user statement that settles a contested fact, by confirming either value, replaces it.
 - duplicate_of: optional id from existing_memories that already states the same fact with the same value. Never combine it with replaces.
 - Do not emit entries for facts already stated in existing_memories, with one exception: when a user source message itself states a fact that existing_memories holds only in entries with user_statement false, such as an assistant's report or a note an agent wrote, emit the user's statement and set duplicate_of to that entry's id, so the user's own words are recorded. When that statement changes an older fact, use replaces for the older fact instead. Use an empty memories array when a message only repeats facts already held with user_statement true or reports routine progress.
 
@@ -317,6 +322,20 @@ fn validate_capture_memories(
             && !existing.iter().any(|previous| previous.id == *target)
         {
             return Err("capture names an unprovided memory target");
+        }
+        for target in &memory.contests {
+            let Some(previous) = existing.iter().find(|previous| previous.id == *target) else {
+                return Err("capture names an unprovided memory target");
+            };
+            if memory.replaces.as_ref() == Some(target)
+                || memory.also_replaces.contains(target)
+                || content_words(&memory.quote)
+                    .intersection(&content_words(&previous.content))
+                    .next()
+                    .is_none()
+            {
+                return Err("capture contests a memory that states a different fact");
+            }
         }
         for target in memory.replaces.iter().chain(&memory.also_replaces) {
             let Some(previous) = existing.iter().find(|previous| previous.id == *target) else {
@@ -1035,13 +1054,7 @@ impl CaptureWork {
             .kernel
             .kernel_store()
             .map_err(|_| "kernel_unavailable")?;
-        let words: HashSet<String> = messages
-            .iter()
-            .flat_map(|message| message.text.split(|ch: char| !ch.is_alphanumeric()))
-            .filter(|word| word.chars().count() >= 3)
-            .map(str::to_lowercase)
-            .collect();
-        select_existing_memories(&kernel, &self.binding.kernel_project, &words)
+        select_existing_memories(&kernel, &self.binding.kernel_project, messages)
     }
 
     /// Transport, provider, store, and kernel outcomes say nothing about the
@@ -1680,13 +1693,56 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
         })
 }
 
-/// The bounded candidate set for one batch: the 64 memory decisions sharing
-/// the most of the batch's lowercase words, newest first among ties.
+/// The memories one batch is offered as replacement, contest, and duplicate
+/// targets.
+const MAX_EXISTING_CANDIDATES: usize = 64;
+/// The candidates chosen for the batch's user messages. Only a user message
+/// replaces a memory, so half of the set is ranked for that use and the other
+/// half for duplicate detection over the whole batch.
+const USER_MESSAGE_CANDIDATES: usize = MAX_EXISTING_CANDIDATES / 2;
+/// The BM25 term-saturation and length-normalization constants, at the
+/// values of the original formulation.
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+/// The bounded candidate set for one batch, at most
+/// [`MAX_EXISTING_CANDIDATES`] memory decisions in two ranked parts.
+///
+/// The first part holds up to [`USER_MESSAGE_CANDIDATES`] memories ranked by
+/// BM25 against each user message on its own, a memory taking its best score.
+/// A correction names the fact it changes in a few words, and the memory it
+/// corrects is a short statement of the same words. Ranking per message with
+/// inverse document frequency and length normalization puts that statement
+/// ahead of long memories that share many common words with a long batch.
+///
+/// The rest of the set holds the memories sharing the most of the whole
+/// batch's lowercase words, newest first among ties.
 fn select_existing_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
-    words: &HashSet<String>,
+    messages: &[CaptureMessage],
 ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
+    let words: HashSet<String> = messages
+        .iter()
+        .flat_map(|message| message.text.split(|ch: char| !ch.is_alphanumeric()))
+        .filter(|word| word.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect();
+    // Each distinct content word of a user message is one query term.
+    let mut terms: HashMap<String, usize> = HashMap::new();
+    let queries: Vec<Vec<usize>> = messages
+        .iter()
+        .filter(|message| message.role == CaptureRole::User)
+        .map(|message| {
+            content_words(&message.text)
+                .into_iter()
+                .map(|word| {
+                    let next = terms.len();
+                    *terms.entry(word).or_insert(next)
+                })
+                .collect()
+        })
+        .collect();
     let read = kernel_routes::read::read_visible(
         kernel,
         project,
@@ -1695,9 +1751,20 @@ fn select_existing_memories(
         kernel_routes::read::RowSelection::DomainDecisions("memory"),
     )
     .map_err(|_| "kernel_unavailable")?;
-    // Score borrows the read; only the 64 kept candidates are materialized.
+    struct Candidate<'r> {
+        row: &'r kernel::VisibleRow,
+        decision: &'r kernel::DecisionRow,
+        /// Words of the summary that the batch holds, repeats counted.
+        shared: usize,
+        /// Query terms in the summary with their counts, and its word count.
+        matched: Vec<(usize, f64)>,
+        length: f64,
+        relevance: f64,
+    }
+    // Scoring borrows the read; only the kept candidates are materialized.
     let mut lowered = String::new();
-    let mut candidates: Vec<(usize, &kernel::VisibleRow, &kernel::DecisionRow)> = read
+    let mut frequency = vec![0_usize; terms.len()];
+    let mut candidates: Vec<Candidate<'_>> = read
         .rows
         .iter()
         .filter_map(|row| {
@@ -1710,37 +1777,94 @@ fn select_existing_memories(
             {
                 return None;
             }
-            let score = decision
+            let (mut shared, mut length) = (0, 0.0);
+            let mut matched: Vec<(usize, f64)> = Vec::new();
+            for word in decision
                 .payload
                 .summary
                 .split(|ch: char| !ch.is_alphanumeric())
-                .filter(|word| {
-                    if word.is_ascii() {
-                        lowered.clear();
-                        lowered.push_str(word);
-                        lowered.make_ascii_lowercase();
-                        words.contains(lowered.as_str())
-                    } else {
-                        words.contains(&word.to_lowercase())
+            {
+                lowered.clear();
+                if word.is_ascii() {
+                    lowered.push_str(word);
+                    lowered.make_ascii_lowercase();
+                } else {
+                    lowered.push_str(&word.to_lowercase());
+                }
+                shared += usize::from(words.contains(lowered.as_str()));
+                length += 1.0;
+                if let Some(&term) = terms.get(lowered.as_str()) {
+                    match matched.iter_mut().find(|(seen, _)| *seen == term) {
+                        Some((_, count)) => *count += 1.0,
+                        None => {
+                            frequency[term] += 1;
+                            matched.push((term, 1.0));
+                        }
                     }
-                })
-                .count();
-            Some((score, row, decision))
+                }
+            }
+            Some(Candidate {
+                row,
+                decision,
+                shared,
+                matched,
+                length,
+                relevance: 0.0,
+            })
         })
         .collect();
+    let count = candidates.len() as f64;
+    let average = candidates
+        .iter()
+        .map(|candidate| candidate.length)
+        .sum::<f64>()
+        / count.max(1.0);
+    let inverse: Vec<f64> = frequency
+        .iter()
+        .map(|&holding| {
+            let holding = holding as f64;
+            (1.0 + (count - holding + 0.5) / (holding + 0.5)).ln()
+        })
+        .collect();
+    let mut asked = vec![false; terms.len()];
+    for query in &queries {
+        asked.fill(false);
+        for &term in query {
+            asked[term] = true;
+        }
+        for candidate in &mut candidates {
+            let norm = BM25_K1 * (1.0 - BM25_B + BM25_B * candidate.length / average.max(1.0));
+            let score: f64 = candidate
+                .matched
+                .iter()
+                .filter(|(term, _)| asked[*term])
+                .map(|&(term, count)| inverse[term] * count * (BM25_K1 + 1.0) / (count + norm))
+                .sum();
+            candidate.relevance = candidate.relevance.max(score);
+        }
+    }
+    let newest_first = |a: &Candidate<'_>, b: &Candidate<'_>| {
+        b.row
+            .object
+            .created_commit_seq
+            .cmp(&a.row.object.created_commit_seq)
+            .then_with(|| a.row.object.object_id.cmp(&b.row.object.object_id))
+    };
     candidates.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| {
-                b.1.object
-                    .created_commit_seq
-                    .cmp(&a.1.object.created_commit_seq)
-            })
-            .then_with(|| a.1.object.object_id.cmp(&b.1.object.object_id))
+        b.relevance
+            .total_cmp(&a.relevance)
+            .then_with(|| newest_first(a, b))
     });
+    let relevant = candidates
+        .iter()
+        .take(USER_MESSAGE_CANDIDATES)
+        .take_while(|candidate| candidate.relevance > 0.0)
+        .count();
+    candidates[relevant..].sort_by(|a, b| b.shared.cmp(&a.shared).then_with(|| newest_first(a, b)));
     Ok(candidates
         .into_iter()
-        .take(64)
-        .map(|(_, row, decision)| ExistingCaptureMemory {
+        .take(MAX_EXISTING_CANDIDATES)
+        .map(|Candidate { row, decision, .. }| ExistingCaptureMemory {
             id: row.object.object_id.clone(),
             category: decision.decision_kind.clone(),
             content: decision.payload.summary.clone(),
@@ -1791,6 +1915,124 @@ fn checked_capture_target(
         .then_some(previous.source_revision))
 }
 
+/// The fields of a capture decision's rationale that later captures and the
+/// block renderer read.
+#[derive(Default, Deserialize)]
+pub(crate) struct CaptureRationale {
+    /// The session whose message the decision quotes.
+    #[serde(default)]
+    pub(crate) session: Option<String>,
+    /// The memory this user statement was recorded beside.
+    #[serde(default)]
+    restates: Option<String>,
+    /// The observation that contradicts this statement.
+    #[serde(default)]
+    pub(crate) contested_by: Option<Contest>,
+}
+
+/// The observation a contested statement is shown beside. The record holds
+/// commit sequences and no clock reading, so a retried publication writes
+/// the same bytes.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Contest {
+    /// The contesting memory's id.
+    pub(crate) memory: String,
+    /// The contesting memory's stored text.
+    pub(crate) text: String,
+    /// The commit that recorded the statement before it was contested.
+    pub(crate) stated_seq: i64,
+}
+
+pub(crate) fn capture_rationale(decision: &kernel::DecisionRow) -> CaptureRationale {
+    serde_json::from_str(&decision.payload.rationale).unwrap_or_default()
+}
+
+/// Retires the live memory a replaced statement recorded as restated, when
+/// it belongs to the project and to a source a correction may replace.
+fn retire_restated(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    restated: &str,
+) -> Result<(), kernel::KernelError> {
+    let mut filter = kernel_routes::project::ScopeFilter::new(project);
+    let Ok(state) = kernel_routes::commit::scoped_object_state(envelope, &mut filter, restated)
+    else {
+        return Ok(());
+    };
+    if state.object.invalidated_commit_seq.is_none()
+        && state.object.object_kind == "decision"
+        && state.object.domain_id == "memory"
+        && REPLACEABLE_SOURCES.contains(&state.object.source_id.as_str())
+        && !approved(envelope, restated)?
+    {
+        envelope.retire_decision(restated)?;
+    }
+    Ok(())
+}
+
+/// Marks an approved user statement contested by the observation just
+/// written. The statement is superseded by a row with the same text and
+/// approval whose rationale names the observation, so the statement stays
+/// live and every later read can show both. A statement that is already
+/// contested keeps its first contest, and a memory without an approval is
+/// left as it is: the observation's own rationale names what it contests.
+fn contest_statement(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    (contested, revision): (&kernel::DecisionRow, i64),
+    (observation, text): (&str, &str),
+) -> Result<(), kernel::KernelError> {
+    use sha2::{Digest, Sha256};
+    let Some((_, Some(approval))) = envelope.subject_admission(&contested.object_id)? else {
+        return Ok(());
+    };
+    let Ok(Value::Object(mut rationale)) =
+        serde_json::from_str::<Value>(&contested.payload.rationale)
+    else {
+        return Ok(());
+    };
+    if rationale.contains_key("contested_by") {
+        return Ok(());
+    }
+    rationale.insert(
+        "contested_by".to_owned(),
+        json!(Contest {
+            memory: observation.to_owned(),
+            text: text.to_owned(),
+            stated_seq: contested.created_commit_seq,
+        }),
+    );
+    let id = format!(
+        "mem_{:x}",
+        Sha256::digest(format!("{}:contested:{observation}", contested.object_id).as_bytes())
+    );
+    let id = &id[..36];
+    envelope.supersede_decision(
+        &contested.object_id,
+        kernel::DecisionSpec {
+            decision_id: format!("dec_{}", &id[4..]),
+            object_id: id.into(),
+            domain_id: "memory".into(),
+            proposition_id: None,
+            scope_id: Some(project.scope_id()),
+            anchor_id: contested.anchor_id.clone(),
+            evidence_id: None,
+            decision_kind: contested.decision_kind.clone(),
+            payload: kernel::DecisionPayload {
+                summary: contested.payload.summary.clone(),
+                rationale: Value::Object(rationale).to_string(),
+            },
+            source_kind: CAPTURE_SOURCE_KIND.into(),
+            source_id: CAPTURE_SOURCE_ID.into(),
+            source_revision: revision
+                .checked_add(1)
+                .ok_or(kernel::KernelError::InvalidInput)?,
+            sensitivity: kernel::Sensitivity::Normal,
+        },
+    )?;
+    kernel_routes::commit::admit_capture(envelope, id, Some(&approval))
+}
+
 /// Whether the Kernel serves live memory `target` on automatic surfaces: the
 /// state an approval, such as a user's statement record, gives it.
 fn approved(envelope: &kernel::Envelope<'_>, target: &str) -> Result<bool, kernel::KernelError> {
@@ -1821,6 +2063,24 @@ fn publish_captured_memories(
     reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
     use sha2::{Digest, Sha256};
+    // A contest and a replacement read the earlier row's rationale. A live
+    // row's payload never changes, and the commit checks each target is still
+    // the row the plan named, so reading before the commit is the same read.
+    let targets: Vec<String> = output
+        .memories
+        .iter()
+        .flat_map(|memory| memory.contests.iter().chain(&memory.replaces))
+        .cloned()
+        .collect();
+    let earlier: HashMap<String, kernel::DecisionRow> = if targets.is_empty() {
+        HashMap::new()
+    } else {
+        kernel
+            .decisions_for_objects_as_of(&targets, kernel.tip()?)?
+            .into_iter()
+            .map(|decision| (decision.object_id.clone(), decision))
+            .collect()
+    };
     let commit = |approve: bool, reasons: &mut Vec<crate::source_capture::Count>| {
         reasons.clear();
         let intent = kernel::CommitIntent {
@@ -1832,14 +2092,18 @@ fn publish_captured_memories(
             actor: "agent:memory_capture".into(),
             cause: "automatic project memory capture".into(),
         };
+        let plan = Publication {
+            project,
+            job,
+            output,
+            settlement,
+            approve,
+            earlier: &earlier,
+        };
         kernel.commit_before(
             Instant::now() + Duration::from_secs(5),
             intent,
-            |envelope| {
-                write_captured_memories(
-                    envelope, project, job, output, settlement, approve, reasons,
-                )
-            },
+            |envelope| write_captured_memories(envelope, &plan, reasons),
         )
     };
     match commit(true, reasons) {
@@ -1858,19 +2122,35 @@ fn publish_captured_memories(
     }
 }
 
+/// One source's frozen plan and the facts its commit reads.
+struct Publication<'a> {
+    project: &'a ProjectBinding,
+    job: &'a CaptureJob,
+    output: &'a PreparedCapture,
+    settlement: SettlementOutcome,
+    /// Records a statement record for each user-attributed memory and admits
+    /// the memory on it.
+    approve: bool,
+    /// The decision rows of the plan's contest and replacement targets.
+    earlier: &'a HashMap<String, kernel::DecisionRow>,
+}
+
 /// Writes the plan's decisions inside one commit and returns how many it
-/// wrote. `approve` records a statement record for each user-attributed
-/// memory and admits the memory on it.
+/// wrote.
 fn write_captured_memories(
     envelope: &mut kernel::Envelope<'_>,
-    project: &ProjectBinding,
-    job: &CaptureJob,
-    output: &PreparedCapture,
-    settlement: SettlementOutcome,
-    approve: bool,
+    plan: &Publication<'_>,
     reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<String, kernel::KernelError> {
     use sha2::{Digest, Sha256};
+    let &Publication {
+        project,
+        job,
+        output,
+        settlement,
+        approve,
+        earlier,
+    } = plan;
     let mut domains = HashSet::new();
     let mut ready = false;
     let mut refusal = None;
@@ -1946,6 +2226,9 @@ fn write_captured_memories(
         if let Some(restated) = &memory.duplicate_of {
             rationale.insert("restates".to_owned(), json!(restated));
         }
+        if !memory.contests.is_empty() {
+            rationale.insert("contests".to_owned(), json!(memory.contests));
+        }
         anchor_reason.record(&mut rationale, reasons);
         let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
         let spec = kernel::DecisionSpec {
@@ -1976,6 +2259,27 @@ fn write_captured_memories(
         }
         for target in superseded.into_iter().chain(retired) {
             retire_statement(envelope, target)?;
+        }
+        // A statement recorded beside an agent's note names the note it
+        // restates; replacing the statement retires that note with it.
+        if let Some(restated) = memory
+            .replaces
+            .as_ref()
+            .and_then(|target| earlier.get(target))
+            .and_then(|replaced| capture_rationale(replaced).restates)
+        {
+            retire_restated(envelope, project, &restated)?;
+        }
+        for target in &memory.contests {
+            let revision = checked_capture_target(envelope, project, output, target, false)?;
+            if let (Some(revision), Some(contested)) = (revision, earlier.get(target)) {
+                contest_statement(
+                    envelope,
+                    project,
+                    (contested, revision),
+                    (id, &memory.content),
+                )?;
+            }
         }
         cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
         let approval = if attributed && approve {
@@ -2815,6 +3119,103 @@ mod tests {
     }
 
     #[test]
+    fn a_contest_names_a_provided_memory_about_the_same_fact_from_any_role() {
+        let target = |id: &str, content: &str| ExistingCaptureMemory {
+            id: id.into(),
+            category: "CONFIG_VALUES".into(),
+            content: content.into(),
+            can_replace: false,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic: true,
+        };
+        let existing = [
+            target("mem_port", "User stated: The staging port is 1234."),
+            target("mem_release", "User stated: Releases are cut on Thursdays."),
+        ];
+        // `sources()` holds a user message about port 4321 and an assistant
+        // message; the assistant's decision is first in `output()`.
+        let parse = |decision: usize, memory: Value| {
+            let mut response = output();
+            response["decisions"][decision]["memories"] = json!([memory]);
+            parse_capture_output_with_existing(&response.to_string(), &sources(), &existing).map(
+                |parsed| {
+                    parsed
+                        .iter()
+                        .flat_map(|message| &message.memories)
+                        .flat_map(|memory| memory.contests.clone())
+                        .collect::<Vec<_>>()
+                },
+            )
+        };
+        let user = |extra: Value| {
+            let mut memory = json!({"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging."});
+            memory
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            memory
+        };
+        assert_eq!(
+            parse(1, user(json!({"contests": ["mem_port"]}))),
+            Ok(vec!["mem_port".to_string()]),
+            "a protected memory may be contested: it stays live"
+        );
+        assert_eq!(
+            parse(
+                0,
+                json!({"category":"CONFIG_VALUES","content":"x","quote":"I will investigate.","contests":[]})
+            ),
+            Ok(Vec::new())
+        );
+        for (memory, refusal) in [
+            (
+                user(json!({"contests": ["mem_absent"]})),
+                "capture names an unprovided memory target",
+            ),
+            (
+                user(json!({"contests": ["mem_release"]})),
+                "capture contests a memory that states a different fact",
+            ),
+        ] {
+            assert_eq!(parse(1, memory), Err(refusal));
+        }
+        let assistant = CaptureMessage {
+            id: "native-2".into(),
+            role: CaptureRole::Assistant,
+            text: "The staging port in deploy.toml is 4321 now.".into(),
+        };
+        let observed = CapturedMemory {
+            contests: vec!["mem_port".into()],
+            ..memory("The staging port in deploy.toml is 4321 now.")
+        };
+        assert_eq!(
+            validate_capture_memories(
+                std::slice::from_ref(&observed),
+                &assistant,
+                &existing,
+                &mut BTreeSet::new()
+            ),
+            Ok(()),
+            "an assistant message may contest; only a user message replaces"
+        );
+    }
+
+    #[test]
+    fn memories_that_collapse_keep_every_contest() {
+        let contest = |target: &str| CapturedMemory {
+            contests: vec![target.into()],
+            ..memory("The staging port in deploy.toml is 4321 now.")
+        };
+        let collapsed = native::collapse_quotations(
+            "Assistant reported",
+            vec![contest("mem_a"), contest("mem_b"), contest("mem_a")],
+        );
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].contests, ["mem_a", "mem_b"]);
+    }
+
+    #[test]
     fn further_targets_need_a_replacement_and_each_must_be_replaceable() {
         let target = |id: &str, can_replace: bool| ExistingCaptureMemory {
             id: id.into(),
@@ -3070,6 +3471,7 @@ mod tests {
             replaces: None,
             also_replaces: Vec::new(),
             duplicate_of: None,
+            contests: Vec::new(),
         }
     }
 
