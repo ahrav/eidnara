@@ -202,8 +202,14 @@ async fn run_session(
 }
 
 fn operator_set_arena_limit() -> bool {
-    std::env::var_os("MALLOC_ARENA_MAX").is_some()
-        || std::env::var("GLIBC_TUNABLES").is_ok_and(|tunables| tunables.contains("arena_max"))
+    std::env::var_os("MALLOC_ARENA_MAX").is_some_and(|value| !value.is_empty())
+        || std::env::var("GLIBC_TUNABLES").is_ok_and(|tunables| {
+            tunables.split(':').any(|tunable| {
+                tunable
+                    .strip_prefix("glibc.malloc.arena_max=")
+                    .is_some_and(|value| !value.is_empty())
+            })
+        })
 }
 
 async fn status_after_teardown(client: &Client, route: ClientRoute) -> Value {

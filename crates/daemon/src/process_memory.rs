@@ -12,10 +12,28 @@ pub const C_HEAP_RELEASE_THRESHOLD_BYTES: u64 = 64 * 1024 * 1024;
 
 static ARENA_LIMIT_SET: AtomicBool = AtomicBool::new(false);
 static RELEASING: AtomicBool = AtomicBool::new(false);
-static RESIDENT_FLOOR: AtomicU64 = AtomicU64::new(0);
-static FREE_FLOOR: AtomicU64 = AtomicU64::new(0);
-static RELEASES: AtomicU64 = AtomicU64::new(0);
-static RELEASE_RESIDENT_DROP_BYTES: AtomicU64 = AtomicU64::new(0);
+static RELEASES: Releases = Releases {
+    resident_floor: AtomicU64::new(0),
+    free_floor: AtomicU64::new(0),
+    count: AtomicU64::new(0),
+    resident_drop_bytes: AtomicU64::new(0),
+};
+
+/// The floors a release is judged against and the totals the status reports.
+#[derive(Default)]
+struct Releases {
+    resident_floor: AtomicU64,
+    free_floor: AtomicU64,
+    count: AtomicU64,
+    resident_drop_bytes: AtomicU64,
+}
+
+/// Freed C-heap bytes, where glibc reports them, and anonymous resident bytes at one instant.
+#[derive(Debug, Clone, Copy)]
+struct HeapReading {
+    free_bytes: Option<u64>,
+    resident_bytes: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CHeap {
@@ -45,6 +63,13 @@ impl ProcessMemory {
         }
     }
 
+    fn heap_reading(&self, resident_bytes: u64) -> HeapReading {
+        HeapReading {
+            free_bytes: self.c_heap.map(|heap| heap.free_bytes),
+            resident_bytes: self.rss_anon_bytes.unwrap_or(resident_bytes),
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         json!({
             "rss_anon_bytes": self.rss_anon_bytes,
@@ -57,8 +82,8 @@ impl ProcessMemory {
                 "mmapped_bytes": heap.mmapped_bytes,
             })),
             "c_heap_arena_limit": ARENA_LIMIT_SET.load(Ordering::Relaxed).then_some(C_HEAP_ARENAS),
-            "c_heap_releases": RELEASES.load(Ordering::Relaxed),
-            "c_heap_release_resident_drop_bytes": RELEASE_RESIDENT_DROP_BYTES.load(Ordering::Relaxed),
+            "c_heap_releases": RELEASES.count.load(Ordering::Relaxed),
+            "c_heap_release_resident_drop_bytes": RELEASES.resident_drop_bytes.load(Ordering::Relaxed),
         })
     }
 }
@@ -108,7 +133,7 @@ fn c_heap() -> Option<CHeap> {
 pub fn limit_c_heap_arenas() {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let operator_set = arena_limit_is_operator_set(
-        std::env::var_os("MALLOC_ARENA_MAX").is_some(),
+        std::env::var_os("MALLOC_ARENA_MAX").is_some_and(|value| !value.is_empty()),
         std::env::var("GLIBC_TUNABLES").ok().as_deref(),
     );
     if status_field(&status, "Threads") != Some(1) || operator_set {
@@ -154,20 +179,39 @@ fn release_is_due(
     }
 }
 
-fn release_is_due_past_floors(
-    free_bytes: Option<u64>,
-    resident_bytes: u64,
-    free_floor: &AtomicU64,
-    resident_floor: &AtomicU64,
-) -> bool {
-    let resident_floor = lowered(resident_floor, resident_bytes);
-    let free_floor = free_bytes.map_or(0, |free| lowered(free_floor, free));
-    release_is_due(free_bytes, free_floor, resident_bytes, resident_floor)
-}
+impl Releases {
+    /// Lowers each floor to its reading, then judges the reading against the floors.
+    fn is_due(&self, now: HeapReading) -> bool {
+        let resident_floor = lowered(&self.resident_floor, now.resident_bytes);
+        let free_floor = now
+            .free_bytes
+            .map_or(0, |free| lowered(&self.free_floor, free));
+        release_is_due(
+            now.free_bytes,
+            free_floor,
+            now.resident_bytes,
+            resident_floor,
+        )
+    }
 
-/// The freed-byte level the release acted on: bytes freed while it ran count as growth afterwards.
-fn free_floor_after_release(before: Option<u64>, after: Option<u64>) -> u64 {
-    after.map_or(0, |after| before.map_or(after, |before| before.min(after)))
+    /// Resets the floors after a trim and counts it as a release when resident memory fell.
+    ///
+    /// The freed-byte floor is the lower of the two readings, so bytes freed while the trim ran
+    /// count as growth at the next check.
+    fn record(&self, before: HeapReading, after: HeapReading, trimmed: bool) {
+        self.resident_floor
+            .store(after.resident_bytes, Ordering::Relaxed);
+        let free_floor = after.free_bytes.map_or(0, |after| {
+            before.free_bytes.map_or(after, |before| before.min(after))
+        });
+        self.free_floor.store(free_floor, Ordering::Relaxed);
+        let dropped = before.resident_bytes.saturating_sub(after.resident_bytes);
+        if trimmed && dropped > 0 {
+            self.resident_drop_bytes
+                .fetch_add(dropped, Ordering::Relaxed);
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -176,24 +220,12 @@ pub fn release_free_c_heap_when_due() {
     if RELEASING.swap(true, Ordering::AcqRel) {
         return;
     }
-    let before = ProcessMemory::sample();
-    let resident = before.rss_anon_bytes.unwrap_or(0);
-    let free = before.c_heap.map(|heap| heap.free_bytes);
-    if release_is_due_past_floors(free, resident, &FREE_FLOOR, &RESIDENT_FLOOR) {
+    let before = ProcessMemory::sample().heap_reading(0);
+    if RELEASES.is_due(before) {
         // SAFETY: `malloc_trim` takes one integer and releases pages of free chunks only.
-        let released = unsafe { libc::malloc_trim(0) } == 1;
-        let after = ProcessMemory::sample();
-        let resident_after = after.rss_anon_bytes.unwrap_or(resident);
-        RESIDENT_FLOOR.store(resident_after, Ordering::Relaxed);
-        FREE_FLOOR.store(
-            free_floor_after_release(free, after.c_heap.map(|heap| heap.free_bytes)),
-            Ordering::Relaxed,
-        );
-        if released {
-            RELEASE_RESIDENT_DROP_BYTES
-                .fetch_add(resident.saturating_sub(resident_after), Ordering::Relaxed);
-            RELEASES.fetch_add(1, Ordering::Relaxed);
-        }
+        let trimmed = unsafe { libc::malloc_trim(0) } == 1;
+        let after = ProcessMemory::sample().heap_reading(before.resident_bytes);
+        RELEASES.record(before, after, trimmed);
     }
     RELEASING.store(false, Ordering::Release);
 }
@@ -257,36 +289,84 @@ mod tests {
         assert_eq!(floor.load(Ordering::Relaxed), 300);
     }
 
+    const MIB: u64 = 1024 * 1024;
+
+    fn reading(free_bytes: Option<u64>, resident_bytes: u64) -> HeapReading {
+        HeapReading {
+            free_bytes,
+            resident_bytes,
+        }
+    }
+
     #[test]
     fn a_reading_under_its_floor_lowers_the_floor_the_next_reading_is_judged_against() {
-        let mib = 1024 * 1024;
-        let (free_floor, resident_floor) = (AtomicU64::new(0), AtomicU64::new(500 * mib));
-        assert!(!release_is_due_past_floors(
-            None,
-            300 * mib,
-            &free_floor,
-            &resident_floor
-        ));
-        assert!(release_is_due_past_floors(
-            None,
-            300 * mib + THRESHOLD,
-            &free_floor,
-            &resident_floor
-        ));
+        let releases = Releases {
+            resident_floor: AtomicU64::new(500 * MIB),
+            ..Releases::default()
+        };
+        assert!(!releases.is_due(reading(None, 300 * MIB)));
+        assert!(releases.is_due(reading(None, 300 * MIB + THRESHOLD)));
 
-        let (free_floor, resident_floor) = (AtomicU64::new(900 * mib), AtomicU64::new(0));
-        assert!(!release_is_due_past_floors(
-            Some(300 * mib),
-            0,
-            &free_floor,
-            &resident_floor
-        ));
-        assert!(release_is_due_past_floors(
-            Some(300 * mib + THRESHOLD),
-            0,
-            &free_floor,
-            &resident_floor
-        ));
+        let releases = Releases {
+            free_floor: AtomicU64::new(900 * MIB),
+            ..Releases::default()
+        };
+        assert!(!releases.is_due(reading(Some(300 * MIB), 0)));
+        assert!(releases.is_due(reading(Some(300 * MIB + THRESHOLD), 0)));
+    }
+
+    #[test]
+    fn a_release_that_lowers_resident_memory_is_counted_and_resets_the_floors() {
+        let releases = Releases::default();
+        let before = reading(Some(300 * MIB), 800 * MIB);
+        assert!(releases.is_due(before));
+        releases.record(before, reading(Some(280 * MIB), 520 * MIB), true);
+
+        assert_eq!(releases.count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            releases.resident_drop_bytes.load(Ordering::Relaxed),
+            280 * MIB
+        );
+        assert!(!releases.is_due(reading(Some(280 * MIB), 520 * MIB)));
+        assert!(releases.is_due(reading(Some(280 * MIB + THRESHOLD), 520 * MIB)));
+    }
+
+    #[test]
+    fn a_trim_that_returns_no_pages_resets_the_floors_and_is_not_counted() {
+        for (after_resident, trimmed) in [(800 * MIB, true), (700 * MIB, false)] {
+            let releases = Releases::default();
+            let before = reading(Some(300 * MIB), 800 * MIB);
+            assert!(releases.is_due(before));
+            let after = reading(Some(300 * MIB), after_resident);
+            releases.record(before, after, trimmed);
+
+            assert_eq!(releases.count.load(Ordering::Relaxed), 0);
+            assert_eq!(releases.resident_drop_bytes.load(Ordering::Relaxed), 0);
+            assert!(!releases.is_due(after));
+        }
+    }
+
+    #[test]
+    fn bytes_freed_while_a_release_runs_count_as_growth_for_the_next_check() {
+        let releases = Releases::default();
+        let before = reading(Some(100 * MIB), 400 * MIB);
+        assert!(releases.is_due(before));
+        let after = reading(Some(100 * MIB + THRESHOLD), 300 * MIB);
+        releases.record(before, after, true);
+
+        assert_eq!(releases.free_floor.load(Ordering::Relaxed), 100 * MIB);
+        assert!(releases.is_due(after));
+    }
+
+    #[test]
+    fn where_glibc_reports_no_heap_a_release_leaves_the_freed_byte_floor_at_zero() {
+        let releases = Releases::default();
+        let before = reading(None, 400 * MIB);
+        assert!(releases.is_due(before));
+        releases.record(before, reading(None, 300 * MIB), true);
+
+        assert_eq!(releases.free_floor.load(Ordering::Relaxed), 0);
+        assert_eq!(releases.resident_floor.load(Ordering::Relaxed), 300 * MIB);
     }
 
     #[test]
@@ -309,22 +389,5 @@ mod tests {
             false,
             Some("glibc.malloc.arena_maximum=8:glibc.malloc.arena_max=")
         ));
-    }
-
-    #[test]
-    fn bytes_freed_while_a_release_runs_count_as_growth_for_the_next_check() {
-        let mib = 1024 * 1024;
-        let before = 100 * mib;
-        let after = before + THRESHOLD;
-        let floor = free_floor_after_release(Some(before), Some(after));
-        assert_eq!(floor, before);
-        assert!(release_is_due(Some(after), floor, 0, 0));
-
-        assert_eq!(
-            free_floor_after_release(Some(before), Some(20 * mib)),
-            20 * mib
-        );
-        assert_eq!(free_floor_after_release(None, Some(20 * mib)), 20 * mib);
-        assert_eq!(free_floor_after_release(Some(before), None), 0);
     }
 }
