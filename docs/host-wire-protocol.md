@@ -1174,8 +1174,8 @@ an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; the name records which memory
 the extractor matched and carries no Kernel dependency. A stored plan that
-names `duplicate_of` beside `replaces` or `also_replaces` is refused as
-invalid input. The
+names `duplicate_of` beside `replaces` or `also_replaces`, or `also_replaces`
+beside no `replaces`, is refused as invalid input. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,

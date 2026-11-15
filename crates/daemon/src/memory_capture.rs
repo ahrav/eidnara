@@ -283,8 +283,6 @@ fn parse_capture_batch(
         .collect())
 }
 
-/// One source's proposed memories against its own text and the provided
-/// targets. `replaced` carries replacement uniqueness across the caller's scope.
 /// The target shapes one memory may carry: further targets only beside a
 /// replacement, and a duplicate target beside neither. Extraction and
 /// publication of a stored plan apply this one rule.
@@ -294,6 +292,8 @@ fn target_shape_is_valid(memory: &CapturedMemory) -> bool {
             || (memory.replaces.is_none() && memory.also_replaces.is_empty()))
 }
 
+/// One source's proposed memories against its own text and the provided
+/// targets. `replaced` carries replacement uniqueness across the caller's scope.
 fn validate_capture_memories(
     memories: &[CapturedMemory],
     source: &CaptureMessage,
