@@ -379,7 +379,7 @@ Two kinds of anchors with different decay rules.
 For each history_segment, build in this exact order:
 
 1. Decide history_segment boundaries; write `title` and `episode_type`.
-2. Apply DROP/KEEP/wording rules to identify durable U: line candidates. Note where in the conversation arc each candidate was said (start / middle / end of the work unit).
+2. Apply DROP/KEEP/wording rules to identify durable U: line candidates. Note where in the conversation arc each candidate was said (start / middle / end of the work unit). Resolve each open item against the `U:` messages and choose its status line and key (see "Open items").
 3. Write P2 first — this is the most familiar density level, your natural recent-consolidated voice. Place any surviving U: lines inline at their conversation point.
 4. Decide importance, calibrated against `<history_segment_examples_from_other_projects>` and `<session_references>`.
 5. Expand P2 → P1 by adding secondary rationale, minor file paths, all KEEP U: lines verbatim (inline at their conversation points), any borderline-but-useful detail.
@@ -696,6 +696,33 @@ After outputting history_segments, facts, events, and user observations, also ou
 </primer_candidates>
 ```
 If no candidates, omit the `<primer_candidates>` section entirely.
+
+---
+
+## Open items: waiting, constraints, decided, lifted
+
+An open item is a question I put to the user, a decision I am waiting for the user to make, or a standing constraint the user set for the work. Resolve every open item against the `U:` messages in `<new_messages>` before you write the tiers. A waiting line kept beside the user's answer makes a later me ask again for something the user already settled, and a constraint kept after the user lifted it makes a later me refuse work the user asked for.
+
+Write each item as one status line on its own line, in one of four forms:
+
+```
+Waiting on user (release.server-steps): Should the server steps stay in the shared checklist or get their own file?
+Constraint (policy.measurement-fixes): No bug fixes during the baseline run.
+Decided (release.server-steps): The user chose a separate file for the server steps.
+Lifted (policy.measurement-fixes): The no-fixes rule for the baseline run is lifted; the user wants each bug fixed in its own PR.
+```
+
+- **Form**: a status line is one line of a tier's text, placed with the narrative it belongs to. It starts with the prefix, after at most one `- ` or `* ` bullet, and carries no bold, other emphasis, or list number. Status lines change nothing else about the Output shape.
+- **Key**: the parentheses hold a key in the `<claims>` key grammar that names the item, not the message. One item keeps one key in this pass and in later passes: when a `<session_references>` history_segment shows a status line for the item, reuse its key exactly. A new question about an item that already shows `Decided` or `Lifted` gets a new key, so the recorded decision stays current.
+- **Waiting on user**: the question is open at the end of this history_segment: I asked it or raised it again here, and no later `U:` message in this history_segment answers it, sets it aside, or replaces it. A waiting line speaks for its own history_segment only. When a later history_segment follows it, in this output or after a `<session_references>` history_segment that shows the line, write the line again in the later history_segment, with the same key, only when I raised the question again there and it is still open at that history_segment's end. A question the user passed over by turning to other work gets no line in the later history_segment. A waiting line needs no claim.
+- **Decided**: a `U:` message answers the item, sets it aside, or redirects the work it concerns, whether I asked in this pass or a `<session_references>` history_segment shows it waiting. Write what the user decided in the history_segment that holds the user's message, and leave the waiting line out of that history_segment.
+- **Constraint**: a standing limit the user set for the work, such as a rule against touching some code or a step to skip. Write it once, in the history_segment where the user set it. It stands wherever the history renders until a `Lifted` or `Decided` line with its key settles it.
+- **Lifted**: a `U:` message removes or relaxes a constraint the user set earlier, in this pass or in `<session_references>`. Write the constraint as lifted under the constraint's own key and state what the user now allows; no tier states the original constraint as still standing.
+- **Claims**: every `Constraint`, `Decided`, and `Lifted` line has a claim with its key that cites the user's message: the one that set the constraint, gave the answer, or lifted the constraint. Its `<value>` copies the user's words from the cited part within the value bound, and its `<anchor>` is the whole status line, so keep the line within the anchor bound and word it identically in every tier that carries it. A `Decided` or `Lifted` line settles an open line in an earlier history_segment only through this claim.
+- **Other messages**: a `U:` message on another subject leaves a question unanswered; it gets no `Decided` line. A message that reports a tool, task, or subagent result is not the user's answer.
+- **Tiers**: `<p1>`, `<p2>`, and `<p3>` carry the `Constraint`, `Decided`, and `Lifted` lines. `<p1>` and `<p2>` carry the waiting lines. `<p4>` keeps its own shapes and may name an outcome.
+
+Eidnara reads these lines as the state of each key across all history_segments every time the history renders. A `Waiting on user` line renders only while its history_segment is the newest one. A `Waiting on user` or `Constraint` line stops rendering once a later history_segment has a `Decided` or `Lifted` line with its key and a valid claim, or once the same history_segment's `<p1>` ends the key with a `Decided` or `Lifted` line. The narrative around a status line always renders, so the narrative states each outcome as well.
 
 ---
 

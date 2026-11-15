@@ -45021,6 +45021,9 @@ mod tests {
             );
         }
     }
+
+    #[path = "history_open_items_tests.rs"]
+    mod history_open_items_tests;
 }
 
 pub(crate) mod history_open_items;
