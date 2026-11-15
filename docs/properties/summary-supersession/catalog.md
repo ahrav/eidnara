@@ -325,7 +325,7 @@ Type: safety
 Reachability: default-production - every m0 and m1 compose
 Status: active
 Exercised: partial - the committed bound test covers store work, measured claim visits, and measured anchor searches up to H = 50,000 and N = 10^6 under both correction regimes; `guard_rerenders_search_each_anchor_again_at_every_demoted_tier` measures the searches of one guard walk and `eight_maximal_corrections_add_at_most_the_escaped_marker_bound` measures the bytes eight corrections at the claim bounds add; the per-segment marker count and the m1-entry clause hold by source reading and are not measured; render time was measured with an uncommitted driver
-Guarantee: Per compose, each liveness scan visits each claim of R once, at most 8 x |R|, and the pass adds no store statement, row, or VM step beyond the segment load; each render of a row below tier 5 runs one anchor search per anchored correction, the guard renders a row again at each tier it demotes it to, and a compose renders at most four times, so at most 16 searches per anchored correction and 128 x |R|; at most 8 markers or footer entries per rendered segment, adding at most 8 x (82 + 5 x 128 + d) bytes before the guard, where d is the ordinal's digit count (5,928 bytes at 19 digits); at most 8 x |R| entries in the m1 block; nothing grows with H or N beyond the claims stored on rows in R; open-item retirement reads the claims and tier lines of each row of R at most twice per compose, adds no store work, and only removes lines from the tiers (by source reading of `crates/daemon/src/history_open_items.rs`).
+Guarantee: Per compose, each liveness scan visits each claim of R once, at most 8 x |R|, and the pass adds no store statement, row, or VM step beyond the segment load; each render of a row below tier 5 runs one anchor search per anchored correction, the guard renders a row again at each tier it demotes it to, and a compose renders at most four times, so at most 16 searches per anchored correction and 128 x |R|; at most 8 markers or footer entries per rendered segment, adding at most 8 x (82 + 5 x 128 + d) bytes before the guard, where d is the ordinal's digit count (5,928 bytes at 19 digits); at most 8 x |R| entries in the m1 block; nothing grows with H or N beyond the claims stored on rows in R; open-item retirement reads the claims and tier lines of each row of R at most twice per compose, searches each anchored correction's anchor once in each tier of its row, adds no store work, and only removes lines from the tiers (by source reading of `crates/daemon/src/history_open_items.rs`).
 Check: `always` - store statements, rows, and VM steps per compose are equal with and without claims; an m0 compose's `CLAIMS_VISITED` count equals the claims held by R and is at most 8 x |R|, and its `ANCHOR_SEARCHES` count is at most 16 x the anchored corrections of R; an m1 compose visits twice the claims on its rows (corrections, then the block); one guard walk searches each anchored correction once per tier below 5 it renders the row at; eight corrections at the key, value, and ordinal bounds with all-`&` values add at most the escaped bound; timing is not a committed check
 Fault/timing angle: footers raise rendered bytes above the curve's target, so the budget guard demotes rows one tier per iteration and re-estimates the whole body each time
 Required faults and enabling state: a session of 10^6 messages; one correction per three messages; one per two hundred; no claims
@@ -380,9 +380,9 @@ Within this part:
   `apply-corrections-splice-is-disjoint-and-total` splices rather than
   footers at tier 1, for an anchor whose line open-item retirement leaves in
   the rendered tier. An anchor that stood in a retired line footers, and so
-  does an anchor that is an open status line of the correction's own key,
-  which `history_open_items::beside_open_lines` clears before the row
-  renders.
+  does an anchor whose first occurrence in one of the row's tiers lies in an
+  open status line, which `history_open_items::beside_open_lines` clears
+  before the row renders.
 - `claims-column-is-set-once-at-insert` and `revert-restores-earlier-value`
   make deletion the only way a claim leaves the loaded set.
 - `m0-bytes-change-only-at-hard` and `correction-visible-before-next-hard`

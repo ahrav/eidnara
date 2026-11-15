@@ -17,8 +17,9 @@
 //! retires an open line under these rules:
 //!
 //! - **Waiting lines** speak for the end of their own segment. A waiting line renders while its
-//!   segment is the session's newest among the rows rendered together; legacy and archive rows
-//!   are older history and leave it in place. The fold of the next span reads that segment in its
+//!   segment is the newest summarized segment among the rows rendered together; a legacy row and
+//!   an archive row, which covers a span no fold summarized, leave it in place. The fold of the
+//!   next span reads that segment in its
 //!   reference window and states the item again in a newer segment, settles it, or passes over
 //!   it; in each case the older line leaves. In the newest segment a waiting line leaves when the
 //!   segment itself answers it: the key's last status line in `p1`, the segment's full statement,
@@ -30,19 +31,20 @@
 //!   `p1`; the summarizer prompt has the claim cite the user's lifting message and anchor on the
 //!   whole line. Such a claim in a later segment retires the constraint line; in the constraint's
 //!   own segment it retires the line when `Lifted` is the key's last status line in `p1`. A
-//!   `Decided` line, and any other claim under the key, leaves the constraint line standing: a
-//!   correction anchored on an open line of its own key lists on the row's `[corrections: …]`
-//!   line, so only retirement takes an open line out of a tier.
+//!   `Decided` line, and any other claim, leaves the constraint line standing: a correction whose
+//!   anchor lies in an open line of the row lists on the row's `[corrections: …]` line, so only
+//!   retirement takes an open line out of a tier.
 //!
-//! The evidence lives in the claims, which every read of a row carries, so the state is the same
-//! whether an archived row was loaded with its text or with its claims alone. The summarizer sees
+//! The evidence lives in the claims of the summarized segments, which every read of such a row
+//! carries, so the state is the same whether a row the decay curve archives was loaded with its
+//! text or with its claims alone. The summarizer sees
 //! the newest [`crate::history_summarizer_prompt::SESSION_REF_WINDOW`] segments when it folds. A
 //! lift it writes under another key than the constraint's leaves the constraint line standing
 //! beside the lifted line.
 //!
 //! Retirement only removes lines from a row's tiers. A tier it empties renders the row's heading
-//! alone at that tier, and so does a sparser tier the row stores no text for. Corrections apply
-//! to the text that remains, so a superseded claim whose anchor stood in a retired line lists on
+//! alone, at that tier and at a sparser tier the row stores no text for. Corrections apply to
+//! the text that remains, so a superseded claim whose anchor stood in a retired line lists on
 //! the row's `[corrections: …]` line with the key's live value.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -101,7 +103,7 @@ fn lifts(claim: &Claim) -> bool {
 /// The open lines one row retires at render.
 #[derive(Debug)]
 struct Retired {
-    /// A newer segment of the session exists, so every waiting line leaves.
+    /// A newer summarized segment exists, so every waiting line leaves.
     aged: bool,
     /// The keys whose waiting lines leave: the row's own `p1` ends them with a settling line.
     answered: BTreeSet<String>,
@@ -114,7 +116,7 @@ struct Retired {
 /// no key.
 fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
     let mut out: Vec<Option<Retired>> = segments.iter().map(|_| None).collect();
-    // The keys a newer row lifts, and whether a newer segment of the session exists.
+    // The keys a newer summarized segment lifts, and whether one exists.
     let mut lifted_later: BTreeSet<&str> = BTreeSet::new();
     let mut newer = false;
     for (at, segment) in segments.iter().enumerate().rev() {
@@ -125,8 +127,8 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
                 .filter(|claim| lifts(claim))
                 .map(|claim| claim.key.as_str())
         };
-        // Legacy and archive rows render flat or empty and hold history older than the tiered
-        // rows. Every other row is a segment of the session, with or without its text loaded.
+        // A legacy row renders flat and an archive row renders empty over a span no fold
+        // summarized. Every other row is a summarized segment, with or without its text loaded.
         let session_segment = segment.legacy != 1 && !segment.is_archive();
         if session_segment && let Some(p1) = segment.p1.as_deref().filter(|p1| !p1.is_empty()) {
             // Each key's last status line in `p1`.
@@ -162,8 +164,10 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
                 });
             }
         }
-        newer |= session_segment;
-        lifted_later.extend(lifted_here());
+        if session_segment {
+            newer = true;
+            lifted_later.extend(lifted_here());
+        }
     }
     out
 }
@@ -220,10 +224,10 @@ fn retire_lines(text: &str, retired: &Retired) -> Option<String> {
     Some(kept.join("\n"))
 }
 
-/// `row` with the tiers retirement leaves. A `p1` that retirement empties becomes one space, which
-/// the renderer trims, so the row still renders from its tiers, with its heading and corrections;
-/// the flat `content` follows `p1`. A tier the row stores no text for renders the next denser
-/// tier, so it empties with a tier that retirement empties.
+/// `row` with the tiers retirement leaves. A tier that retirement empties becomes one space, which
+/// the renderer trims: the tier still counts as text, so the row renders from its tiers with its
+/// heading and corrections, and a sparser tier the row stores no text for renders this one. The
+/// flat `content` follows `p1`.
 fn retire(
     mut row: DecayRenderHistorySegment,
     retired: Option<Retired>,
@@ -231,22 +235,27 @@ fn retire(
     let Some(retired) = retired else {
         return row;
     };
-    if let Some(p1) = row.p1.as_deref().and_then(|p1| retire_lines(p1, &retired)) {
-        let p1 = if p1.is_empty() { " ".to_owned() } else { p1 };
-        row.content.clone_from(&p1);
-        row.p1 = Some(p1);
-    }
-    let mut emptied = false;
-    for tier in [&mut row.p2, &mut row.p3, &mut row.p4] {
-        match tier.as_deref().map(|text| retire_lines(text, &retired)) {
-            Some(Some(text)) => {
-                emptied = text.is_empty();
-                *tier = Some(text);
-            }
-            Some(None) => emptied = false,
-            None if emptied => *tier = Some(String::new()),
-            None => {}
+    let mut p1_changed = false;
+    for (tier, is_p1) in [
+        (&mut row.p1, true),
+        (&mut row.p2, false),
+        (&mut row.p3, false),
+        (&mut row.p4, false),
+    ] {
+        if let Some(text) = tier
+            .as_deref()
+            .and_then(|text| retire_lines(text, &retired))
+        {
+            *tier = Some(if text.is_empty() {
+                " ".to_owned()
+            } else {
+                text
+            });
+            p1_changed |= is_p1;
         }
+    }
+    if p1_changed && let Some(p1) = &row.p1 {
+        row.content.clone_from(p1);
     }
     row
 }
@@ -275,17 +284,38 @@ pub(crate) fn owned_rows(
         .map(|(row, retired)| retire(row, retired))
 }
 
-/// `corrections` with each one that is anchored on an open line of its own key listed on the
-/// footer: the line stays as written beside the key's live value, and leaves only through
-/// retirement.
-pub(crate) fn beside_open_lines(mut corrections: Vec<Correction>) -> Vec<Correction> {
+/// `corrections` for `row`, with each one whose anchor lies in an open line of one of the row's
+/// tiers listed on the footer: the line stays as written beside the key's live value, and
+/// leaves only through retirement.
+pub(crate) fn beside_open_lines(
+    row: &DecayRenderHistorySegment,
+    mut corrections: Vec<Correction>,
+) -> Vec<Correction> {
+    // Whether the first occurrence of `anchor` in `text`, the one a splice replaces, shares bytes
+    // with an open status line.
+    let in_open_line = |text: &str, anchor: &str| {
+        text.find(anchor).is_some_and(|start| {
+            let mut line_start = 0;
+            text.split('\n').any(|line| {
+                let line_end = line_start + line.len();
+                let overlaps = line_start < start + anchor.len() && start < line_end;
+                line_start = line_end + 1;
+                overlaps && status_line(line).is_some_and(|(status, _)| status.is_open())
+            })
+        })
+    };
     for correction in &mut corrections {
-        let on_open_line = correction
+        let anchored_on_open_line = correction
             .anchor
             .as_deref()
-            .and_then(status_line)
-            .is_some_and(|(status, key)| status.is_open() && key == correction.key);
-        if on_open_line {
+            .filter(|anchor| !anchor.is_empty())
+            .is_some_and(|anchor| {
+                [&row.p1, &row.p2, &row.p3, &row.p4]
+                    .into_iter()
+                    .flatten()
+                    .any(|text| in_open_line(text, anchor))
+            });
+        if anchored_on_open_line {
             correction.anchor = None;
         }
     }
@@ -416,9 +446,9 @@ mod tests {
         );
         assert_eq!(rendered[0].content, rendered[0].p1.clone().unwrap());
         assert_eq!(rendered[0].p2.as_deref(), Some(DECIDED));
-        // A tier that held the waiting line alone is empty and renders the heading alone.
-        assert_eq!(rendered[0].p3.as_deref(), Some(""));
-        assert_eq!(rendered[0].p4.as_deref(), Some(""));
+        // A tier that held the waiting line alone keeps one space and renders the heading alone.
+        assert_eq!(rendered[0].p3.as_deref(), Some(" "));
+        assert_eq!(rendered[0].p4.as_deref(), Some(" "));
         assert_eq!(
             render_history_segment_at_tier(&rendered[0], 3),
             "## 10-19 · row 1"
@@ -509,6 +539,14 @@ mod tests {
                     Some("Note that Lifted (policy.measurement-fixes): is not the case."),
                 )],
             ),
+            // A claim with the key whose anchor holds the lifted line after other text.
+            (
+                LIFTED,
+                vec![claim(
+                    "policy.measurement-fixes",
+                    Some(&format!("Measured.\n{LIFTED}")),
+                )],
+            ),
             // The constraint's own claim, restated in a later segment.
             (
                 CONSTRAINT,
@@ -547,8 +585,8 @@ mod tests {
             rendered[0].p1.as_deref(),
             Some(format!("Measured.\n{LIFTED}").as_str())
         );
-        assert_eq!(rendered[0].p2.as_deref(), Some(""));
-        assert_eq!(rendered[0].p3.as_deref(), Some(""));
+        assert_eq!(rendered[0].p2.as_deref(), Some(" "));
+        assert_eq!(rendered[0].p3.as_deref(), Some(" "));
         // The same lines with no stored lift claim keep the constraint.
         assert_eq!(
             p1s(&[same(1, &set_then_lifted, vec![])])[0],
@@ -587,7 +625,7 @@ mod tests {
                 rows(&[row(1, tiers, vec![]), same(2, LIFTED, vec![lift()])]).collect();
             let row = &rendered[0];
             assert_eq!(
-                [&row.p2, &row.p3, &row.p4].map(|tier| tier.as_deref()),
+                [&row.p2, &row.p3, &row.p4].map(|tier| tier.as_deref().map(str::trim)),
                 [Some(""); 3],
                 "{tiers:?}"
             );
@@ -612,7 +650,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_and_archive_rows_keep_their_text_and_leave_the_newest_segment_its_waiting_line() {
+    fn legacy_and_archive_rows_keep_their_text_and_leave_a_waiting_line_in_place() {
+        let asked = same(1, &format!("I drafted the steps.\n{WAITING}"), vec![]);
         let mut legacy = same(2, WAITING, vec![]);
         legacy.legacy = 1;
         let mut archive = same(3, WAITING, vec![]);
@@ -620,10 +659,36 @@ mod tests {
         archive.content = String::new();
         assert!(archive.is_archive());
         let rendered: Vec<DecayRenderHistorySegment> =
-            rows(&[same(1, WAITING, vec![]), legacy, archive]).collect();
-        assert_eq!(rendered[0].p1.as_deref(), Some(WAITING));
+            rows(&[asked.clone(), legacy.clone(), archive.clone()]).collect();
+        assert_eq!(
+            rendered[0].p1.as_deref(),
+            Some(format!("I drafted the steps.\n{WAITING}").as_str())
+        );
+        // A summarized segment after them ages the waiting line, and the legacy and archive rows
+        // keep their own text beside it.
+        let later = same(4, "Later work.", vec![]);
+        let rendered: Vec<DecayRenderHistorySegment> =
+            rows(&[asked, legacy, archive, later]).collect();
+        assert_eq!(rendered[0].p1.as_deref(), Some("I drafted the steps."));
         assert_eq!(rendered[1].content, WAITING);
+        assert_eq!(rendered[1].p1.as_deref(), Some(WAITING));
         assert_eq!(rendered[2].p1.as_deref(), Some(WAITING));
+    }
+
+    #[test]
+    fn a_lift_claim_counts_on_a_summarized_segment_only() {
+        let set = same(1, &format!("Measured.\n{CONSTRAINT}"), vec![]);
+        let mut legacy = same(2, LIFTED, vec![lift()]);
+        legacy.legacy = 1;
+        let mut archive = same(2, LIFTED, vec![lift()]);
+        archive.episode_type = Some(memory_store::ARCHIVE_EPISODE_TYPE.to_owned());
+        archive.content = String::new();
+        for other in [legacy, archive] {
+            assert_eq!(
+                p1s(&[set.clone(), other])[0],
+                format!("Measured.\n{CONSTRAINT}")
+            );
+        }
     }
 
     #[test]
@@ -672,83 +737,86 @@ mod tests {
     }
 
     #[test]
-    fn a_tier_the_row_stores_no_text_for_empties_with_the_tier_it_would_render() {
-        let mut set = row(
-            1,
-            ["Baseline measured in detail.", CONSTRAINT, "", ""],
-            vec![],
-        );
-        set.p3 = None;
-        set.p4 = None;
+    fn a_tier_the_row_stores_no_text_for_renders_the_denser_tier_retirement_leaves() {
+        let heading = "## 10-19 \u{b7} row 1";
         let lifted = same(2, LIFTED, vec![lift()]);
-        let rendered = render_rows(&[set.clone(), lifted], false);
-        assert_eq!(
-            [&rendered[0].p2, &rendered[0].p3, &rendered[0].p4].map(|tier| tier.as_deref()),
-            [Some(""); 3]
-        );
+        let missing = |p2: &str, p3: Option<&str>| {
+            let mut set = row(1, ["Baseline measured in detail.", p2, "", ""], vec![]);
+            set.p3 = p3.map(str::to_owned);
+            set.p4 = None;
+            render_rows(&[set, lifted.clone()], false).remove(0)
+        };
+        // The tier the missing ones fall back to held the constraint alone: all render the
+        // heading, and the missing tiers stay missing.
+        for p3 in [None, Some("")] {
+            let rendered = missing(CONSTRAINT, p3);
+            assert_eq!(rendered.p4, None);
+            for tier in [2, 3, 4] {
+                assert_eq!(render_history_segment_at_tier(&rendered, tier), heading);
+            }
+        }
+        // It keeps its other lines, and the missing tiers render them.
+        let rendered = missing(&format!("{CONSTRAINT}\nBaseline measured."), None);
         for tier in [2, 3, 4] {
             assert_eq!(
-                render_history_segment_at_tier(&rendered[0], tier),
-                "## 10-19 \u{b7} row 1"
+                render_history_segment_at_tier(&rendered, tier),
+                format!("{heading}\nBaseline measured.")
             );
         }
-        // While the constraint stands, the missing tiers stay missing and render `p2`.
-        let standing: Vec<DecayRenderHistorySegment> = rows(&[set]).collect();
-        assert_eq!(standing[0].p3, None);
-        assert_eq!(standing[0].p4, None);
     }
 
     #[test]
-    fn a_later_claim_under_a_standing_constraints_key_lists_beside_the_line() {
-        let own = claim("policy.measurement-fixes", Some(CONSTRAINT));
-        let set = same(1, &format!("{CONSTRAINT}\nBaseline measured."), vec![own]);
+    fn a_claim_that_would_splice_into_a_standing_open_line_lists_beside_it() {
         let decided = "Decided (policy.measurement-fixes): The user confirmed the rule stays.";
-        let kept = same(
-            2,
-            decided,
-            vec![Claim {
-                value: "keep that rule".into(),
-                ordinal: 21,
-                ..claim("policy.measurement-fixes", Some(decided))
-            }],
-        );
-        let rendered = render_rows(&[set, kept], false);
-        for tier in [1, 2, 3] {
-            assert_eq!(
-                render_history_segment_at_tier(&rendered[0], tier),
-                format!(
-                    "## 10-19 \u{b7} row 1\n{CONSTRAINT}\nBaseline measured.\n\
-                     [corrections: policy.measurement-fixes = keep that rule @21]"
-                )
-            );
+        let later = Claim {
+            value: "keep that rule".into(),
+            ordinal: 21,
+            ..claim("policy.measurement-fixes", Some(decided))
+        };
+        let narrative = "Baseline measured on port 5432.";
+        // Anchors on the whole constraint line, on part of it, and across the line before it.
+        for anchor in [
+            CONSTRAINT.to_owned(),
+            "No bug fixes".to_owned(),
+            format!("port 5432.\n{CONSTRAINT}"),
+        ] {
+            let own = claim("policy.measurement-fixes", Some(&anchor));
+            let set = same(1, &format!("{narrative}\n{CONSTRAINT}"), vec![own]);
+            let rendered = render_rows(&[set, same(2, decided, vec![later.clone()])], false);
+            for tier in [1, 2, 3] {
+                assert_eq!(
+                    render_history_segment_at_tier(&rendered[0], tier),
+                    format!(
+                        "## 10-19 \u{b7} row 1\n{narrative}\n{CONSTRAINT}\n\
+                         [corrections: policy.measurement-fixes = keep that rule @21]"
+                    ),
+                    "{anchor}"
+                );
+            }
         }
 
-        // Only an anchor that is an open line of the correction's own key moves to the footer.
-        let correction = |key: &str, anchor: &str| Correction {
-            anchor: Some(anchor.to_owned()),
-            key: key.to_owned(),
-            live_value: "v".to_owned(),
-            live_ordinal: 1,
+        // A claim under another key whose words stand in the narrative still splices there, and
+        // one whose words stand in the waiting line of the newest segment lists beside it.
+        let port = |sequence, anchor: &str| Claim {
+            ordinal: sequence,
+            ..claim("db.port", Some(anchor))
         };
-        let anchors: Vec<Option<String>> = beside_open_lines(vec![
-            correction("policy.measurement-fixes", CONSTRAINT),
-            correction("release.server-steps", WAITING),
-            correction("policy.other", CONSTRAINT),
-            correction("release.server-steps", DECIDED),
-            correction("db.port", "the database listens on 5432"),
-        ])
-        .into_iter()
-        .map(|correction| correction.anchor)
-        .collect();
+        let asked = "Waiting on user (db.port-move): Move the database off port 5432?";
+        let rendered = render_rows(
+            &[
+                same(1, narrative, vec![port(1, "port 5432")]),
+                same(2, asked, vec![port(2, "port 5432")]),
+                same(3, asked, vec![port(3, "port 5432"), port(4, "port 5432")]),
+            ],
+            false,
+        );
         assert_eq!(
-            anchors,
-            [
-                None,
-                None,
-                Some(CONSTRAINT.to_owned()),
-                Some(DECIDED.to_owned()),
-                Some("the database listens on 5432".to_owned())
-            ]
+            render_history_segment_at_tier(&rendered[0], 1),
+            "## 10-19 \u{b7} row 1\nBaseline measured on [corrected @4: db.port = v]."
+        );
+        assert_eq!(
+            render_history_segment_at_tier(&rendered[2], 1),
+            format!("## 30-39 \u{b7} row 3\n{asked}\n[corrections: db.port = v @4]")
         );
     }
 
