@@ -25,7 +25,7 @@ identity-contract version.
 Contract identifiers are `CC1` through `CC12`. The adoption table at the end
 maps each later ticket to the contracts it consumes. Changing any contract
 changes `identity_contract_version`
-(`search-projection-identity-v4`), which is one of the invalidation identities every hook
+(`search-projection-identity-v5`), which is one of the invalidation identities every hook
 carries (CC10) and one of the five rebuild triggers in the specification's C7.
 
 ## CC1. Source classes and stable identifiers
@@ -330,10 +330,12 @@ that holds `HookGate::lifecycle_work`, which the owner takes with its manager
 (`docs/search-projection.md`, *Lifecycle work past the freshness limit*).
 Every other admission, including a reader's pin, a supervisor's slice, and a
 producer's dispatch, passes all five gates as stated above. This paragraph
-changes which admissions the freshness gate refuses. It changes no encoder,
-identifier, hook, gate name, limit name, or record a stored family or an
-admission record carries, so `identity_contract_version` stays
-`search-projection-identity-v4`.
+changes which admissions the freshness gate refuses, so it revises
+`identity_contract_version` to `search-projection-identity-v5`. A family built
+under the earlier version is replaced once under the running identity (C7), and
+admission requires evidence bound to the running version. The revision
+keeps every encoder, identifier, hook, gate name, limit name, and record field
+as the earlier version defined it.
 
 The invalidation identity is the tuple `(schema_version,
 tokenizer_fingerprint, analysis_identity, embedding_model,
