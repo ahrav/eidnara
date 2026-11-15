@@ -707,7 +707,7 @@ const MAX_COUNTER: u64 = 1 << 53;
 
 pub(crate) const SOURCE_CAPTURE_KEY: &str = "source_capture";
 /// `SOURCE_CAPTURE_COUNTERS` defines the counter allowlist for `metrics.source_capture` in `docs/host-wire-protocol.md`.
-const SOURCE_CAPTURE_COUNTERS: [&str; 44] = [
+const SOURCE_CAPTURE_COUNTERS: [&str; 45] = [
     "admitted",
     "refused_queue_full",
     "refused_resident_short",
@@ -752,6 +752,7 @@ const SOURCE_CAPTURE_COUNTERS: [&str; 44] = [
     "decisions_descriptor_not_found",
     "decisions_anchored",
     "decisions_head_unavailable",
+    "decisions_approval_refused",
 ];
 const SOURCE_CAPTURE_OLDEST_DEFERRED_KEY: &str = "oldest_deferred_age_ms";
 

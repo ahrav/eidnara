@@ -127,11 +127,13 @@ counts! {
     DecisionsDescriptorNotFound => "decisions_descriptor_not_found",
     DecisionsAnchored => "decisions_anchored",
     DecisionsHeadUnavailable => "decisions_head_unavailable",
+    DecisionsApprovalRefused => "decisions_approval_refused",
 }
 
-/// The memory-capture decision reasons: five citation reasons, then two
-/// anchor reasons.
-const DECISION_COUNTS: [Count; 7] = [
+/// The memory-capture decision reasons: five citation reasons, two anchor
+/// reasons, then the count of user statements stored without the approval
+/// the Kernel refused.
+const DECISION_COUNTS: [Count; 8] = [
     Count::DecisionsCited,
     Count::DecisionsSourceCaptureOff,
     Count::DecisionsSourceIdUnjoinable,
@@ -139,6 +141,7 @@ const DECISION_COUNTS: [Count; 7] = [
     Count::DecisionsDescriptorNotFound,
     Count::DecisionsAnchored,
     Count::DecisionsHeadUnavailable,
+    Count::DecisionsApprovalRefused,
 ];
 
 struct Counters([AtomicU64; Count::ALL.len()]);

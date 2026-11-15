@@ -39,8 +39,10 @@ const CAPTURE_PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// `pending` excludes abandoned jobs; they still count as failed.
 const STATUS_SQL: &str = "SELECT COALESCE(SUM(commit_seq IS NULL AND abandoned_at_ms IS NULL),0),COALESCE(SUM(prepared_json IS NOT NULL),0),COALESCE(SUM(commit_seq IS NOT NULL),0),COALESCE(SUM(commit_seq IS NULL AND last_error IS NOT NULL),0) FROM memory_capture_jobs WHERE project=?1";
-/// Index order is `(project,harness,created_at_ms,rowid)`, so the ORDER BY needs no sorter.
-const PENDING_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL OR paused_until_ms<=?3) ORDER BY created_at_ms,rowid LIMIT 32";
+/// One drain window: the oldest 32 ripe jobs that hold a frozen plan (`?4` = 1)
+/// or await extraction (`?4` = 0). Index order is
+/// `(project,harness,created_at_ms,rowid)`, so the ORDER BY needs no sorter.
+const PENDING_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL)=?4 AND (prepared_json IS NOT NULL OR paused_until_ms<=?3) ORDER BY created_at_ms,rowid LIMIT 32";
 /// Without statistics the planner prefers the covering project index, which
 /// holds every completed row; the partial index holds only the pending ones.
 const PENDING_COUNTS_SQL: &str = "SELECT COALESCE(SUM(project=?1),0),COUNT(*) FROM memory_capture_jobs INDEXED BY idx_memory_capture_pending WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL";
@@ -175,6 +177,17 @@ fn retire_prepared_output_scans(
     )
 }
 
+/// A closed error code: lowercase ASCII letters and `_`, at most 64 bytes.
+fn valid_error_code(code: &str) -> Result<(), MemoryStoreError> {
+    if code.is_empty()
+        || code.len() > 64
+        || !code.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
+    {
+        return Err(MemoryStoreError::Serde("invalid capture error code".into()));
+    }
+    Ok(())
+}
+
 /// Capture rows own audits under `project`; retire them before the session
 /// sweep deletes their rows, since that sweep retires only the `session` scope.
 pub(crate) fn retire_capture_scans_for_session(
@@ -272,7 +285,12 @@ impl MemoryStore {
         })
     }
 
-    /// Reads at most 32 jobs and 64 KiB of source text. Prepared jobs respect
+    /// Reads two windows, each the oldest ripe jobs of its kind: frozen plans
+    /// awaiting a kernel commit, then sources awaiting extraction. A window
+    /// holds at most 32 jobs and 1 MiB of retained text and plan bytes; the
+    /// extraction window also holds at most 64 KiB of source text. The windows
+    /// are independent, so a plan whose commit keeps failing takes no slot
+    /// from a source that has not reached the model. Prepared jobs respect
     /// commit retry deadlines but do not consume the model-failure allowance.
     pub fn pending_memory_captures(
         &self,
@@ -283,34 +301,37 @@ impl MemoryStore {
         self.inner
             .with_conn(|conn| {
                 let mut statement = conn.prepare_cached(PENDING_SQL)?;
-                let rows = statement.query_map(params![project, harness, now_ms], |row| {
-                    Ok(CaptureJob {
-                        job_id: row.get(0)?,
-                        project: row.get(1)?,
-                        harness: row.get(2)?,
-                        session_id: row.get(3)?,
-                        message_id: row.get(4)?,
-                        role: row.get(5)?,
-                        text: row.get(6)?,
-                        prepared: row.get(7)?,
-                        attempts: row.get(8)?,
-                        failures: row.get(9)?,
-                    })
-                })?;
                 let mut jobs = Vec::new();
-                let mut bytes = 0;
-                let mut retained_bytes = 0;
-                for row in rows {
-                    let job = row?;
-                    let charge = job.text.len() + job.prepared.as_ref().map_or(0, String::len);
-                    if bytes + job.text.len() > MAX_CAPTURE_SOURCE_BYTES
-                        || retained_bytes + charge > MAX_CAPTURE_BATCH_RETAINED_BYTES
-                    {
-                        break;
+                for prepared in [true, false] {
+                    let rows =
+                        statement.query_map(params![project, harness, now_ms, prepared], |row| {
+                            Ok(CaptureJob {
+                                job_id: row.get(0)?,
+                                project: row.get(1)?,
+                                harness: row.get(2)?,
+                                session_id: row.get(3)?,
+                                message_id: row.get(4)?,
+                                role: row.get(5)?,
+                                text: row.get(6)?,
+                                prepared: row.get(7)?,
+                                attempts: row.get(8)?,
+                                failures: row.get(9)?,
+                            })
+                        })?;
+                    let mut bytes = 0;
+                    let mut retained_bytes = 0;
+                    for row in rows {
+                        let job = row?;
+                        let charge = job.text.len() + job.prepared.as_ref().map_or(0, String::len);
+                        if (!prepared && bytes + job.text.len() > MAX_CAPTURE_SOURCE_BYTES)
+                            || retained_bytes + charge > MAX_CAPTURE_BATCH_RETAINED_BYTES
+                        {
+                            break;
+                        }
+                        bytes += job.text.len();
+                        retained_bytes += charge;
+                        jobs.push(job);
                     }
-                    bytes += job.text.len();
-                    retained_bytes += charge;
-                    jobs.push(job);
                 }
                 Ok(jobs)
             })
@@ -459,12 +480,7 @@ impl MemoryStore {
         model_failure: bool,
         now_ms: i64,
     ) -> Result<(), MemoryStoreError> {
-        if code.is_empty()
-            || code.len() > 64
-            || !code.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
-        {
-            return Err(MemoryStoreError::Serde("invalid capture error code".into()));
-        }
+        valid_error_code(code)?;
         prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let tx = tx.tx();
             tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,failures=failures+?5 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL",params![project,job,code,retry_at_ms, i64::from(model_failure)])?;
@@ -478,6 +494,31 @@ impl MemoryStore {
                 tx.execute("UPDATE memory_capture_jobs SET failures=0,paused_until_ms=?3 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND failures>=?4",params![project,job,now_ms.saturating_add(CAPTURE_FAILURE_PAUSE_MS),MAX_CAPTURE_FAILURES])?;
             }
             Ok(WriteDisposition::Applied(()))
+        })
+    }
+
+    /// Records a kernel refusal of a frozen plan as one dispatch: the refusal
+    /// is deterministic for the plan as frozen, so it draws on the same
+    /// [`MAX_CAPTURE_ATTEMPTS`] allowance a model dispatch does. Reaching the
+    /// allowance abandons the source, which releases its text and plan and
+    /// keeps its identity and `code`. Returns whether the source was abandoned.
+    pub fn refuse_memory_capture_commit(
+        &self,
+        project: &str,
+        job: &str,
+        code: &str,
+        retry_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<bool, MemoryStoreError> {
+        valid_error_code(code)?;
+        prepared_write(project, job, job)?.execute(&self.inner, |tx| {
+            let tx = tx.tx();
+            tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,attempts=attempts+1 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL",params![project,job,code,retry_at_ms])?;
+            let abandoned = tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='',prepared_json=NULL WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL AND attempts>=?4",params![project,job,now_ms,MAX_CAPTURE_ATTEMPTS])?;
+            if abandoned == 1 {
+                retire_capture_scans(tx, project, job)?;
+            }
+            Ok(WriteDisposition::Applied(abandoned == 1))
         })
     }
 
@@ -865,6 +906,143 @@ mod tests {
         );
     }
 
+    fn numbered_source(index: usize, text: &str) -> CaptureSource<'_> {
+        // Leaked ids keep the borrowed source shape for a handful of rows.
+        CaptureSource {
+            message_id: Box::leak(format!("native-{index}").into_boxed_str()),
+            ..source(text)
+        }
+    }
+
+    #[test]
+    fn refused_plans_and_new_sources_drain_in_separate_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let mut refused = Vec::new();
+        for index in 0..40 {
+            let id = accepted(
+                store
+                    .enqueue_memory_capture(numbered_source(index, "Use staging port 4321."), 1)
+                    .unwrap(),
+            );
+            assert!(store.begin_memory_capture_attempt("/project", &id, 0).unwrap());
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, "{}")
+                    .unwrap()
+                    .is_some()
+            );
+            refused.push(id);
+        }
+        let later = accepted(
+            store
+                .enqueue_memory_capture(numbered_source(40, "The build uses cargo."), 2)
+                .unwrap(),
+        );
+
+        let jobs = store.pending_memory_captures("/project", "pi", 10).unwrap();
+        let (plans, sources): (Vec<_>, Vec<_>) =
+            jobs.iter().partition(|job| job.prepared.is_some());
+        assert_eq!(
+            plans
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            refused[..32],
+            "the oldest 32 frozen plans fill their own window"
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            [later.as_str()],
+            "a source awaiting extraction is read however many plans wait ahead of it"
+        );
+    }
+
+    #[test]
+    fn a_refused_plan_backs_off_by_its_dispatch_count_and_is_abandoned_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let id = accepted(
+            store
+                .enqueue_memory_capture(source("Use staging port 4321."), 1)
+                .unwrap(),
+        );
+        assert!(store.begin_memory_capture_attempt("/project", &id, 0).unwrap());
+        assert!(
+            store
+                .prepare_memory_capture("/project", &id, "{}")
+                .unwrap()
+                .is_some()
+        );
+        // One model dispatch is recorded; each refusal is one more.
+        for refusal in 1..MAX_CAPTURE_ATTEMPTS - 1 {
+            let retry_at = i64::from(refusal) * 100;
+            assert!(
+                !store
+                    .refuse_memory_capture_commit(
+                        "/project",
+                        &id,
+                        "kernel_write_refused",
+                        retry_at,
+                        retry_at
+                    )
+                    .unwrap(),
+                "refusal {refusal} leaves the plan queued"
+            );
+            assert!(
+                store
+                    .pending_memory_captures("/project", "pi", retry_at - 1)
+                    .unwrap()
+                    .is_empty(),
+                "the plan waits for its retry deadline"
+            );
+            let jobs = store
+                .pending_memory_captures("/project", "pi", retry_at)
+                .unwrap();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].attempts, refusal + 1);
+            assert!(jobs[0].prepared.is_some(), "the frozen plan is kept");
+        }
+        assert!(
+            store
+                .refuse_memory_capture_commit("/project", &id, "kernel_write_refused", 0, 5_000)
+                .unwrap(),
+            "the refusal that reaches the dispatch cap abandons the source"
+        );
+        assert!(
+            store
+                .pending_memory_captures("/project", "pi", i64::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        let status = store.memory_capture_status("/project").unwrap();
+        assert_eq!(
+            (status.pending, status.prepared, status.failed),
+            (0, 0, 1),
+            "an abandoned plan leaves the pending count and stays counted as failed"
+        );
+        let (text, error): (String, String) = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT text,last_error FROM memory_capture_jobs WHERE job_id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(text, "", "an abandoned source releases its text bytes");
+        assert_eq!(error, "kernel_write_refused");
+        assert!(
+            !store
+                .refuse_memory_capture_commit("/project", &id, "kernel_write_refused", 0, 6_000)
+                .unwrap(),
+            "an abandoned source records no further refusal"
+        );
+    }
+
     #[test]
     fn non_model_failures_never_abandon_a_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -917,7 +1095,7 @@ mod tests {
                 .any(|step| step.contains("SCAN memory_capture_jobs")),
             "{status:?}"
         );
-        let pending = plan(PENDING_SQL, &["", "pi", "0"]);
+        let pending = plan(PENDING_SQL, &["", "pi", "0", "0"]);
         assert_eq!(
             pending,
             [

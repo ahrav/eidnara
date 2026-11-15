@@ -54,13 +54,13 @@ fn fact(quote: &str) -> Extracted {
     }
 }
 
-async fn capture(
+/// Queues `messages` as capture sources and returns their job ids.
+async fn enqueue(
     handler: &Handler,
     channel: u16,
     session: &str,
     messages: &[(&str, &str, &str)],
-    extract: impl Fn(&str, &[Value]) -> Vec<Extracted>,
-) {
+) -> Vec<String> {
     let request = json!({
         "method": "memory.capture",
         "session_id": session,
@@ -70,14 +70,39 @@ async fn capture(
             .map(|(id, role, text)| json!({"id": id, "role": role, "text": text}))
             .collect::<Vec<_>>(),
     });
-    assert_eq!(
-        body(
-            handler
-                .handle_memory_capture(test_route(channel), &request)
-                .await
-        )["state"],
-        "accepted"
+    let accepted = body(
+        handler
+            .handle_memory_capture(test_route(channel), &request)
+            .await,
     );
+    assert_eq!(accepted["state"], "accepted", "{accepted}");
+    accepted["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| job.as_str().unwrap().to_string())
+        .collect()
+}
+
+async fn capture(
+    handler: &Handler,
+    channel: u16,
+    session: &str,
+    messages: &[(&str, &str, &str)],
+    extract: impl Fn(&str, &[Value]) -> Vec<Extracted>,
+) {
+    enqueue(handler, channel, session, messages).await;
+    drain(handler, channel, session, messages, extract).await;
+}
+
+/// Runs the native drain until every one of `messages` has been extracted.
+async fn drain(
+    handler: &Handler,
+    channel: u16,
+    session: &str,
+    messages: &[(&str, &str, &str)],
+    extract: impl Fn(&str, &[Value]) -> Vec<Extracted>,
+) {
     let next = json!({"method": "memory.capture.next", "session_id": session, "model": "custom-native/model"});
     let mut unseen: Vec<&str> = messages.iter().map(|(_, _, text)| *text).collect();
     while !unseen.is_empty() {
@@ -835,56 +860,245 @@ async fn capture_statements(
     }
 }
 
+fn capture_counter(handler: &Handler, name: &str) -> u64 {
+    handler.source_capture.report(false, 0)[name]
+        .as_u64()
+        .unwrap()
+}
+
+/// The Kernel bounds the authority-bearing statements of one lineage at 64.
+/// Each user message is its own lineage, so three projects sharing one data
+/// home hold 70 statements each, every one approved and searchable, and the
+/// block delivers the newest that fit `memory.injection_budget_tokens`.
 #[tokio::test]
-async fn repro_cause_1_statements_past_the_shared_lineage_bound_are_stored() {
-    let (handler, store, dir, project) = delivery_handler(capture_config()).await;
-    let other = dir.path().join("other-project");
-    std::fs::create_dir_all(&other).unwrap();
-    bind(&handler, OTHER_PROJECT, &other, "s-other", capture_config());
-    let ours = numbered(40, "billing");
-    let theirs = numbered(40, "search");
-    capture_statements(&handler, FIRST, "s1", &ours).await;
-    capture_statements(&handler, OTHER_PROJECT, "s-other", &theirs).await;
-    let stored = explicit_search(&handler, (SECOND, "s2"), &project).await.len();
-    bind(&handler, OTHER_PROJECT + 1, &other, "s-other-2", capture_config());
-    let stored_other = explicit_search(&handler, (OTHER_PROJECT + 1, "s-other-2"), &other)
-        .await
-        .len();
-    let status = store
-        .memory_capture_status(&kernel_routes::ProjectBinding::new(&other).digest().to_owned())
+async fn hundreds_of_statements_across_projects_are_all_approved_and_delivered_within_the_budget() {
+    const PER_PROJECT: usize = 70;
+    const SMALL_BUDGET: f64 = 500.0;
+    let config = capture_config();
+    let (handler, store, dir, project) = delivery_handler(config.clone()).await;
+    let mut projects = vec![("billing", project.clone())];
+    for subject in ["search", "upload"] {
+        let root = dir.path().join(format!("{subject}-project"));
+        std::fs::create_dir_all(&root).unwrap();
+        projects.push((subject, root));
+    }
+    for (index, (subject, root)) in projects.iter().enumerate() {
+        let channel = 40 + index as u16;
+        let session = format!("{subject}-writer");
+        bind(&handler, channel, root, &session, config.clone());
+        capture_statements(&handler, channel, &session, &numbered(PER_PROJECT, subject)).await;
+    }
+    assert_eq!(capture_counter(&handler, "decisions_approval_refused"), 0);
+    for (index, (subject, root)) in projects.iter().enumerate() {
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(root).digest())
+            .unwrap();
+        assert_eq!(
+            (status.pending, status.failed, status.completed),
+            (0, 0, PER_PROJECT as i64),
+            "{subject}: every source committed"
+        );
+        let (reader, session) = (50 + index as u16, format!("{subject}-reader"));
+        bind(&handler, reader, root, &session, config.clone());
+        let rows = explicit_search(&handler, (reader, &session), root).await;
+        assert_eq!(rows.len(), PER_PROJECT, "{subject}");
+        assert!(
+            rows.iter().all(|(_, visibility)| visibility == "visible"),
+            "{subject}: every statement is approved"
+        );
+        assert_eq!(live_statement_records(&handler, root).len(), PER_PROJECT);
+
+        let block = project_memory_block(&serve(&handler, reader, &session).await)
+            .expect("a later session carries the block");
+        assert!(
+            crate::token_cache::cached_estimate_tokens(&block) as f64
+                <= config.memory_budget_tokens,
+            "{subject}: {block}"
+        );
+        let delivered = block.matches("User stated: ").count();
+        assert!(
+            delivered > 64,
+            "{subject}: the default budget delivers more statements than one lineage holds, got {delivered}"
+        );
+        for index in 0..PER_PROJECT {
+            assert_eq!(
+                block.contains(&format!("The {subject} service number {index} listens")),
+                index >= PER_PROJECT - delivered,
+                "{subject}: the block holds the newest {delivered} statements, checked at {index}"
+            );
+        }
+        assert!(!block.contains(projects[(index + 1) % 3].0), "{block}");
+
+        let (tight, session) = (60 + index as u16, format!("{subject}-tight"));
+        bind(
+            &handler,
+            tight,
+            root,
+            &session,
+            DaemonConfig {
+                memory_budget_tokens: SMALL_BUDGET,
+                ..config.clone()
+            },
+        );
+        let block = project_memory_block(&serve(&handler, tight, &session).await)
+            .expect("a smaller budget still carries a block");
+        assert!(
+            crate::token_cache::cached_estimate_tokens(&block) as f64 <= SMALL_BUDGET,
+            "{subject}: {block}"
+        );
+        let newest = format!("The {subject} service number {} listens", PER_PROJECT - 1);
+        let oldest = format!("The {subject} service number 0 listens");
+        assert!(block.contains(&newest), "{block}");
+        assert!(
+            !block.contains(&oldest),
+            "the budget keeps the newest statements: {block}"
+        );
+    }
+}
+
+/// Fills the statement lineage of capture job `job` with 64 accepted records,
+/// the Kernel's bound for one lineage, so the job's own statement is refused.
+fn fill_statement_lineage(handler: &Handler, project: &Path, job: &str) {
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let binding = kernel_routes::ProjectBinding::new(project);
+    let source_id = format!("memory_capture_statement:{}", &job[..32]);
+    kernel
+        .commit_before(
+            Instant::now() + Duration::from_secs(5),
+            kernel::CommitIntent {
+                producer: "test".into(),
+                operation_key: binding.operation_key("test", "fill-lineage").unwrap(),
+                request_digest: "0".repeat(64),
+                actor: "test".into(),
+                cause: "fill one statement lineage".into(),
+            },
+            |envelope| {
+                let (mut domains, mut ready, mut refusal) = (HashSet::new(), false, None);
+                kernel_routes::commit::ensure_domain(envelope, "user-statements", &mut domains)?;
+                kernel_routes::commit::ensure_scope(
+                    envelope,
+                    &binding,
+                    &mut ready,
+                    &mut domains,
+                    &mut refusal,
+                )?;
+                for index in 0..64 {
+                    let id = format!("stm_fill{index}");
+                    envelope.insert_decision(kernel::DecisionSpec {
+                        decision_id: format!("dst_fill{index}"),
+                        object_id: id.clone(),
+                        domain_id: "user-statements".into(),
+                        proposition_id: None,
+                        scope_id: Some(binding.scope_id()),
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "adr_accepted".into(),
+                        payload: kernel::DecisionPayload {
+                            summary: format!("Earlier statement {index}."),
+                            rationale: "{}".into(),
+                        },
+                        source_kind: "user".into(),
+                        source_id: source_id.clone(),
+                        source_revision: 1,
+                        sensitivity: kernel::Sensitivity::Normal,
+                    })?;
+                    kernel_routes::commit::accept_statement(envelope, &id)?;
+                }
+                Ok("64".into())
+            },
+        )
         .unwrap();
-    eprintln!(
-        "stored {stored} + {stored_other}; statements {} + {}; other-project queue {status:?}",
-        live_statement_records(&handler, &project).len(),
-        live_statement_records(&handler, &other).len()
-    );
-    assert_eq!((stored, stored_other), (40, 40));
 }
 
 #[tokio::test]
-async fn repro_cause_2_refused_plans_do_not_hold_back_a_later_source() {
+async fn a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_search_and_counted() {
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
-    capture_statements(&handler, FIRST, "s1", &numbered(104, "billing")).await;
-    let digest = kernel_routes::ProjectBinding::new(&project).digest().to_owned();
-    eprintln!("queue {:?}", store.memory_capture_status(&digest).unwrap());
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
-    let request = json!({
-        "method": "memory.capture",
-        "session_id": "s2",
-        "model": "test/model",
-        "messages": [{"id": "later", "role": "assistant", "text": ASSISTANT_NOTE}],
-    });
+    let messages = [("m1", "user", THURSDAY), ("m2", "user", PNPM)];
+    let jobs = enqueue(&handler, FIRST, "s1", &messages).await;
+    fill_statement_lineage(&handler, &project, &jobs[0]);
+    drain(&handler, FIRST, "s1", &messages, |text, _| vec![fact(text)]).await;
+
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
     assert_eq!(
-        body(handler.handle_memory_capture(test_route(SECOND), &request).await)["state"],
-        "accepted"
+        rows,
+        [
+            (stated(THURSDAY), "labeled".to_string()),
+            (stated(PNPM), "visible".to_string()),
+        ],
+        "the refused statement is stored for explicit search; the other is approved"
     );
+    assert_eq!(capture_counter(&handler, "decisions_approval_refused"), 1);
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+        .unwrap();
+    assert_eq!(
+        (status.pending, status.failed, status.completed),
+        (0, 0, 2),
+        "the refused approval leaves no source waiting"
+    );
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the approved statement is delivered");
+    assert!(block.contains(&stated(PNPM)), "{block}");
+    assert!(
+        !block.contains(&stated(THURSDAY)),
+        "a statement without its approval stays off the automatic surface: {block}"
+    );
+}
+
+/// Forty frozen plans the publication step refuses are ripe when a new source
+/// arrives. The next drain call issues the new source: refused plans wait in
+/// their own window of the drain.
+#[tokio::test]
+async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let refused = numbered(40, "billing");
+    for batch in refused.chunks(20) {
+        let messages: Vec<(&str, &str, &str)> = batch
+            .iter()
+            .map(|(id, text)| (id.as_str(), "user", text.as_str()))
+            .collect();
+        for job in enqueue(&handler, FIRST, "s1", &messages).await {
+            assert!(store.begin_memory_capture_attempt(&digest, &job, 0).unwrap());
+            let frozen = store
+                .prepare_memory_capture(&digest, &job, r#"{"version":0}"#)
+                .unwrap();
+            assert!(frozen.is_some(), "the plan is frozen");
+        }
+    }
+    enqueue(
+        &handler,
+        SECOND,
+        "s2",
+        &[("later", "assistant", ASSISTANT_NOTE)],
+    )
+    .await;
+
     let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
     let work = body(
         handler
             .handle_native_capture_next(test_route(SECOND), &next)
             .await,
     );
-    eprintln!("next after 40 refused plans: {}", work["state"]);
     assert_eq!(work["state"], "work", "{work}");
-    assert!(work["prompt"].as_str().unwrap().contains(ASSISTANT_NOTE));
+    let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        prompt["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [ASSISTANT_NOTE],
+        "the batch holds the new source and none of the refused plans"
+    );
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.pending, status.prepared, status.failed),
+        (41, 40, 32),
+        "one drain call attempted one window of refused plans and kept them queued"
+    );
 }

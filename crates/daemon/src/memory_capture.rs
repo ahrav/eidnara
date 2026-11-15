@@ -1104,21 +1104,42 @@ impl CaptureWork {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let mut reasons = Vec::new();
-        let receipt = publish_captured_memories(
-            &kernel,
-            &self.binding.kernel_project,
-            job,
-            &output,
-            &prepared,
-            settlement,
-            &mut reasons,
-        )
-        .map_err(|error| {
-            if matches!(error, kernel::KernelError::Conflict) {
-                "reconciliation_conflict"
-            } else {
-                "kernel_write_failed"
+        let commit = |approve: bool, reasons: &mut Vec<_>| {
+            reasons.clear();
+            publish_captured_memories(
+                &kernel,
+                &self.binding.kernel_project,
+                job,
+                &output,
+                &prepared,
+                settlement,
+                approve,
+                reasons,
+            )
+        };
+        let receipt = match commit(true, &mut reasons) {
+            // The refused transaction wrote nothing. The same plan commits
+            // with each statement as a labeled memory, so the user's words
+            // stay on explicit search when their approval is refused.
+            Err(kernel::KernelError::AdmissionPolicy)
+                if output
+                    .memories
+                    .iter()
+                    .any(|memory| user_attributed(job, memory)) =>
+            {
+                eprintln!(
+                    "daemon: memory capture statement approval refused; storing its memories for explicit search"
+                );
+                commit(false, &mut reasons)
             }
+            outcome => outcome,
+        }
+        .map_err(|error| match error {
+            kernel::KernelError::Conflict => "reconciliation_conflict",
+            kernel::KernelError::AdmissionPolicy
+            | kernel::KernelError::InvalidInput
+            | kernel::KernelError::NotFound => COMMIT_REFUSED,
+            _ => "kernel_write_failed",
         })?;
         if !receipt.replayed {
             self.source_capture.record_capture_decisions(&reasons);
@@ -1130,8 +1151,10 @@ impl CaptureWork {
     }
 
     /// A rejected kernel transaction wrote nothing. A revision conflict means a
-    /// target moved under the frozen plan, so the source is re-planned; any
-    /// other kernel failure keeps the plan and retries on the dispatch backoff.
+    /// target moved under the frozen plan, so the source is re-planned. A
+    /// refusal of the plan as frozen counts as a dispatch, so its backoff
+    /// doubles and the source is abandoned at the dispatch cap. Any other
+    /// kernel failure keeps the plan and retries on the dispatch backoff.
     fn publish_or_recover(
         &self,
         job: &CaptureJob,
@@ -1140,28 +1163,46 @@ impl CaptureWork {
         let Err(code) = self.publish(job, settlement) else {
             return Ok(());
         };
-        if code == "reconciliation_conflict" {
-            self.store
+        let now = now_ms();
+        let retry_at = now.saturating_add(capture_retry_delay_ms(job.attempts));
+        match code {
+            "reconciliation_conflict" => self
+                .store
                 .retry_memory_capture_reconciliation(
                     &job.project,
                     &job.job_id,
                     job.prepared.as_deref().unwrap_or_default(),
                 )
-                .map_err(|_| "store_failed")
-        } else {
-            self.store
+                .map_err(|_| "store_failed"),
+            COMMIT_REFUSED | "invalid_preparation" => {
+                if self
+                    .store
+                    .refuse_memory_capture_commit(&job.project, &job.job_id, code, retry_at, now)
+                    .map_err(|_| "store_failed")?
+                {
+                    eprintln!("daemon: memory capture source abandoned: {code}");
+                }
+                Ok(())
+            }
+            _ => self
+                .store
                 .fail_memory_capture(
                     &job.project,
                     &job.job_id,
                     "kernel_write_failed",
-                    now_ms().saturating_add(capture_retry_delay_ms(job.attempts)),
+                    retry_at,
                     false,
-                    now_ms(),
+                    now,
                 )
-                .map_err(|_| "store_failed")
+                .map_err(|_| "store_failed"),
         }
     }
 }
+
+/// The error code of a frozen plan the Kernel refuses on policy, input, or a
+/// missing object: committing the same plan again meets the same refusal
+/// unless canonical state changes.
+const COMMIT_REFUSED: &str = "kernel_write_refused";
 
 /// The source lineage of every decision capture publishes.
 pub(crate) const CAPTURE_SOURCE_ID: &str = "memory_capture";
@@ -1202,7 +1243,27 @@ fn holds_whole_message(job: &CaptureJob) -> bool {
 /// The domain of the statement records that approve user-attributed captures;
 /// memory reads select the `memory` domain.
 const STATEMENT_DOMAIN_ID: &str = "user-statements";
+/// The prefix of every statement record's source id. A record written before
+/// statements had one lineage per message carries the prefix alone.
 const STATEMENT_SOURCE_ID: &str = "memory_capture_statement";
+
+/// The source of a statement record is the user message it quotes: the id
+/// joins [`STATEMENT_SOURCE_ID`] and the first 32 hex digits of the capture
+/// job id, which digests the project, harness, session, message id, role, and
+/// redacted text. The Kernel bounds the accepted decisions holding authority
+/// on one lineage at 64, and one message yields at most
+/// [`MAX_CAPTURE_MEMORIES`] (64) statements, so every statement of a message
+/// fits its lineage and a project's statement count has no shared ceiling.
+fn statement_source_id(job: &CaptureJob) -> String {
+    let message = job.job_id.get(..32).unwrap_or(&job.job_id);
+    format!("{STATEMENT_SOURCE_ID}:{message}")
+}
+
+fn is_statement_source(source_id: &str) -> bool {
+    source_id
+        .strip_prefix(STATEMENT_SOURCE_ID)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+}
 
 /// The decision kind the Kernel's approval predicate requires.
 const ACCEPTED_DECISION_KIND: &str = "adr_accepted";
@@ -1241,7 +1302,7 @@ fn record_statement(
             .to_string(),
         },
         source_kind: "user".into(),
-        source_id: STATEMENT_SOURCE_ID.into(),
+        source_id: statement_source_id(job),
         source_revision: 1,
         sensitivity: kernel::Sensitivity::Normal,
     })?;
@@ -1258,7 +1319,7 @@ fn retire_statement(
     };
     if envelope.object_state(&approval)?.is_some_and(|state| {
         state.object.invalidated_commit_seq.is_none()
-            && state.object.source_id == STATEMENT_SOURCE_ID
+            && is_statement_source(&state.object.source_id)
     }) {
         envelope.retire_decision(&approval)?;
     }
@@ -1585,6 +1646,11 @@ fn checked_capture_target(
 
 /// `reasons` receives one citation reason and one anchor reason per decision
 /// the closure writes; a replayed receipt runs no closure and adds none.
+///
+/// `approve` records a statement record for each user-attributed memory and
+/// admits the memory on it. With `approve` false every memory is admitted as
+/// labeled inference, and `reasons` receives one approval-refused reason per
+/// user-attributed memory.
 fn publish_captured_memories(
     kernel: &kernel::KernelStore,
     project: &ProjectBinding,
@@ -1592,6 +1658,7 @@ fn publish_captured_memories(
     output: &PreparedCapture,
     frozen: &str,
     settlement: SettlementOutcome,
+    approve: bool,
     reasons: &mut Vec<crate::source_capture::Count>,
 ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
     use sha2::{Digest, Sha256};
@@ -1724,7 +1791,7 @@ fn publish_captured_memories(
                     retire_statement(envelope, target)?;
                 }
                 cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
-                let approval = if attributed {
+                let approval = if attributed && approve {
                     Some(record_statement(
                         envelope,
                         project,
@@ -1734,6 +1801,9 @@ fn publish_captured_memories(
                         &mut domains,
                     )?)
                 } else {
+                    if attributed {
+                        reasons.push(crate::source_capture::Count::DecisionsApprovalRefused);
+                    }
                     None
                 };
                 kernel_routes::commit::admit_capture(envelope, id, approval.as_deref())?;
@@ -2611,6 +2681,7 @@ mod tests {
             output,
             &frozen,
             SettlementOutcome::Settled,
+            true,
             &mut reasons,
         )
         .unwrap();
@@ -2709,6 +2780,7 @@ mod tests {
                 &refused,
                 &serde_json::to_string(&refused).unwrap(),
                 SettlementOutcome::Settled,
+                true,
                 &mut reasons,
             ),
             Err(kernel::KernelError::Conflict)
@@ -2766,6 +2838,7 @@ mod tests {
                 &output,
                 &frozen,
                 SettlementOutcome::Settled,
+                true,
                 &mut Vec::new(),
             )
             .unwrap();
@@ -2889,6 +2962,7 @@ mod tests {
             &output,
             &frozen,
             SettlementOutcome::Off,
+            true,
             &mut Vec::new(),
         )
     }
@@ -3152,6 +3226,7 @@ mod tests {
                 &prepared,
                 &serde_json::to_string(&prepared).unwrap(),
                 SettlementOutcome::Off,
+                true,
                 &mut Vec::new(),
             ),
             Err(kernel::KernelError::Conflict)
