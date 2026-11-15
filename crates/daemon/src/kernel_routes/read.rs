@@ -67,7 +67,7 @@ pub(crate) struct ReadResponse {
     pub(crate) known_as_of: i64,
     pub(crate) tip: i64,
     pub(crate) rows: Vec<VisibleRow>,
-    /// Whether rows beyond [`MAX_READ_ROWS`] were dropped. Byte-budget truncation happens at serialization, so the response's flag can be `true` while `truncated` here is `false`.
+    /// Whether the read left out rows the selection admits: rows beyond the caller's row cap, or rows from the first whose payload passes the caller's payload-byte cap. The route serializer applies a further byte budget to the encoded rows, so the response's flag can be `true` while `truncated` here is `false`.
     pub(crate) truncated: bool,
     /// Decision rows keyed by `object_id`, looked up at `known_as_of`. Total
     /// over the visible decision-kind rows in `rows`: a missing entry fails
@@ -83,9 +83,6 @@ pub(crate) enum RowSelection<'a> {
     Objects(&'a [String]),
     /// Applied in the kernel query as well; `keeps` re-checks each returned row.
     DomainDecisions(&'a str),
-    /// The decisions of one domain except the named objects, which spend
-    /// neither the row cap nor the byte cap.
-    DomainDecisionsExcept(&'a str, &'a std::collections::HashSet<String>),
 }
 
 impl RowSelection<'_> {
@@ -94,11 +91,6 @@ impl RowSelection<'_> {
             Self::All | Self::Objects(_) => true,
             Self::DomainDecisions(domain_id) => {
                 row.object.object_kind == "decision" && row.object.domain_id == domain_id
-            }
-            Self::DomainDecisionsExcept(domain_id, excluded) => {
-                row.object.object_kind == "decision"
-                    && row.object.domain_id == domain_id
-                    && !excluded.contains(&row.object.object_id)
             }
         }
     }
@@ -185,6 +177,40 @@ pub(crate) fn read_visible(
     )
 }
 
+/// The project's visible decisions of one domain at `as_of` in serving order,
+/// with the snapshot's `known_as_of` and `tip`. The rows carry no payload, so
+/// a caller that judges each row before a cap applies walks them and loads
+/// the payloads of one bounded page at a time.
+pub(crate) fn domain_decisions_in_serving_order(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    surface: Surface,
+    as_of: i64,
+    domain_id: &str,
+) -> Result<(i64, i64, Vec<VisibleRow>), KernelError> {
+    let visible = store.visible_domain_decisions_as_of_in_scope(
+        surface,
+        as_of,
+        domain_id,
+        Some(project.scope_term()),
+    )?;
+    let selection = RowSelection::DomainDecisions(domain_id);
+    let mut filter = ScopeFilter::new(project);
+    let mut terms = stored_terms(store);
+    let mut rows = Vec::new();
+    for row in visible.rows {
+        if selection.keeps(&row) && filter.matches(row.scope_id.as_deref(), &mut terms)? {
+            rows.push(ServingOrderLast(row));
+        }
+    }
+    rows.sort();
+    Ok((
+        visible.known_as_of,
+        visible.tip,
+        rows.into_iter().map(|entry| entry.0).collect(),
+    ))
+}
+
 /// [`read_visible`] under the given row and payload-byte caps.
 pub(crate) fn read_visible_within(
     store: &KernelStore,
@@ -208,8 +234,7 @@ pub(crate) fn read_visible_within(
         RowSelection::Objects(ids) => {
             store.visible_as_of_in_scope(surface, requested, Some(ids), scope)?
         }
-        RowSelection::DomainDecisions(domain_id)
-        | RowSelection::DomainDecisionsExcept(domain_id, _) => {
+        RowSelection::DomainDecisions(domain_id) => {
             store.visible_domain_decisions_as_of_in_scope(surface, requested, domain_id, scope)?
         }
     };

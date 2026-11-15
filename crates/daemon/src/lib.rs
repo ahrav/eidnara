@@ -25441,15 +25441,39 @@ mod tests {
         }
     }
 
+    /// A `pi` transform request: one native row per message, with the
+    /// message's own role and text.
     fn capture_transform_request(messages: &[IngressMessage]) -> TransformRequest {
+        let rows: Vec<Value> = messages
+            .iter()
+            .map(|message| {
+                let text: String = message
+                    .ck
+                    .content()
+                    .iter()
+                    .filter_map(|block| match block.kind() {
+                        BlockKind::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let content = if message.ck.role == "user" {
+                    json!(text)
+                } else {
+                    json!([{"type": "text", "text": text}])
+                };
+                json!({"id": message.mid, "message": {"role": message.ck.role, "content": content}})
+            })
+            .collect();
         serde_json::from_value(json!({
             "kind": "transform",
             "boundary": null,
             "base_revision": "test-base",
-            "serializer_profile": "opencode-aisdk",
+            "serializer_profile": "pi",
             "session_id": "ses",
             "render_config": "cfg0",
             "messages": messages,
+            "native_messages": rows,
         }))
         .unwrap()
     }
@@ -26342,14 +26366,43 @@ mod tests {
                 ("assistant", "Staging now listens on 4321."),
             ]
         );
-        request.native_messages = Some(rows[..5].to_vec());
         handler.purge_session_state("ses", "session_delete");
+        store
+            .execute_tag_sql_for_test("DELETE FROM memory_capture_jobs")
+            .unwrap();
+        request.native_messages = Some(rows[..5].to_vec());
         assert_eq!(
             handler
                 .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
                 .await,
             0,
             "rows that do not pair with the messages name no source"
+        );
+        request.native_messages = None;
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            0,
+            "a request that carries no native rows names no source"
+        );
+        request.native_messages = Some(rows.clone());
+        request.serializer_profile = "owned-llmrunner".into();
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            0,
+            "rows of another serializer profile name no source"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+        request.serializer_profile = "pi".into();
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            2,
+            "the same rows under the pi profile name the two sources"
         );
     }
 

@@ -133,15 +133,17 @@ export async function searchThroughRoute(args: {
     }
     if (ranking.length === 0) return { kind: "ranked", results: [], notes };
 
-    // The limit counts memory decisions. A ranked decision of another domain, such as the statement record that approves a memory and repeats its text, takes no place: each read names as many of the next ranked decisions as places remain, at the snapshot of the first read.
+    // The limit counts memory decisions. A ranked decision of another domain, such as the statement record that approves a memory and repeats its text, takes no place: each read names as many of the next ranked decisions as places remain, and every read after the first reads the store state the first one answered at, so a commit between two reads changes nothing the search renders.
     const nowMs = args.nowMs ?? Date.now();
     const results: KernelMemorySearchResult[] = [];
     const stale: string[] = [];
     const unresolvedObjectIds: string[] = [];
-    let places = args.limit;
+    // A whole number of places, so each pass names at least one decision.
+    let places = Math.floor(args.limit);
     let snapshot: number | null = null;
     for (let next = 0; places > 0 && next < ranking.length; ) {
         const selected = ranking.slice(next, next + places);
+        if (selected.length === 0) break;
         next += selected.length;
         const read = await readObjectRowsChunked({
             client: args.client,
@@ -150,6 +152,7 @@ export async function searchThroughRoute(args: {
             objectIds: selected.map((decision) => decision.objectId),
             signal: args.signal,
             deadline,
+            asOf: snapshot,
         });
         if (!read.ok) return refusedState(read.state);
         if (

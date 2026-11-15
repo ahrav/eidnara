@@ -667,7 +667,9 @@ object describing source capture (Section 7.9), the background publication of
 consented message text, tool results, and configured repository documents as
 Kernel source descriptors. The block also counts the memory-capture
 decisions each committed capture publish wrote, by citation reason and by
-anchor reason; a replayed publish adds nothing. The
+anchor reason, and the user statements a publish stored labeled after the
+Kernel's admission policy refused their approval; a replayed publish adds
+nothing. The
 counters are process-local and start at zero when the daemon starts. The block
 is sanitized field by field: any object survives, a non-object drops the block
 whole, and every field is kept or dropped on its own. Every field is
@@ -899,8 +901,10 @@ boundaries. Reasoning, tool output, and synthetic summaries are excluded.
 A `pi` transform also checkpoints the text of its window. Pi gives the wire
 role `user` to bash executions, extension messages, and branch and compaction
 summaries; a window message is a source only when its own native row's role
-is `user` or `assistant`, and a window whose native rows and messages differ
-in number yields no source.
+is `user` or `assistant`. A transform of another serializer profile, one that
+carries no native rows, and one whose native rows and messages differ in
+number each yield no source. The native role names the kind of Pi entry; it
+does not show who composed the text of a `user` entry.
 Optional `model` is a nonempty provider/model identifier of at most 512 bytes
 without control characters. A checkpoint never invokes a model, with or
 without this hint.
@@ -996,25 +1000,29 @@ Before freezing, each memory's text becomes its exact supporting quotation,
 prefixed with `User stated:` or `Assistant reported:` from the native role.
 The model's paraphrase is not published. A cut quotation of a user source that
 reaches capture under its own message id and lies inside one plain-prose
-paragraph is first widened to the whole sentences of that paragraph that
-contain it, when those sentences meet the statement rule below and fit one
+paragraph is first widened to the whole sentence of that paragraph that
+contains it, when that sentence meets the statement rule below and fits one
 memory's 2,048 bytes: a quotation that leaves out a lead-in clause, a
-negation, or a condition is stored as the user's whole sentence. A quotation
-that already meets the statement rule, and one whose sentences do not
-qualify, is stored as proposed. So is a quotation that occurs in sentences
-that differ, and each of two quotations that would widen to one sentence
-under different categories. A proposal that names `replaces` or
-`also_replaces` is widened only by a lead-in: the words added before the
-quotation end in a comma or a colon, and only its closing `.` or `!` is added
-after it, so a quotation cut after a negation or before a condition stays a
-fragment and replaces nothing. A sentence with a reporting clause before a
+negation, or a condition is stored as the user's whole sentence. Widening adds
+words of the quotation's own line and sentence only. A quotation is stored as
+proposed when it already meets the statement rule; when its sentence does not
+qualify; when the words widening would add hold a line break, a `.`, `!`, or
+question mark before whitespace other than an abbreviation's period, or a
+sentence terminator of another script (`。`, `｡`, `．`, `！`, `।`); when the
+occurrences the search yields lie in qualifying sentences that differ; and
+when it and a proposal of another category name one sentence. A proposal that
+names `replaces` or `also_replaces` is stored as proposed, so only a
+correction the extractor quoted whole meets the statement rule and replaces a
+fact served on `auto_inject`. A sentence with a reporting clause before a
 colon, such as `My teammate wrote: always rebase.`, is the user's sentence
 and is stored whole with that clause. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
-among them; distinct replacement targets keep one memory each, since a
-memory supersedes exactly one predecessor. The frozen memory names
-`duplicate_of` only when every memory it joins names the same target, and a
-user statement whose stored text equals a reference memory served on
+among them; two quotations that differ only in the sentence's closing `.` or
+`!` are one quotation, stored with the mark; distinct replacement targets
+keep one memory each, since a memory supersedes exactly one predecessor. The
+frozen memory names `duplicate_of` only when every memory it joins names the
+same target, and a frozen memory that still names `duplicate_of` and whose
+stored text equals, up to its closing mark, a reference memory served on
 `auto_inject` is a duplicate of that memory whichever target it named. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
@@ -1045,10 +1053,15 @@ dispatch abandons the source with the error `kernel_write_refused` or
 plan or the Kernel holds another receipt for the source, releases the plan
 with the error `reconciliation_conflict`; the source is extracted again after
 the delay of its count, and the conflict met on the ninth dispatch abandons
-it. Each recovery applies to the plan the commit read, so a late answer about
-an earlier plan leaves a newer one as it is. Any other Kernel failure keeps
-the plan, records `kernel_write_failed`, and retries after the delay of the
-current count. An
+it. Any other Kernel failure keeps the plan, records `kernel_write_failed`,
+and retries after the delay of the current count. Each of the three
+recoveries applies to the freeze of the plan the commit read, which the plan
+bytes and the dispatch count read beside them name, so a late answer about an
+earlier plan, or about an earlier freeze of the same bytes, leaves the newer
+one as it is. A publication waits for the capture gate and the Kernel writer
+inside the allowance of its call, 10 seconds for the frozen plans of one
+`memory.capture.next` and 10 seconds for the plans one submission froze; a
+plan the allowance does not reach stays frozen for the next call. An
 abandoned source keeps
 its replay identity and its last error, releases its text and frozen plan, no longer counts
 toward the pending quota or the `pending` status count, is never returned as
@@ -1082,7 +1095,8 @@ tier. `memory.auto_capture` and
 A captured fact is the user's statement when its source message has the user
 role and reaches capture under its own message id (a source id of the form
 `<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
-and hashed ids, never qualifies); its stored text is `User stated: ` followed
+and hashed ids, never qualifies, and neither does a `pi` source whose id is
+in the `eidnara:` space Pi reserves for the rows it derives); its stored text is `User stated: ` followed
 by a verbatim quotation of that message; and the quotation is one or more
 whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
 (closed by a run of the opener's character at least as long), each block a
@@ -1099,24 +1113,34 @@ the same style, when it holds an odd number of the marks of one style
 (straight, curly, angle, corner, or ornamental); a paragraph whose marks pair
 up ends its quotations itself, and a mark of one style closes no quotation of
 another. Pairing is trusted only when the prose of the whole message holds an
-even number of each style's marks and every mark sits where a quotation can
-open or close: after the line start, whitespace, an opening bracket, or
-another mark and before a character that is not whitespace, or after a
-character that is not whitespace, and a straight mark directly after a digit
-is read as an inch or seconds sign. Otherwise every paragraph after the first
-one holding a double mark is left out. A paragraph that opens a single
-quotation with no word-ending single mark to close it leaves out every later
-paragraph, and a single mark after `s` or a digit, which may be a plural
-possessive or a feet mark, closes nothing. The quotation starts the
-paragraph, or follows a `.`, `!`, or `?` and whitespace with a first character
+even number of each style's marks and every mark, read in order, sits where a
+quotation can open or close and takes its turn: a mark after the line start,
+whitespace, an opening bracket, or a mark that opened, and before a character
+that is not whitespace, opens, and its style has no quotation open; any other
+mark after a character that is not whitespace closes, and its style has one
+open. A straight mark directly after a number is read as an inch or seconds
+sign. Otherwise, as for a second opening mark inside an open quotation, every
+paragraph after the first one holding a double mark is left out. A paragraph
+that opens a single quotation with no closing single mark leaves out every
+later paragraph. A single mark closes a quotation of one word when it ends a
+word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
+after `s` or a number, which may be a plural possessive or a feet mark, a
+mark after a bracket, and a word-final mark inside a quotation of several
+words, which may be an elision, close nothing, so such a quotation stays open.
+The rule reads marks by their place and cannot tell every arrangement of
+symmetric marks apart; where it cannot, the text is left out. The quotation starts the
+paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
 follows it past any punctuation; the paragraph's indentation and trailing
 spaces border its sentences as its edges do; neither boundary falls
 at a dotted abbreviation, a word of two or more one- or two-letter segments
 such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
-`Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
-or `Approx` in any letter case before a number; and its trimmed text contains
+`Prof`, `Sr`, `Jr`, `St`), at a single letter or at `vs`, `cf`, `viz`, or
+`ca` when text follows, or before a number at `No`, `Nos`, `Fig`, `Vol`,
+`Ch`, `Sec`, `Eq`, or `Approx` in any letter case and at any word of up to
+five letters; these lists are a heuristic, and a period they keep inside a
+sentence joins two sentences into one span and never cuts one; and its trimmed text contains
 no ASCII, fullwidth, or Arabic question mark, contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes
 a single quotation. The rule reads sentence ends in `.` and `!` only, so text
@@ -1152,12 +1176,13 @@ invalid input. The
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. Those facts
-are left out of the bounded read of the newest 8,192 facts and 8 MiB, so they
-take no place from another session's facts; the read is repeated at the same
-snapshot at most four times to pass over them. The extractor's reference
-memories are ranked from two such reads at one snapshot, the newest facts on
-`explicit_search` and the newest on `auto_inject`; a fact older than both
-windows is not offered. A user message may correct earlier facts, and only
+are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
+however many of them are newer, they take no place from another session's
+facts. The extractor's reference memories are ranked from two bounded reads
+at one snapshot: the newest facts on `explicit_search`, and the facts a
+transform would deliver to each session whose messages the batch holds, so a
+fact a session is shown is a fact its correction can name; a fact older than
+both windows is not offered. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces` (which must share its category
 and at least one content word), retires each further fact it names
