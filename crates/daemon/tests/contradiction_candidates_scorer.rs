@@ -394,7 +394,7 @@ fn the_matcher_digest_pins_every_rule() {
     );
     assert_eq!(
         matcher_digest(),
-        "63a46048304e06a0ff71bf491c9f83effd1c606d2cd393963695670c0a94b0bd",
+        recorded_matcher_digest(),
         "a changed matcher rule changes the digest; update the epoch and the digest together"
     );
 }
@@ -449,4 +449,15 @@ fn a_summary_with_more_than_64_distinct_terms_scores_every_term() {
             decision_terms: 72
         }
     );
+}
+
+/// The matcher digest recorded for the Unicode version of the compiling
+/// toolchain. The preimage names that version, so each version has its own
+/// digest, and a version without a recorded digest fails the pin.
+fn recorded_matcher_digest() -> &'static str {
+    match char::UNICODE_VERSION {
+        (17, 0, 0) => "63a46048304e06a0ff71bf491c9f83effd1c606d2cd393963695670c0a94b0bd",
+        (18, 0, 0) => "92a5bd0e3e3b4c212a317c72b8f3077138f68ef165743b3ee6e14f04065b6187",
+        version => panic!("no matcher digest is recorded for Unicode {version:?}"),
+    }
 }
