@@ -7166,12 +7166,12 @@ async fn a_read_continues_past_the_rows_its_scope_filter_drops() {
     daemon.handler.shutdown().await.unwrap();
 }
 
-/// A page serves each decision object with its decision text when the kernel's chunk carried the row undecoded:
-/// a payload over the chunk's inline size, and a row the chunk read after its decode budget was spent. One commit
+/// A page serves each decision object with its decision text when the kernel's chunk carried the row's size alone:
+/// a payload over the chunk's inline size, and a row the chunk read after its payload budget was spent. One commit
 /// holds more payload than the byte budget, so the page ends inside it and serves that commit's first rows in
 /// object-id order.
 #[tokio::test]
-async fn a_page_serves_the_decisions_its_chunk_left_undecoded() {
+async fn a_page_serves_the_decisions_its_chunk_carried_by_size_alone() {
     use daemon::kernel_routes::read::MAX_READ_ROW_BYTES;
 
     for (name, first, count, summary_bytes) in [

@@ -10,7 +10,7 @@ use super::envelope::{
 use super::object_write;
 use super::redaction::{identity, record, redact};
 use super::scope::Dimension;
-use super::slice::{APPROVAL_REVOKE_KIND, DecisionPayload, DecisionSpec, DecisionWriteOutcome};
+use super::slice::{APPROVAL_REVOKE_KIND, DecisionSpec, DecisionWriteOutcome};
 use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 use crate::CachedSql;
 use crate::current_time_ms;
@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "bba35122b2695c40db2ee13ced369e5ce3d4a720e62b6b1fb601f7878e389e04";
+    "026dd283fc3212b258854a0747a3e7e4aba5aeb3777032f01fffaaaac219b927";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -264,17 +264,19 @@ pub struct ChunkRow {
 pub struct ChunkDecision {
     /// `length(decision_payload)` in bytes.
     pub payload_bytes: u64,
-    /// The decision's kind and payload, decoded while the payload bytes the chunk holds decoded stay within the
-    /// caller's budget. `None` past the budget, for a payload over [`PAGE_PAYLOAD_INLINE_BYTES`], and for a
-    /// payload that does not decode, so a caller reads that decision by id when it serves it.
+    /// The decision's kind and stored payload, held while the payload bytes the chunk holds stay within the
+    /// caller's budget. `None` past the budget and for a payload over [`PAGE_PAYLOAD_INLINE_BYTES`], so a caller
+    /// reads that decision by id when it serves it.
     pub content: Option<DecisionContent>,
 }
 
-/// The part of a decision row a surface serves.
+/// The part of a decision row a surface serves, with the payload as the row stores it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionContent {
     pub decision_kind: String,
-    pub payload: DecisionPayload,
+    /// The stored payload bytes, unchecked: for a decision the kernel wrote, the JSON `serde_json` encodes for
+    /// its [`DecisionPayload`](crate::DecisionPayload).
+    pub stored_payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3721,8 +3723,9 @@ fn served_chunk(
 }
 
 /// The decision the page statement joined to a decision object, when the snapshot holds one. `held_bytes` counts
-/// the payload bytes of the decisions decoded so far; a decision is decoded while that count stays within
-/// `payload_budget`, which bounds the payloads a chunk holds to the budget.
+/// the payload bytes of the decisions held so far; a decision's payload is held while that count stays within
+/// `payload_budget`, which bounds the payloads a chunk holds to the budget. The payload stays as stored, so a
+/// caller that serves the stored text of a row reads each payload once.
 fn chunk_decision(
     row: &rusqlite::Row<'_>,
     requested: i64,
@@ -3744,12 +3747,11 @@ fn chunk_decision(
     let mut content = None;
     if held_bytes.saturating_add(payload_bytes) <= payload_budget
         && let Some(payload) = bytes_column(row, first + 3)?
-        && let Ok(payload) = serde_json::from_slice::<DecisionPayload>(payload)
     {
         *held_bytes = held_bytes.saturating_add(payload_bytes);
         content = Some(DecisionContent {
             decision_kind: row.get(first + 4)?,
-            payload,
+            stored_payload: payload.to_vec(),
         });
     }
     Ok(Some(ChunkDecision {

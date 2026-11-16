@@ -19,7 +19,7 @@ use super::serving;
 use super::{InvalidReason, KernelOutcome, blocking, state_only};
 use crate::HandlerCore;
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError};
-use crate::json_string::push_json_string;
+use crate::json_string::{escape, escape_marks, push_json_string};
 
 const OPERATION: &str = "kernel.read";
 
@@ -180,11 +180,123 @@ impl NewestRows {
     }
 }
 
+/// The end of the JSON string token that starts at `bytes[start]`, when the token is the encoding `serde_json`
+/// writes for its text: [`escape`]'s bytes for a quote, a backslash, and each control byte, and every other byte
+/// as it is. Encoding the text such a token decodes to writes the token again. The caller checks that `bytes` is
+/// UTF-8.
+fn canonical_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if *bytes.get(start)? != b'"' {
+        return None;
+    }
+    let mut at = start + 1;
+    loop {
+        // A word with no quote, backslash, or control byte is string content.
+        while let Some(word) = bytes.get(at..at + 8) {
+            let marks = escape_marks(u64::from_le_bytes(word.try_into().unwrap_or_default()));
+            if marks != 0 {
+                at += (marks.trailing_zeros() / 8) as usize;
+                break;
+            }
+            at += 8;
+        }
+        match *bytes.get(at)? {
+            b'"' => return Some(at + 1),
+            b'\\' => {
+                let named = match *bytes.get(at + 1)? {
+                    b'"' => b'"',
+                    b'\\' => b'\\',
+                    b'b' => 0x08,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'f' => 0x0c,
+                    b'r' => b'\r',
+                    b'u' => {
+                        let digit = |at: usize| char::from(*bytes.get(at)?).to_digit(16);
+                        (digit(at + 4)? << 4 | digit(at + 5)?) as u8
+                    }
+                    _ => return None,
+                };
+                // The escape is canonical when it is the bytes `serde_json` writes for the byte it names.
+                let (written, len) = escape(named);
+                if bytes.get(at..at + len)? != &written[..len] {
+                    return None;
+                }
+                at += len;
+            }
+            0..=0x1f => return None,
+            _ => at += 1,
+        }
+    }
+}
+
+/// A decision as a page serves it: its kind, and its payload as the JSON string tokens of the payload's two
+/// fields, each the bytes `serde_json` writes for the field's text.
+#[derive(Debug, PartialEq, Eq)]
+struct PageDecision {
+    decision_kind: String,
+    /// The bytes that hold both tokens.
+    text: Vec<u8>,
+    summary: std::ops::Range<usize>,
+    rationale: std::ops::Range<usize>,
+}
+
+impl PageDecision {
+    /// The decision of a stored payload that is the text the kernel writes for a decision payload: the two
+    /// fields in stored order, each string in `serde_json`'s encoding. The stored tokens are then the bytes that
+    /// decoding the payload and encoding its fields would write, so the page serves them without that round
+    /// trip. Any other text is `None`, and the page reads that decision by id.
+    fn from_stored(content: DecisionContent) -> Option<Self> {
+        const SUMMARY: &[u8] = b"{\"summary\":";
+        const RATIONALE: &[u8] = b",\"rationale\":";
+        let text = content.stored_payload;
+        if !text.starts_with(SUMMARY) || std::str::from_utf8(&text).is_err() {
+            return None;
+        }
+        let summary = SUMMARY.len()..canonical_string_end(&text, SUMMARY.len())?;
+        if !text[summary.end..].starts_with(RATIONALE) {
+            return None;
+        }
+        let rationale_start = summary.end + RATIONALE.len();
+        let rationale = rationale_start..canonical_string_end(&text, rationale_start)?;
+        if text[rationale.end..] != *b"}" {
+            return None;
+        }
+        Some(Self {
+            decision_kind: content.decision_kind,
+            text,
+            summary,
+            rationale,
+        })
+    }
+
+    fn from_row(decision: DecisionRow) -> Self {
+        let payload = decision.payload;
+        let mut text = Vec::with_capacity(payload.summary.len() + payload.rationale.len() + 4);
+        push_json_string(&mut text, &payload.summary);
+        let summary = 0..text.len();
+        push_json_string(&mut text, &payload.rationale);
+        Self {
+            decision_kind: decision.decision_kind,
+            rationale: summary.end..text.len(),
+            summary,
+            text,
+        }
+    }
+
+    fn summary_json(&self) -> &[u8] {
+        &self.text[self.summary.clone()]
+    }
+
+    fn rationale_json(&self) -> &[u8] {
+        &self.text[self.rationale.clone()]
+    }
+}
+
 /// One page of a read: rows in serving order, each decision object beside the content the read serves for it.
 struct Page {
     known_as_of: i64,
     tip: i64,
-    rows: Vec<(VisibleRow, Option<DecisionContent>)>,
+    rows: Vec<(VisibleRow, Option<PageDecision>)>,
     /// Whether the read left rows out before the byte budget of the encoding applied.
     truncated: bool,
 }
@@ -196,11 +308,7 @@ impl From<ReadResponse> for Page {
             .into_iter()
             .map(|row| {
                 let decision = response.decisions.remove(&row.object.object_id);
-                let content = decision.map(|decision| DecisionContent {
-                    decision_kind: decision.decision_kind,
-                    payload: decision.payload,
-                });
-                (row, content)
+                (row, decision.map(PageDecision::from_row))
             })
             .collect();
         Self {
@@ -241,8 +349,8 @@ fn newest_page(
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(store);
-    let mut rows: Vec<(VisibleRow, Option<DecisionContent>)> = Vec::new();
-    // Positions in `rows` of the decision objects whose chunk carried no decoded content.
+    let mut rows: Vec<(VisibleRow, Option<PageDecision>)> = Vec::new();
+    // Positions in `rows` of the decision objects whose chunk carried no payload the page can serve as stored.
     let mut unread: Vec<usize> = Vec::new();
     let mut payload_bytes: u64 = 0;
     let mut position = before.cloned();
@@ -280,7 +388,7 @@ fn newest_page(
                 if payload_bytes > MAX_READ_ROW_BYTES as u64 {
                     break 'page true;
                 }
-                content = decision.content;
+                content = decision.content.and_then(PageDecision::from_stored);
                 if content.is_none() {
                     unread.push(rows.len());
                 }
@@ -308,10 +416,7 @@ fn newest_page(
             let decision = decisions
                 .remove(id)
                 .ok_or(KernelError::CorruptCanonicalRow)?;
-            rows[index].1 = Some(DecisionContent {
-                decision_kind: decision.decision_kind,
-                payload: decision.payload,
-            });
+            rows[index].1 = Some(PageDecision::from_row(decision));
         }
     }
     Ok(Page {
@@ -467,7 +572,7 @@ fn write_int(body: &mut Vec<u8>, value: i64) {
 fn write_row(
     body: &mut Vec<u8>,
     row: &VisibleRow,
-    decision: Option<&DecisionContent>,
+    decision: Option<&PageDecision>,
     known_as_of: i64,
 ) {
     let object = &row.object;
@@ -477,9 +582,9 @@ fn write_row(
             body.extend_from_slice(b"{\"decision_kind\":");
             push_json_string(body, &decision.decision_kind);
             body.extend_from_slice(b",\"payload\":{\"rationale\":");
-            push_json_string(body, &decision.payload.rationale);
+            body.extend_from_slice(decision.rationale_json());
             body.extend_from_slice(b",\"summary\":");
-            push_json_string(body, &decision.payload.summary);
+            body.extend_from_slice(decision.summary_json());
             body.extend_from_slice(b"}}");
         }
         None => body.extend_from_slice(b"null"),
@@ -636,6 +741,7 @@ impl HandlerCore {
 #[cfg(test)]
 mod tests {
     use kernel::{DecisionPayload, ObjectRow, Sensitivity, SurfaceVisibility};
+    use proptest::prelude::Strategy as _;
     use serde_json::json;
 
     use super::*;
@@ -690,15 +796,28 @@ mod tests {
         }
     }
 
-    fn content(decision: &DecisionRow) -> DecisionContent {
-        DecisionContent {
-            decision_kind: decision.decision_kind.clone(),
-            payload: decision.payload.clone(),
+    fn content(decision: &DecisionRow) -> PageDecision {
+        PageDecision::from_row(decision.clone())
+    }
+
+    /// The payload a page decision's tokens decode to.
+    fn payload(decision: &PageDecision) -> DecisionPayload {
+        DecisionPayload {
+            summary: serde_json::from_slice(decision.summary_json()).unwrap(),
+            rationale: serde_json::from_slice(decision.rationale_json()).unwrap(),
         }
     }
 
+    /// The page decision of the payload text the kernel stores for `decision`.
+    fn stored(decision: &DecisionRow) -> Option<PageDecision> {
+        PageDecision::from_stored(DecisionContent {
+            decision_kind: decision.decision_kind.clone(),
+            stored_payload: serde_json::to_vec(&decision.payload).unwrap(),
+        })
+    }
+
     /// `to_value` of a struct emits its keys in sorted order, so this tree fixes field order too.
-    fn row_value(row: &VisibleRow, decision: Option<&DecisionContent>, known_as_of: i64) -> Value {
+    fn row_value(row: &VisibleRow, decision: Option<&PageDecision>, known_as_of: i64) -> Value {
         json!({
             "object": row.object,
             "visibility": row.visibility.as_str(),
@@ -707,7 +826,7 @@ mod tests {
             "token": {"object_id": row.object.object_id, "known_as_of": known_as_of},
             "decision": decision.map(|decision| json!({
                 "decision_kind": decision.decision_kind,
-                "payload": decision.payload,
+                "payload": payload(decision),
             })),
         })
     }
@@ -761,6 +880,130 @@ mod tests {
             write_int(&mut written, value);
             proptest::prop_assert_eq!(String::from_utf8(written).unwrap(), serde_json::to_string(&value).unwrap());
         }
+
+        /// The token of any text ends where `serde_json` ends it, at every offset into a word and with any bytes
+        /// after it.
+        #[test]
+        fn the_encoding_of_any_text_is_a_canonical_token(
+            text in proptest::prelude::any::<String>(),
+            lead in 0usize..24,
+            trail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..24),
+        ) {
+            let token = serde_json::to_vec(&text).unwrap();
+            let mut bytes = vec![b'a'; lead];
+            bytes.extend_from_slice(&token);
+            bytes.extend_from_slice(&trail);
+            proptest::prop_assert_eq!(canonical_string_end(&bytes, lead), Some(lead + token.len()));
+        }
+
+        /// Bytes the scan accepts as a token decode to a text whose encoding is those bytes, so serving them
+        /// equals decoding and encoding again.
+        #[test]
+        fn an_accepted_token_is_the_encoding_of_its_text(
+            pieces in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::sample::select(vec![
+                        "\"", "\\", "\\\\", "\\\"", "\\u", "\\u00", "\\u001", "\\u00", "0", "1", "a", "f", "A", "F", "b",
+                        "t", "n", "r", "/", "\u{7f}", "\u{1f}", "\n", "é", "\u{1F600}", "  ", "xxxxxxx",
+                    ]).prop_map(str::to_string),
+                    proptest::prelude::any::<char>().prop_map(String::from),
+                ],
+                0..24,
+            ),
+            lead in 0usize..12,
+        ) {
+            let mut bytes = vec![b'a'; lead];
+            bytes.push(b'"');
+            bytes.extend_from_slice(pieces.concat().as_bytes());
+            if let Some(end) = canonical_string_end(&bytes, lead) {
+                let token = &bytes[lead..end];
+                let text: String = serde_json::from_slice(token).unwrap();
+                proptest::prop_assert_eq!(serde_json::to_vec(&text).unwrap(), token);
+            }
+        }
+    }
+
+    /// Every escape `serde_json` reads is a canonical token exactly when `serde_json` writes that escape back.
+    #[test]
+    fn an_escape_is_canonical_exactly_when_serde_json_writes_it() {
+        let canonical = |token: &[u8]| {
+            let accepted = canonical_string_end(token, 0) == Some(token.len());
+            let rewritten = serde_json::from_slice::<String>(token)
+                .is_ok_and(|text| serde_json::to_vec(&text).unwrap() == token);
+            assert_eq!(accepted, rewritten, "{:?}", String::from_utf8_lossy(token));
+            accepted
+        };
+        let mut short = 0;
+        for byte in 0u8..=0x7f {
+            short += usize::from(canonical(&[b'"', b'\\', byte, b'"']));
+            // A raw control byte, quote, or backslash is no string content.
+            canonical(&[b'"', byte, b'"']);
+        }
+        assert_eq!(short, 7, "the two-byte escapes serde_json writes");
+        let hex = b"0123456789abcdefABCDEF";
+        let mut long = 0;
+        for a in hex {
+            for b in hex {
+                for c in hex {
+                    for d in hex {
+                        long += usize::from(canonical(&[b'"', b'\\', b'u', *a, *b, *c, *d, b'"']));
+                    }
+                }
+            }
+        }
+        assert_eq!(long, 0x20 - 5, "the control bytes with no two-byte escape");
+        for token in [
+            &b""[..],
+            b"\"",
+            b"\"abc",
+            b"\"abc\\",
+            b"\"\\u00",
+            b"\"\\u001",
+            b"abc\"",
+        ] {
+            assert_eq!(canonical_string_end(token, 0), None, "{token:?}");
+        }
+    }
+
+    /// A stored payload in the kernel's text becomes the tokens that encoding its fields writes. A payload in any
+    /// other text, valid JSON or not, is left to the read by id.
+    #[test]
+    fn a_stored_payload_is_served_as_stored_only_in_the_kernels_text() {
+        let mut decision = decision("memory-decision");
+        decision.payload.summary =
+            "quote \" slash \\ tab \t bell \u{7} é \u{1F600} \u{7f}".to_string();
+        assert_eq!(payload(&stored(&decision).unwrap()), decision.payload);
+        let (from_stored, from_row) = (stored(&decision).unwrap(), content(&decision));
+        assert_eq!(from_stored.decision_kind, from_row.decision_kind);
+        assert_eq!(from_stored.summary_json(), from_row.summary_json());
+        assert_eq!(from_stored.rationale_json(), from_row.rationale_json());
+
+        let refused = |stored_payload: &[u8]| {
+            PageDecision::from_stored(DecisionContent {
+                decision_kind: "fact".to_string(),
+                stored_payload: stored_payload.to_vec(),
+            })
+            .is_none()
+        };
+        assert!(!refused(br#"{"summary":"s","rationale":"r"}"#));
+        for other in [
+            &br#"{"rationale":"r","summary":"s"}"#[..],
+            br#"{"summary": "s","rationale":"r"}"#,
+            br#"{"summary":"s","rationale":"r"} "#,
+            br#"{"summary":"s","rationale":"r","extra":1}"#,
+            br#"{"summary":"s","rationale":"r"}}"#,
+            br#"{"summary":"\u0073","rationale":"r"}"#,
+            br#"{"summary":"s\/","rationale":"r"}"#,
+            br#"{"summary":"s","rationale":"r""#,
+            br#"{"summary":"s","rationale":7}"#,
+            br#"{"summary":"s"}"#,
+            b"{\"summary\":\"\xff\",\"rationale\":\"r\"}",
+            b"{\"summary\":\"s\",\"rationale\":\"\xc3\"}",
+            b"{}",
+            b"",
+        ] {
+            assert!(refused(other), "{:?}", String::from_utf8_lossy(other));
+        }
     }
 
     #[test]
@@ -783,7 +1026,8 @@ mod tests {
             known_as_of: 41,
             tip: 42,
             rows: vec![
-                (populated, Some(content(&decision))),
+                (populated.clone(), Some(content(&decision))),
+                (populated, stored(&decision)),
                 (row("observation", "notes"), None),
             ],
             truncated: true,
@@ -793,7 +1037,7 @@ mod tests {
             let body = encode_page(&page, gated).unwrap();
             assert_eq!(
                 String::from_utf8(body.clone()).unwrap(),
-                body_bytes(&page, 2, gated, truncated)
+                body_bytes(&page, 3, gated, truncated)
             );
             let output = PreparedOutput::cached_bytes(body.clone());
             assert!(output.serializes_directly());

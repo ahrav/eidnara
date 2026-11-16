@@ -654,8 +654,9 @@ fn a_chunk_after_a_position_serves_exactly_the_rows_that_follow_it() {
 }
 
 /// A chunk carries the decision of each decision object: its payload size as stored and, inside the payload
-/// budget, the kind and payload a read by id returns. An object that is no decision carries none, and a decision whose stored
-/// payload does not decode carries its size alone, so the read by id reports it.
+/// budget, its kind and the stored payload, which is the JSON `serde_json` encodes for the payload a read by id
+/// returns. An object that is no decision carries none. A decision whose stored payload does not decode carries
+/// those bytes too, so a caller that serves decoded payloads finds it and the read by id reports it.
 #[test]
 fn a_chunk_carries_each_decision_object_with_its_decision() {
     let directory = tempfile::tempdir().unwrap();
@@ -708,17 +709,21 @@ fn a_chunk_carries_each_decision_object_with_its_decision() {
             continue;
         }
         let decision = entry.decision.as_ref().expect(id);
+        let stored_payload = decision
+            .content
+            .as_ref()
+            .map(|content| &content.stored_payload);
         if *id == undecodable {
             assert_eq!(
-                (decision.payload_bytes, decision.content.as_ref()),
-                (2, None)
+                (decision.payload_bytes, stored_payload),
+                (2, Some(&b"{}".to_vec()))
             );
             continue;
         }
         assert_eq!(decision.payload_bytes, sizes[id], "{id}");
         let content = DecisionContent {
             decision_kind: stored[id].decision_kind.clone(),
-            payload: stored[id].payload.clone(),
+            stored_payload: serde_json::to_vec(&stored[id].payload).unwrap(),
         };
         assert_eq!(decision.content.as_ref(), Some(&content), "{id}");
     }
@@ -795,9 +800,9 @@ fn a_chunk_carries_a_decision_only_while_its_row_is_live_at_the_snapshot() {
 }
 
 /// A payload budget ends the chunk at the first commit boundary where the rows' payload bytes pass it. The
-/// decisions the chunk decodes stay within the budget, and every decision keeps its payload size.
+/// payloads the chunk holds stay within the budget, and every decision keeps its payload size.
 #[test]
-fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_rows() {
+fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_payloads_it_holds() {
     let directory = tempfile::tempdir().unwrap();
     let store = store_with(directory.path(), 40, 300, 4);
     let tip = store.tip().unwrap();
@@ -840,14 +845,14 @@ fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_r
             commit_of(&all.rows[chunk.rows.len()]) < last_commit,
             "budget {budget}: the chunk split a commit"
         );
-        let decoded: u64 = chunk
+        let held: u64 = chunk
             .rows
             .iter()
             .filter_map(|entry| entry.decision.as_ref())
             .filter(|decision| decision.content.is_some())
             .map(|decision| decision.payload_bytes)
             .sum();
-        assert!(decoded <= budget, "budget {budget}: decoded {decoded}");
+        assert!(held <= budget, "budget {budget}: held {held}");
         for (entry, full) in chunk.rows.iter().zip(&all.rows) {
             let (decision, stored) = (entry.decision.as_ref(), full.decision.as_ref());
             assert_eq!(
@@ -886,7 +891,7 @@ fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_r
 }
 
 /// A chunk after a position inside a commit spends its payload budget on the rows it returns: with a budget of
-/// exactly their payload bytes it holds every one of their decisions decoded, as the unbounded read does.
+/// exactly their payload bytes it holds every one of their payloads, as the unbounded read does.
 #[test]
 fn a_chunk_after_a_position_spends_its_payload_budget_on_the_rows_it_returns() {
     let directory = tempfile::tempdir().unwrap();
