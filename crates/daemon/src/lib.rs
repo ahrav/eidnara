@@ -3224,7 +3224,8 @@ struct HistorySummarizerPrepareContext<'a> {
     snapshot_generation: u64,
     timings: &'a mut HistorySummarizerTriggerTimings,
     /// The pass's pinned canonical memory read, so the history_summarizer prompt and the
-    /// m0 of the same pass compose from one snapshot.
+    /// m0 of the same pass compose from one snapshot. A firing of a pass that holds
+    /// none reads its own snapshot for its prompt.
     project_memory: Option<&'a canonical_memory::CanonicalMemoryRead>,
 }
 
@@ -5954,7 +5955,9 @@ impl HandlerCore {
                 boundary,
                 // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read.
                 memory_enabled: binding.config.memory_enabled,
-                project_memory: project_memory.cloned(),
+                project_memory: project_memory.cloned().or_else(|| {
+                    self.project_memory_read(binding, &binding.config, &parsed.session_id)
+                }),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
@@ -9662,10 +9665,13 @@ impl HandlerCore {
         // One canonical read per pass: every memory surface of the pass (m0, the
         // m1 revision signal, and a history_summarizer firing this pass triggers), and
         // every attempt the transform makes, composes from the same pinned
-        // snapshot. `None` when memory is disabled, so the kernel store is not
-        // touched for a block that is never rendered.
-        let project_memory =
-            self.project_memory_read(&binding, &binding.config, &parsed.session_id);
+        // snapshot. With `memory_auto_inject` false, a history_summarizer firing
+        // reads its own snapshot for its prompt.
+        let project_memory = binding
+            .config
+            .memory_auto_inject
+            .then(|| self.project_memory_read(&binding, &binding.config, &parsed.session_id))
+            .flatten();
         let env = PassEnv {
             store,
             parsed,
@@ -9889,7 +9895,7 @@ impl HandlerCore {
     /// The Kernel to advance `last_transform_at` in after a settled committed pass, when a live record of the session needs it: the check reads within what remains of the pass's Kernel wait, and a skip is counted. A route with memory disabled takes no Kernel read, so it writes no record and touches none.
     fn use_outcomes_to_touch(&self, env: &PassEnv) -> Option<Arc<kernel::KernelStore>> {
         if !self.kernel.expected()
-            || env.project_memory.is_none()
+            || !env.binding.config.memory_enabled
             || env
                 .touch_delegated
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -40220,6 +40226,60 @@ mod tests {
         ] {
             assert!(!prompt.contains(absent), "{absent} leaked into {prompt}");
         }
+    }
+
+    /// `memory_auto_inject` gates the memory block of the served messages; a
+    /// history_summarizer firing composes its prompt from the project's
+    /// canonical rows either way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_history_summarizer_firing_reads_project_memory_with_auto_inject_off() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+        let kernel = handler.kernel.kernel_store().unwrap();
+        let session = binding(project.to_str().unwrap(), "ses");
+        kernel
+            .commit(kernel_route_fixtures::intent("scope"), |envelope| {
+                kernel_route_fixtures::ensure_route_scope(envelope, &project)?;
+                Ok(String::new())
+            })
+            .unwrap();
+        kernel_route_fixtures::commit_verified_memory(
+            &kernel,
+            "rule",
+            "mem-rule",
+            &session.kernel_project.scope_id(),
+            "PROJECT_RULES",
+            "Keep the public contract.",
+        );
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_inject: false,
+                    ..default_test_config()
+                },
+                ..session
+            },
+        );
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(
+            response["history_summarizer"]["project_memory"]["kind"], "canonical",
+            "{response}"
+        );
+        assert!(
+            !serde_json::to_string(&response["messages"])
+                .unwrap()
+                .contains("<project-memory>"),
+            "{response}"
+        );
+        wait_for_count(&producer.starts, 1).await;
+        let prompt = producer.prompts.lock().unwrap()[0].clone();
+        assert!(
+            prompt.contains("mem-rule: Keep the public contract."),
+            "{prompt}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
