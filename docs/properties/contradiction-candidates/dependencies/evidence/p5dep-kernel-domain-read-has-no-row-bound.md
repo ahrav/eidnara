@@ -36,7 +36,11 @@ resource boundaries, vacuity.
   `payload_budget` bytes (`admission.rs:3244-3276`).
 - The daemon cap test `kernel_routes.rs:1958` constructs over-cap rows, reads
   them through `kernel.read` with no `object_ids`, and observes only the wire
-  response; the Kernel-side count of the domain read is not asserted.
+  response. `crates/daemon/src/kernel_routes/read.rs:1025`
+  `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` puts 8,193
+  same-project `memory` decisions through the domain read by way of
+  `read_visible` and observes the daemon's `truncated` flag; the Kernel-side
+  count of the domain read is not asserted.
 
 ## Failure scenario
 
@@ -58,7 +62,8 @@ None; the cost is in the read itself.
 ## What a test must construct
 
 - At least 8193 visible same-project `memory` decisions at one snapshot.
-- Inside the over-cap fixture (`kernel_routes.rs:1958`), call the Kernel API
+- Inside an over-cap fixture of `memory` decisions
+  (`crates/daemon/src/kernel_routes/read.rs:1025` builds one), call the Kernel API
   directly and record `rows.len()` on its return value; assert
   `sometimes(len > MAX_READ_ROWS)` across the campaign. No production marker
   is needed.

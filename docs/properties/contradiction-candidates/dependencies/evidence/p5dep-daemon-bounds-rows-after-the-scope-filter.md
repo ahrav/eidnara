@@ -84,7 +84,8 @@ arguments. Lens: resource boundaries; C6.
   `:7273`
   `a_read_fails_closed_for_a_decision_object_without_a_live_decision_row`;
   `:7414` `a_full_page_reads_later_chunks_to_decide_truncation`.
-  The route tests read without `object_ids` and so run `newest_page`;
+  The route tests' over-cap and over-budget reads carry no `object_ids` and
+  so run `newest_page`;
   `:2080` checks the `NewestRows` heap that `read_visible_page` uses, and
   `crates/daemon/src/kernel_routes/read.rs:1025`
   `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` puts one row

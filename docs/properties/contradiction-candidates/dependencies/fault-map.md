@@ -86,8 +86,9 @@ Each asserts a precondition, never the violation:
    reads `invalidated_commit_seq` on both rows. Cheap and currently
    unconstructed; highest information per cost in this set.
 5. S3 claim-fact bounds: existing test pattern plus the acquisition counter.
-6. S2 daemon bound and S2 reachability witness: existing over-cap fixture
-   plus one probe.
+6. S2 daemon bound and S2 reachability witness: the existing over-cap
+   fixture of `memory` decisions
+   (`crates/daemon/src/kernel_routes/read.rs:1025`) plus one probe.
 7. S4 records: existing integration suite; add a one-terminal-per-job
    assertion across the exit matrix.
 8. S3 budget exhaustion inside a statement: needs an injection point or a

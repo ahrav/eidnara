@@ -312,7 +312,8 @@ Type: safety
 Reachability: default-production - `kernel.read` (`read.rs:671-677`) serves a
 request with `object_ids` through `read_visible_page` (`read.rs:395`) and a
 request with none through `newest_page` (`read.rs:289`); `read_visible`
-(`read.rs:383`) puts the in-process `DomainDecisions` callers on
+(`read.rs:383`) puts the in-process callers, the `DomainDecisions` readers
+and the classifier's named-id read (`crates/daemon/src/lib.rs:15206`), on
 `read_visible_page`.
 Status: active
 Exercised: yes - on the `newest_page` path,
@@ -367,8 +368,9 @@ cursor under the row cap,
 (`:7273`), and `a_full_page_reads_later_chunks_to_decide_truncation`
 (`:7414`); for `read_visible_page`,
 `a_domain_selection_over_the_row_cap_keeps_the_newest_rows`
-(`crates/daemon/src/kernel_routes/read.rs:1025`). The route tests read
-without `object_ids`, so they check `newest_page`. Status unaudited.
+(`crates/daemon/src/kernel_routes/read.rs:1025`). The route tests' over-cap
+and over-budget reads carry no `object_ids`, so `newest_page` serves them.
+Status unaudited.
 Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at
 `crates/daemon/src/candidate_pass_tests.rs:665` cuts the two oldest at a
@@ -385,9 +387,11 @@ Reachability: default-production - any in-process `DomainDecisions` read
 through `read_visible` (`read.rs:418-423`), such as the canonical memory
 read, on a project with many decisions. `kernel.read` does not call this API.
 Status: active
-Exercised: not yet - no test constructs a same-project `memory` domain with
-more than `MAX_READ_ROWS` decisions and observes the Kernel-side
-materialization before the daemon heap.
+Exercised: partial - `crates/daemon/src/kernel_routes/read.rs:1025` puts
+8,193 same-project `memory` decisions through the domain read by way of
+`read_visible` and asserts `truncated`, which holds only when the domain read
+returned more than `MAX_READ_ROWS` rows; the count on the Kernel API's return
+value is not asserted.
 Guarantee: the situation "the Kernel returned more rows than the daemon
 keeps" is reachable at HEAD: `visible_domain_decisions_as_of_in_scope` has
 no `max_rows`, `max_bytes`, or `EvalBudget` parameter and materializes every
@@ -406,7 +410,10 @@ Required faults and enabling state: at least 8193 visible same-project
 `memory` decisions at one snapshot.
 Confidence: high - [evidence](evidence/p5dep-kernel-domain-read-has-no-row-bound.md).
 Read the signature at `admission.rs:3278-3287` and `visible_selected_as_of`.
-Existing check: none for the Kernel-side count; the daemon-side cap test
+Existing check: none for the Kernel-side count.
+`a_domain_selection_over_the_row_cap_keeps_the_newest_rows`
+(`crates/daemon/src/kernel_routes/read.rs:1025`) constructs the state and
+observes it through the daemon's `truncated` flag. The route cap test
 (`kernel_routes.rs:1958`) constructs over-cap rows, but its `kernel.read`
 reads them through `visible_chunk_as_of_in_scope`, so it would witness this
 state only by calling the domain read directly. Status unaudited.

@@ -43,10 +43,10 @@ folding exists as a check; the goldens imply both (e.g. `HTTPServer` stays
 | `the_row_cap_serves_a_surface_of_its_size_whole_and_flags_one_row_more` | `:7225` | `MAX_READ_ROWS` rows serve with `truncated: false`; one row more serves the newest `MAX_READ_ROWS` with `truncated: true` | unaudited |
 | `a_read_fails_closed_for_a_decision_object_without_a_live_decision_row` | `:7273` | a decision object whose decision row is not live at the snapshot answers `store_unsupported` and serves no row | unaudited |
 | `a_full_page_reads_later_chunks_to_decide_truncation` | `:7414` | a page that fills at the end of a chunk reports `truncated: true` when a later chunk holds a project row and `truncated: false` when it holds none | unaudited |
-| `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` | `crates/daemon/src/kernel_routes/read.rs:1025` | `read_visible` over one decision more than `MAX_READ_ROWS` keeps the newest rows with their decisions and `truncated: true` | unaudited |
 | `rows_serve_only_to_the_project_their_scope_names` | `:1803` | cross-project rows absent | unaudited |
 | `recorded_cross_project_read_is_empty` | `:1366` | | unaudited |
 | `a_request_naming_another_project_root_is_refused_before_any_work` | `:1487` | project mismatch before work | unaudited |
+| `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` | `crates/daemon/src/kernel_routes/read.rs:1025` | `read_visible` over one decision more than `MAX_READ_ROWS` keeps the newest rows with their decisions and `truncated: true` | unaudited |
 
 Production guards: `CorruptCanonicalRow` when a visible decision lacks its
 payload size or row in `read_visible_page` (`read.rs:450-455`, `:483-488`),
@@ -57,7 +57,9 @@ None found: no test asserts the Kernel API's lack of a row bound (it is an
 absence, not a check), and no test drives `visible_domain_decisions_as_of_in_scope`
 with a `ScopeTermFilter` on `Dimension::Project` directly; the daemon tests
 reach that filter through `kernel.read`, which passes it to the chunk and
-named-id statements and does not run the domain statement.
+named-id statements and does not run the domain statement, and through
+`read_visible` (`crates/daemon/src/kernel_routes/read.rs:1025`), which passes
+it to the domain statement.
 
 ## S3 budgeted Kernel reads
 

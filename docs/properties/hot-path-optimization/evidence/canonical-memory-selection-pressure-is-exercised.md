@@ -16,9 +16,9 @@ from a premature row limit. Row and byte pressure need separate witnesses.
 - [read.rs:425-472][cutoff] filters before heap admission and then applies the
   cumulative payload cutoff to the retained newest-first rows.
 - [kernel_routes.rs:1958][row-test] and [2112][byte-test] contain generic cap
-  tests. Their existence is not this campaign's pressure evidence. Both read
-  through `kernel.read` with no `object_ids`, which `newest_page` serves, so
-  neither runs the heap or the cutoff above.
+  tests. Their existence is not this campaign's pressure evidence. Their
+  over-cap and over-budget reads carry no `object_ids`, so `newest_page`
+  serves them and neither puts pressure on the heap or the cutoff above.
 
 ## Failure scenario
 
