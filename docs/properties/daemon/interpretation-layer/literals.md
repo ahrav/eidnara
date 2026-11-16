@@ -362,7 +362,7 @@ or rendered output text carries no interpretation of a harness record.
 | <code>0123456789abcdef</code> | rendered text, marker, separator, or value | `wire.rs:651` |
 | <code>; </code> | rendered text, marker, separator, or value | `crates/daemon/src/tool_outcome.rs:170` |
 | <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:185` |
-| <code>; output=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:354` |
+| <code>; output=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:382` |
 | <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:185` |
 | <code>&lt;!-- OMO_INTERNAL_INITIATOR --&gt;</code> | rendered text, marker, separator, or value | `chunk_text.rs:14` |
 | <code>&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:48` |
