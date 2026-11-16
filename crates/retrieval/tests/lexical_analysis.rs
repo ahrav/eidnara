@@ -407,7 +407,18 @@ fn identity_pins_the_manifest() {
     assert_eq!(ANALYSIS_CONTRACT_EPOCH, "identifier-analysis.v1");
     assert_eq!(
         AnalysisIdentity::current().as_str(),
-        "b624de2ef523ed1b8a78f6a30fd80cf425f7563b94201887814886cd9b62ba83",
+        recorded_identity(),
         "a changed manifest field changes the identity; update the contract and digest together"
     );
+}
+
+/// The analysis identity recorded for the Unicode version of the compiling
+/// toolchain. The manifest names that version, so each version has its own
+/// identity, and a version without a recorded identity fails the pin.
+fn recorded_identity() -> &'static str {
+    match char::UNICODE_VERSION {
+        (17, 0, 0) => "b624de2ef523ed1b8a78f6a30fd80cf425f7563b94201887814886cd9b62ba83",
+        (18, 0, 0) => "ea3e83e64b03fa99a4b084e0a1f35b2c7c62e4ef64dd25541a99e2ec49235837",
+        version => panic!("no analysis identity is recorded for Unicode {version:?}"),
+    }
 }

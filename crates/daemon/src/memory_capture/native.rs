@@ -897,14 +897,17 @@ impl CaptureWork {
                 }
             }
             let kept_for_contests = settle_links(&mut memories);
-            accepted.push(job.clone());
+            accepted.push((index, job.clone()));
             settled.push((memories, kept_for_contests));
         }
         settle_batch_contests(&mut settled);
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
         let budget = Instant::now() + self.plan_commit_budget;
-        for (mut job, (memories, _)) in accepted.into_iter().zip(settled) {
+        for ((index, mut job), (quoted, _)) in accepted.into_iter().zip(settled) {
+            let mut memories = quoted.clone();
+            failure_evidence::attach(&job.text, &mut memories);
+            let attached = keep_statement_text(&job, &proses[index], &quoted, &mut memories);
             let existing = plan
                 .existing
                 .iter()
@@ -918,7 +921,7 @@ impl CaptureWork {
                 })
                 .cloned()
                 .collect();
-            let output = PreparedCapture {
+            let mut output = PreparedCapture {
                 version: CAPTURE_SCHEMA_VERSION,
                 model: plan.model.clone(),
                 existing,
@@ -926,19 +929,34 @@ impl CaptureWork {
                 head: head.clone(),
             };
             let frozen = serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
-            let prepared =
-                match self
+            let mut prepared =
+                self.store
+                    .prepare_memory_capture(&job.project, &job.job_id, &frozen);
+            // Appended lines sit beside text they were not beside in the redacted
+            // source, so the store's secret scan or size bound may refuse a plan its
+            // quotations alone pass; that plan freezes without the appended lines.
+            if attached
+                && matches!(
+                    prepared,
+                    Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_))
+                )
+            {
+                output.memories = quoted;
+                let frozen =
+                    serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
+                prepared = self
                     .store
-                    .prepare_memory_capture(&job.project, &job.job_id, &frozen)
-                {
-                    Ok(prepared) => prepared,
-                    Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
-                        eprintln!("daemon: native memory capture plan refused by the store");
-                        self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
-                        continue;
-                    }
-                    Err(_) => return Err("store_failed"),
-                };
+                    .prepare_memory_capture(&job.project, &job.job_id, &frozen);
+            }
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
+                    eprintln!("daemon: native memory capture plan refused by the store");
+                    self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
+                    continue;
+                }
+                Err(_) => return Err("store_failed"),
+            };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
                 // The plan's copy of the job predates the dispatch that
@@ -959,3 +977,25 @@ impl CaptureWork {
         Ok(())
     }
 }
+
+/// Restores the quoted text of each memory that is the user's own
+/// statement. A statement is approved as the sentence the user wrote, so it
+/// keeps its exact text and failure lines stay on the other memories of the
+/// source. Returns whether any memory still holds an appended line.
+pub(super) fn keep_statement_text(
+    job: &CaptureJob,
+    prose: &super::Prose<'_>,
+    quoted: &[CapturedMemory],
+    memories: &mut [CapturedMemory],
+) -> bool {
+    let mut attached = false;
+    for (memory, quoted) in memories.iter_mut().zip(quoted) {
+        if user_attributed(job, prose, quoted) {
+            memory.content.clone_from(&quoted.content);
+        }
+        attached |= memory.content != quoted.content;
+    }
+    attached
+}
+
+mod failure_evidence;
