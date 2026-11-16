@@ -240,5 +240,37 @@ fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+        .map_or(0, |now| now.saturating_add(wall_clock_step_ms()))
+}
+
+/// The milliseconds a test has stepped the wall clock by through [`test_clock::step`], which
+/// every kernel timestamp and expiry adds to the system clock; zero in a build without
+/// `test-support`. A caller that judges its own deadlines against kernel expiries adds the
+/// same step, so both are judged on one clock.
+pub fn wall_clock_step_ms() -> i64 {
+    #[cfg(feature = "test-support")]
+    return test_clock::offset_ms();
+    #[cfg(not(feature = "test-support"))]
+    0
+}
+
+/// A step of the wall clock every kernel timestamp and expiry reads, while monotonic time keeps
+/// its pace: what a host suspend, an NTP correction, or an operator's clock change does to a
+/// running process. The step is process-wide, so a test binary that steps it runs those tests
+/// serially.
+#[cfg(feature = "test-support")]
+pub mod test_clock {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    static OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+
+    /// Moves the wall clock by `step_ms`; a negative step moves it back.
+    pub fn step(step_ms: i64) {
+        OFFSET_MS.fetch_add(step_ms, Ordering::SeqCst);
+    }
+
+    /// The sum of every step so far, in milliseconds.
+    pub(crate) fn offset_ms() -> i64 {
+        OFFSET_MS.load(Ordering::SeqCst)
+    }
 }

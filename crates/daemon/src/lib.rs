@@ -14759,7 +14759,7 @@ impl HandlerCore {
                     self.handle_review_candidates(channel, request).await
                 }
                 search_lifecycle_wire::STATUS => {
-                    self.handle_search_lifecycle_status(channel, request)
+                    self.handle_search_lifecycle_status(channel, request).await
                 }
                 search_lifecycle_wire::REBUILD => {
                     self.handle_search_lifecycle_rebuild(channel, request).await
@@ -14851,7 +14851,7 @@ pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |now| now.saturating_add(kernel::wall_clock_step_ms()))
 }
 
 /// The answer to a window the coverage resolution refused: `boundary_unknown` or `invalid_params`.

@@ -521,7 +521,7 @@ async fn slices_are_bounded_by_the_records_deadline_and_a_restart_renews_nothing
     assert!(done.episodes.consumed <= done.episodes.allowance);
 }
 
-/// A Current family within the freshness limit catches up in the next slice under the hold its checkpoint names and is at the tip afterwards; after the kernel lease changes, the hold is dead, so the same slice reports the blocked episode while the family still serves; and a family that trails the kernel past the freshness limit is denied on its own coverage, so nothing runs on stale rows until a rebuild is requested.
+/// A Current family within the freshness limit catches up in the next slice under the hold its checkpoint names and is at the tip afterwards; after the kernel lease changes, the hold is dead, so the same slice reports the blocked episode while the family still serves; and a family that trails the kernel past the freshness limit is refused to readers on its own coverage while the owner's slice still runs its episode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
     let root = tempfile::tempdir().unwrap();
@@ -1737,7 +1737,11 @@ async fn a_commit_between_selection_and_retirement_still_completes_the_rebuild()
         }
     }
     assert!(selected, "the replacement was selected");
+    // More commits than the freshness limit land after selection, so the completion runs over a replacement that trails the kernel past the limit.
     let raced = corpus.publish("raced", "raced text");
+    for index in 0..LAG_LIMIT {
+        corpus.publish(&format!("raced-{index}"), "raced text");
+    }
 
     let slices = drive_recording(&owner, 20, || {
         current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
@@ -4915,6 +4919,226 @@ async fn a_request_wakes_an_idle_slice_loop() {
     assert!(began.duration_since(requested) < Duration::from_secs(2));
 }
 
+/// A disable wakes the idle slice loop before `SLICE_IDLE` expires; the status then reports `progress.checkpoint` as `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_disable_wakes_an_idle_slice_loop() {
+    use daemon::search_lifecycle_owner::SLICE_IDLE;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    let (events_tx, events) = std::sync::mpsc::channel();
+    owner.tap_slice_events_for_test(move |event| match event {
+        SliceEvent::Idle => {
+            let _ = events_tx.send(("idle", Instant::now()));
+        }
+        SliceEvent::Waiting { .. } => {
+            let _ = events_tx.send(("waiting", Instant::now()));
+        }
+        _ => {}
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
+        Arc::clone(&owner),
+        cancel.clone(),
+    ));
+    let started = Instant::now();
+    loop {
+        let (progress, tip) = owner.progress(&slice_budget());
+        if matches!(owner.lifecycle_record(), ControlState::Current(_))
+            && progress.checkpoint == tip
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the loop's family did not reach the tip: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let current = Instant::now();
+    let (idle, events) = tokio::task::spawn_blocking(move || {
+        loop {
+            let idle = loop {
+                match events.recv_timeout(Duration::from_secs(20)) {
+                    Ok(("idle", at)) if at >= current => break at,
+                    Ok(_) => continue,
+                    Err(_) => panic!("the loop reaches an idle wait over the Current family"),
+                }
+            };
+            let woken_at_once = events.recv_timeout(Duration::from_millis(500)).is_ok();
+            if !woken_at_once {
+                return (idle, events);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("the disable reconciles");
+    let began = tokio::task::spawn_blocking(move || {
+        loop {
+            match events.recv_timeout(SLICE_IDLE * 2) {
+                Ok(("waiting", at)) if at >= idle => return at,
+                Ok(_) => continue,
+                Err(_) => panic!("a slice begins after the disable"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        began.duration_since(idle) < SLICE_IDLE - Duration::from_secs(1),
+        "the next slice began {:?} after the idle wait started; the loop idles for five seconds unwoken",
+        began.duration_since(idle)
+    );
+    let started = Instant::now();
+    loop {
+        let (progress, _) = owner.progress(&slice_budget());
+        if progress.checkpoint.is_none() {
+            assert_eq!(progress.blocked, None, "{progress:?}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the woken slice kept the checkpoint: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    loop_task.await.unwrap();
+    let _ = owner.shutdown().await;
+}
+
+/// The status reports the commit the loop's family has applied while the family is Current, and reports none once a slice finds the record disabled: a disabled record serves no family for a lag to describe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_disabled_record_reports_no_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
+        Arc::clone(&owner),
+        cancel.clone(),
+    ));
+    let started = Instant::now();
+    loop {
+        let (progress, tip) = owner.progress(&slice_budget());
+        if matches!(control(home), ControlState::Current(_)) && progress.checkpoint == tip {
+            assert_eq!(progress.blocked, None, "{progress:?}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the loop's family did not reach the tip: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("the disable reconciles");
+    let started = Instant::now();
+    loop {
+        let (progress, _) = owner.progress(&slice_budget());
+        if progress.checkpoint.is_none() {
+            assert_eq!(progress.blocked, None, "{progress:?}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "a slice over the disabled record kept the checkpoint: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cancel.cancel();
+    loop_task.await.unwrap();
+    let _ = owner.shutdown().await;
+}
+
+/// A slice that finds a disable reconciling clears the status checkpoint before that disable completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_slice_that_finds_a_disable_reconciling_reports_no_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = Arc::new(current_owner(home, &corpus));
+    let (progress, _) = owner.progress(&slice_budget());
+    assert!(progress.checkpoint.is_some(), "{progress:?}");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    let probe = {
+        let owner = Arc::clone(&owner);
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv().unwrap();
+            let slice = owner.run_slice(&slice_budget());
+            let (progress, _) = owner.progress(&slice_budget());
+            exit_tx.send(()).unwrap();
+            (slice, progress)
+        })
+    };
+    let mut notified = false;
+    owner
+        .disable(&slice_budget(), &mut move |event| {
+            if matches!(event, DisableEvent::IntentPersisted) && !notified {
+                notified = true;
+                entered_tx.send(()).unwrap();
+                exit_rx.recv().unwrap();
+            }
+        })
+        .await
+        .expect("the disable reconciles");
+    let (slice, progress) = probe.await.unwrap();
+    assert!(matches!(slice, SliceOutcome::Disabled), "{slice:?}");
+    assert_eq!(progress.checkpoint, None, "{progress:?}");
+    let _ = owner.shutdown().await;
+}
+
+/// A slice that finds the record disabled clears the status checkpoint when it cannot read the kernel tip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_slice_over_a_disabled_record_with_the_kernel_unread_reports_no_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("the disable reconciles");
+    assert!(matches!(control(home), ControlState::Disabled(_)));
+    let (progress, _) = owner.progress(&slice_budget());
+    assert!(
+        progress.checkpoint.is_some(),
+        "no slice has run since the disable: {progress:?}"
+    );
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(20)),
+        Arc::clone(&cancel),
+    );
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared { .. }) {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let outcome = owner.run_slice(&budget);
+    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+    let (progress, _) = owner.progress(&slice_budget());
+    assert_eq!(progress.checkpoint, None, "{progress:?}");
+    let _ = owner.shutdown().await;
+}
+
 /// A request made after a reload that changes the identity while the old family's supervisor still runs does not open admission under the new identity over that supervisor: it closes admission, refuses, and leaves the rotation to the next slice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_request_over_running_foreign_maintenance_closes_admission_until_rotation() {
@@ -5142,9 +5366,9 @@ async fn shutdown_with_no_grace_releases_a_free_manager() {
     owner.shutdown().await.unwrap();
 }
 
-/// A Current family that trails the kernel past the freshness limit is judged on its own coverage and denied before catch-up can run, so the slice reports the block rather than a fabricated observation and a rebuild is the way back.
+/// A Current family that trails the kernel past the freshness limit is judged on its own coverage. While the slice runs the family's catch-up episode, a hook asked for on another thread, as a reader's pin or a supervisor's dispatch is, is refused as stale, and the slice's own thread is admitted as lifecycle work. The episode applies the commits the family trails by, and readers pin it again at the tip once the slice ends.
 #[test]
-fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
+fn a_current_family_that_trails_the_kernel_past_the_limit_is_refused_to_readers_and_caught_up() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();
     let corpus = Corpus::open(home);
@@ -5176,39 +5400,111 @@ fn a_current_family_that_trails_the_kernel_is_denied_on_its_own_coverage() {
     }
     let lag = corpus.tip() - checkpoint;
     assert!(lag > i64::try_from(LAG_LIMIT).unwrap());
+    // At the episode's first event, the gate is asked for a maintenance hook from the slice's thread and from another thread.
+    type Verdicts = (Result<(), Denial>, Result<(), Denial>);
+    let during: Arc<std::sync::Mutex<Option<Verdicts>>> = Arc::default();
+    let observed = Arc::clone(&during);
+    let gate = Arc::clone(owner.admission().gate());
+    owner.tap_slice_events_for_test(move |event| {
+        let mut observed = observed.lock().unwrap();
+        if !matches!(event, SliceEvent::Episode(_)) || observed.is_some() {
+            return;
+        }
+        let admit = || {
+            gate.admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+                .map(drop)
+        };
+        let here = admit();
+        let elsewhere = std::thread::scope(|scope| scope.spawn(admit).join().unwrap());
+        *observed = Some((here, elsewhere));
+    });
     let outcome = owner.run_slice(&slice_budget());
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains(&format!("trails the kernel by {lag}"))),
+        matches!(&outcome, SliceOutcome::CaughtUp(report) if report.batches_applied > 0),
+        "{outcome:?}"
+    );
+    let (here, elsewhere) = during
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the slice ran an episode");
+    assert_eq!(here, Ok(()), "the slice's own thread is admitted");
+    assert_eq!(
+        elsewhere,
+        Err(Denial::Stale {
+            lag,
+            max: LAG_LIMIT
+        }),
+        "another thread is refused while the family trails"
+    );
+    // The slice observed the family again after its episode, so readers and maintenance are admitted at the tip.
+    assert_eq!(
+        owner
+            .pin(&slice_budget())
+            .unwrap()
+            .coverage(&slice_budget())
+            .unwrap()
+            .checkpoint
+            .checkpoint_commit_seq,
+        corpus.tip()
+    );
+    owner
+        .admission()
+        .gate()
+        .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+        .expect("the caught-up family is fresh");
+}
+
+/// A Current family that trails the kernel past the freshness limit and whose hold belongs to an earlier lease cannot catch up, so the slice asks for a rebuild. The rebuild is recorded, built, selected, and completed while its predecessor stays past the limit, and the replacement serves the commits the predecessor lacked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restarted_family_past_the_freshness_limit_rebuilds_to_current() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    converge_once(home, &corpus).await;
+    let (before, _) = current_attempt(home).unwrap();
+
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let later: Vec<String> = (0..=LAG_LIMIT)
+        .map(|index| corpus.publish(&format!("later-{index}"), "later text"))
+        .collect();
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
         "{outcome:?}"
     );
     assert_eq!(
-        owner
-            .admission()
-            .gate()
-            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-            .unwrap_err(),
-        Denial::Stale {
-            lag,
-            max: LAG_LIMIT
-        }
+        owner.admission_state(),
+        Err("coverage_stale"),
+        "readers are refused on the family that trails past the limit"
     );
-    // The next slice observes the family's coverage again; the gate's denial does not hide it.
-    let outcome = owner.run_slice(&slice_budget());
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
     assert!(
-        matches!(&outcome, SliceOutcome::Blocked(reason) if reason.contains(&format!("trails the kernel by {lag}"))),
-        "{outcome:?}"
+        slices < 20,
+        "the rebuild of the stale family reached Current"
     );
-    assert_eq!(
-        owner
-            .admission()
-            .gate()
-            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
-            .unwrap_err(),
-        Denial::Stale {
-            lag,
-            max: LAG_LIMIT
-        }
-    );
+    assert_eq!(current_attempt(home).unwrap().1, Cause::CatchUpHoldLost);
+    let indexed = indexed_objects(&owner);
+    for object in &later {
+        assert!(
+            indexed.contains(object),
+            "{object} is served after the rebuild"
+        );
+    }
+    assert_eq!(owner.admission_state(), Ok(()));
+    owner.shutdown().await.unwrap();
 }
 
 /// Disabling `EmbeddingBootstrap` blocks that hook without stopping the coverage observation the enabled hooks are judged on; restoring the manifest re-admits it in the same process.
@@ -6653,6 +6949,64 @@ async fn the_operator_surface_rebuilds_disables_and_recovers_the_projection() {
     daemon.shutdown().await;
 }
 
+/// Dropping one status request per blocking-pool thread exposes pool exhaustion if cancelled tip reads keep waiting for held kernel readers.
+#[test]
+fn a_cancelled_status_request_stops_waiting_for_a_kernel_reader() {
+    const BLOCKING_THREADS: usize = 16;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(3)
+        .max_blocking_threads(BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (daemon, route, _home) = operator_daemon().await;
+        let kernel = daemon.store();
+        let held = Arc::new(std::sync::Barrier::new(2));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let (kernel, held) = (Arc::clone(&kernel), Arc::clone(&held));
+            move || {
+                kernel.with_readers_held_for_test(|| {
+                    held.wait();
+                    let _ = released.recv_timeout(Duration::from_secs(60));
+                });
+            }
+        });
+        tokio::task::block_in_place(|| held.wait());
+        for _ in 0..BLOCKING_THREADS {
+            // The timeout drops the request's future while its tip read waits for a reader.
+            let answered = tokio::time::timeout(
+                Duration::from_millis(250),
+                operator_status(&daemon, route),
+            )
+            .await;
+            assert!(
+                answered.is_err(),
+                "a status answered while every kernel reader was held: {answered:?}"
+            );
+        }
+        let probe = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(|| ()),
+        )
+        .await;
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(
+            probe.is_ok(),
+            "the tip reads of {BLOCKING_THREADS} dropped status requests still hold the blocking pool"
+        );
+        let status = operator_status(&daemon, route).await;
+        assert_eq!(
+            status["progress"]["tip"],
+            serde_json::json!(kernel.tip().unwrap()),
+            "{status}"
+        );
+        daemon.shutdown().await;
+    });
+}
+
 /// A commit that lands before the disable deregisters its consumer leaves the consumer pending, since a default disable never abandons. The operator's audited abandonment releases it, a retry after a lost answer runs the disable's cleanup, and the record ends deregistered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn an_operator_abandonment_releases_a_consumer_the_disable_left_pending() {
@@ -7170,7 +7524,11 @@ async fn a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_t
         owner.pin(&slice_budget()).is_err(),
         "an expired record admits no reader"
     );
+    // More commits than the freshness limit land before the renewal, so it is admitted over a loaded predecessor that trails the kernel past the limit.
     let later = corpus.publish("later", "later text");
+    for index in 0..LAG_LIMIT {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
 
     let renewed = owner
         .renew_expired_rebuild(&slice_budget())
@@ -7367,6 +7725,18 @@ async fn the_slice_loop_renews_an_expired_rebuild_found_after_a_restart() {
     }
     cancel.cancel();
     loop_task.await.unwrap();
+    // The status surface counts what this process's loop did: one renewal of the record it inherited, and its completion.
+    let (progress, tip) = restarted.progress(&slice_budget());
+    assert_eq!(
+        (
+            progress.rebuilds_recorded,
+            progress.rebuilds_renewed,
+            progress.rebuilds_completed
+        ),
+        (0, 1, 1),
+        "{progress:?}"
+    );
+    assert_eq!(tip, Some(corpus.tip()));
     let mut settled = false;
     for _ in 0..10 {
         if matches!(restarted.run_slice(&slice_budget()), SliceOutcome::Current) {
