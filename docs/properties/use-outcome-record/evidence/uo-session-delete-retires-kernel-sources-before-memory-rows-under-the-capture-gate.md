@@ -13,8 +13,8 @@ References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - Handler and step order: `handle_session_delete_value`
-  (`crates/daemon/src/lib.rs:6992`).
-- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:7028`.
+  (`crates/daemon/src/lib.rs:7020`).
+- Test hook `stop_after_retirement`: `crates/daemon/src/lib.rs:7056`.
 - Correction: the spec's `lib.rs:25158, 25911` were test functions that moved by
   31 lines.
 
@@ -23,13 +23,13 @@ revision.
   Kernel failure returns before the Memory Store is touched.
 - Existing check:
   `session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores`
-  (`crates/daemon/src/source_capture_tests.rs:1557`);
+  (`crates/daemon/src/source_capture_tests.rs:1575`);
   `session_delete_with_the_kernel_starting_deletes_nothing`
-  (`crates/daemon/src/source_capture_tests.rs:1627`);
+  (`crates/daemon/src/source_capture_tests.rs:1645`);
   `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
-  (`crates/daemon/src/source_capture_tests.rs:1699`);
+  (`crates/daemon/src/source_capture_tests.rs:1717`);
   `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-  (`crates/daemon/src/lib.rs:26627`);
+  (`crates/daemon/src/lib.rs:26739`);
   `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 

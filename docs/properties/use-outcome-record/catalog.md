@@ -329,9 +329,9 @@ Required faults and enabling state: A route bound with memory on, then a reload
 that turns it off (and the reverse), then a pass and a wrapup.
 Confidence: medium -
 [evidence](evidence/uo-consent-gate-source-is-the-route-frozen-config.md). bind
-freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13582-13592`);
+freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13636-13646`);
 wrapup reads the live config (`prepare_wrapup_fire`
-(`crates/daemon/src/lib.rs:6046`)). R14 applied: the config seam is
+(`crates/daemon/src/lib.rs:6074`)). R14 applied: the config seam is
 `SessionBinding.config` versus `effective_config` at the two call sites.
 Existing check:
 `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
@@ -344,10 +344,10 @@ Open questions:
 - Lead L5: the pass and the wrapup read consent from different sources. Owner:
   daemon owner (needs human input).
 - Gap G4: the summarizer reattach path reads `memory_enabled` from the live
-  effective config (`crates/daemon/src/lib.rs:5269`, used at
-  `crates/daemon/src/lib.rs:5416`), a third consent source beside the frozen
+  effective config (`crates/daemon/src/lib.rs:5297`, used at
+  `crates/daemon/src/lib.rs:5444`), a third consent source beside the frozen
   binding and the live wrapup config; the fire path states the frozen-config
-  rule in its own comment (`crates/daemon/src/lib.rs:5928`). Recorded, not
+  rule in its own comment (`crates/daemon/src/lib.rs:5956`). Recorded, not
   fixed; whether the reattach should follow the frozen config is an owner
   decision (needs human input).
 
@@ -521,18 +521,18 @@ Required faults and enabling state: A session with captured sources; the
 Confidence: high -
 [evidence](evidence/uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate.md).
 handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:7020`); gate
-`crates/daemon/src/lib.rs:2825`; Kernel step `retire_captured_sources`
-(`crates/daemon/src/lib.rs:6955`); memory delete
-`crates/daemon/src/lib.rs:7037`.
+`crates/daemon/src/lib.rs:2827`; Kernel step `retire_captured_sources`
+(`crates/daemon/src/lib.rs:6983`); memory delete
+`crates/daemon/src/lib.rs:7065`.
 Existing check:
 `session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores`
-(`crates/daemon/src/source_capture_tests.rs:1557`);
+(`crates/daemon/src/source_capture_tests.rs:1575`);
 `session_delete_with_the_kernel_starting_deletes_nothing`
-(`crates/daemon/src/source_capture_tests.rs:1627`);
+(`crates/daemon/src/source_capture_tests.rs:1645`);
 `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
-(`crates/daemon/src/source_capture_tests.rs:1699`);
+(`crates/daemon/src/source_capture_tests.rs:1717`);
 `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-(`crates/daemon/src/lib.rs:26627`);
+(`crates/daemon/src/lib.rs:26739`);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 Impact: #1156 places the `deleted_at` write in this Kernel step; a reordering
@@ -558,9 +558,9 @@ after a HARD fold.
 Confidence: high -
 [evidence](evidence/uo-route-teardown-purges-process-state-but-deletes-no-durable-row.md).
 `unbind_route` (`crates/daemon/src/lib.rs:4741`) calls `purge_session_state`
-(`crates/daemon/src/lib.rs:4769`), which clears in-memory maps only.
+(`crates/daemon/src/lib.rs:4781`), which clears in-memory maps only.
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-(`crates/daemon/src/lib.rs:25448`);
+(`crates/daemon/src/lib.rs:25584`);
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
@@ -707,9 +707,9 @@ Confidence: medium -
 `packages/cli/src/commands/review-wire.ts:434`;
 `packages/opencode-plugin/src/shared/host-client/exact-json.ts:11`. Lead L4: the
 `source_capture` block has no state flag
-(`crates/daemon/src/source_capture.rs:681`).
+(`crates/daemon/src/source_capture.rs:695`).
 Existing check: `the_capture_report_reaches_host_status_field_for_field`
-(`crates/daemon/src/source_capture_tests.rs:845`);
+(`crates/daemon/src/source_capture_tests.rs:861`);
 `packages/cli/src/commands/review.test.ts:901`;
 `packages/cli/src/commands/review.test.ts:952`. Status: unaudited.
 Impact: A zero read as "no harm observed" when the store was not ready.
@@ -738,7 +738,7 @@ Confidence: high -
 [evidence](evidence/uo-review-reads-authorize-by-bearer-and-project-binding-not-owner.md).
 `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:422`);
 `bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:203`);
-`crates/daemon/src/lib.rs:276`.
+`crates/daemon/src/lib.rs:278`.
 Existing check:
 `review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it`
 (`crates/daemon/tests/memory_reviewer_wire.rs:15`);
@@ -1156,7 +1156,7 @@ Required faults and enabling state: A Kernel starting or a refused tip or
 visible-row read at read time, then a HARD fold.
 Confidence: high - [evidence](evidence/uo-p-no-row-for-withheld-composition.md).
 the writer acts only on `CanonicalMemoryRead::Available` (`record_use_outcome`
-(`crates/daemon/src/lib.rs:9746`)).
+(`crates/daemon/src/lib.rs:9801`)).
 Existing check: `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
 `a_withheld_read_then_an_available_read_of_the_same_rows_records_once`
@@ -1296,10 +1296,10 @@ Confidence: high -
 [evidence](evidence/uo-p-last-transform-at-monotone-per-committing-pass.md). the
 settle step checks the session's live records once per committed pass on a
 memory-enabled route (`use_outcomes_to_touch`
-(`crates/daemon/src/lib.rs:9842`)) and, when one needs the update, makes it on a
+(`crates/daemon/src/lib.rs:9896`)) and, when one needs the update, makes it on a
 scoped thread beside the response build that the settle joins before the
-response returns (`crates/daemon/src/lib.rs:10155`, `touch_use_outcomes`
-(`crates/daemon/src/lib.rs:9876`)), within what remains of the pass's Kernel
+response returns (`crates/daemon/src/lib.rs:10209`, `touch_use_outcomes`
+(`crates/daemon/src/lib.rs:9930`)), within what remains of the pass's Kernel
 wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:395-402`); a pass that handed its
 serve to a tracked job leaves the touch to that job, which checks and updates
 after its serve attempt, whatever that serve answered, with a Kernel wait of its

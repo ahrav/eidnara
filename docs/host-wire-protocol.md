@@ -1113,9 +1113,9 @@ no ceiling; a statement leaves when a correction supersedes or retires it.
 When the Kernel's admission policy refuses a statement record, or the
 admission that rests on it, the same frozen plan commits with each of its user
 statements as a labeled memory for explicit search, and
-`decisions_approval_refused` counts them. The labeled commit applies the
-plan's replacements as the approving commit would, so a fact it supersedes or
-retires leaves `auto_inject` while the correction is labeled. Every other captured fact remains labeled model inference
+`decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
+as a replacement stays live and served on `auto_inject` beside the labeled correction, and the labeled commit supersedes
+or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
