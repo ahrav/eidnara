@@ -8,8 +8,8 @@ use std::collections::{BinaryHeap, HashMap};
 
 use host_runtime::RouteHandle;
 use kernel::{
-    ChunkRow, DecisionContent, DecisionPayload, DecisionRow, KernelError, KernelStore,
-    ServingPosition, Surface, VisibleRow,
+    ChunkRow, DecisionContent, DecisionRow, KernelError, KernelStore, ServingPosition, Surface,
+    VisibleRow,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,6 +19,7 @@ use super::serving;
 use super::{InvalidReason, KernelOutcome, blocking, state_only};
 use crate::HandlerCore;
 use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError};
+use crate::json_string::push_json_string;
 
 const OPERATION: &str = "kernel.read";
 
@@ -75,10 +76,15 @@ pub(crate) struct ReadCursor {
 }
 
 impl ReadCursor {
+    fn position(&self) -> ServingPosition<'_> {
+        ServingPosition {
+            created_commit_seq: self.created_commit_seq,
+            object_id: &self.object_id,
+        }
+    }
+
     fn precedes(&self, row: &VisibleRow) -> bool {
-        row.object.created_commit_seq < self.created_commit_seq
-            || (row.object.created_commit_seq == self.created_commit_seq
-                && row.object.object_id.as_str() > self.object_id.as_str())
+        self.position().precedes(&row.object)
     }
 }
 
@@ -178,15 +184,46 @@ impl NewestRows {
     }
 }
 
-/// One page of an unfiltered read: rows in serving order, each decision object beside the content the read serves
-/// for it.
-struct NewestPage {
+/// One page of a read: rows in serving order, each decision object beside the content the read serves for it.
+struct Page {
     known_as_of: i64,
     tip: i64,
     rows: Vec<(VisibleRow, Option<DecisionContent>)>,
-    /// Whether rows follow the page at the snapshot.
+    /// Whether the read left rows out before the byte budget of the encoding applied.
     truncated: bool,
 }
+
+impl From<ReadResponse> for Page {
+    fn from(mut response: ReadResponse) -> Self {
+        let rows = response
+            .rows
+            .into_iter()
+            .map(|row| {
+                let decision = response.decisions.remove(&row.object.object_id);
+                let content = decision.map(|decision| DecisionContent {
+                    decision_kind: decision.decision_kind,
+                    payload: decision.payload,
+                });
+                (row, content)
+            })
+            .collect();
+        Self {
+            known_as_of: response.known_as_of,
+            tip: response.tip,
+            rows,
+            truncated: response.truncated,
+        }
+    }
+}
+
+/// The fewest rows a page asks of one chunk. A page close to its row cap that the scope filter keeps thinning
+/// reads the rows the filter drops in transactions of at least this many rows.
+const MIN_CHUNK_ROWS: usize = 1024;
+
+/// The smallest payload budget a page passes to one chunk: one worst-case row. A page close to its byte budget
+/// reads the payloads the scope filter drops in transactions of at least this many bytes, and the chunk decodes at
+/// most this much past the page.
+const MIN_CHUNK_PAYLOAD_BYTES: u64 = (MAX_READ_ROW_BYTES / 8) as u64;
 
 /// The first rows of the project's surface after `before` in serving order, within [`MAX_READ_ROWS`] and with
 /// decision payloads within [`MAX_READ_ROW_BYTES`]. The kernel serves the surface in chunks of whole commits,
@@ -198,7 +235,7 @@ fn newest_page(
     surface: Surface,
     as_of: Option<i64>,
     before: Option<&ReadCursor>,
-) -> Result<NewestPage, KernelError> {
+) -> Result<Page, KernelError> {
     let requested = match as_of {
         Some(as_of) => as_of,
         None => store.tip()?,
@@ -212,31 +249,24 @@ fn newest_page(
     // Positions in `rows` of the decision objects whose chunk carried no decoded content.
     let mut unread: Vec<usize> = Vec::new();
     let mut payload_bytes: u64 = 0;
-    let mut position = before.map(|cursor| (cursor.created_commit_seq, cursor.object_id.clone()));
-    let read_chunk = |position: &Option<(i64, String)>, rows: usize, payload_bytes: u64| {
+    let mut position = before.cloned();
+    let read_chunk = |position: Option<&ReadCursor>, rows: usize, payload_bytes: u64| {
         store.visible_chunk_as_of_in_scope(
             surface,
             requested,
-            position
-                .as_ref()
-                .map(|(created_commit_seq, object_id)| ServingPosition {
-                    created_commit_seq: *created_commit_seq,
-                    object_id,
-                }),
-            MAX_READ_ROWS + 1 - rows,
-            MAX_READ_ROW_BYTES as u64 - payload_bytes,
+            position.map(ReadCursor::position),
+            (MAX_READ_ROWS + 1 - rows).max(MIN_CHUNK_ROWS),
+            (MAX_READ_ROW_BYTES as u64 - payload_bytes).max(MIN_CHUNK_PAYLOAD_BYTES),
             Some(scope),
         )
     };
-    let mut chunk = read_chunk(&position, 0, 0)?;
+    let mut chunk = read_chunk(position.as_ref(), 0, 0)?;
     let tip = chunk.tip;
     rows.reserve(chunk.rows.len().min(MAX_READ_ROWS));
     let truncated = 'page: loop {
-        let last = chunk.rows.last().map(|entry| {
-            (
-                entry.row.object.created_commit_seq,
-                entry.row.object.object_id.clone(),
-            )
+        let last = chunk.rows.last().map(|entry| ReadCursor {
+            created_commit_seq: entry.row.object.created_commit_seq,
+            object_id: entry.row.object.object_id.clone(),
         });
         for ChunkRow { row, decision } in chunk.rows {
             if !filter.matches(row.scope_id.as_deref(), &mut terms)? {
@@ -247,7 +277,7 @@ fn newest_page(
             }
             let mut content = None;
             if row.object.object_kind == "decision" {
-                // A visible decision-kind row without its typed decision row at the same snapshot is a canonical-integrity break. Serving it with `decision: null` would be indistinguishable from a non-decision row and silently drop it from memory surfaces, so the read fails closed instead.
+                // A visible decision-kind row without its decision row at the snapshot fails the read closed, as `read_visible_page` explains.
                 let decision = decision.ok_or(KernelError::CorruptCanonicalRow)?;
                 // A serialized row is at least its payload bytes, so cutting where cumulative payload size passes the budget keeps every row the serializer could keep.
                 payload_bytes = payload_bytes.saturating_add(decision.payload_bytes);
@@ -265,9 +295,10 @@ fn newest_page(
             Some(last) if !chunk.exhausted => position = Some(last),
             _ => break false,
         }
-        chunk = read_chunk(&position, rows.len(), payload_bytes)?;
+        chunk = read_chunk(position.as_ref(), rows.len(), payload_bytes)?;
     };
     if !unread.is_empty() {
+        // The page's payloads are within the byte budget, so the decisions read here are too.
         let ids: Vec<String> = unread
             .iter()
             .map(|&index| rows[index].0.object.object_id.clone())
@@ -287,7 +318,7 @@ fn newest_page(
             });
         }
     }
-    Ok(NewestPage {
+    Ok(Page {
         known_as_of: requested,
         tip,
         rows,
@@ -410,69 +441,9 @@ pub(crate) fn read_visible_page(
     })
 }
 
-/// The escape `serde_json` writes after a backslash for `byte`: the byte's short form, or `u` for a control byte
-/// with none, which is written as `\u00` and two lowercase hex digits. `None` for a byte written as it is.
-fn json_escape(byte: u8) -> Option<u8> {
-    match byte {
-        b'"' => Some(b'"'),
-        b'\\' => Some(b'\\'),
-        0x08 => Some(b'b'),
-        0x09 => Some(b't'),
-        0x0a => Some(b'n'),
-        0x0c => Some(b'f'),
-        0x0d => Some(b'r'),
-        0x00..=0x1f => Some(b'u'),
-        _ => None,
-    }
-}
-
-/// Whether any of the eight bytes of `word` is below 0x20, a quote, or a backslash.
-fn word_needs_escape(word: u64) -> bool {
-    const LOW: u64 = 0x0101_0101_0101_0101;
-    const HIGH: u64 = 0x8080_8080_8080_8080;
-    let has_zero = |bytes: u64| bytes.wrapping_sub(LOW) & !bytes & HIGH;
-    let control = word.wrapping_sub(LOW * 0x20) & !word & HIGH;
-    (control | has_zero(word ^ (LOW * 0x22)) | has_zero(word ^ (LOW * 0x5c))) != 0
-}
-
-/// Appends `value` as a JSON string, byte for byte as `serde_json` encodes it. Text is copied in runs between
-/// escapes, and a run is scanned eight bytes at a time.
-fn write_str(body: &mut Vec<u8>, value: &str) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let bytes = value.as_bytes();
-    body.push(b'"');
-    let mut run = 0;
-    let mut at = 0;
-    while let Some(&byte) = bytes.get(at) {
-        if let Some(word) = bytes[at..].first_chunk::<8>()
-            && !word_needs_escape(u64::from_le_bytes(*word))
-        {
-            at += 8;
-            continue;
-        }
-        if let Some(escape) = json_escape(byte) {
-            body.extend_from_slice(&bytes[run..at]);
-            body.push(b'\\');
-            body.push(escape);
-            if escape == b'u' {
-                body.extend_from_slice(&[
-                    b'0',
-                    b'0',
-                    HEX[usize::from(byte >> 4)],
-                    HEX[usize::from(byte & 0xf)],
-                ]);
-            }
-            run = at + 1;
-        }
-        at += 1;
-    }
-    body.extend_from_slice(&bytes[run..]);
-    body.push(b'"');
-}
-
 fn write_optional_str(body: &mut Vec<u8>, value: Option<&str>) {
     match value {
-        Some(value) => write_str(body, value),
+        Some(value) => push_json_string(body, value),
         None => body.extend_from_slice(b"null"),
     }
 }
@@ -495,19 +466,12 @@ fn write_int(body: &mut Vec<u8>, value: i64) {
     body.extend_from_slice(&digits[first..]);
 }
 
-/// The part of a decision a row serves.
-#[derive(Clone, Copy)]
-struct ServedDecision<'a> {
-    decision_kind: &'a str,
-    payload: &'a DecisionPayload,
-}
-
 /// Appends one row in its wire shape. Keys are written in the sorted order a `serde_json::Map` emits and values as
 /// `serde_json` encodes them, so the bytes equal the encoding of the row's `json!` tree.
 fn write_row(
     body: &mut Vec<u8>,
     row: &VisibleRow,
-    decision: Option<ServedDecision<'_>>,
+    decision: Option<&DecisionContent>,
     known_as_of: i64,
 ) {
     let object = &row.object;
@@ -515,11 +479,11 @@ fn write_row(
     match decision {
         Some(decision) => {
             body.extend_from_slice(b"{\"decision_kind\":");
-            write_str(body, decision.decision_kind);
+            push_json_string(body, &decision.decision_kind);
             body.extend_from_slice(b",\"payload\":{\"rationale\":");
-            write_str(body, &decision.payload.rationale);
+            push_json_string(body, &decision.payload.rationale);
             body.extend_from_slice(b",\"summary\":");
-            write_str(body, &decision.payload.summary);
+            push_json_string(body, &decision.payload.summary);
             body.extend_from_slice(b"}}");
         }
         None => body.extend_from_slice(b"null"),
@@ -529,22 +493,22 @@ fn write_row(
     body.extend_from_slice(b",\"object\":{\"created_commit_seq\":");
     write_int(body, object.created_commit_seq);
     body.extend_from_slice(b",\"domain_id\":");
-    write_str(body, &object.domain_id);
+    push_json_string(body, &object.domain_id);
     body.extend_from_slice(b",\"invalidated_commit_seq\":");
     match object.invalidated_commit_seq {
         Some(invalidated) => write_int(body, invalidated),
         None => body.extend_from_slice(b"null"),
     }
     body.extend_from_slice(b",\"object_id\":");
-    write_str(body, &object.object_id);
+    push_json_string(body, &object.object_id);
     body.extend_from_slice(b",\"object_kind\":");
-    write_str(body, &object.object_kind);
+    push_json_string(body, &object.object_kind);
     body.extend_from_slice(b",\"sensitivity\":");
-    write_str(body, object.sensitivity.as_str());
+    push_json_string(body, object.sensitivity.as_str());
     body.extend_from_slice(b",\"source_id\":");
-    write_str(body, &object.source_id);
+    push_json_string(body, &object.source_id);
     body.extend_from_slice(b",\"source_kind\":");
-    write_str(body, &object.source_kind);
+    push_json_string(body, &object.source_kind);
     body.extend_from_slice(b",\"source_revision\":");
     write_int(body, object.source_revision);
     body.extend_from_slice(b",\"superseded_by\":");
@@ -554,46 +518,33 @@ fn write_row(
     body.extend_from_slice(b",\"token\":{\"known_as_of\":");
     write_int(body, known_as_of);
     body.extend_from_slice(b",\"object_id\":");
-    write_str(body, &object.object_id);
+    push_json_string(body, &object.object_id);
     body.extend_from_slice(b"},\"visibility\":");
-    write_str(body, row.visibility.as_str());
+    push_json_string(body, row.visibility.as_str());
     body.push(b'}');
 }
 
-/// The snapshot and flags of a read's response envelope.
-#[derive(Clone, Copy)]
-struct Envelope {
-    gated: bool,
-    known_as_of: i64,
-    tip: i64,
-    /// Whether the read left rows out before the byte budget applied.
-    truncated: bool,
-}
-
-/// Encodes the read's response body: the envelope and the longest prefix of `rows` whose encoding fits
+/// Encodes the read's response body: the envelope and the longest prefix of the page's rows whose encoding fits
 /// [`MAX_READ_ROW_BYTES`]. Each row is encoded once, straight into the body, and a row that passes the budget is
 /// taken back out. Rows are newest first, so the budget retains a contiguous prefix of the most recent rows.
 /// `truncated` reports rows the read or the budget left out.
-fn encode_body<'a>(
-    envelope: Envelope,
-    rows: impl ExactSizeIterator<Item = (&'a VisibleRow, Option<ServedDecision<'a>>)>,
-) -> Result<Vec<u8>, serde_json::Error> {
+fn encode_page(page: &Page, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
     // A typical memory row encodes to about 1 KiB; the envelope is under 200 bytes.
     let mut body =
-        Vec::with_capacity(MAX_READ_ROW_BYTES.min(rows.len().saturating_mul(1024)) + 256);
+        Vec::with_capacity(MAX_READ_ROW_BYTES.min(page.rows.len().saturating_mul(1024)) + 256);
     body.extend_from_slice(b"{\"gated\":");
-    serde_json::to_writer(&mut body, &envelope.gated)?;
+    serde_json::to_writer(&mut body, &gated)?;
     body.extend_from_slice(b",\"known_as_of\":");
-    serde_json::to_writer(&mut body, &envelope.known_as_of)?;
+    serde_json::to_writer(&mut body, &page.known_as_of)?;
     body.extend_from_slice(b",\"rows\":[");
     let rows_start = body.len();
-    let mut truncated = envelope.truncated;
-    for (row, decision) in rows {
+    let mut truncated = page.truncated;
+    for (row, decision) in &page.rows {
         let row_start = body.len();
         if row_start > rows_start {
             body.push(b',');
         }
-        write_row(&mut body, row, decision, envelope.known_as_of);
+        write_row(&mut body, row, decision.as_ref(), page.known_as_of);
         // The `+ 1` charges each row's array separator or bracket byte against the budget.
         if body.len() - rows_start + 1 > MAX_READ_ROW_BYTES {
             body.truncate(row_start);
@@ -604,50 +555,11 @@ fn encode_body<'a>(
     body.extend_from_slice(b"],\"state\":");
     serde_json::to_writer(&mut body, &KernelOutcome::Available)?;
     body.extend_from_slice(b",\"tip\":");
-    serde_json::to_writer(&mut body, &envelope.tip)?;
+    serde_json::to_writer(&mut body, &page.tip)?;
     body.extend_from_slice(b",\"truncated\":");
     serde_json::to_writer(&mut body, &truncated)?;
     body.push(b'}');
     Ok(body)
-}
-
-fn encode_response(response: &ReadResponse, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
-    let envelope = Envelope {
-        gated,
-        known_as_of: response.known_as_of,
-        tip: response.tip,
-        truncated: response.truncated,
-    };
-    encode_body(
-        envelope,
-        response.rows.iter().map(|row| {
-            let decision = response.decisions.get(&row.object.object_id);
-            let decision = decision.map(|decision| ServedDecision {
-                decision_kind: &decision.decision_kind,
-                payload: &decision.payload,
-            });
-            (row, decision)
-        }),
-    )
-}
-
-fn encode_page(page: &NewestPage, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
-    let envelope = Envelope {
-        gated,
-        known_as_of: page.known_as_of,
-        tip: page.tip,
-        truncated: page.truncated,
-    };
-    encode_body(
-        envelope,
-        page.rows.iter().map(|(row, content)| {
-            let decision = content.as_ref().map(|content| ServedDecision {
-                decision_kind: &content.decision_kind,
-                payload: &content.payload,
-            });
-            (row, decision)
-        }),
-    )
 }
 
 impl HandlerCore {
@@ -702,18 +614,14 @@ impl HandlerCore {
         let result = blocking(move || {
             let before = before.as_ref();
             // An id filter is matched in the kernel query, which reads every named row; an unfiltered read pages the surface in serving order.
-            Ok::<_, KernelError>(match object_ids.as_deref() {
+            let page = match object_ids.as_deref() {
                 Some(ids) => {
                     let selection = RowSelection::Objects(ids);
-                    let response =
-                        read_visible_page(&store, &project, surface, as_of, selection, before)?;
-                    encode_response(&response, gated)
+                    read_visible_page(&store, &project, surface, as_of, selection, before)?.into()
                 }
-                None => encode_page(
-                    &newest_page(&store, &project, surface, as_of, before)?,
-                    gated,
-                ),
-            })
+                None => newest_page(&store, &project, surface, as_of, before)?,
+            };
+            Ok::<_, KernelError>(encode_page(&page, gated))
         })
         .await;
         match result {
@@ -786,8 +694,15 @@ mod tests {
         }
     }
 
+    fn content(decision: &DecisionRow) -> DecisionContent {
+        DecisionContent {
+            decision_kind: decision.decision_kind.clone(),
+            payload: decision.payload.clone(),
+        }
+    }
+
     /// `to_value` of a struct emits its keys in sorted order, so this tree fixes field order too.
-    fn row_value(row: &VisibleRow, decision: Option<&DecisionRow>, known_as_of: i64) -> Value {
+    fn row_value(row: &VisibleRow, decision: Option<&DecisionContent>, known_as_of: i64) -> Value {
         json!({
             "object": row.object,
             "visibility": row.visibility.as_str(),
@@ -801,231 +716,175 @@ mod tests {
         })
     }
 
+    /// The body `serde_json` encodes for the first `served` rows of `page`.
+    fn body_bytes(page: &Page, served: usize, gated: bool, truncated: bool) -> String {
+        let rows: Vec<Value> = page.rows[..served]
+            .iter()
+            .map(|(row, decision)| row_value(row, decision.as_ref(), page.known_as_of))
+            .collect();
+        serde_json::to_string(&json!({
+            "known_as_of": page.known_as_of,
+            "tip": page.tip,
+            "gated": gated,
+            "truncated": truncated,
+            "rows": rows,
+            "state": {"kind": "available"},
+        }))
+        .unwrap()
+    }
+
+    fn encoded(page: &Page, gated: bool) -> String {
+        String::from_utf8(encode_page(page, gated).unwrap()).unwrap()
+    }
+
     /// A column added to `ObjectRow` or `DecisionPayload` fails here instead of silently leaving the wire.
     #[test]
-    fn object_and_payload_mirrors_match_the_kernel_structs() {
+    fn a_written_row_carries_every_field_of_the_kernel_structs() {
         let row = populated_row();
         let decision = decision(&row.object.object_id);
-        let mut encoded = Vec::new();
-        let served = ServedDecision {
-            decision_kind: &decision.decision_kind,
-            payload: &decision.payload,
-        };
-        write_row(&mut encoded, &row, Some(served), 7);
-        let written: Value = serde_json::from_slice(&encoded).unwrap();
+        let mut written = Vec::new();
+        write_row(&mut written, &row, Some(&content(&decision)), 7);
+        let value: Value = serde_json::from_slice(&written).unwrap();
 
+        assert_eq!(value["object"], serde_json::to_value(&row.object).unwrap());
         assert_eq!(
-            written["object"],
-            serde_json::to_value(&row.object).unwrap()
-        );
-        assert_eq!(
-            written["decision"]["payload"],
+            value["decision"]["payload"],
             serde_json::to_value(&decision.payload).unwrap()
         );
         assert_eq!(
-            String::from_utf8(encoded).unwrap(),
-            serde_json::to_string(&row_value(&row, Some(&decision), 7)).unwrap(),
+            String::from_utf8(written).unwrap(),
+            serde_json::to_string(&row_value(&row, Some(&content(&decision)), 7)).unwrap(),
             "a row must write its keys in the sorted order a Value map emits"
         );
     }
 
-    fn written(value: &str) -> String {
-        let mut encoded = Vec::new();
-        write_str(&mut encoded, value);
-        String::from_utf8(encoded).unwrap()
-    }
-
-    /// Every ASCII byte, at every offset of an eight-byte word and beside multi-byte text, is written as
-    /// `serde_json` writes it.
-    #[test]
-    fn strings_are_written_as_serde_json_writes_them() {
-        for byte in 0..=0x7fu8 {
-            let special = char::from(byte);
-            for padding in 0..=17 {
-                for filler in ["a", "\u{e9}", "\u{1f600}"] {
-                    let value = format!("{}{special}{}", filler.repeat(padding), filler.repeat(9));
-                    assert_eq!(
-                        written(&value),
-                        serde_json::to_string(&value).unwrap(),
-                        "byte {byte:#x} after {padding} of {filler:?}"
-                    );
-                }
-            }
-        }
-        for value in [
-            "",
-            "plain",
-            "\"\\\u{0}\u{1f}\u{7f}",
-            "tab\tend\n",
-            "\u{2028}\u{2029}",
-        ] {
-            assert_eq!(written(value), serde_json::to_string(value).unwrap());
-        }
-    }
-
     proptest::proptest! {
         #[test]
-        fn any_string_is_written_as_serde_json_writes_it(value in proptest::prelude::any::<String>()) {
-            proptest::prop_assert_eq!(written(&value), serde_json::to_string(&value).unwrap());
-        }
-
-        #[test]
         fn any_integer_is_written_as_serde_json_writes_it(value in proptest::prelude::any::<i64>()) {
-            let mut encoded = Vec::new();
-            write_int(&mut encoded, value);
-            proptest::prop_assert_eq!(String::from_utf8(encoded).unwrap(), serde_json::to_string(&value).unwrap());
+            let mut written = Vec::new();
+            write_int(&mut written, value);
+            proptest::prop_assert_eq!(String::from_utf8(written).unwrap(), serde_json::to_string(&value).unwrap());
         }
     }
 
     #[test]
     fn integer_extremes_are_written_as_serde_json_writes_them() {
         for value in [0, 1, -1, 9, 10, -10, i64::MAX, i64::MIN] {
-            let mut encoded = Vec::new();
-            write_int(&mut encoded, value);
+            let mut written = Vec::new();
+            write_int(&mut written, value);
             assert_eq!(
-                String::from_utf8(encoded).unwrap(),
+                String::from_utf8(written).unwrap(),
                 serde_json::to_string(&value).unwrap()
             );
         }
     }
 
-    fn body_value(response: &ReadResponse, served: usize, gated: bool, truncated: bool) -> Value {
-        let rows: Vec<Value> = response.rows[..served]
-            .iter()
-            .map(|row| {
-                row_value(
-                    row,
-                    response.decisions.get(&row.object.object_id),
-                    response.known_as_of,
-                )
-            })
-            .collect();
-        json!({
-            "known_as_of": response.known_as_of,
-            "tip": response.tip,
-            "gated": gated,
-            "truncated": truncated,
-            "rows": rows,
-            "state": {"kind": "available"},
-        })
-    }
-
     #[test]
     fn read_body_bytes_match_the_value_tree_encoding() {
         let populated = populated_row();
-        let bare = row("observation", "notes");
         let decision = decision(&populated.object.object_id);
-        let mut decisions = HashMap::new();
-        decisions.insert(populated.object.object_id.clone(), decision);
-        let mut response = ReadResponse {
-            known_as_of: 41,
-            tip: 42,
-            rows: vec![populated, bare],
-            truncated: true,
-            decisions,
-        };
-        for (gated, truncated) in [(true, true), (false, false)] {
-            response.truncated = truncated;
-            let expected = serde_json::to_vec(&body_value(&response, 2, gated, truncated)).unwrap();
-            let encoded = encode_response(&response, gated).unwrap();
-            assert_eq!(
-                String::from_utf8(encoded.clone()).unwrap(),
-                String::from_utf8(expected).unwrap()
-            );
-            let output = PreparedOutput::cached_bytes(encoded.clone());
-            assert!(output.serializes_directly());
-            assert_eq!(output.measure().unwrap().len(), encoded.len());
-        }
-        response.rows.clear();
-        assert_eq!(
-            encode_response(&response, false).unwrap(),
-            serde_json::to_vec(&body_value(&response, 0, false, false)).unwrap()
-        );
-    }
-
-    /// A page encodes as the response that holds the same rows and decisions.
-    #[test]
-    fn a_page_encodes_as_the_response_with_its_rows() {
-        let populated = populated_row();
-        let bare = row("observation", "notes");
-        let decision = decision(&populated.object.object_id);
-        let page = NewestPage {
+        let mut page = Page {
             known_as_of: 41,
             tip: 42,
             rows: vec![
-                (
-                    populated.clone(),
-                    Some(DecisionContent {
-                        decision_kind: decision.decision_kind.clone(),
-                        payload: decision.payload.clone(),
-                    }),
-                ),
-                (bare.clone(), None),
+                (populated, Some(content(&decision))),
+                (row("observation", "notes"), None),
             ],
             truncated: true,
         };
+        for (gated, truncated) in [(true, true), (false, false)] {
+            page.truncated = truncated;
+            let body = encode_page(&page, gated).unwrap();
+            assert_eq!(
+                String::from_utf8(body.clone()).unwrap(),
+                body_bytes(&page, 2, gated, truncated)
+            );
+            let output = PreparedOutput::cached_bytes(body.clone());
+            assert!(output.serializes_directly());
+            assert_eq!(output.measure().unwrap().len(), body.len());
+        }
+        page.rows.clear();
+        assert_eq!(encoded(&page, false), body_bytes(&page, 0, false, false));
+    }
+
+    /// An id-filtered read's response becomes the page that holds its rows in order, each decision object beside
+    /// its decision.
+    #[test]
+    fn a_response_becomes_the_page_with_its_rows_and_decisions() {
+        let populated = populated_row();
+        let bare = row("observation", "notes");
+        let decision = decision(&populated.object.object_id);
         let response = ReadResponse {
             known_as_of: 41,
             tip: 42,
-            rows: vec![populated.clone(), bare],
+            rows: vec![populated.clone(), bare.clone()],
             truncated: true,
-            decisions: HashMap::from([(populated.object.object_id, decision)]),
+            decisions: HashMap::from([(populated.object.object_id.clone(), decision.clone())]),
         };
+        let page = Page::from(response);
+        assert_eq!((page.known_as_of, page.tip, page.truncated), (41, 42, true));
         assert_eq!(
-            String::from_utf8(encode_page(&page, true).unwrap()).unwrap(),
-            String::from_utf8(encode_response(&response, true).unwrap()).unwrap()
+            page.rows,
+            vec![(populated, Some(content(&decision))), (bare, None)]
         );
     }
 
-    /// The body keeps the longest prefix of rows whose encodings, each charged one separator byte, fit the
-    /// budget, and reports the rows it leaves out as truncation.
-    #[test]
-    fn the_byte_budget_keeps_the_longest_row_prefix_that_fits() {
-        let rationale = "r".repeat(MAX_READ_ROW_BYTES / 8);
-        let mut decisions = HashMap::new();
-        let rows: Vec<VisibleRow> = (0..9)
+    /// A page of nine decisions whose rationales take `fill` bytes in all but the last, which takes `last`.
+    fn page_of_nine(fill: usize, last: usize) -> Page {
+        let rows = (0..9)
             .map(|index| {
                 let mut row = row("decision", "memory");
                 row.object.object_id = format!("memory-decision-{index}");
                 let mut decision = decision(&row.object.object_id);
-                decision.payload.rationale = rationale.clone();
-                decisions.insert(row.object.object_id.clone(), decision);
-                row
+                decision.payload.rationale = "r".repeat(if index == 8 { last } else { fill });
+                (row, Some(content(&decision)))
             })
             .collect();
-        let response = ReadResponse {
+        Page {
             known_as_of: 7,
             tip: 7,
             rows,
             truncated: false,
-            decisions,
-        };
-        let mut charged = 0;
-        let fitting = response
-            .rows
+        }
+    }
+
+    /// The bytes the budget charges a page's first `rows` rows: each row's encoding and one separator byte.
+    fn charged(page: &Page, rows: usize) -> usize {
+        page.rows[..rows]
             .iter()
-            .take_while(|row| {
-                let decision = response.decisions.get(&row.object.object_id);
-                charged += serde_json::to_vec(&row_value(row, decision, 7))
+            .map(|(row, decision)| {
+                serde_json::to_vec(&row_value(row, decision.as_ref(), page.known_as_of))
                     .unwrap()
                     .len()
-                    + 1;
-                charged <= MAX_READ_ROW_BYTES
+                    + 1
             })
-            .count();
-        assert_eq!(
-            fitting, 7,
-            "eight rows of an eighth of the budget each pass it"
+            .sum()
+    }
+
+    /// The body keeps the longest prefix of rows whose encodings, each charged one separator byte, fit the
+    /// budget, and reports the rows it leaves out as truncation. A last row charged exactly the budget stays; one
+    /// byte more takes it out.
+    #[test]
+    fn the_byte_budget_keeps_the_longest_row_prefix_that_fits() {
+        let fill = MAX_READ_ROW_BYTES / 16;
+        let room = MAX_READ_ROW_BYTES - charged(&page_of_nine(fill, 0), 9);
+        assert!(
+            room > 0,
+            "nine rows of a sixteenth of the budget leave room"
         );
+
+        let exact = page_of_nine(fill, room);
+        assert_eq!(charged(&exact, 9), MAX_READ_ROW_BYTES);
+        assert_eq!(encoded(&exact, false), body_bytes(&exact, 9, false, false));
+
+        let over = page_of_nine(fill, room + 1);
+        assert_eq!(charged(&over, 9), MAX_READ_ROW_BYTES + 1);
+        assert_eq!(encoded(&over, false), body_bytes(&over, 8, false, true));
+
+        let first_row_over = page_of_nine(MAX_READ_ROW_BYTES, 0);
         assert_eq!(
-            encode_response(&response, false).unwrap(),
-            serde_json::to_vec(&body_value(&response, fitting, false, true)).unwrap()
-        );
-        let mut within = response;
-        within.rows.truncate(fitting);
-        assert_eq!(
-            encode_response(&within, false).unwrap(),
-            serde_json::to_vec(&body_value(&within, fitting, false, false)).unwrap()
+            encoded(&first_row_over, false),
+            body_bytes(&first_row_over, 0, false, true)
         );
     }
 

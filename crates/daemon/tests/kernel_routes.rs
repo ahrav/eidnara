@@ -7057,3 +7057,246 @@ async fn paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once(
     assert!(ids.contains(&oldest));
     daemon.handler.shutdown().await.unwrap();
 }
+
+/// The object ids of a read's rows in the order the daemon served them.
+fn served_order(read: &Value) -> Vec<String> {
+    read["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["object"]["object_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Commits `specs` straight into the store in one commit, each admitted as an explicit user decision.
+fn commit_admitted(store: &kernel::KernelStore, key: &str, specs: Vec<DecisionSpec>) {
+    store
+        .commit(intent(key), |envelope| {
+            for spec in specs {
+                let object_id = spec.object_id.clone();
+                envelope.insert_decision(spec)?;
+                envelope.record_admission(admission(
+                    &object_id,
+                    EventKind::Other,
+                    None,
+                    (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                ))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// A store decision under `scope_id` whose summary starts with its index and fills `summary_bytes`.
+fn sized_decision(index: i64, scope_id: Option<&str>, summary_bytes: usize) -> DecisionSpec {
+    let mut spec = store_decision(
+        index,
+        scope_id.unwrap_or(""),
+        &format!("sized-lineage-{index}"),
+    );
+    spec.scope_id = scope_id.map(str::to_string);
+    spec.payload.summary = format!("{index:04}{}", "s".repeat(summary_bytes - 4));
+    spec
+}
+
+/// The kernel's scope prefilter keeps a decision with no scope for every project, and the route's scope filter
+/// serves it to none. A page whose first chunk holds more of those than the row cap reads on, so the project
+/// rows older than them are served and the read reports no truncation.
+#[tokio::test]
+async fn a_read_continues_past_the_rows_its_scope_filter_drops() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    let older = daemon
+        .commit(
+            "older",
+            vec![insert_decision(1), insert_decision(2)],
+            vec![],
+        )
+        .await;
+    assert_state(&older, "available", None);
+    let dropped: Vec<i64> = (0..(MAX_READ_ROWS + 10) as i64).collect();
+    for (batch, indexes) in dropped.chunks(256).enumerate() {
+        let specs = indexes
+            .iter()
+            .map(|&index| sized_decision(index, None, 16))
+            .collect();
+        commit_admitted(&store, &format!("unscoped-{batch}"), specs);
+    }
+    let newest = daemon
+        .commit("newest", vec![insert_decision(3)], vec![])
+        .await;
+    assert_state(&newest, "available", None);
+
+    let read = daemon.read("explicit_search", None).await;
+    assert_state(&read, "available", None);
+    assert_eq!(
+        served_order(&read),
+        [
+            "decision-object-3",
+            "decision-object-1",
+            "decision-object-2"
+        ]
+    );
+    assert_eq!(read["truncated"], false);
+
+    let snapshot = read["known_as_of"].as_i64().unwrap();
+    let mut after_newest =
+        read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+    after_newest["before"] = json!({
+        "created_commit_seq": read["rows"][0]["object"]["created_commit_seq"],
+        "object_id": "decision-object-3",
+    });
+    let page = daemon.call(daemon.route, after_newest).await;
+    assert_state(&page, "available", None);
+    assert_eq!(
+        served_order(&page),
+        ["decision-object-1", "decision-object-2"]
+    );
+    assert_eq!(page["truncated"], false);
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A page serves each decision object with its decision text when the kernel's chunk carried the row undecoded:
+/// a payload over the chunk's inline size, and a row the chunk read after its decode budget was spent. One commit
+/// holds more payload than the byte budget, so the page ends inside it and serves that commit's first rows in
+/// object-id order.
+#[tokio::test]
+async fn a_page_serves_the_decisions_its_chunk_left_undecoded() {
+    use daemon::kernel_routes::read::MAX_READ_ROW_BYTES;
+
+    for (name, first, count, summary_bytes) in [
+        ("large", 1000_i64, 20_i64, 480 * 1024_usize),
+        ("inline", 2000, 200, 60 * 1024),
+    ] {
+        let daemon = Daemon::start().await;
+        let store = daemon.store();
+        seed_domain(&store);
+        let seeded = daemon
+            .commit("seed", vec![insert_decision(1)], vec![])
+            .await;
+        assert_state(&seeded, "available", None);
+        let scope_id = daemon.project_scope_id().await;
+        let specs = (first..first + count)
+            .map(|index| sized_decision(index, Some(&scope_id), summary_bytes))
+            .collect();
+        commit_admitted(&store, name, specs);
+
+        let read = daemon.read("explicit_search", None).await;
+        assert_state(&read, "available", None);
+        assert_eq!(read["truncated"], true, "{name}");
+        let rows = read["rows"].as_array().unwrap();
+        // Every row of the commit encodes to the same length, so the byte budget, which charges each row one
+        // separator byte, fixes how many the page holds.
+        let row_bytes = serde_json::to_vec(&rows[0]).unwrap().len();
+        let fitting = MAX_READ_ROW_BYTES / (row_bytes + 1);
+        assert!(
+            fitting > 1 && (fitting as i64) < count,
+            "{name}: {fitting} of {count} rows fit"
+        );
+        let expected: Vec<String> = (first..first + fitting as i64)
+            .map(|index| format!("store-decision-object-{index}"))
+            .collect();
+        assert_eq!(served_order(&read), expected, "{name}");
+        for (row, index) in rows.iter().zip(first..) {
+            let summary = row["decision"]["payload"]["summary"].as_str();
+            assert_eq!(
+                summary.map(|summary| (&summary[..4], summary.len())),
+                Some((format!("{index:04}").as_str(), summary_bytes)),
+                "{name}: row {index}"
+            );
+        }
+        daemon.handler.shutdown().await.unwrap();
+    }
+}
+
+/// A surface of exactly the row cap is served whole with no truncation, and one row more is served as the newest
+/// rows of the cap with truncation, when the row past the cap is alone in the oldest commit.
+#[tokio::test]
+async fn the_row_cap_serves_a_surface_of_its_size_whole_and_flags_one_row_more() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let oldest = daemon
+        .commit("oldest", vec![insert_decision(0)], vec![])
+        .await;
+    assert_state(&oldest, "available", None);
+    let mut index = 1_i64;
+    for batch in 0..MAX_READ_ROWS / 256 {
+        let operations: Vec<Value> = (0..256)
+            .map(|offset| insert_decision(index + offset))
+            .collect();
+        index += 256;
+        let response = daemon
+            .commit(&format!("bulk-{batch}"), operations, vec![])
+            .await;
+        assert_state(&response, "available", None);
+    }
+
+    let over = daemon.read("explicit_search", None).await;
+    assert_state(&over, "available", None);
+    assert_eq!(over["rows"].as_array().unwrap().len(), MAX_READ_ROWS);
+    assert_eq!(over["truncated"], true);
+    assert!(!object_ids(&over).contains(&"decision-object-0".to_string()));
+
+    let snapshot = over["known_as_of"].as_i64().unwrap();
+    let retired = daemon
+        .commit(
+            "retire-oldest",
+            vec![json!({"op": "retire_decision", "object_id": "decision-object-0"})],
+            vec![token("decision-object-0", snapshot)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    let exact = daemon.read("explicit_search", None).await;
+    assert_state(&exact, "available", None);
+    assert_eq!(exact["rows"].as_array().unwrap().len(), MAX_READ_ROWS);
+    assert_eq!(exact["truncated"], false);
+    assert_eq!(served_order(&exact), served_order(&over));
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A visible decision object whose decision row is not live at the snapshot fails the read closed: the route
+/// answers `store_unsupported` and serves no row with a null decision. A snapshot at which the decision row is
+/// live serves the object with its decision.
+#[tokio::test]
+async fn a_read_fails_closed_for_a_decision_object_without_a_live_decision_row() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    for index in 1..=3 {
+        let response = daemon
+            .commit(
+                &format!("decision-{index}"),
+                vec![insert_decision(index)],
+                vec![],
+            )
+            .await;
+        assert_state(&response, "available", None);
+    }
+    let tip = daemon.tip();
+    // The registry row stays live; only the decision row ends at the tip, as a damaged store could hold it.
+    core_connection(&daemon)
+        .execute(
+            "UPDATE decisions SET invalidated_commit_seq=?1 WHERE object_id='decision-object-1'",
+            [tip],
+        )
+        .unwrap();
+
+    let broken = daemon.read("explicit_search", None).await;
+    assert_state(&broken, "unavailable", Some("store_unsupported"));
+    assert!(broken.get("rows").is_none(), "{broken}");
+
+    let before = daemon.read("explicit_search", Some(tip - 1)).await;
+    assert_state(&before, "available", None);
+    let first = before["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["object"]["object_id"] == "decision-object-1")
+        .expect("the object is visible before its decision row ends");
+    assert_eq!(first["decision"]["payload"]["summary"], "decision 1");
+    daemon.handler.shutdown().await.unwrap();
+}

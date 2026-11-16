@@ -52,12 +52,6 @@ enum PreparedSource {
     Json(Arc<Value>),
     Exact(Arc<Vec<u8>>),
     Transform(Arc<TransformSegments>),
-    Emit(Arc<dyn Emit>),
-}
-
-/// A typed body serialized on demand: once into a counter for measurement, once into the reserved destination.
-pub trait Emit: Send + Sync {
-    fn emit(&self, destination: &mut dyn Write) -> Result<(), PreparedOutputError>;
 }
 
 /// `TransformSegments` stores the encoded envelope around its prepared operations.
@@ -251,11 +245,6 @@ impl PreparedOutput {
         Self::from_source(PreparedSource::Json(Arc::new(value)))
     }
 
-    /// A typed body that serializes directly, with no intermediate `Value` tree.
-    pub fn emit(body: Arc<dyn Emit>) -> Self {
-        Self::from_source(PreparedSource::Emit(body))
-    }
-
     /// Retains existing encoded bytes without copying them into an output body.
     pub fn cached_bytes(bytes: Vec<u8>) -> Self {
         Self::from_source(PreparedSource::Exact(Arc::new(bytes)))
@@ -300,9 +289,7 @@ impl PreparedOutput {
     pub fn json_for_test(&self) -> Option<&Value> {
         match &self.source {
             PreparedSource::Json(value) => Some(value),
-            PreparedSource::Exact(_) | PreparedSource::Transform(_) | PreparedSource::Emit(_) => {
-                None
-            }
+            PreparedSource::Exact(_) | PreparedSource::Transform(_) => None,
         }
     }
 
@@ -338,9 +325,6 @@ impl PreparedOutput {
                         .map_err(PreparedOutputError::Write)
                 })
             }),
-            PreparedSource::Emit(emitted) => {
-                write_staged_body(len, destination, |body| emitted.emit(body))
-            }
         }
     }
 
@@ -362,12 +346,6 @@ impl PreparedOutput {
             PreparedSource::Transform(segments) => {
                 let len = measure_transform(segments)?;
                 (MeasuredSource::Transform(segments), len)
-            }
-            PreparedSource::Emit(body) => {
-                let mut counter = CountingWriter::default();
-                let result = body.emit(&mut counter);
-                let counter = finish_count(counter, result)?;
-                (MeasuredSource::Emit(body.as_ref()), counter.len)
             }
         };
         Ok(MeasuredOutput { source, len })
@@ -412,7 +390,6 @@ impl fmt::Debug for PreparedOutput {
             PreparedSource::Json(_) => "json",
             PreparedSource::Exact(_) => "exact",
             PreparedSource::Transform(_) => "transform",
-            PreparedSource::Emit(_) => "emit",
         };
         f.debug_struct("PreparedOutput")
             .field("kind", &kind)
@@ -484,7 +461,6 @@ enum MeasuredSource<'a> {
     Json(&'a Value),
     Exact(&'a [u8]),
     Transform(&'a TransformSegments),
-    Emit(&'a dyn Emit),
 }
 
 impl MeasuredOutput<'_> {
@@ -513,7 +489,6 @@ impl MeasuredOutput<'_> {
             }
             MeasuredSource::Exact(bytes) => destination.write_all(bytes)?,
             MeasuredSource::Transform(segments) => write_transform(segments, &mut destination)?,
-            MeasuredSource::Emit(body) => body.emit(&mut destination)?,
         }
         let written = destination.written();
         if written != self.len {

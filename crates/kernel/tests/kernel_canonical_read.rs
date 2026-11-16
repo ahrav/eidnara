@@ -722,6 +722,76 @@ fn a_chunk_carries_each_decision_object_with_its_decision() {
     }
 }
 
+/// A decision object's chunk row carries its decision while the decision row is live at the snapshot: created
+/// at or before it and invalidated after it. At any other snapshot the row carries none, which a caller that
+/// serves the object reads as a missing canonical row.
+#[test]
+fn a_chunk_carries_a_decision_only_while_its_row_is_live_at_the_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 2, 0, 0);
+    let seeded = store.tip().unwrap();
+    for name in ["later-one", "later-two"] {
+        store
+            .commit(intent(name), |envelope| {
+                envelope.insert_domain(domain(name))?;
+                Ok(String::new())
+            })
+            .unwrap();
+    }
+    drop(store);
+    // The registry rows keep their commits; only the decision rows move, as a damaged store could hold them.
+    Connection::open(directory.path().join("kernel.sqlite"))
+        .unwrap()
+        .execute_batch(&format!(
+            "UPDATE decisions SET created_commit_seq={} WHERE object_id='memory-0';
+             UPDATE decisions SET invalidated_commit_seq={} WHERE object_id='memory-1';",
+            seeded + 1,
+            seeded + 2
+        ))
+        .unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let carried = |requested: i64, object_id: &str| {
+        let chunk = store
+            .visible_chunk_as_of_in_scope(
+                Surface::ExplicitSearch,
+                requested,
+                None,
+                usize::MAX,
+                u64::MAX,
+                None,
+            )
+            .unwrap();
+        let row = chunk
+            .rows
+            .iter()
+            .find(|entry| entry.row.object.object_id == object_id)
+            .unwrap_or_else(|| panic!("{object_id} is visible at {requested}"));
+        row.decision
+            .as_ref()
+            .map(|decision| decision.content.is_some())
+    };
+    assert_eq!(
+        carried(seeded, "memory-0"),
+        None,
+        "created after the snapshot"
+    );
+    assert_eq!(
+        carried(seeded + 1, "memory-0"),
+        Some(true),
+        "created at the snapshot"
+    );
+    assert_eq!(
+        carried(seeded + 1, "memory-1"),
+        Some(true),
+        "invalidated after the snapshot"
+    );
+    assert_eq!(
+        carried(seeded + 2, "memory-1"),
+        None,
+        "invalidated at the snapshot"
+    );
+}
+
 /// A payload budget ends the chunk at the first commit boundary where the rows' payload bytes pass it. The
 /// decisions the chunk decodes stay within the budget, and every decision keeps its payload size.
 #[test]
