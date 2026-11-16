@@ -14,15 +14,15 @@ References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - The additive engine composes m0 from the pinned read inside its HARD arm and
-  assigns the composition at `crates/daemon/src/transform.rs:3122`.
+  assigns the composition at `crates/daemon/src/transform.rs:3143`.
 - Soft and Defer passes keep the frozen m0 unit and the stored
   `meta.project_memory`; the response field `project_memory` is read from meta
-  (`apply_additive_only` (`crates/daemon/src/transform.rs:2854`)).
+  (`apply_additive_only` (`crates/daemon/src/transform.rs:2871`)).
 - Each pass still reads the Kernel (`project_memory_read`
-  (`crates/daemon/src/lib.rs:5554`)); the read feeds only the m1 revision
+  (`crates/daemon/src/lib.rs:5585`)); the read feeds only the m1 revision
   signal, and a changed revision requests a HARD fold
   (`project_memory_revision_change_requests_a_hard_fold`
-  (`crates/daemon/src/transform.rs:13993`)).
+  (`crates/daemon/src/transform.rs:14092`)).
 - Correction: the spec cited `transform.rs` line 13972, which at this tip lies inside
   the test
   `withheld_canonical_read_composes_no_block_and_differs_from_empty_memory`; the
@@ -35,7 +35,7 @@ revision.
   `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
   (`crates/daemon/tests/transform_canonical_memory.rs:46`) (third pass keeps
   `project_memory`); `project_memory_revision_change_requests_a_hard_fold`
-  (`crates/daemon/src/transform.rs:13993`). Status: unaudited.
+  (`crates/daemon/src/transform.rs:14092`). Status: unaudited.
 
 ## Failure scenario
 

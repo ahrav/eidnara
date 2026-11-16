@@ -86,7 +86,7 @@ pub(crate) struct ReadResponse {
     pub(crate) known_as_of: i64,
     pub(crate) tip: i64,
     pub(crate) rows: Vec<VisibleRow>,
-    /// Whether rows beyond [`MAX_READ_ROWS`] were dropped. Byte-budget truncation happens at serialization, so the response's flag can be `true` while `truncated` here is `false`.
+    /// Whether the read left out rows the selection admits: rows beyond the caller's row cap, or rows from the first whose payload passes the caller's payload-byte cap. The route serializer applies a further byte budget to the encoded rows, so the response's flag can be `true` while `truncated` here is `false`.
     pub(crate) truncated: bool,
     /// Decision rows keyed by `object_id`, looked up at `known_as_of`. Total
     /// over the visible decision-kind rows in `rows`: a missing entry fails
@@ -186,7 +186,15 @@ pub(crate) fn read_visible(
     as_of: Option<i64>,
     selection: RowSelection<'_>,
 ) -> Result<ReadResponse, KernelError> {
-    read_visible_page(store, project, surface, as_of, selection, None)
+    read_visible_bounded(
+        store,
+        project,
+        surface,
+        as_of,
+        selection,
+        None,
+        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+    )
 }
 
 /// When `before` is set, `read_visible_page` applies the row cap to rows after `before` in serving order.
@@ -197,6 +205,73 @@ pub(crate) fn read_visible_page(
     as_of: Option<i64>,
     selection: RowSelection<'_>,
     before: Option<&ReadCursor>,
+) -> Result<ReadResponse, KernelError> {
+    read_visible_bounded(
+        store,
+        project,
+        surface,
+        as_of,
+        selection,
+        before,
+        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+    )
+}
+
+/// The project's visible decisions of one domain at `as_of` in serving order,
+/// with the snapshot's `known_as_of` and `tip`. The rows carry no payload, so
+/// a caller that judges each row before a cap applies walks them and loads
+/// the payloads of one bounded page at a time.
+pub(crate) fn domain_decisions_in_serving_order(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    surface: Surface,
+    as_of: i64,
+    domain_id: &str,
+) -> Result<(i64, i64, Vec<VisibleRow>), KernelError> {
+    let visible = store.visible_domain_decisions_as_of_in_scope(
+        surface,
+        as_of,
+        domain_id,
+        Some(project.scope_term()),
+    )?;
+    let selection = RowSelection::DomainDecisions(domain_id);
+    let mut filter = ScopeFilter::new(project);
+    let mut terms = stored_terms(store);
+    let mut rows = Vec::new();
+    for row in visible.rows {
+        if selection.keeps(&row) && filter.matches(row.scope_id.as_deref(), &mut terms)? {
+            rows.push(ServingOrderLast(row));
+        }
+    }
+    rows.sort();
+    Ok((
+        visible.known_as_of,
+        visible.tip,
+        rows.into_iter().map(|entry| entry.0).collect(),
+    ))
+}
+
+/// [`read_visible`] under the given row and payload-byte caps.
+pub(crate) fn read_visible_within(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    surface: Surface,
+    as_of: Option<i64>,
+    selection: RowSelection<'_>,
+    caps: (usize, usize),
+) -> Result<ReadResponse, KernelError> {
+    read_visible_bounded(store, project, surface, as_of, selection, None, caps)
+}
+
+/// The visible read behind [`read_visible`], [`read_visible_page`], and [`read_visible_within`]: the newest `max_rows` rows after `before` in serving order, cut where their payload bytes pass `max_row_bytes`.
+fn read_visible_bounded(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    surface: Surface,
+    as_of: Option<i64>,
+    selection: RowSelection<'_>,
+    before: Option<&ReadCursor>,
+    (max_rows, max_row_bytes): (usize, usize),
 ) -> Result<ReadResponse, KernelError> {
     let requested = match as_of {
         Some(as_of) => as_of,
@@ -227,7 +302,7 @@ pub(crate) fn read_visible_page(
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(store);
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
-    let mut newest = NewestRows::new(MAX_READ_ROWS);
+    let mut newest = NewestRows::new(max_rows);
     for row in visible.rows {
         if selection.keeps(&row)
             && before.is_none_or(|cursor| cursor.precedes(&row))
@@ -265,7 +340,7 @@ pub(crate) fn read_visible_page(
         }
         cumulative_payload_bytes = cumulative_payload_bytes
             .saturating_add(*payload_sizes.get(&row.object.object_id).unwrap_or(&0));
-        if cumulative_payload_bytes > MAX_READ_ROW_BYTES as u64 {
+        if cumulative_payload_bytes > max_row_bytes as u64 {
             cutoff = index;
             break;
         }

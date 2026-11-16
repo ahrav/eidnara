@@ -13,11 +13,11 @@ re-verified at this branch tip.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Additive engine: `crates/daemon/src/transform.rs:3122` inside
+- Additive engine: `crates/daemon/src/transform.rs:3143` inside
   `apply_additive_only` (`apply_additive_only`
-  (`crates/daemon/src/transform.rs:2854`)).
-- Folding engine fold: `crates/daemon/src/transform.rs:4743`; pressure refold:
-  `crates/daemon/src/transform.rs:4898` (`MaterializeReason::PressureRefold`).
+  (`crates/daemon/src/transform.rs:2871`)).
+- Folding engine fold: `crates/daemon/src/transform.rs:4768`; pressure refold:
+  `crates/daemon/src/transform.rs:4923` (`MaterializeReason::PressureRefold`).
 - All three call `ctx.project_memory_composition()`, which returns the
   composition of the read pinned for that pass.
 - Correction: the spec cited `transform.rs` lines 13972, 20836, and 21245; at this tip
@@ -28,13 +28,13 @@ revision.
   durable by the pass's memory-store commit.
 - Existing check:
   `canonical_memory_composes_the_project_memory_block_and_pins_the_snapshot`
-  (`crates/daemon/src/transform.rs:13886`);
+  (`crates/daemon/src/transform.rs:13985`);
   `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
   (`crates/daemon/tests/transform_canonical_memory.rs:46`);
   `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it`
   (`crates/daemon/src/use_outcome_writer_tests.rs:282`);
   `a_pressure_refold_reports_its_frozen_composition`
-  (`crates/daemon/src/transform.rs:20895`). Status: unaudited.
+  (`crates/daemon/src/transform.rs:20994`). Status: unaudited.
 
 ## Failure scenario
 

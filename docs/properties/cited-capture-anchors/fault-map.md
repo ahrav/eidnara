@@ -15,7 +15,7 @@ that adds this part.
 | F4 | Evaluation budget exhaustion or interrupt | constructible: `EvalBudget` in tests |
 | F5 | HEAD moves during snapshot, or between a capture submit and its retry | constructible: engine tests that move HEAD between batches; the U2 route test commits between submit and retry |
 | F6 | Retired or unknown parent row | constructible: retire a parent, or insert it later in one envelope |
-| F7 | Operation-key reuse with different bytes | constructible: Kernel envelope tests; test-only for capture (refinement R7) |
+| F7 | Operation-key reuse with different bytes | constructible: Kernel envelope tests; for capture, a committed source whose queue row was pruned and whose message is planned again: a plan with the receipt's bytes replays it and completes the source, and planning that keeps conflicting ends at the dispatch cap |
 | F8 | Kernel writer held past 5 s | constructible: hold the writer from a test thread |
 | F9 | Model output invents or omits a source id or quotes foreign text | constructible: memory-capture unit tests |
 | F10 | Session delete interleaved with checkpoint or publish | constructible: gate-holding daemon tests |
@@ -23,7 +23,7 @@ that adds this part.
 | F12 | Source-capture slot busy, budget spent, cancelled, Kernel starting | constructible: source-capture test module |
 | F13 | Secret-bearing text | constructible: known secret fixtures |
 | F14 | Unsupported object format, oversized delta base, replacement refs; unborn and non-repository roots | constructible: git-source tests and the U2 head-observation fixtures (`crates/daemon/src/memory_capture/head.rs:416`, `:690`) |
-| F15 | Harness capture past `retain_until` while a decision cites it | constructible: capture citation events since U3 (`crates/daemon/src/source_capture_tests.rs:3783`) |
+| F15 | Harness capture past `retain_until` while a decision cites it | constructible: capture citation events since U3 (`crates/daemon/src/source_capture_tests.rs:3832`) |
 | F16 | Fragment id differs from descriptor message id (hashed, chunked, multi-block) | production: messages over 16 KiB or out-of-grammar ids |
 
 ## Per-property required faults

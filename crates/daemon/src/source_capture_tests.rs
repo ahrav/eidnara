@@ -3584,41 +3584,49 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
         assert_eq!(decision.evidence_id, None);
         assert_eq!(decision.sensitivity, "normal");
     }
-    let admissions: Vec<(String, String, String, String, i64)> = kernel_db(dir.path())
-        .prepare(
-            "SELECT a.source_class,a.taint_class,a.maturity,a.effective_maturity,a.elevated_support
-             FROM admission_decisions a JOIN object_registry r ON r.object_id=a.subject_object_id
-             WHERE r.source_id='memory_capture' AND r.object_kind='decision'",
-        )
-        .unwrap()
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+    let admissions: BTreeMap<String, (String, String, String, String, i64)> =
+        kernel_db(dir.path())
+            .prepare(
+                "SELECT r.object_id,a.source_class,a.taint_class,a.maturity,a.effective_maturity,
+                        a.elevated_support
+                 FROM admission_decisions a JOIN object_registry r ON r.object_id=a.subject_object_id
+                 WHERE r.source_id='memory_capture' AND r.object_kind='decision'",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    (
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
     assert_eq!(admissions.len(), 6, "{admissions:?}");
-    assert!(
-        admissions
-            .iter()
-            .all(|admission| *admission == admissions[0]),
-        "{admissions:?}"
-    );
-    let (source, taint, ..) = admissions[0].clone();
-    assert_eq!(
-        (source.as_str(), taint.as_str()),
-        ("model_inference", "assistant_inference")
-    );
-    let object_ids: Vec<&str> = decisions
-        .values()
-        .map(|decision| decision.object_id.as_str())
-        .collect();
+    let fragments = ["pi-span", "pi-edge"];
+    let admission = |maturity: &str, elevated: i64| {
+        (
+            "model_inference".to_owned(),
+            "assistant_inference".to_owned(),
+            maturity.to_owned(),
+            maturity.to_owned(),
+            elevated,
+        )
+    };
+    for (message, decision) in &decisions {
+        let expected = if fragments.contains(&message.as_str()) {
+            admission("candidate", 0)
+        } else {
+            admission("approved", 1)
+        };
+        assert_eq!(admissions[&decision.object_id], expected, "{message}");
+    }
     let served = store
         .commit(
             kernel::CommitIntent {
@@ -3629,15 +3637,23 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
                 cause: "read".into(),
             },
             |envelope| {
-                let rows = envelope.served_rows_for(&object_ids, None)?;
-                let visibility: BTreeSet<String> = rows
+                let ids: Vec<&str> = decisions
                     .values()
-                    .map(|row| {
-                        format!(
-                            "{:?}/{:?}/{:?}",
-                            row.visibility(Surface::AutoInject),
-                            row.visibility(Surface::ExplicitSearch),
-                            row.object.sensitivity
+                    .map(|decision| decision.object_id.as_str())
+                    .collect();
+                let rows = envelope.served_rows_for(&ids, None)?;
+                let visibility: BTreeMap<String, String> = decisions
+                    .iter()
+                    .map(|(message, decision)| {
+                        let row = &rows[&decision.object_id];
+                        (
+                            message.clone(),
+                            format!(
+                                "{:?}/{:?}/{:?}",
+                                row.visibility(Surface::AutoInject),
+                                row.visibility(Surface::ExplicitSearch),
+                                row.object.sensitivity
+                            ),
                         )
                     })
                     .collect();
@@ -3645,12 +3661,18 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
             },
         )
         .unwrap();
-    let visibility: BTreeSet<String> = serde_json::from_str(&served.result).unwrap();
-    assert_eq!(
-        visibility.into_iter().collect::<Vec<_>>(),
-        vec!["Hidden/Labeled/Normal".to_owned()],
-        "cited and uncited memories serve alike"
-    );
+    let visibility: BTreeMap<String, String> = serde_json::from_str(&served.result).unwrap();
+    for (message, served) in &visibility {
+        let expected = if fragments.contains(&message.as_str()) {
+            "Hidden/Labeled/Normal"
+        } else {
+            "Visible/Visible/Normal"
+        };
+        assert_eq!(
+            served, expected,
+            "{message}: cited and uncited memories serve alike"
+        );
+    }
 
     assert_eq!(counter(&handler, "decisions_cited"), 5);
     assert_eq!(counter(&handler, "decisions_descriptor_not_found"), 1);

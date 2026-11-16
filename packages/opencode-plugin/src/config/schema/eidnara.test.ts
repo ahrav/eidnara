@@ -175,6 +175,7 @@ describe("EidnaraConfigSchema", () => {
                 memory: {
                     enabled: true,
                     injection_budget_tokens: 4000,
+                    auto_inject: { enabled: true },
                     auto_promote: true,
                     auto_capture: true,
                     retrieval_count_promotion_threshold: 3,

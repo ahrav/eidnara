@@ -8,7 +8,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 `insert_decision` (`crates/kernel/src/slice/write.rs:920`) calls `require_parents` (`:1095`), which runs `require_live` for the domain and `require_optional_live` for proposition, scope, anchor, and evidence. Each query requires `invalidated_commit_seq IS NULL` inside the envelope's transaction and returns `NotFound` otherwise. The parent check runs before the registry insert, so a refusal leaves no registry row.
 
-At U1 and U2 memory capture passed `anchor_id: None`, so no production decision reached the anchor clause. Since U3, `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:1215`) inserts the job's anchor before the job's first decision and names it on every decision of the job (`:1274`, `:1304`), so every publish that writes a decision reaches the clause in production order; a job whose memories are all `duplicate_of` writes no decision and no anchor (`:1259`). `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
+At U1 and U2 memory capture passed `anchor_id: None`, so no production decision reached the anchor clause. Since U3, `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:2117`) inserts the job's anchor before the job's first decision and names it on every memory decision of the job (`:2275`, `:2305`); the statement record of an approved user statement is a `user-statements` decision with `anchor_id: None` (`:1569`). So every publish of a job with a readable frozen HEAD that writes a decision reaches the clause in production order. A job whose plan froze no HEAD has no anchor (`crates/daemon/src/memory_capture/cite.rs:403`) and writes its decisions with `anchor_id: None`, and a job whose memories are all `duplicate_of` writes no decision and no anchor (`crates/daemon/src/memory_capture.rs:2224`); neither reaches the clause. `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
 
 ## Failure scenario
 
@@ -26,7 +26,7 @@ A decision naming a missing domain; a decision naming an anchor inserted after i
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/kernel/tests/kernel_slice.rs:196`; `crates/kernel/tests/kernel_envelope.rs:669`; `crates/kernel/tests/kernel_anchor_write.rs:404`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/kernel/tests/kernel_slice.rs:197`; `crates/kernel/tests/kernel_envelope.rs:669`; `crates/kernel/tests/kernel_anchor_write.rs:404`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
@@ -36,12 +36,15 @@ A decision naming a missing domain; a decision naming an anchor inserted after i
 - Sources examined: `publish_captured_memories` and every other `DecisionSpec` construction in `crates/daemon/src`.
 - Findings: at U1 and U2 every production `DecisionSpec` set `anchor_id: None`.
   At U3 the capture publish inserts the job's anchor before the job's first
-  decision and names it on every decision of the job
-  (`crates/daemon/src/memory_capture.rs:1274`), so the clause is reached on
-  every publish that writes a decision
-  (`crates/daemon/src/source_capture_tests.rs:3496`); a job whose memories
+  decision and names it on every memory decision of the job
+  (`crates/daemon/src/memory_capture.rs:2275`); a statement record names no
+  anchor (`crates/daemon/src/memory_capture.rs:1569`). So the clause is reached on
+  every publish of a job with a readable frozen HEAD that writes a decision
+  (`crates/daemon/src/source_capture_tests.rs:3523`); a job whose plan froze
+  no HEAD writes its decisions with `anchor_id: None`, and a job whose memories
   are all `duplicate_of` writes no decision and no anchor
-  (`crates/daemon/src/memory_capture.rs:1259`).
+  (`crates/daemon/src/memory_capture.rs:2224`).
 - Missing evidence: none.
 - Conclusion: resolved with answer: R1's `always-or-unreached` label is
-  reversed to `always` at U3.
+  reversed to `always` at U3, because production reaches the clause on every
+  anchored publish; a publish with no frozen HEAD names no anchor.
