@@ -61,9 +61,9 @@ than redirected to different checks after test consolidation.
 | [Lag and acknowledgement][lag-test] | Consumer lag withholds the block; acknowledgement restores serving. | unaudited |
 | [Disabled memory][disabled-test] | A disabled pass takes no canonical read. | unaudited |
 | [Configured memory budget][configured-budget-test] | The reader drops rows beyond the configured budget. | unaudited |
-| [Generic row cap][row-cap-test] | Newest rows survive and truncation is reported. | unaudited |
+| [Generic row cap][row-cap-test] | Newest rows survive and truncation is reported. The read is `kernel.read` with no `object_ids`, which `newest_page` serves. | unaudited |
 | [bounded_selection_matches_a_full_sort_and_truncate][selection-reference] | Generated keys and caps compare selected rows and dropped status against an independent full sort/truncate. | unaudited |
-| [Generic byte cap][byte-cap-test] | The result is nonempty, truncated, shorter than the input, and a contiguous newest prefix; exact byte usage and maximal fit are not asserted. | unaudited |
+| [Generic byte cap][byte-cap-test] | The result is nonempty, truncated, shorter than the input, and a contiguous newest prefix; exact byte usage and maximal fit are not asserted. The read is `kernel.read` with no `object_ids`, which `newest_page` serves. | unaudited |
 | [Render category boundary][render-category] | Nonpositive and unknown categories are excluded at rendering. | unaudited |
 | [Memory markup escaping][render-markup] | Object IDs cannot forge block structure through markup or newlines. | unaudited |
 | [Memory content cap][render-content-cap] | UTF-8 content is cut before the 64 KiB boundary. | unaudited |
@@ -458,7 +458,7 @@ Production guards go to
 above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
-[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L182-L300
+[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L383-L496
 [injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L282
 [revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L315
 [dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L373
@@ -469,8 +469,8 @@ that no related check exists anywhere in the repository.
 [lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L230
 [disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L309
 [configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L345
-[row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
-[byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
+[row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L1958
+[byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2112
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L981-L1008
 [handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L1028-L1184
 [close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1649
@@ -516,12 +516,12 @@ that no related check exists anywhere in the repository.
 [identity-test]: ../../../crates/memory-store/src/lib.rs#L16042
 [json-identity-test]: ../../../crates/memory-store/src/lib.rs#L15899
 [trace-identity-test]: ../../../crates/memory-store/src/lib.rs#L16109
-[served-columns]: ../../../crates/kernel/src/admission.rs#L4081
-[cross-project]: ../../../crates/daemon/tests/kernel_routes.rs#L1354
-[project-scope]: ../../../crates/daemon/tests/kernel_routes.rs#L1847
-[historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1919
-[object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2060
-[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2031
+[served-columns]: ../../../crates/kernel/src/admission.rs#L4407
+[cross-project]: ../../../crates/daemon/tests/kernel_routes.rs#L1366
+[project-scope]: ../../../crates/daemon/tests/kernel_routes.rs#L1803
+[historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1875
+[object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2016
+[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2080
 [render-category]: ../../../crates/daemon/src/memory_render.rs#L257
 [render-markup]: ../../../crates/daemon/src/memory_render.rs#L284
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308

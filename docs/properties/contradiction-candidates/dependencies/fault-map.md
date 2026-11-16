@@ -10,7 +10,7 @@ today, which records need it, and the cheapest valid oracle.
 | F1 oversize input (bytes, atoms) | yes | construct a `&str`; pure function |
 | F2 large same-project domain (> 8192 decisions) | yes, slow | commit decisions in a fixture (`kernel_routes.rs:1958` does this for the daemon cap) |
 | F3 scope shapes: no term, non-exact operator, redacted term, redacted filter, NULL scope | yes | `insert_scope` with `ScopeTermSpec`; `SECRET` fixture for redaction (`kernel_scope.rs:235`) |
-| F4 corrupt payload in another domain | yes | raw SQL `UPDATE decisions SET decision_payload=...` (`kernel_canonical_read.rs:448`) |
+| F4 corrupt payload in another domain | yes | raw SQL `UPDATE decisions SET decision_payload=...` (`kernel_canonical_read.rs:450`) |
 | F5 held reader pool | `test-support` only | `hold_readers_for_test` (`open.rs:614`) |
 | F6 deadline crossing inside a statement | partial | `EvalBudget` with a near deadline plus a slow statement; no injection point found for `claim_facts` statements |
 | F7 parent interrupt on a linked budget | yes | `EvalBudget::linked` then `parent.cancel()` |
@@ -39,7 +39,7 @@ today, which records need it, and the cheapest valid oracle.
 | p5dep-domain-decision-read-matches-domain-and-kind-in-sql | F4 | two domains at one snapshot |
 | p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict | F3 | scopes of each shape with decisions |
 | p5dep-daemon-bounds-rows-after-the-scope-filter | F2; large payloads for the byte cut; F4 variant (missing decision row) for `CorruptCanonicalRow` | a project with > 8192 rows |
-| p5dep-kernel-domain-read-has-no-row-bound | F2 | > 8192 same-project `memory` decisions; an assertion that `visible_domain_decisions_as_of_in_scope` returns more than `MAX_READ_ROWS` rows before `read_visible` bounds them (`read.rs:230`) |
+| p5dep-kernel-domain-read-has-no-row-bound | F2 | > 8192 same-project `memory` decisions; an assertion that `visible_domain_decisions_as_of_in_scope` returns more than `MAX_READ_ROWS` rows before `read_visible` bounds them (`read.rs:426`) |
 | p5dep-claim-fact-bounds-are-refused-before-any-row-is-read | over-bound id lists; exhausted budget | `controlled_acquisitions_for_test` counter |
 | p5dep-budget-exhaustion-stops-a-budgeted-kernel-read | F5, F6, F7 | `test-support` build |
 | p5dep-decision-page-returns-an-oversize-decision-alone | a payload larger than `max_payload_bytes` | decisions with known sizes |

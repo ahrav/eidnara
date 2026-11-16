@@ -45,21 +45,26 @@ folds case and diacritics. The daemon depends on `retrieval` at
 `crates/daemon/Cargo.toml:45` (plan cited `:41`; drifted).
 
 S2 scope-filtered Kernel read. `KernelStore::visible_domain_decisions_as_of_in_scope`
-(`crates/kernel/src/admission.rs:3186-3218`) calls `visible_selected_as_of`
-(`:3220-3253`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
-one snapshot through `served_rows` (`:3502-3518`), which runs
-`served_classes_selected` (`:3716-3803`) over the SQL in `served_classes_sql`
-(`:3574-3692`). The domain/kind predicate is `o.domain_id=:domain_id AND
-o.object_kind='decision'` (`:3602-3604`). The scope prefilter is the `WHERE`
-tail at `:3672-3690`. Rows are then sorted by `object_id` (`:3241`). No row
+(`crates/kernel/src/admission.rs:3281-3313`) calls `visible_selected_as_of`
+(`:3315-3340`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
+one snapshot through `served_rows` (`:3589-3605`), which runs
+`served_classes_selected` (`:3979-3998`) over the SQL in `served_classes_sql`
+(`:3818-3955`). The domain/kind predicate is `o.domain_id=:domain_id AND
+o.object_kind='decision'` (`:3852-3856`). The scope prefilter is the `WHERE`
+tail at `:3934-3952`. Rows are then sorted by `object_id` (`:3328`). No row
 limit and no budget parameter exist on this API. The daemon consumer is
-`read_visible` in `crates/daemon/src/kernel_routes/read.rs:182-300`: SQL
-prefilter with `project.scope_term()` (`:209`,
+`read_visible` in `crates/daemon/src/kernel_routes/read.rs:383-496`: SQL
+prefilter with `project.scope_term()` (`:411`,
 `crates/daemon/src/kernel_routes/project.rs:106-111`), then `ScopeFilter`
 (`project.rs:186-222`) judges each kept row, then `NewestRows` heap of
-`MAX_READ_ROWS = 8192` (`read.rs:26`, `:147-180`, `:230-238`), then payload
-sizes before payloads (`:240-276`), then `decisions_for_objects_as_of` for the
-retained ids (`:277-292`).
+`MAX_READ_ROWS = 8192` (`read.rs:27`, `:148-181`, `:426-434`), then payload
+sizes before payloads (`:436-472`), then `decisions_for_objects_as_of` for the
+retained ids (`:473-488`). `kernel.read` does not use this API: a request
+with `object_ids` reads `visible_as_of_in_scope` through the same
+`read_visible_page` (`read.rs:415-417`), and a request with none reads, in
+`newest_page` (`read.rs:289-381`), `visible_chunk_as_of_in_scope`
+(`crates/kernel/src/admission.rs:3249-3276`), which takes a row count and a
+payload budget and has no domain selection.
 
 S3 budgeted Kernel reads. `decision_page_within_budget`
 (`crates/kernel/src/slice/read.rs:126-220`): keyset page over the whole
@@ -200,12 +205,13 @@ C2 `analysis.rs:6`: "Parts keep their original bytes; the engine folds case
 and diacritics."
 C3 `crates/retrieval/AGENTS.md`: a change to any analysis rule needs a new
 epoch and an updated pinned digest; mutations pure; every bound caller-supplied.
-C4 `admission.rs:3183-3185`: domain and kind matched in SQL before any row is
+C4 `admission.rs:3278-3280`: domain and kind matched in SQL before any row is
 read; a corrupt row outside the domain never fails this read.
-C5 `admission.rs:3138-3144`: the scope restriction is a superset of the
+C5 `admission.rs:3220-3225`: the scope restriction is a superset of the
 algebra's verdict.
-C6 `read.rs:26`, `:230`: the row bound applies after the filter; `:240`:
-payload sizes read before any payload.
+C6 `read.rs:27`, `:302`, `:425-426`: the row bound applies after the filter
+on both read paths; `:436`: `read_visible_page` reads payload sizes before
+any payload.
 C7 `slice/read.rs:121`: a single decision larger than the bound is returned
 alone; the wait for a pooled reader stops at the budget.
 C8 `claim_facts.rs:232-234`: reader acquisition and every statement stop at
@@ -288,7 +294,7 @@ this is deliberate. A P5 consumer that pins the epoch string alone pins less
 than the identity does.
 
 D5 The Kernel scope prefilter keeps rows whose `scope_id` is NULL
-(`admission.rs:3684`), and the daemon `ScopeFilter::matches` returns `false`
+(`admission.rs:3949`), and the daemon `ScopeFilter::matches` returns `false`
 for `None` (`project.rs:212-214`). The superset claim holds; a P5 consumer
 that uses the Kernel API without the daemon filter would see unscoped rows
 the daemon never serves.

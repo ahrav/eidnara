@@ -275,7 +275,7 @@ Confidence: high -
 `read_project_memory` captures the tip and passes it as the requested snapshot
 (`read_project_memory` (`crates/daemon/src/canonical_memory.rs:205`)); the route
 returns `known_as_of` from the visible read
-(`crates/daemon/src/kernel_routes/read.rs:294`).
+(`crates/daemon/src/kernel_routes/read.rs:490`).
 Existing check:
 `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
 (`crates/daemon/tests/transform_canonical_memory.rs:46`) (assertions
@@ -368,10 +368,10 @@ Required faults and enabling state: A decision admitted, then a committed
 Confidence: high -
 [evidence](evidence/uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search.md).
 `visibility_row` maps `Disputed` to `ExplicitLabeled` (`visibility_row`
-(`crates/kernel/src/admission.rs:4356`)); `surface_visibility` hides it on every
-surface but explicit search (`crates/kernel/src/admission.rs:4229`).
+(`crates/kernel/src/admission.rs:4686`)); `surface_visibility` hides it on every
+surface but explicit search (`crates/kernel/src/admission.rs:4559`).
 Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-(`crates/kernel/src/admission.rs:5115`);
+(`crates/kernel/src/admission.rs:5445`);
 `every_non_active_disposition_has_the_contracted_surface_row`
 (`crates/kernel/tests/kernel_admission.rs:2890`);
 `dispositions_and_sensitivity_only_reduce_visibility`
@@ -396,8 +396,8 @@ SQL.
 Confidence: high -
 [evidence](evidence/uo-admission-reads-require-a-non-null-commit-seq.md). the
 predicates filter `commit_seq IS NOT NULL`
-(`crates/kernel/src/admission.rs:691`); the production writer binds the envelope
-sequence at `crates/kernel/src/admission.rs:1853`. The use-outcome dispute join
+(`crates/kernel/src/admission.rs:748`); the production writer binds the envelope
+sequence at `crates/kernel/src/admission.rs:1910`. The use-outcome dispute join
 and citation predicate filter the same way
 (`crates/kernel/src/use_outcome.rs:180`).
 Existing check:
@@ -424,12 +424,12 @@ Required faults and enabling state: A `mark_stale` and a `mark_disputed`
 committed together.
 Confidence: high -
 [evidence](evidence/uo-disposition-events-append-rows-and-newest-by-commit-seq-wins.md).
-`LATEST_SUBJECT_DECISION_PREDICATE` (`crates/kernel/src/admission.rs:691`) and
+`LATEST_SUBJECT_DECISION_PREDICATE` (`crates/kernel/src/admission.rs:748`) and
 its single-row seek.
 Existing check: `both_latest_decision_formulations_choose_the_same_row`
 (`crates/kernel/tests/kernel_admission.rs:2252`);
 `an_event_that_names_a_disposition_keeps_its_own_outcome`
-(`crates/kernel/src/admission.rs:5445`). Status: unaudited.
+(`crates/kernel/src/admission.rs:5775`). Status: unaudited.
 Impact: The dispute join counts event existence (C12), so this record bounds
 what a reader sees, not the join.
 Open questions:
@@ -881,7 +881,7 @@ and before n; a null row and another lineage by SQL.
 Confidence: high -
 [evidence](evidence/uo-p-disputed-after-serve-from-committed-events-only.md).
 the join is `crates/kernel/src/use_outcome.rs:198-236`, using the admission
-lineage text through `crates/kernel/src/admission.rs:926`.
+lineage text through `crates/kernel/src/admission.rs:983`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
 (`crates/kernel/tests/kernel_use_outcome.rs:401`);

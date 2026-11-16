@@ -10,13 +10,15 @@ from a premature row limit. Row and byte pressure need separate witnesses.
 
 ## Evidence trail
 
-- [read.rs:23-26][caps] defines 8192 rows and one eighth of the wire-body limit
+- [read.rs:26-30][caps] defines 8192 rows and one eighth of the wire-body limit
   as the read-byte budget.
-- [read.rs:162-168][heap] drops the serving-order-last retained row on overflow.
-- [read.rs:227-276][cutoff] filters before heap admission and then applies the
+- [read.rs:163-169][heap] drops the serving-order-last retained row on overflow.
+- [read.rs:425-472][cutoff] filters before heap admission and then applies the
   cumulative payload cutoff to the retained newest-first rows.
-- [kernel_routes.rs:2002][row-test] and [2156][byte-test] contain generic cap
-  tests. Their existence is not this campaign's pressure evidence.
+- [kernel_routes.rs:1958][row-test] and [2112][byte-test] contain generic cap
+  tests. Their existence is not this campaign's pressure evidence. Both read
+  through `kernel.read` with no `object_ids`, which `newest_page` serves, so
+  neither runs the heap or the cutoff above.
 
 ## Failure scenario
 
@@ -55,9 +57,9 @@ This record remains unexercised and the existing checks are unaudited.
 - Conclusion: Resolved. This record requires row pressure, while
   [K4][byte-record] separately requires byte pressure. Both are campaign gates.
 
-[caps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L23-L26
-[heap]: ../../../../crates/daemon/src/kernel_routes/read.rs#L162-L168
-[cutoff]: ../../../../crates/daemon/src/kernel_routes/read.rs#L227-L276
-[row-test]: ../../../../crates/daemon/tests/kernel_routes.rs#L2002
-[byte-test]: ../../../../crates/daemon/tests/kernel_routes.rs#L2156
+[caps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L26-L30
+[heap]: ../../../../crates/daemon/src/kernel_routes/read.rs#L163-L169
+[cutoff]: ../../../../crates/daemon/src/kernel_routes/read.rs#L425-L472
+[row-test]: ../../../../crates/daemon/tests/kernel_routes.rs#L1958
+[byte-test]: ../../../../crates/daemon/tests/kernel_routes.rs#L2112
 [byte-record]: ../catalog.md#canonical-memory-byte-pressure-is-exercised
