@@ -716,7 +716,7 @@ fn contracts_freeze_the_six_classes() {
     let contracts = fixture("construction-contracts.json");
     assert_eq!(
         contracts["identity_contract_version"],
-        "search-projection-identity-v4"
+        "search-projection-identity-v5"
     );
     let classes = contracts["classes"].as_object().expect("classes");
     assert_eq!(

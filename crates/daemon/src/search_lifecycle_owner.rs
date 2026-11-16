@@ -48,7 +48,7 @@ use crate::search_replacement::{BuildError, ReplacementSpec, RetirementBounds};
 use crate::search_seed::SeedBounds;
 
 /// The construction contract every occurrence tuple and lineage identifier follows; a revision rebuilds the projection.
-pub const IDENTITY_CONTRACT_VERSION: &str = "search-projection-identity-v4";
+pub const IDENTITY_CONTRACT_VERSION: &str = "search-projection-identity-v5";
 /// The source policy that selects classes, representations, and spans; a revision rebuilds the projection.
 pub const PROJECTION_POLICY_VERSION: &str = "source-policy.v1";
 /// How far before the record's deadline a slice bounded by it must end, so a later wall-clock read of that deadline cannot land before the bound.
@@ -181,7 +181,7 @@ pub struct SearchLifecycleOwner {
     roster: ProjectRoster,
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
-    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request finds a supervisor running under records a reload replaced, or a renewal finds any supervisor running, so the next slice rotates or hands it back.
+    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request finds a supervisor running under records a reload replaced, or a renewal finds any supervisor running, so the next slice rotates or hands it back. A persisted disable also wakes it, so the next slice observes the disable.
     requested: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
@@ -201,10 +201,31 @@ pub struct SearchLifecycleOwner {
     claim_batch: std::sync::atomic::AtomicUsize,
     /// `preparation_refused` preserves the last slice's [`SpecRefusal::code`] so status can report the refusal while the gate reports `no_manifest`.
     preparation_refused: Mutex<Option<&'static str>>,
+    /// What the slices of this daemon process observed and recorded, for the status surface.
+    progress: Mutex<ProjectionProgress>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
     recovery_sync_failure: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// How far the selected family trails the kernel and what the slice loop did about it, since this daemon process started. The status surface reports it, so an operator or a test harness reads the projection's lag and its rebuild outcomes without parsing the log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectionProgress {
+    /// The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `None` until a selected family is observed, and again once an observation finds none it can read or a slice finds the record disabled, a disable reconciling, or the owner shut down.
+    pub checkpoint: Option<i64>,
+    /// First builds and rebuilds the slice loop recorded.
+    pub rebuilds_recorded: u64,
+    /// Builds that reached Current, whoever recorded them.
+    pub rebuilds_completed: u64,
+    /// Renewals of a rebuild whose deadline lapsed.
+    pub rebuilds_renewed: u64,
+    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that hands a supervisor back for joining leaves the earlier value when that supervisor drains, whatever its catch-up episode found, and reports the failed drain when it does not.
+    pub blocked: Option<String>,
+    /// Why the last observation of the selected family failed; `None` after an observation that succeeded or expected no selected family, and after a slice that found the record disabled. Any other slice that ends before its observation keeps the value, as it keeps `checkpoint`.
+    unobserved: Option<String>,
+    /// The attempt this process's slice loop last recorded or renewed, and when, on the monotonic clock.
+    building: Option<(String, Instant)>,
 }
 
 #[cfg(feature = "test-support")]
@@ -286,6 +307,7 @@ impl SearchLifecycleOwner {
             claims_paused: Arc::default(),
             claim_batch: std::sync::atomic::AtomicUsize::new(CLAIM_SLICE_BOUNDS.batch.get()),
             preparation_refused: Mutex::new(None),
+            progress: Mutex::new(ProjectionProgress::default()),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -726,6 +748,8 @@ impl SearchLifecycleOwner {
         budget: &EvalBudget,
     ) -> Result<Option<LifecycleIntent>, BuildError> {
         let mut managed = self.lock_within(budget)?;
+        // The admissions this call makes are judged as lifecycle work: a family that trails the kernel past the freshness limit is still caught up, rebuilt, and completed, while readers and maintenance on other threads stay refused.
+        let _work = self.admission.gate().lifecycle_work();
         if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
             return Err(BuildError::Invalid("the owner is disabled or shut down"));
         }
@@ -848,6 +872,91 @@ impl SearchLifecycleOwner {
     /// The lifecycle record as the slice loop reads it, for the operator surface.
     pub fn lifecycle_record(&self) -> ControlState {
         ProjectionLifecycle::read_at(&self.home)
+    }
+
+    /// The progress this process observed, and the kernel tip read now, so the lag describes what a reader meets at this moment; the tip is `None` when the kernel cannot be read within `budget`. The tip read waits for a kernel reader, so an async caller runs this on the blocking pool.
+    pub fn progress(&self, budget: &EvalBudget) -> (ProjectionProgress, Option<i64>) {
+        let progress = self.lock_progress().clone();
+        (progress, self.kernel.tip_within_budget(budget).ok())
+    }
+
+    fn lock_progress(&self) -> MutexGuard<'_, ProjectionProgress> {
+        self.progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Keeps an observation of the selected family: the commit it had applied, or why it could not be read.
+    fn observed(&self, checkpoint: Result<i64, String>) {
+        let mut progress = self.lock_progress();
+        match checkpoint {
+            Ok(checkpoint) => {
+                progress.checkpoint = Some(checkpoint);
+                progress.unobserved = None;
+            }
+            Err(reason) => {
+                progress.checkpoint = None;
+                progress.unobserved = Some(reason);
+            }
+        }
+    }
+
+    /// Records that no selected family was observed and none was expected, so the status reports no checkpoint and no coverage failure.
+    fn unobserved_by_design(&self) {
+        let mut progress = self.lock_progress();
+        progress.checkpoint = None;
+        progress.unobserved = None;
+    }
+
+    /// Keeps what a slice's outcome says about the record for the status surface, and logs a build that reached Current, so a log reader sees each rebuild's end as well as its start. The logged time is monotonic and covers the attempt this process's slice loop recorded or renewed; any other completed attempt logs `unknown`.
+    fn observe_outcome(&self, outcome: &SliceOutcome) {
+        let completed = matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Current));
+        let building = {
+            let mut progress = self.lock_progress();
+            progress.blocked = stalled(outcome).map(|(_, detail)| match &progress.unobserved {
+                Some(reason) => format!("{detail}; coverage: {reason}"),
+                None => detail,
+            });
+            if !completed {
+                return;
+            }
+            progress.rebuilds_completed += 1;
+            progress.building.take()
+        };
+        if let ControlState::Current(record) = self.lifecycle_record() {
+            let elapsed = building
+                .filter(|(attempt, _)| *attempt == record.attempt_id)
+                .map_or_else(
+                    || "unknown".to_owned(),
+                    |(_, since)| since.elapsed().as_millis().to_string(),
+                );
+            eprintln!(
+                "daemon: search lifecycle rebuild completed: attempt={} consumer={} cause={:?} target={} elapsed_ms={elapsed}",
+                record.attempt_id,
+                record.consumer.consumer_id,
+                record.cause,
+                record
+                    .recovery_target
+                    .map_or_else(|| "none".to_owned(), |target| target.commit_seq.to_string()),
+            );
+        }
+    }
+
+    /// Counts a recording the slice loop wrote and starts the clock that attempt's completion is logged against.
+    fn count_recording(&self, recording: Recording, attempt_id: &str) {
+        let mut progress = self.lock_progress();
+        match recording {
+            Recording::Renewal => progress.rebuilds_renewed += 1,
+            Recording::Registration | Recording::Rebuild(_) => progress.rebuilds_recorded += 1,
+        }
+        progress.building = Some((attempt_id.to_owned(), Instant::now()));
+        // The slice's reason asked for this recording, so it no longer describes the record.
+        progress.blocked = None;
+    }
+
+    /// Keeps the refusal of a recording the last slice asked for, so the status surface shows why no build started.
+    fn refused_recording(&self, refusal: String) {
+        self.lock_progress().blocked = Some(refusal);
     }
 
     /// Records an operator's rebuild of the Current family through the next registered consumer, under the bounds a slice's rebuild takes; `None` when the record is not Current.
@@ -1071,7 +1180,10 @@ impl SearchLifecycleOwner {
             Ok(managed) => managed,
             Err(_) => return SliceOutcome::Blocked("the manager is held".to_owned()),
         };
+        // The admissions this call makes are judged as lifecycle work: a family that trails the kernel past the freshness limit is still caught up, rebuilt, and completed, while readers and maintenance on other threads stay refused.
+        let _work = self.admission.gate().lifecycle_work();
         if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
+            self.unobserved_by_design();
             return SliceOutcome::Disabled;
         }
         let (inputs, identity, budget) = match self.prepare(&mut managed, &wait, slice_started) {
@@ -1087,6 +1199,7 @@ impl SearchLifecycleOwner {
             deadline: budget.deadline(),
         });
         let Managed::Selection(selection) = &mut *managed else {
+            self.unobserved_by_design();
             return SliceOutcome::Disabled;
         };
         // `ProjectionLifecycle::open` syncs and locks the lifecycle directory; a probe that decides only whether to write must not.
@@ -1100,7 +1213,10 @@ impl SearchLifecycleOwner {
                 };
             }
             ControlState::Disabled(_) => {
-                return match self.refresh(&inputs, Some(selection), &identity, &budget) {
+                let refreshed = self.refresh(&inputs, Some(selection), &identity, &budget);
+                // A disabled record serves no family, so the status reports no checkpoint whether or not the refresh read the kernel.
+                self.unobserved_by_design();
+                return match refreshed {
                     Refresh::Installed(_) => SliceOutcome::Disabled,
                     Refresh::Closed(closed) => blocked(closed),
                 };
@@ -1468,12 +1584,22 @@ impl SearchLifecycleOwner {
                     && *selection.identity() == *identity
                     && !selection.selected_over_another_kernel(&self.kernel, budget) =>
             {
-                selection
-                    .observe_selected(budget)
+                let observed = selection.observe_selected(budget);
+                self.observed(
+                    observed
+                        .as_ref()
+                        .map(|report| report.checkpoint.checkpoint_commit_seq)
+                        .map_err(ToString::to_string),
+                );
+                observed
                     .ok()
                     .map(|report| ProjectionCoverage::unjudged(report, tip))
             }
-            _ => Some(ProjectionCoverage::unregistered(identity, tip)),
+            _ => {
+                // No family is observed here by design: the home is unregistered, or its selection is quarantined, under another identity, or over another kernel, and the slice names that cause itself.
+                self.unobserved_by_design();
+                Some(ProjectionCoverage::unregistered(identity, tip))
+            }
         };
         self.admission.refresh_with(
             inputs.clone(),
@@ -1500,6 +1626,8 @@ impl SearchLifecycleOwner {
         #[cfg(feature = "test-support")]
         self.tap(SliceEvent::RequestEntered);
         let mut managed = self.lock_within(budget)?;
+        // The admissions this call makes are judged as lifecycle work: a family that trails the kernel past the freshness limit is still caught up, rebuilt, and completed, while readers and maintenance on other threads stay refused.
+        let _work = self.admission.gate().lifecycle_work();
         // The records and lane are read now rather than trusted from the evidence an earlier slice installed; unavailable ones close the gate and refuse the request.
         let inputs = match AdmissionInputs::read(&self.home) {
             Ok(inputs) => inputs,
@@ -1736,6 +1864,8 @@ impl SearchLifecycleOwner {
         let ControlState::Disabled(disabled) = ProjectionLifecycle::open(&self.home)?.read() else {
             return Err(BuildError::Invalid("disable did not persist"));
         };
+        // The notification wakes the idle slice loop to observe the persisted disable.
+        self.requested.notify_one();
         // A stop with nothing to reconcile is complete; only cleanup needs the manifest's bounds, so the records are read after this.
         let Some(intent) = disabled.handoff.as_deref() else {
             return Ok(());
@@ -2426,6 +2556,7 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if let Some(report) = reporter.report(&outcome, Instant::now()) {
             eprintln!("daemon: search lifecycle {report}");
         }
+        owner.observe_outcome(&outcome);
         if cancel.is_cancelled() {
             return;
         }
@@ -2463,8 +2594,9 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
                     }
                 }
                 // A recording that succeeds ends the run of refusals, so the first refusal of a later stall is printed.
-                if recorded.is_some() {
+                if let Some(recorded) = &recorded {
                     registration_reporter = SliceReporter::default();
+                    owner.count_recording(recording, &recorded.attempt_id);
                 }
                 recorded.is_some()
             }
@@ -2534,14 +2666,16 @@ async fn record_if_admitted(
     match registration {
         Ok(Ok(recorded)) => recorded,
         Ok(Err(error)) => {
-            if let Some(report) = reporter.report(
-                &SliceOutcome::Blocked(match recording {
-                    Recording::Registration => format!("registration refused: {error}"),
-                    Recording::Rebuild(cause) => format!("{cause:?} rebuild refused: {error}"),
-                    Recording::Renewal => format!("expired rebuild renewal refused: {error}"),
-                }),
-                Instant::now(),
-            ) {
+            let refused = SliceOutcome::Blocked(match recording {
+                Recording::Registration => format!("registration refused: {error}"),
+                Recording::Rebuild(cause) => format!("{cause:?} rebuild refused: {error}"),
+                Recording::Renewal => format!("expired rebuild renewal refused: {error}"),
+            });
+            if let Some((_, detail)) = stalled(&refused) {
+                // The status surface and the log carry the same text for the refusal.
+                owner.refused_recording(detail);
+            }
+            if let Some(report) = reporter.report(&refused, Instant::now()) {
                 eprintln!("daemon: search lifecycle {report}");
             }
             None
@@ -2570,43 +2704,48 @@ struct SliceReporter {
     last: Option<(ReportKind, String, Instant)>,
 }
 
+/// The log text of a slice that found its record's renewal due.
+const EXPIRED_REPORT: &str =
+    "rebuild expired: its deadline passed or the wall clock stepped back past its recording";
+
+/// The kind and text of a slice outcome that left the record or its Current family where it was, or `None` for an outcome that advanced the record, found the family current or caught it up, handed work back, or found the home unregistered or disabled.
+fn stalled(outcome: &SliceOutcome) -> Option<(ReportKind, String)> {
+    Some(match outcome {
+        SliceOutcome::Blocked(reason) => {
+            (ReportKind::Blocked, format!("did not advance: {reason}"))
+        }
+        SliceOutcome::Unavailable(reason) => (
+            ReportKind::Unavailable,
+            format!("did not advance: {reason}"),
+        ),
+        SliceOutcome::Closed(refusal) => {
+            (ReportKind::Closed, format!("admission closed: {refusal}"))
+        }
+        SliceOutcome::CaughtUp(EpisodeReport {
+            end: EpisodeEnd::Blocked(blocked),
+            ..
+        }) => (
+            ReportKind::CatchUpBlocked,
+            format!("catch-up blocked: {blocked:?}"),
+        ),
+        SliceOutcome::Rebuild(cause) => {
+            (ReportKind::Rebuild, format!("rebuild required: {cause:?}"))
+        }
+        SliceOutcome::Expired => (ReportKind::Expired, EXPIRED_REPORT.to_owned()),
+        SliceOutcome::Unregistered
+        | SliceOutcome::Advanced(_)
+        | SliceOutcome::Current
+        | SliceOutcome::CaughtUp(_)
+        | SliceOutcome::RotateMaintenance(_)
+        | SliceOutcome::Disabled => return None,
+    })
+}
+
 impl SliceReporter {
     fn report(&mut self, outcome: &SliceOutcome, now: Instant) -> Option<String> {
-        let (kind, detail) = match outcome {
-            SliceOutcome::Blocked(reason) => {
-                (ReportKind::Blocked, format!("did not advance: {reason}"))
-            }
-            SliceOutcome::Unavailable(reason) => (
-                ReportKind::Unavailable,
-                format!("did not advance: {reason}"),
-            ),
-            SliceOutcome::Closed(refusal) => {
-                (ReportKind::Closed, format!("admission closed: {refusal}"))
-            }
-            SliceOutcome::CaughtUp(EpisodeReport {
-                end: EpisodeEnd::Blocked(blocked),
-                ..
-            }) => (
-                ReportKind::CatchUpBlocked,
-                format!("catch-up blocked: {blocked:?}"),
-            ),
-            SliceOutcome::Rebuild(cause) => {
-                (ReportKind::Rebuild, format!("rebuild required: {cause:?}"))
-            }
-            SliceOutcome::Expired => (
-                ReportKind::Expired,
-                "rebuild expired: its deadline passed or the wall clock stepped back past its recording"
-                    .to_owned(),
-            ),
-            SliceOutcome::Unregistered
-            | SliceOutcome::Advanced(_)
-            | SliceOutcome::Current
-            | SliceOutcome::CaughtUp(_)
-            | SliceOutcome::RotateMaintenance(_)
-            | SliceOutcome::Disabled => {
-                self.last = None;
-                return None;
-            }
+        let Some((kind, detail)) = stalled(outcome) else {
+            self.last = None;
+            return None;
         };
         let print = match &self.last {
             Some((last_kind, last_detail, printed_at)) if *last_kind == kind => {

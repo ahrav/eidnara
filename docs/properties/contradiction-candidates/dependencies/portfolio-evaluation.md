@@ -378,7 +378,7 @@ Refinements applied in this bundle: R1 (both S6 records, their index rows,
 and the reachability-classes note), R2 (applied with a correction: the bundle
 pass found a production caller of `decision_page_within_budget` at
 `crates/daemon/src/claim_sources.rs:802`, reached from
-`crates/daemon/src/search_lifecycle_owner.rs:574`, so the record keeps
+`crates/daemon/src/search_lifecycle_owner.rs:596`, so the record keeps
 `default-production` and names that caller; the `test-only` label proposed
 by R2 rests on a claim that does not hold at HEAD), R3, R4, R5 (both S6
 records), R6 (catalog record and evidence file), R7 (catalog, system-model
