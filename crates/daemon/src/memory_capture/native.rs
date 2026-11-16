@@ -587,7 +587,9 @@ pub(super) fn settle_batch_contests(batch: &mut [(Vec<CapturedMemory>, Vec<bool>
 /// proposals of different categories that name one sentence keep their own
 /// quotations, so one sentence is stored once per category at most and each
 /// clause stays its own memory.
-fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) {
+///
+/// Returns the widened quotations.
+fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) -> Vec<String> {
     let widened: Vec<Option<&str>> = proposed
         .iter()
         .map(|memory| {
@@ -601,6 +603,7 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
             }
         })
         .collect();
+    let mut quotations = Vec::new();
     for index in 0..proposed.len() {
         let Some(statement) = widened[index] else {
             continue;
@@ -611,8 +614,10 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
         });
         if !shared {
             proposed[index].quote = statement.to_owned();
+            quotations.push(statement.to_owned());
         }
     }
+    quotations
 }
 
 impl CaptureWork {
@@ -816,9 +821,13 @@ impl CaptureWork {
             };
             let prose = &proses[index];
             let mut proposed = decision.memories;
-            if super::is_user_source(job) && !super::cite::is_hashed_source_id(&job.message_id) {
-                widen_cut_quotations(prose, &mut proposed);
-            }
+            let widened = if super::is_user_source(job)
+                && !super::cite::is_hashed_source_id(&job.message_id)
+            {
+                widen_cut_quotations(prose, &mut proposed)
+            } else {
+                Vec::new()
+            };
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
@@ -843,6 +852,21 @@ impl CaptureWork {
                         .find(|previous| previous.automatic && previous.content == memory.content)
                 {
                     memory.duplicate_of = Some(approved.id.clone());
+                } else if widened.contains(&memory.quote)
+                    && named.is_some_and(|previous| {
+                        previous.automatic && previous.content != memory.content
+                    })
+                {
+                    // The extractor matched the clause it quoted to an
+                    // approved statement. The widened sentence is another
+                    // text, such as that clause negated, so it is written
+                    // as the user's own statement, or names the approved
+                    // statement that holds it word for word.
+                    memory.duplicate_of = plan
+                        .existing
+                        .iter()
+                        .find(|previous| previous.automatic && previous.content == memory.content)
+                        .map(|approved| approved.id.clone());
                 }
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for

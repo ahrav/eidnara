@@ -12,10 +12,10 @@ re-verified at this branch tip.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Folding plan rule: `crates/daemon/src/transform.rs:4239` sets `Defer` when the
+- Folding plan rule: `crates/daemon/src/transform.rs:4264` sets `Defer` when the
   scheduler defers and `Soft` otherwise.
-- Subagent stepping: `crates/daemon/src/transform.rs:4478`.
-- Routing: `crates/daemon/src/transform.rs:3363`.
+- Subagent stepping: `crates/daemon/src/transform.rs:4503`.
+- Routing: `crates/daemon/src/transform.rs:3384`.
 - Correction: the spec cited `transform.rs` line 27022, now inside the test
   `terse_text_compression_gates_subagents_reasoning_and_protected_tail`.
 
@@ -26,7 +26,7 @@ revision.
   `a_subagent_pass_under_native_authority_reports_native_authority`
   (`crates/daemon/src/fold_authority_handler_tests.rs:143`);
   `subagent_first_active_render_commits_tagged_bytes_before_replay`
-  (`crates/daemon/src/transform.rs:23784`);
+  (`crates/daemon/src/transform.rs:23883`);
   `the_session_role_follows_the_pass_subagent_flag_on_each_engine`
   (`crates/daemon/src/use_outcome_writer_tests.rs:420`). Status: unaudited.
 
@@ -62,7 +62,7 @@ a model chain) and a subagent request; the same request under native authority.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Correction: a native subagent lineage switch routes to `apply_once`
-  and answers a passthrough (`crates/daemon/src/transform.rs:3363`), so "no
+  and answers a passthrough (`crates/daemon/src/transform.rs:3384`), so "no
   subagent rule applies under native authority" holds for the plan, not for
   routing.
 - Missing evidence: none beyond what the question names.

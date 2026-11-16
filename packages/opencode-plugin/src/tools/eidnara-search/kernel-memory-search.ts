@@ -245,7 +245,15 @@ function contestingMemoryOf(row: ReadRow, decision: ReadDecision): string | unde
         return undefined;
     }
     const contest = isRecord(parsed) ? parsed.contested_by : undefined;
-    return isRecord(contest) && typeof contest.memory === "string" ? contest.memory : undefined;
+    // The whole record, as the daemon reads it: a string id, an integer commit, and a session that is a string, null, or absent.
+    const whole =
+        isRecord(contest) &&
+        typeof contest.memory === "string" &&
+        Number.isSafeInteger(contest.stated_seq) &&
+        (contest.session === undefined ||
+            contest.session === null ||
+            typeof contest.session === "string");
+    return whole ? (contest.memory as string) : undefined;
 }
 
 /** Whether a reader is shown this memory as a contesting observation: a live memory decision the daemon serves on explicit search, labeled or not, with normal sensitivity. */

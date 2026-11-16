@@ -622,10 +622,14 @@ fn unattributed(content: &str) -> &str {
         .unwrap_or(content)
 }
 
+/// The words two memories are compared by: runs of letters and digits of
+/// three or more characters, and shorter runs that hold a digit, so a
+/// version or a port such as the `22` of `1.22` counts while `is` and `to`
+/// do not.
 fn content_words(content: &str) -> BTreeSet<String> {
     unattributed(content)
         .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| word.chars().count() >= 3)
+        .filter(|word| word.chars().count() >= 3 || word.chars().any(char::is_numeric))
         .map(str::to_lowercase)
         .filter(|word| !FUNCTION_WORDS.contains(&word.as_str()))
         .collect()
@@ -2856,6 +2860,10 @@ pub(crate) struct CaptureRationale {
     /// The observation that contradicts this statement.
     #[serde(default)]
     pub(crate) contested_by: Option<Contest>,
+    /// The commit that first recorded this statement, kept when a contest
+    /// is settled so a later contest dates the statement from it.
+    #[serde(default)]
+    stated_seq: Option<i64>,
 }
 
 /// The observation a contested statement is shown beside. The record names
@@ -2960,8 +2968,18 @@ fn rewrite_statement(
         None => format!("{}:settled:{}", statement.object_id, plan.job.job_id),
     };
     match contest {
-        Some(contest) => rationale.insert("contested_by".to_owned(), json!(contest)),
-        None => rationale.remove("contested_by"),
+        Some(contest) => {
+            rationale.remove("stated_seq");
+            rationale.insert("contested_by".to_owned(), json!(contest));
+        }
+        // A settled statement keeps the commit that first recorded it.
+        None => {
+            if let Some(settled) = rationale.remove("contested_by")
+                && let Some(stated_seq) = settled.get("stated_seq").and_then(Value::as_i64)
+            {
+                rationale.insert("stated_seq".to_owned(), json!(stated_seq));
+            }
+        }
     };
     // Citations are events of the superseded decision, judged live by their
     // evidence ids as the Kernel judges a citation event.
@@ -2973,10 +2991,17 @@ fn rewrite_statement(
         .collect();
     let mut evidence = Vec::new();
     if let Some(Value::Array(cited)) = rationale.get("citation_evidence") {
-        let kept: Vec<bool> = cited
+        let mut kept: Vec<bool> = cited
             .iter()
             .map(|id| id.as_str().is_some_and(|id| live.contains(id)))
             .collect();
+        // The blocks of a span citation hold the quotation only together,
+        // so a span that lost a block cites nothing.
+        if rationale.get("citation_block").and_then(Value::as_str) == Some("span")
+            && kept.contains(&false)
+        {
+            kept.fill(false);
+        }
         evidence = cited
             .iter()
             .zip(&kept)
@@ -3048,10 +3073,11 @@ fn contest_statement(
     if observation == contested.object_id {
         return Ok(None);
     }
-    let stated_seq = match capture_rationale(contested).contested_by {
+    let recorded = capture_rationale(contested);
+    let stated_seq = match recorded.contested_by {
         Some(contest) if contest.memory == observation => return Ok(None),
         Some(contest) => contest.stated_seq,
-        None => contested.created_commit_seq,
+        None => recorded.stated_seq.unwrap_or(contested.created_commit_seq),
     };
     rewrite_statement(
         envelope,
@@ -3154,7 +3180,7 @@ fn approved(envelope: &kernel::Envelope<'_>, target: &str) -> Result<bool, kerne
         .served_rows_for(&[target], None)?
         .get(target)
         .is_some_and(|row| {
-            row.visibility(kernel::Surface::ExplicitSearch) == kernel::SurfaceVisibility::Visible
+            row.visibility(kernel::Surface::AutoInject) == kernel::SurfaceVisibility::Visible
         }))
 }
 
@@ -3363,6 +3389,14 @@ fn write_captured_memories(
                 return Err(kernel::KernelError::Conflict);
             }
         }
+        // A correction whose approval the Kernel refused is stored labeled.
+        // A labeled fact replaces no approved one, so each approved target
+        // stays live beside it.
+        let labeled = attributed && approval == Approval::Refused;
+        // The approved targets a labeled correction leaves live. Each is
+        // contested by the correction, so its line shows the user's newer
+        // words.
+        let mut kept = Vec::new();
         let mut superseded = None;
         let mut retired = Vec::new();
         // The replaced targets that capture wrote; their rationales are
@@ -3370,22 +3404,32 @@ fn write_captured_memories(
         let mut captured = Vec::new();
         let mut source_revision = 1;
         if let Some(target) = &memory.replaces {
-            match checked_capture_target(envelope, project, output, target, true)? {
-                Some(revision) => {
-                    source_revision = revision
-                        .checked_add(1)
-                        .ok_or(kernel::KernelError::InvalidInput)?;
-                    superseded = Some(target);
-                    captured.push(target);
+            let revision = checked_capture_target(envelope, project, output, target, true)?;
+            if labeled && approved(envelope, target)? {
+                kept.push(target);
+            } else {
+                match revision {
+                    Some(revision) => {
+                        source_revision = revision
+                            .checked_add(1)
+                            .ok_or(kernel::KernelError::InvalidInput)?;
+                        superseded = Some(target);
+                        captured.push(target);
+                    }
+                    None => retired.push(target),
                 }
-                None => retired.push(target),
             }
         }
         for target in &memory.also_replaces {
-            if checked_capture_target(envelope, project, output, target, true)?.is_some() {
-                captured.push(target);
+            let revision = checked_capture_target(envelope, project, output, target, true)?;
+            if labeled && approved(envelope, target)? {
+                kept.push(target);
+            } else {
+                if revision.is_some() {
+                    captured.push(target);
+                }
+                retired.push(target);
             }
-            retired.push(target);
         }
         // The job's first written decision inserts the anchor every
         // decision of the job names and reads the message's descriptors.
@@ -3464,6 +3508,12 @@ fn write_captured_memories(
             targets: &memory.contests,
             observation: id.to_owned(),
         });
+        for target in kept {
+            pending.push(PendingContest {
+                targets: std::slice::from_ref(target),
+                observation: id.to_owned(),
+            });
+        }
         cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
         // A policy refusal of the statement record, or of the admission that
         // rests on it, is the one refusal a labeled commit recovers.
@@ -5664,6 +5714,17 @@ mod tests {
                 text.len()
             );
         }
+    }
+
+    /// A correction of a short identifier shares its numerals with the
+    /// fact it corrects; short words without a digit are not compared.
+    #[test]
+    fn content_words_keep_numerals_and_drop_short_words() {
+        let words = |text: &str| -> Vec<String> { content_words(text).into_iter().collect() };
+        assert_eq!(words("User stated: Use Go 1.22."), ["1", "22"]);
+        assert_eq!(words("Use Go 1.23, not Go 1.22."), ["1", "22", "23"]);
+        assert_eq!(words("It is up to us."), Vec::<String>::new());
+        assert_eq!(words("Use port 80 for staging."), ["80", "port", "staging"]);
     }
 
     #[test]

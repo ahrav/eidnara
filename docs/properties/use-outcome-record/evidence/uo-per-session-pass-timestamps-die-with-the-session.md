@@ -12,8 +12,8 @@ re-verified at this branch tip.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Writes happen only when state changed: `crates/daemon/src/transform.rs:3262`,
-  `crates/daemon/src/transform.rs:3761`, `crates/daemon/src/transform.rs:5382`.
+- Writes happen only when state changed: `crates/daemon/src/transform.rs:3283`,
+  `crates/daemon/src/transform.rs:3785`, `crates/daemon/src/transform.rs:5407`.
 
 - Guarantee under test: The per-session pass timestamp
   `last_committed_pass_at_ms` lives on Memory Store session meta and is deleted

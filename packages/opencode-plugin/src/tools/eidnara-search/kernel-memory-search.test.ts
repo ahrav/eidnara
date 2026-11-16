@@ -490,6 +490,21 @@ describe("a contested statement in explicit search", () => {
         });
     });
 
+    test("a contest record with a missing or mistyped field shows no contest", async () => {
+        for (const broken of [
+            { memory: OBJECT_B },
+            { memory: OBJECT_B, stated_seq: "7" },
+            { memory: OBJECT_B, stated_seq: 7.5 },
+            { memory: OBJECT_B, stated_seq: 7, session: 3 },
+        ]) {
+            expect(await shown(contested(contestedBy(broken)), [observed()])).toEqual({
+                contest: undefined,
+                note: undefined,
+                reads: 0,
+            });
+        }
+    });
+
     test("a row on the capture lineage with another source kind shows no contest", async () => {
         const row = contested(contestedBy(record));
         const foreign: ReadRow = { ...row, object: { ...row.object, source_kind: "user" } };

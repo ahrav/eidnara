@@ -305,7 +305,7 @@ Required faults and enabling state: A route bound with `/memory/enabled: false`.
 Confidence: high -
 [evidence](evidence/uo-memory-disabled-route-takes-no-canonical-read.md).
 `project_memory_read` wraps the read in `cfg.memory_enabled.then(...)`
-(`project_memory_read` (`crates/daemon/src/lib.rs:5555`)).
+(`project_memory_read` (`crates/daemon/src/lib.rs:5585`)).
 Existing check: `a_memory_disabled_pass_takes_no_canonical_read`
 (`crates/daemon/tests/transform_canonical_memory.rs:349`). Status: unaudited.
 Impact: A disabled route that still read and recorded would breach the consent
@@ -520,7 +520,7 @@ Required faults and enabling state: A session with captured sources; the
 `stop_after_retirement` hook.
 Confidence: high -
 [evidence](evidence/uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate.md).
-handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:6992`); gate
+handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:7020`); gate
 `crates/daemon/src/lib.rs:2825`; Kernel step `retire_captured_sources`
 (`crates/daemon/src/lib.rs:6955`); memory delete
 `crates/daemon/src/lib.rs:7037`.
@@ -557,7 +557,7 @@ Required faults and enabling state: A route closed without `session.delete`
 after a HARD fold.
 Confidence: high -
 [evidence](evidence/uo-route-teardown-purges-process-state-but-deletes-no-durable-row.md).
-`unbind_route` (`crates/daemon/src/lib.rs:4729`) calls `purge_session_state`
+`unbind_route` (`crates/daemon/src/lib.rs:4741`) calls `purge_session_state`
 (`crates/daemon/src/lib.rs:4769`), which clears in-memory maps only.
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
 (`crates/daemon/src/lib.rs:25448`);
@@ -736,7 +736,7 @@ Required faults and enabling state: An observational route and an ordinary route
 bound to one project.
 Confidence: high -
 [evidence](evidence/uo-review-reads-authorize-by-bearer-and-project-binding-not-owner.md).
-`kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:421`);
+`kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:422`);
 `bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:203`);
 `crates/daemon/src/lib.rs:276`.
 Existing check:
@@ -1119,7 +1119,7 @@ Required faults and enabling state: A route bound with `/memory/enabled: false`,
 then HARD folds on both engines.
 Confidence: high - [evidence](evidence/uo-p-no-row-when-memory-disabled.md). a
 disabled route takes no read, so `env.project_memory` is `None` and
-`record_use_outcome` (`crates/daemon/src/lib.rs:9746`) returns before any write.
+`record_use_outcome` (`crates/daemon/src/lib.rs:9801`) returns before any write.
 Existing check: `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:181`). Status: unaudited.
 Impact: Consent violation (R5).
@@ -1232,7 +1232,7 @@ it starting; a route close without delete.
 Confidence: high -
 [evidence](evidence/uo-p-deleted-at-iff-session-delete-kernel-step.md). the step
 runs inside the capture gate after the descriptor retirement and before the
-memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6900`)); the
+memory delete (`delete_kernel_step` (`crates/daemon/src/lib.rs:6928`)); the
 envelope selects the session's live records under the writer
 (`mark_use_outcomes_deleted` (`crates/kernel/src/use_outcome.rs:426`)), and the
 set-once trigger refuses a changed value (`crates/kernel/src/schema.rs:194`).

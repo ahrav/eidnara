@@ -378,9 +378,9 @@ async fn a_user_quotation_that_is_no_statement_contests_the_statement_it_names()
     );
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
         .expect("the contested statement is delivered");
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let (stated_day, contested_day) = contest_days(&handler, &project, &stated(THURSDAY));
     let contested = format!(
-        "{} (stated {today}; contested {today} by mem_",
+        "{} (stated {stated_day}; contested {contested_day} by mem_",
         stated(THURSDAY)
     );
     assert!(block.contains(&contested), "{block}");
@@ -1201,6 +1201,51 @@ fn fill_statement_lineage(handler: &Handler, project: &Path, job: &str) {
         .unwrap();
 }
 
+/// A correction whose statement approval the Kernel refuses is stored
+/// labeled. A labeled fact replaces no approved one: the statement it named
+/// stays live and served, beside the correction on explicit search.
+#[tokio::test]
+async fn a_correction_whose_approval_is_refused_leaves_the_approved_statement_live() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let messages = [("m2", "user", TUESDAY)];
+    let jobs = enqueue(&handler, SECOND, "s2", &messages).await;
+    fill_statement_lineage(&handler, &project, &jobs[0]);
+    drain(&handler, SECOND, "s2", &messages, |_, existing| {
+        vec![Extracted {
+            quote: TUESDAY.to_string(),
+            replaces: ids_containing(existing, "Thursday"),
+            ..Extracted::default()
+        }]
+    })
+    .await;
+    let committed = published(&handler, &project).await;
+    assert_eq!(
+        committed.0,
+        [
+            (stated(THURSDAY), "visible".to_string()),
+            (stated(TUESDAY), "labeled".to_string()),
+        ],
+        "the approved statement stays; the correction is stored for explicit search"
+    );
+    assert_eq!(committed.1, [stated(THURSDAY)]);
+    assert_eq!(committed.2, 1, "the refused approval is counted");
+    // The statement that stays is contested by the correction, so a block
+    // shows the user's newer words on its line.
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        block.contains(&format!(": \"{}\")", stated(TUESDAY))),
+        "{block}"
+    );
+}
+
 const CITATION_COUNTERS: [&str; 5] = [
     "decisions_cited",
     "decisions_source_capture_off",
@@ -2014,6 +2059,48 @@ async fn a_cut_quotation_widens_only_for_a_user_message_held_whole() {
     assert_eq!(
         live_statement_records(&handler, &project),
         [stated(NEVER_FRIDAYS)]
+    );
+}
+
+/// The extractor cuts a clause out of a negated sentence and names the
+/// approved statement of that clause as the memory that already holds it.
+/// The widened sentence is another text, so it is written as the user's own
+/// statement beside the one the extractor named.
+#[tokio::test]
+async fn a_widened_quotation_is_no_duplicate_of_the_statement_its_clause_matched() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let positive = "Deploy on Fridays.";
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", positive)],
+        |_, _| vec![fact(positive)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", NEVER_FRIDAYS)],
+        |_, existing| {
+            vec![Extracted {
+                quote: CUT.to_string(),
+                duplicate_of: ids_containing(existing, &stated(positive)).pop(),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(positive), "visible".to_string()),
+            (stated(NEVER_FRIDAYS), "visible".to_string()),
+        ],
+        "the negated sentence is stored; it duplicates no statement"
     );
 }
 
@@ -2901,10 +2988,10 @@ async fn an_observation_that_contradicts_a_statement_contests_it_until_the_user_
         "the contested statement keeps its statement record"
     );
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let (stated_day, contested_day) = contest_days(&handler, &project, &stated(LIMIT_300));
     assert!(
         block.contains(&format!(
-            "{} (stated {today}; contested {today} by mem_",
+            "{} (stated {stated_day}; contested {contested_day} by mem_",
             stated(LIMIT_300)
         )),
         "{block}"
@@ -2941,9 +3028,10 @@ async fn an_observation_that_contradicts_a_statement_contests_it_until_the_user_
     )
     .await;
     let moved = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let (stated_day, contested_day) = contest_days(&handler, &project, &stated(LIMIT_300));
     assert!(
         moved.contains(&format!(
-            "{} (stated {today}; contested {today} by mem_",
+            "{} (stated {stated_day}; contested {contested_day} by mem_",
             stated(LIMIT_300)
         )) && moved.contains(&format!(": \"Assistant reported: {newer}\")")),
         "{moved}"
@@ -3115,10 +3203,10 @@ async fn an_observation_the_store_already_holds_contests_the_statement_it_contra
         [stated(LIMIT_300)]
     );
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let (stated_day, contested_day) = contest_days(&handler, &project, &stated(LIMIT_300));
     assert!(
         block.contains(&format!(
-            "{} (stated {today}; contested {today} by mem-agent: \"{LIMIT_NOTE}\")",
+            "{} (stated {stated_day}; contested {contested_day} by mem-agent: \"{LIMIT_NOTE}\")",
             stated(LIMIT_300)
         )),
         "{block}"
@@ -3404,6 +3492,30 @@ fn memory_rows(handler: &Handler, project: &Path) -> Vec<(String, String, i64, V
         .collect()
 }
 
+/// The UTC days a contested statement's line shows: the day of the commit
+/// its contest record names as the statement's first, and the day of the
+/// commit that recorded the contest. Both come from the commit log, so the
+/// expectation holds across midnight.
+fn contest_days(handler: &Handler, project: &Path, statement: &str) -> (String, String) {
+    let rows = memory_rows(handler, project);
+    let row = rows
+        .iter()
+        .find(|row| row.1 == statement)
+        .unwrap_or_else(|| panic!("{statement}: {rows:?}"));
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let day = |commit_seq: i64| {
+        let at = kernel.commit_recorded_at(commit_seq).unwrap().unwrap();
+        chrono::DateTime::from_timestamp_millis(at)
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string()
+    };
+    (
+        day(row.3["contested_by"]["stated_seq"].as_i64().unwrap()),
+        day(row.2),
+    )
+}
+
 /// One assistant message makes two observations that both contradict a
 /// statement. The publication commits: the statement is contested once, by
 /// the first observation, and both observations are stored. The record
@@ -3612,6 +3724,15 @@ async fn a_contest_shows_the_observation_only_while_the_kernel_serves_it() {
 #[tokio::test]
 async fn the_users_restatement_of_a_contested_statement_settles_the_contest() {
     let (handler, _dir, project, ..) = contested_limit().await;
+    let statement_row = |handler: &Handler| {
+        memory_rows(handler, &project)
+            .into_iter()
+            .find(|row| row.1 == stated(LIMIT_300))
+            .expect("the statement is live")
+    };
+    let first_commit = statement_row(&handler).3["contested_by"]["stated_seq"]
+        .as_i64()
+        .unwrap();
     let again = format!("To confirm what we agreed. {LIMIT_300}");
     capture(
         &handler,
@@ -3665,6 +3786,27 @@ async fn the_users_restatement_of_a_contested_statement_settles_the_contest() {
             .all(|(.., rationale)| rationale.get("contested_by").is_none()),
         "no row names a contest"
     );
+    // The settled statement keeps the commit that first recorded it, and a
+    // later contest dates the statement from that commit.
+    assert_eq!(statement_row(&handler).3["stated_seq"], first_commit);
+    let newer = "The deploy config caps the gateway at 800 clients, above the 300 clients stated.";
+    capture(
+        &handler,
+        THIRD,
+        "s3",
+        &[("m4", "assistant", newer)],
+        |_, existing| {
+            vec![Extracted {
+                quote: newer.to_string(),
+                contests: ids_containing(existing, &stated(LIMIT_300)),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let contested = statement_row(&handler);
+    assert_eq!(contested.3["contested_by"]["stated_seq"], first_commit);
+    assert!(contested.3.get("stated_seq").is_none(), "{contested:?}");
 }
 
 /// One capture call holds two corrections of one statement. The first

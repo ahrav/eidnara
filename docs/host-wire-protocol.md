@@ -1032,7 +1032,10 @@ names `replaces`, `also_replaces`, or `contests`, and one whose replacement
 the parser released as a contest, is stored as proposed, so only a
 correction the extractor quoted whole meets the statement rule and replaces a
 fact served on `auto_inject`, and a contest shows the clause the extractor
-judged. A sentence with a reporting clause before a
+judged. A widened quotation whose `duplicate_of` names
+a fact served on `auto_inject` with another text drops that link and is
+stored as the user's own statement: the extractor matched the clause it
+quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
 colon, such as `My teammate wrote: always rebase.`, is the user's sentence
 and is stored whole with that clause. 
 Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. A quotation that capture approves as the user's own statement keeps its exact text and takes no failure lines. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the model's quote; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
@@ -1301,7 +1304,9 @@ with `memory` (the contesting fact's id),
 (the session whose message recorded the contest). The record names the
 contesting fact and holds none of its text. The statement record stays
 live, and the new fact cites again, in order, each piece of evidence the fact
-it supersedes cites that is still live; when it cited evidence and none is
+it supersedes cites that is still live; a `span` citation, whose blocks hold
+the quotation only together, cites again only while every block is live.
+When it cited evidence and none is
 live, its `citation` reads `descriptor_not_found`, and a fact recorded with
 no citation keeps the reason it was recorded with. When one commit contests
 a statement and also contests the fact that contests it, the first names the
@@ -1344,7 +1349,9 @@ settles a contest: a user statement that replaces the contested fact ends it,
 and a user statement that repeats the contested fact word for word, up to
 edge whitespace and its closing `.` or `!`, which names it under
 `duplicate_of` and writes no fact, supersedes it with a fact of the same
-text and approval whose rationale holds no `contested_by`. A user statement
+text and approval whose rationale holds no `contested_by` and keeps the
+record's `stated_seq` as its own `stated_seq`, so a later contest dates the
+statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
 its own fact and the contest stays. The extractor is
 told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
