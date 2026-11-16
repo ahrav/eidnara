@@ -1832,6 +1832,7 @@ pub(super) fn quotes_whole_sentences(prose: &Prose<'_>, quote: &str) -> bool {
     let lead = quote.len() - quote.trim_start().len();
     let paragraphs = prose.paragraphs();
     let colons = prose.colons();
+    let mut letters = NextAlphanumeric { text, scan: None };
     text.match_indices(quote).any(|(at, _)| {
         let start = at + lead;
         let end = start + trimmed.len();
@@ -1848,9 +1849,46 @@ pub(super) fn quotes_whole_sentences(prose: &Prose<'_>, quote: &str) -> bool {
                         start - first,
                         end - first,
                         colons[index] - first,
+                        |skip| {
+                            letters
+                                .at_or_after(end + skip)
+                                .is_some_and(|(at, ch)| at < last && ch.is_lowercase())
+                        },
                     )
             })
     })
+}
+
+/// Occurrences ask in ascending order, so each scan starts past the letter
+/// or digit the previous scan found, and the scans for one quotation read
+/// each byte of the message at most once.
+struct NextAlphanumeric<'a> {
+    text: &'a str,
+    /// A scan from the first position found no letter or digit before the
+    /// second, so it answers every position in between.
+    scan: Option<(usize, Option<(usize, char)>)>,
+}
+
+impl NextAlphanumeric<'_> {
+    fn at_or_after(&mut self, from: usize) -> Option<(usize, char)> {
+        if let Some((start, found)) = self.scan
+            && start <= from
+            && found.is_none_or(|(at, _)| from <= at)
+        {
+            return found;
+        }
+        let found = self.text[from..]
+            .char_indices()
+            .find(|(_, ch)| ch.is_alphanumeric())
+            .map(|(at, ch)| (from + at, ch));
+        #[cfg(test)]
+        BOUNDARY_BYTES.with(|bytes| {
+            let scanned = found.map_or(self.text.len(), |(at, ch)| at + ch.len_utf8()) - from;
+            bytes.set(bytes.get() + scanned);
+        });
+        self.scan = Some((from, found));
+        found
+    }
 }
 
 /// The question marks the statement rule recognizes: ASCII, fullwidth,
@@ -1875,7 +1913,15 @@ fn reads_as_statement(trimmed: &str) -> bool {
 /// Whether `paragraph[start..end]` starts and ends on sentence boundaries with
 /// no colon earlier in the paragraph. `colon` is the offset of the
 /// paragraph's first colon, or its length when it holds none.
-fn bounds_sentences(paragraph: &str, start: usize, end: usize, colon: usize) -> bool {
+/// `continues_lowercase(skip)` answers whether the first letter or digit
+/// from `skip` bytes past `end` in the paragraph is lowercase.
+fn bounds_sentences(
+    paragraph: &str,
+    start: usize,
+    end: usize,
+    colon: usize,
+    continues_lowercase: impl FnMut(usize) -> bool,
+) -> bool {
     // A paragraph keeps its indentation and trailing spaces, which border
     // its first and last sentence as the paragraph's edges do.
     let edge = |around: &'_ str| -> bool { around.trim().is_empty() };
@@ -1888,7 +1934,9 @@ fn bounds_sentences(paragraph: &str, start: usize, end: usize, colon: usize) -> 
             .filter(|after| !edge(after))
             .unwrap_or(""),
     );
-    colon >= start && sentence_starts_at(before, statement) && sentence_ends_at(statement, after)
+    colon >= start
+        && sentence_starts_at(before, statement)
+        && sentence_ends_at(statement, after, continues_lowercase)
 }
 
 /// The whole sentence of one plain-prose paragraph of the message that
@@ -1932,6 +1980,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
     let mut cursor = 0;
     let mut judged = 0;
     let mut found: Option<&'t str> = None;
+    let mut letters = NextAlphanumeric { text, scan: None };
     for (at, _) in text.match_indices(quote) {
         let (start, end) = (at + lead, at + lead + trimmed.len());
         if end <= judged {
@@ -1960,7 +2009,11 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
             rest if rest.trim().is_empty() => "",
             rest => rest,
         };
-        let to = if sentence_ends_at(&paragraph[start..end], rest) {
+        let to = if sentence_ends_at(&paragraph[start..end], rest, |skip| {
+            letters
+                .at_or_after(first + end + skip)
+                .is_some_and(|(at, ch)| at < last && ch.is_lowercase())
+        }) {
             let closes = !trimmed.ends_with(['.', '!']) && rest.starts_with(['.', '!']);
             end + usize::from(closes)
         } else if trimmed
@@ -2002,7 +2055,11 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         }
         if statement.len() <= MAX_CAPTURE_MEMORY_BYTES
             && reads_as_statement(statement)
-            && bounds_sentences(paragraph, from, to, colons[cursor] - first)
+            && bounds_sentences(paragraph, from, to, colons[cursor] - first, |skip| {
+                letters
+                    .at_or_after(first + to + skip)
+                    .is_some_and(|(at, ch)| at < last && ch.is_lowercase())
+            })
         {
             match found {
                 None => found = Some(statement),
@@ -2118,6 +2175,9 @@ thread_local! {
     static PROSE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// How many bytes this thread examined for a paragraph's first colon.
     static COLON_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many bytes this thread read beside quotation occurrences to judge
+    /// where their sentences start and end.
+    static BOUNDARY_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
@@ -2412,11 +2472,16 @@ fn sentence_starts_at(before: &str, quote: &str) -> bool {
         return true;
     }
     let ended = before.trim_end();
-    let word = ended.rsplit(char::is_whitespace).next().unwrap_or_default();
-    before.ends_with(char::is_whitespace)
+    if !(before.ends_with(char::is_whitespace)
         && (ended.ends_with(['.', '!']) || ended.ends_with(QUESTION_MARKS))
-        && !(ended.ends_with('.') && is_abbreviation(word, quote))
-        && !quote.starts_with(|ch: char| ch.is_lowercase())
+        && !quote.starts_with(|ch: char| ch.is_lowercase()))
+    {
+        return false;
+    }
+    let word = ended.rsplit(char::is_whitespace).next().unwrap_or_default();
+    #[cfg(test)]
+    BOUNDARY_BYTES.with(|bytes| bytes.set(bytes.get() + word.len()));
+    !(ended.ends_with('.') && is_abbreviation(word, quote))
 }
 
 /// Titles, which English writes capitalized with a closing period before a
@@ -2434,8 +2499,12 @@ const NUMBERED: [&str; 8] = ["no", "nos", "fig", "vol", "ch", "sec", "eq", "appr
 fn is_abbreviation(word: &str, following: &str) -> bool {
     let word = word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
     let single = word.strip_suffix('.').unwrap_or(word);
+    // The word's own period, then whitespace, then a numeral: the scan
+    // reads one whitespace run, so occurrences share no bytes of it.
     let number_follows = following
-        .trim_start_matches(|ch: char| ch == '.' || ch.is_whitespace())
+        .strip_prefix('.')
+        .unwrap_or(following)
+        .trim_start()
         .starts_with(char::is_numeric);
     if TITLES.contains(&single)
         || (number_follows
@@ -2452,7 +2521,13 @@ fn is_abbreviation(word: &str, following: &str) -> bool {
         })
 }
 
-fn sentence_ends_at(quote: &str, after: &str) -> bool {
+/// `continues_lowercase(skip)` answers whether the first letter or digit
+/// after the first `skip` bytes of `after` is lowercase.
+fn sentence_ends_at(
+    quote: &str,
+    after: &str,
+    mut continues_lowercase: impl FnMut(usize) -> bool,
+) -> bool {
     // A question ends where whitespace or the paragraph's end follows it.
     if quote.ends_with(QUESTION_MARKS) {
         return after.is_empty() || after.starts_with(char::is_whitespace);
@@ -2468,17 +2543,13 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
     {
         return false;
     }
-    let continues_lowercase = |tail: &str| {
-        tail.trim_start_matches(|ch: char| !ch.is_alphanumeric())
-            .starts_with(|ch: char| ch.is_lowercase())
-    };
     if quote.ends_with(['.', '!']) {
         return after.is_empty()
-            || (after.starts_with(char::is_whitespace) && !continues_lowercase(after));
+            || (after.starts_with(char::is_whitespace) && !continues_lowercase(0));
     }
     after.is_empty()
         || after.strip_prefix(['.', '!']).is_some_and(|tail| {
-            tail.is_empty() || (tail.starts_with(char::is_whitespace) && !continues_lowercase(tail))
+            tail.is_empty() || (tail.starts_with(char::is_whitespace) && !continues_lowercase(1))
         })
 }
 
@@ -5577,6 +5648,22 @@ mod tests {
         );
         assert_eq!(collapsed.len(), 1);
         assert_eq!(collapsed[0].contests, ["mem_a", "mem_b"]);
+    }
+
+    #[test]
+    fn sentence_boundaries_are_read_once_however_often_the_quote_occurs() {
+        let unbroken = "x".repeat(16_384);
+        let spaced = format!("{}a", ". ".repeat(8_192));
+        for (text, quote) in [(unbroken.as_str(), "x"), (spaced.as_str(), ".")] {
+            let before = BOUNDARY_BYTES.with(std::cell::Cell::get);
+            assert!(!quotes_whole_statements(&Prose::of(text), quote));
+            let read = BOUNDARY_BYTES.with(std::cell::Cell::get) - before;
+            assert!(
+                read <= 2 * text.len(),
+                "{quote:?} read {read} bytes beside its occurrences in a {}-byte message",
+                text.len()
+            );
+        }
     }
 
     #[test]
