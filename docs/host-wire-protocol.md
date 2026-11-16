@@ -1013,10 +1013,13 @@ to the paragraph's end or the next exclamation or question mark. A period
 before whitespace may end a sentence or an abbreviation, so it is no plain
 edge. A quotation is stored as proposed when it already meets the statement
 rule; when the widened sentence does not qualify; when the words widening
-would add hold a `.`, `!`, or `?` that a letter or digit does not directly
-follow, or a sentence terminator of another script (`。`, `｡`, `．`, `！`,
-`？`, `؟`, `।`, `॥`, `۔`, `…`);
-when the quotation ends in a terminator and its sentence goes on; when the
+would add hold a `.`, `!`, or `?` that an ASCII letter or digit does not
+directly follow, or a sentence terminator of another script (`。`, `｡`, `．`,
+`！`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`, `﹗`, `‼`, `﹒`, `․`, `।`, `॥`, `۔`,
+`։`, `።`, `၊`, `။`, `។`, `…`; the list is finite, and a terminator outside it
+reads as part of a sentence);
+when the quotation ends in a terminator, alone or behind closing brackets or
+emphasis marks, and its sentence goes on; when the
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
 names `replaces` or `also_replaces` is stored as proposed, so only a
@@ -1129,22 +1132,25 @@ in any other place, and a mark after a number or a letter that is a number,
 which may be an inch or seconds sign, leave the paragraph's quotations
 unknown. A paragraph that holds a carriage return inside a line, a vertical
 tab, a form feed, or a Unicode next-line, line, or paragraph separator is
-left out, since its lines cannot be told apart. A quotation that
+left out with every paragraph after it, since its lines cannot be told apart
+and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
 later paragraph. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
-after `s` or a number, which may be a plural possessive or a feet mark, a
-mark after a bracket, and a word-final mark inside a quotation of several
-words, which may be an elision, close nothing, so such a quotation stays open.
+after `s`, a number, or a letter that is a number, which may be a plural
+possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
+word-final mark inside a quotation of several words, which may be an elision,
+close nothing, so such a quotation stays open.
 The rule reads marks by their place and cannot tell every arrangement of
 symmetric marks apart; where it cannot, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
 follows it past any punctuation; the paragraph's indentation and trailing
-spaces border its sentences as its edges do; neither boundary falls
+spaces border its sentences as its edges do; neither boundary falls, at a
+period,
 at a dotted abbreviation, a word of two or more one- or two-letter segments
 such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 `Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
@@ -1188,8 +1194,9 @@ positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
-however many of them are newer, they take no place from another session's
-facts. The extractor's reference memories are ranked from two bounded reads
+they take no place from another session's facts. The read passes over at
+most eight pages of that size, 64 MiB of a session's own newer facts, and
+reports a cut past that. The extractor's reference memories are ranked from two bounded reads
 at one snapshot: the newest facts on `explicit_search`, and the facts served
 on `auto_inject` in the plain newest window and in the delivery of each
 session whose messages the batch holds; a fact older than every window is
