@@ -476,3 +476,46 @@ fn the_domain_selection_reads_no_row_of_another_domains_payload_pressure() {
             .all(|row| row.object.domain_id == MEMORY)
     );
 }
+
+/// A read bounded to a commit returns exactly the full read's rows created at or before that commit, rows of the
+/// bound's own commit included, with the same visibility and snapshot.
+#[test]
+fn the_created_at_or_before_selection_equals_the_filtered_full_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 40, 300, 4);
+    let tip = store.tip().unwrap();
+    for surface in [Surface::AutoInject, Surface::ExplicitSearch] {
+        let all = store
+            .visible_as_of_in_scope(surface, tip, None, None)
+            .unwrap();
+        let mut commits: Vec<i64> = all
+            .rows
+            .iter()
+            .map(|row| row.object.created_commit_seq)
+            .collect();
+        commits.sort_unstable();
+        commits.dedup();
+        assert!(commits.len() > 2, "{surface:?}: {commits:?}");
+        for bound in commits {
+            let mut expected = all.clone();
+            expected
+                .rows
+                .retain(|row| row.object.created_commit_seq <= bound);
+            let selected = store
+                .visible_created_at_or_before_as_of_in_scope(surface, tip, bound, None)
+                .unwrap();
+            assert_eq!(selected.rows, expected.rows, "{surface:?} at {bound}");
+            assert!(
+                selected
+                    .rows
+                    .iter()
+                    .any(|row| row.object.created_commit_seq == bound),
+                "{surface:?} at {bound}"
+            );
+            assert_eq!(
+                (selected.known_as_of, selected.tip),
+                (all.known_as_of, all.tip)
+            );
+        }
+    }
+}

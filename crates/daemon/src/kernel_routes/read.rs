@@ -208,7 +208,15 @@ pub(crate) fn read_visible_page(
     // domains are never decoded or judged.
     let scope = Some(project.scope_term());
     let visible = match selection {
-        RowSelection::All => store.visible_as_of_in_scope(surface, requested, None, scope)?,
+        RowSelection::All => match before {
+            Some(cursor) => store.visible_created_at_or_before_as_of_in_scope(
+                surface,
+                requested,
+                cursor.created_commit_seq,
+                scope,
+            )?,
+            None => store.visible_as_of_in_scope(surface, requested, None, scope)?,
+        },
         RowSelection::Objects(ids) => {
             store.visible_as_of_in_scope(surface, requested, Some(ids), scope)?
         }
