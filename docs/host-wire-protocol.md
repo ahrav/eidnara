@@ -1333,8 +1333,8 @@ a statement and also contests the fact that contests it, the first names the
 row that superseded the second; contests that name each other in a ring are
 left unrecorded, and a contest that names a fact of such a ring records that
 fact's unchanged row. A stored plan whose fact names more than four contests
-is refused as invalid. A fact the Kernel does not serve as approved
-is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
+is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
+sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
 by the fact already named writes nothing. The `<project-memory>` block renders
 a contested statement as

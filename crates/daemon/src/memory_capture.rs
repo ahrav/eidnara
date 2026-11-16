@@ -3039,6 +3039,9 @@ pub(crate) struct CaptureRationale {
     /// is settled so a later contest dates the statement from it.
     #[serde(default)]
     stated_seq: Option<i64>,
+    /// The writer of the row: capture's own source id on a capture row.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// The observation a contested statement is shown beside. The record names
@@ -3131,6 +3134,16 @@ fn rewrite_statement(
         return Ok(None);
     };
     if !approved(envelope, &statement.object_id)? {
+        return Ok(None);
+    }
+    // A statement the Kernel serves above normal sensitivity is hidden from
+    // automatic injection. Its successor would be written at normal
+    // sensitivity, so such a statement keeps its row.
+    if envelope
+        .served_rows_for(&[statement.object_id.as_str()], None)?
+        .get(statement.object_id.as_str())
+        .is_none_or(|row| row.object.sensitivity != kernel::Sensitivity::Normal)
+    {
         return Ok(None);
     }
     let Ok(Value::Object(mut rationale)) =
@@ -3300,13 +3313,23 @@ fn contest_statements(
     // A statement one contest targets and another names as its observation
     // is rewritten before the contest that names it, so that contest
     // records the row that superseded it. Each pass writes the contests
-    // whose observation no remaining contest will rewrite; only a target
-    // the plan holds as an earlier capture statement can be rewritten.
+    // whose observation no remaining contest will rewrite.
     while !remaining.is_empty() {
+        // A contest rewrites an approved statement capture wrote. Any other
+        // target keeps its row and makes no contest wait.
+        let rewritable = |target: &str| {
+            plan.earlier.get(target).is_some_and(|row| {
+                capture_rationale(row).source.as_deref() == Some(CAPTURE_SOURCE_ID)
+            }) && plan
+                .output
+                .existing
+                .iter()
+                .any(|previous| previous.id == target && previous.automatic)
+        };
         let waiting: HashSet<&str> = remaining
             .iter()
             .map(|(_, target)| target.as_str())
-            .filter(|target| plan.earlier.contains_key(*target))
+            .filter(|target| rewritable(target))
             .collect();
         let (ready, blocked): (Vec<_>, Vec<_>) =
             remaining.into_iter().partition(|(contest, target)| {
