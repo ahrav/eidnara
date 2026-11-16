@@ -293,6 +293,52 @@ describe("createEidnaraSearchTools", () => {
         expect(kernelReads(harness)).toHaveLength(3);
     });
 
+    it("shows a contest whose observation lies on a page the scan ranked out, read at the scan's snapshot", async () => {
+        const harness = kernelHarness();
+        const observation = "Assistant reported: The client limit in src/limits.rs is 500 now.";
+        harness.kernel.seedDecision({
+            object_id: OBJECT_B,
+            decision_kind: "CONFIG_VALUES",
+            summary: observation,
+            source_id: "memory_capture",
+        });
+        seedMany(
+            harness.kernel,
+            250,
+            (index) => `Release notes for build ${index} list the fixed issues.`,
+        );
+        harness.kernel.seedDecision({
+            object_id: OBJECT_A,
+            decision_kind: "CONFIG_VALUES",
+            summary: "User stated: The gateway admits at most 300 sessions at once.",
+            rationale: JSON.stringify({
+                source: "memory_capture",
+                contested_by: { memory: OBJECT_B, stated_seq: 4 },
+            }),
+            source_id: "memory_capture",
+        });
+        harness.kernel.readRowCap = 100;
+        const tools = createEidnaraSearchTools(harness.deps);
+
+        const result = await tools.eidnara_search.execute(
+            { query: "gateway admits sessions", sources: ["memory"] },
+            toolContext(),
+        );
+
+        expect(result.split("\n").find((line) => line.startsWith("[1] "))).toContain(
+            `id=${OBJECT_A}`,
+        );
+        expect(result).toContain(`Contested by ${OBJECT_B}: ${JSON.stringify(observation)}`);
+        const reads = kernelReads(harness).map(
+            (call) => call.body as { as_of?: number; object_ids?: string[] },
+        );
+        // Three scan pages, then the observation by id at the pages' store state.
+        expect(reads).toHaveLength(4);
+        expect(reads[3]?.object_ids).toEqual([OBJECT_B]);
+        expect(reads[3]?.as_of).toBe(harness.kernel.tip);
+        expect(reads[1]?.as_of).toBe(harness.kernel.tip);
+    });
+
     it("resolves an object-id query through the filtered read", async () => {
         const harness = kernelHarness();
         seed(harness.kernel, OBJECT_A, "Direct id hit.");
