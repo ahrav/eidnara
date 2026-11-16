@@ -412,6 +412,11 @@ a build reaches Current. `elapsed_ms` is monotonic time since this process's
 slice loop recorded or last renewed that attempt, and `unknown` for an attempt
 the loop of this process did not record or renew.
 
+The tip read runs on the blocking pool and waits for a kernel reader within
+the operation's budget. A status request dropped during that wait cancels the
+budget, so the read stops waiting and releases its blocking thread
+(`a_cancelled_status_request_stops_waiting_for_a_kernel_reader`).
+
 Every admission, including the one behind the status block, reads the
 lifecycle record fresh. The gate checks the control directory's owner and mode
 from its path metadata, opening the directory only when that metadata does not

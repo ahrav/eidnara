@@ -6778,6 +6778,64 @@ async fn the_operator_surface_rebuilds_disables_and_recovers_the_projection() {
     daemon.shutdown().await;
 }
 
+/// Dropping one status request per blocking-pool thread exposes pool exhaustion if cancelled tip reads keep waiting for held kernel readers.
+#[test]
+fn a_cancelled_status_request_stops_waiting_for_a_kernel_reader() {
+    const BLOCKING_THREADS: usize = 16;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(3)
+        .max_blocking_threads(BLOCKING_THREADS)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (daemon, route, _home) = operator_daemon().await;
+        let kernel = daemon.store();
+        let held = Arc::new(std::sync::Barrier::new(2));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn({
+            let (kernel, held) = (Arc::clone(&kernel), Arc::clone(&held));
+            move || {
+                kernel.with_readers_held_for_test(|| {
+                    held.wait();
+                    let _ = released.recv_timeout(Duration::from_secs(60));
+                });
+            }
+        });
+        tokio::task::block_in_place(|| held.wait());
+        for _ in 0..BLOCKING_THREADS {
+            // The timeout drops the request's future while its tip read waits for a reader.
+            let answered = tokio::time::timeout(
+                Duration::from_millis(250),
+                operator_status(&daemon, route),
+            )
+            .await;
+            assert!(
+                answered.is_err(),
+                "a status answered while every kernel reader was held: {answered:?}"
+            );
+        }
+        let probe = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(|| ()),
+        )
+        .await;
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(
+            probe.is_ok(),
+            "the tip reads of {BLOCKING_THREADS} dropped status requests still hold the blocking pool"
+        );
+        let status = operator_status(&daemon, route).await;
+        assert_eq!(
+            status["progress"]["tip"],
+            serde_json::json!(kernel.tip().unwrap()),
+            "{status}"
+        );
+        daemon.shutdown().await;
+    });
+}
+
 /// A commit that lands before the disable deregisters its consumer leaves the consumer pending, since a default disable never abandons. The operator's audited abandonment releases it, a retry after a lost answer runs the disable's cleanup, and the record ends deregistered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn an_operator_abandonment_releases_a_consumer_the_disable_left_pending() {

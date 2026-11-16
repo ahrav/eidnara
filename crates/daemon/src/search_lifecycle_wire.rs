@@ -70,6 +70,14 @@ fn budget() -> EvalBudget {
     )
 }
 
+struct CancelOnDrop(EvalBudget);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 fn operation(intent: &LifecycleIntent, state: &str) -> Value {
     json!({
         "state": state,
@@ -132,6 +140,8 @@ impl HandlerCore {
         let record = record_json(&owner.lifecycle_record());
         // The tip read waits for one of the kernel's pooled readers, so it runs off the async workers.
         let budget = budget();
+        // The drop guard propagates request cancellation to the blocking progress read's budget.
+        let _cancel = CancelOnDrop(budget.clone());
         let Ok((progress, tip)) = blocking(move || owner.progress(&budget)).await else {
             return terminal("unavailable");
         };
