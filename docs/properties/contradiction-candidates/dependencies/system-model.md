@@ -98,7 +98,7 @@ kernel store, budget, units, memo, commit gate mutex (`:811`),
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
 (`crates/daemon/src/lib.rs:9258-9275`). The request owner runs the
 `AfterResponse` after `settle_prepared` (`lib.rs:13660-13664`;
-`crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
+`crates/daemon/src/dispatch.rs:24-35`, `:422-437`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1292-1298`), `Published` (`:549-562`),
 `MAX_SOURCE_UNIT_BYTES`/`MAX_SOURCE_BATCH_UNITS`/`MAX_SOURCE_BATCH_BYTES`
 (`:614-618`, resolving to 64 KiB, 32, 64 KiB through
