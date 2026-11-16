@@ -857,10 +857,6 @@ async fn disable_registration_and_barrier_matrix_uses_only_the_released_local_pr
                         )
                     );
                     assert_eq!(
-                        serving::decide_for_tip_read(&lag),
-                        serving::ServingDecision::Available
-                    );
-                    assert_eq!(
                         raw.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))
                             .unwrap(),
                         before
