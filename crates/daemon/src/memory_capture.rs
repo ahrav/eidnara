@@ -2205,8 +2205,19 @@ const QUOTATION_FAMILIES: [&[char]; 5] = [
     &['\u{275b}', '\u{275c}', '\u{3003}'],
 ];
 
+/// `"` is the one ASCII character in [`QUOTATION_FAMILIES`], so one
+/// comparison classifies an ASCII character.
+fn quotation_family(ch: char) -> Option<usize> {
+    if ch.is_ascii() {
+        return (ch == '"').then_some(0);
+    }
+    QUOTATION_FAMILIES
+        .iter()
+        .position(|family| family.contains(&ch))
+}
+
 fn is_quotation_mark(ch: char) -> bool {
-    QUOTATION_FAMILIES.iter().any(|family| family.contains(&ch))
+    quotation_family(ch).is_some()
 }
 
 /// Marks every script that uses them writes at the start of a quotation:
@@ -2237,9 +2248,7 @@ fn quotations_close_in_turn(block: &[(usize, &str)]) -> bool {
         let mut previous_opened = false;
         let mut chars = line.chars().peekable();
         while let Some(ch) = chars.next() {
-            let family = QUOTATION_FAMILIES
-                .iter()
-                .position(|family| family.contains(&ch));
+            let family = quotation_family(ch);
             let mut opened = false;
             if let Some(family) = family {
                 let next = chars.peek().copied();
@@ -4075,6 +4084,19 @@ mod tests {
             listed,
             "each quotation mark belongs to one family"
         );
+    }
+
+    #[test]
+    fn every_character_has_the_quotation_family_that_lists_it() {
+        for ch in '\0'..=char::MAX {
+            assert_eq!(
+                quotation_family(ch),
+                QUOTATION_FAMILIES
+                    .iter()
+                    .position(|family| family.contains(&ch)),
+                "{ch:?}"
+            );
+        }
     }
 
     #[test]
