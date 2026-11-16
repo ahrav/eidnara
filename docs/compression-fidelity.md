@@ -247,6 +247,9 @@ and `digest` render the rest:
   clips the scanned line. A finding that needs an adjacent line, such as a
   value on the tail line whose key is on the line before it, stays in the
   excerpt. An output with no finding has the digest the summarizer read.
+  The scan ledger's receipt for the transcript counts the findings of the
+  store's scan of the text it receives. A credential the as-printed scan
+  replaced arrives as a placeholder, so that receipt counts zero for it.
 - The summarizer's system prompt documents these fields in its `TC:`
   notation, and a test pins them to the claim-value bound and the
   whole-output limit.

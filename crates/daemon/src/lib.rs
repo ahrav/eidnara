@@ -44067,7 +44067,7 @@ mod tests {
             assistant_tool_call("m2", 2),
             tool_result("result-m2", 3, printed),
         ];
-        let (handler, store, _dir, _project) =
+        let (handler, store, dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
         seed_awaiting(&store, &messages);
 
@@ -44087,6 +44087,26 @@ mod tests {
             transcript.contains("output=\"first DB_PASSWORD='<REDACTED:db_password>' last\""),
             "{transcript}"
         );
+
+        // The scan ledger's receipt for the transcript counts the store's scan of the text it received, which holds the placeholder.
+        let ledger = rusqlite::Connection::open_with_flags(
+            sqlite_store_path(dir.path().join("data").to_str().unwrap(), DEFAULT_MODULE_ID),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let receipts: Vec<(i64, i64)> = ledger
+            .prepare(
+                "SELECT DISTINCT s.scan_id, s.finding_count,
+                        (SELECT COUNT(*) FROM scan_detections d WHERE d.scan_id = s.scan_id)
+                   FROM field_scans s JOIN scan_owner_copies o USING (scan_id)
+                  WHERE o.field_id = 'chunk_transcript'",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(receipts, [(0, 0)]);
     }
 
     /// A reattachment must use the retry budget; otherwise it restores aliases the live cut removed from an oversized message and can accept facts citing unseen bytes.
