@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`publish` (`crates/daemon/src/memory_capture.rs:1122`) reads the frozen plan through `prepare_memory_capture` (`crates/memory-store/src/memory_capture.rs:415`), which returns the stored `prepared_json` once frozen. `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:1996`) builds the intent with producer `memory_capture`, the project's operation key for the job id (`:2011`), and the SHA-256 of the frozen plan (`:2014`). The envelope replays a receipt with an equal digest and returns `Conflict` for a different one (`crates/kernel/tests/kernel_envelope.rs:160`).
+`publish` (`crates/daemon/src/memory_capture.rs:1126`) reads the frozen plan and its dispatch count through `frozen_memory_capture` (`crates/memory-store/src/memory_capture.rs:455`), a read that returns the stored `prepared_json` of a job that holds one; `prepare_memory_capture` (`crates/memory-store/src/memory_capture.rs:415`) freezes the plan at extraction and returns the stored plan once frozen. `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:1996`) builds the intent with producer `memory_capture`, the project's operation key for the job id (`:2015`), and the SHA-256 of the frozen plan (`:2018`). The envelope replays a receipt with an equal digest and returns `Conflict` for a different one (`crates/kernel/tests/kernel_envelope.rs:160`).
 
 ## Failure scenario
 

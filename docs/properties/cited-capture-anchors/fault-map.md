@@ -15,7 +15,7 @@ that adds this part.
 | F4 | Evaluation budget exhaustion or interrupt | constructible: `EvalBudget` in tests |
 | F5 | HEAD moves during snapshot, or between a capture submit and its retry | constructible: engine tests that move HEAD between batches; the U2 route test commits between submit and retry |
 | F6 | Retired or unknown parent row | constructible: retire a parent, or insert it later in one envelope |
-| F7 | Operation-key reuse with different bytes | constructible: Kernel envelope tests; for capture, a committed source whose queue row was pruned and whose message is planned again, which ends at the dispatch cap |
+| F7 | Operation-key reuse with different bytes | constructible: Kernel envelope tests; for capture, a committed source whose queue row was pruned and whose message is planned again: a plan with the receipt's bytes replays it and completes the source, and planning that keeps conflicting ends at the dispatch cap |
 | F8 | Kernel writer held past 5 s | constructible: hold the writer from a test thread |
 | F9 | Model output invents or omits a source id or quotes foreign text | constructible: memory-capture unit tests |
 | F10 | Session delete interleaved with checkpoint or publish | constructible: gate-holding daemon tests |
