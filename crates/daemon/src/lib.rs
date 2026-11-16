@@ -3224,7 +3224,8 @@ struct HistorySummarizerPrepareContext<'a> {
     snapshot_generation: u64,
     timings: &'a mut HistorySummarizerTriggerTimings,
     /// The pass's pinned canonical memory read, so the history_summarizer prompt and the
-    /// m0 of the same pass compose from one snapshot.
+    /// m0 of the same pass compose from one snapshot. A firing of a pass that holds
+    /// none reads its own snapshot for its prompt.
     project_memory: Option<&'a canonical_memory::CanonicalMemoryRead>,
 }
 
@@ -5398,6 +5399,11 @@ impl HandlerCore {
                         )
                     });
                 let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
+                let chunk_transcript = history_summarizer_chunk::stored_chunk_transcript(
+                    parsed.messages.as_slice(),
+                    &live,
+                    &chunk.chunk,
+                );
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
                         .iter()
@@ -5476,7 +5482,7 @@ impl HandlerCore {
                                 project_path: &project_path,
                                 observed_chunk_fingerprint: &observed,
                                 validation_chunk: &chunk.chunk,
-                                chunk_transcript: &chunk.text,
+                                chunk_transcript: &chunk_transcript,
 
                                 boundary_dates: &boundary_dates,
                                 prior_history_segments: &prior_history_segments,
@@ -5585,11 +5591,13 @@ impl HandlerCore {
         &self,
         binding: &SessionBinding,
         cfg: &DaemonConfig,
+        session_id: &str,
     ) -> Option<canonical_memory::CanonicalMemoryRead> {
         cfg.memory_enabled.then(|| {
             canonical_memory::read_project_memory(
                 &self.kernel,
                 &binding.kernel_project,
+                session_id,
                 cfg.memory_budget_tokens,
             )
         })
@@ -5952,7 +5960,9 @@ impl HandlerCore {
                 boundary,
                 // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read.
                 memory_enabled: binding.config.memory_enabled,
-                project_memory: project_memory.cloned(),
+                project_memory: project_memory.cloned().or_else(|| {
+                    self.project_memory_read(binding, &binding.config, &parsed.session_id)
+                }),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
                 extraction_free: false,
@@ -6138,7 +6148,7 @@ impl HandlerCore {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
-                project_memory: self.project_memory_read(binding, &cfg),
+                project_memory: self.project_memory_read(binding, &cfg, &parsed.session_id),
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     cfg.history_summarizer_context_limit_tokens,
@@ -7261,7 +7271,11 @@ impl HandlerCore {
             &store,
             &binding.project_root.to_string_lossy(),
             &session_id,
-            loaded.meta.user_profile_version,
+            crate::m1_compose::signalled_user_profile_version(
+                binding.config.memory_auto_inject,
+                !loaded.meta.memory_disabled,
+                loaded.meta.user_profile_version,
+            ),
             !loaded.meta.memory_disabled,
             loaded
                 .meta
@@ -9656,9 +9670,13 @@ impl HandlerCore {
         // One canonical read per pass: every memory surface of the pass (m0, the
         // m1 revision signal, and a history_summarizer firing this pass triggers), and
         // every attempt the transform makes, composes from the same pinned
-        // snapshot. `None` when memory is disabled, so the kernel store is not
-        // touched for a block that is never rendered.
-        let project_memory = self.project_memory_read(&binding, &binding.config);
+        // snapshot. With `memory_auto_inject` false, a history_summarizer firing
+        // reads its own snapshot for its prompt.
+        let project_memory = binding
+            .config
+            .memory_auto_inject
+            .then(|| self.project_memory_read(&binding, &binding.config, &parsed.session_id))
+            .flatten();
         let env = PassEnv {
             store,
             parsed,
@@ -9733,6 +9751,7 @@ impl HandlerCore {
                 .filter(|budget| budget.is_finite() && *budget >= 0.0)
                 .unwrap_or(binding.history_budget_tokens),
             memory_enabled: binding.config.memory_enabled,
+            memory_auto_inject: binding.config.memory_auto_inject,
             inject_docs: binding.config.inject_docs,
             project_doc_files: &binding.config.project_doc_files,
             document_reads: document_reads.as_deref(),
@@ -9785,7 +9804,10 @@ impl HandlerCore {
     }
 
     fn record_use_outcome(&self, env: &PassEnv, pass: &TransformWithProjection) {
-        if !(pass.froze_composition && pass.response.committed) {
+        if !(pass.froze_composition
+            && pass.response.committed
+            && env.binding.config.memory_auto_inject)
+        {
             return;
         }
         let Some(canonical_memory::CanonicalMemoryRead::Available(snapshot)) =
@@ -9878,7 +9900,7 @@ impl HandlerCore {
     /// The Kernel to advance `last_transform_at` in after a settled committed pass, when a live record of the session needs it: the check reads within what remains of the pass's Kernel wait, and a skip is counted. A route with memory disabled takes no Kernel read, so it writes no record and touches none.
     fn use_outcomes_to_touch(&self, env: &PassEnv) -> Option<Arc<kernel::KernelStore>> {
         if !self.kernel.expected()
-            || env.project_memory.is_none()
+            || !env.binding.config.memory_enabled
             || env
                 .touch_delegated
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -14759,7 +14781,7 @@ impl HandlerCore {
                     self.handle_review_candidates(channel, request).await
                 }
                 search_lifecycle_wire::STATUS => {
-                    self.handle_search_lifecycle_status(channel, request)
+                    self.handle_search_lifecycle_status(channel, request).await
                 }
                 search_lifecycle_wire::REBUILD => {
                     self.handle_search_lifecycle_rebuild(channel, request).await
@@ -14851,7 +14873,7 @@ pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |now| now.saturating_add(kernel::wall_clock_step_ms()))
 }
 
 /// The answer to a window the coverage resolution refused: `boundary_unknown` or `invalid_params`.
@@ -19261,6 +19283,8 @@ mod tests {
     mod compression_fidelity_tests;
     #[path = "fold_authority_handler_tests.rs"]
     mod fold_authority_handler_tests;
+    #[path = "memory_auto_delivery_tests.rs"]
+    mod memory_auto_delivery_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
     #[path = "transform/recorded_goldens.rs"]
@@ -24995,7 +25019,8 @@ mod tests {
         );
         assert_eq!(
             memories.rows[0].visibility,
-            kernel::SurfaceVisibility::Labeled
+            kernel::SurfaceVisibility::Visible,
+            "a whole-sentence quotation of a user message is the user's approved statement"
         );
         assert_eq!(
             memories.decisions.values().next().unwrap().payload.summary,
@@ -25003,14 +25028,26 @@ mod tests {
             "store the attributed source quotation, not the extractor's broadened environment"
         );
         // The canonical read pins the kernel tip the capture just committed.
-        let injected = canonical_memory::read_project_memory(
-            &handler.kernel,
-            &kernel_routes::ProjectBinding::new(&project),
-            4000.0,
+        let read = |session: &str| {
+            canonical_memory::read_project_memory(
+                &handler.kernel,
+                &kernel_routes::ProjectBinding::new(&project),
+                session,
+                4000.0,
+            )
+        };
+        assert_eq!(
+            read("a-later-session")
+                .rows()
+                .iter()
+                .map(|row| row.content.as_str())
+                .collect::<Vec<_>>(),
+            ["User stated: Use port 4321 for staging."],
+            "a later session receives the user's statement automatically"
         );
         assert!(
-            injected.rows().is_empty(),
-            "extraction must not promote model inference into trusted automatic context"
+            read("ses").rows().is_empty(),
+            "the capturing session's own statements stay in its conversation"
         );
         assert_eq!(
             tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
@@ -25390,15 +25427,39 @@ mod tests {
         }
     }
 
+    /// A `pi` transform request: one native row per message, with the
+    /// message's own role and text.
     fn capture_transform_request(messages: &[IngressMessage]) -> TransformRequest {
+        let rows: Vec<Value> = messages
+            .iter()
+            .map(|message| {
+                let text: String = message
+                    .ck
+                    .content()
+                    .iter()
+                    .filter_map(|block| match block.kind() {
+                        BlockKind::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let content = if message.ck.role == "user" {
+                    json!(text)
+                } else {
+                    json!([{"type": "text", "text": text}])
+                };
+                json!({"id": message.mid, "message": {"role": message.ck.role, "content": content}})
+            })
+            .collect();
         serde_json::from_value(json!({
             "kind": "transform",
             "boundary": null,
             "base_revision": "test-base",
-            "serializer_profile": "opencode-aisdk",
+            "serializer_profile": "pi",
             "session_id": "ses",
             "render_config": "cfg0",
             "messages": messages,
+            "native_messages": rows,
         }))
         .unwrap()
     }
@@ -26226,6 +26287,111 @@ mod tests {
         );
     }
 
+    /// Pi gives bash executions, extension messages, and summaries the wire
+    /// role `user`. A transform that carries its native rows checkpoints the
+    /// text the user typed and the assistant's reply, and none of those rows.
+    #[tokio::test]
+    async fn transform_checkpoints_only_rows_the_user_or_the_assistant_wrote() {
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let project_key = &capture_key(&project);
+        let rows: Vec<Arc<Value>> = [
+            json!({"id": "1a2b3c4d", "message": {
+                "role": "user", "content": "Use port 4321 for staging.", "timestamp": 1}}),
+            json!({"id": "2b3c4d5e", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Staging now listens on 4321."}],
+                "api": "anthropic-messages", "provider": "anthropic", "model": "m",
+                "usage": {}, "stopReason": "stop", "timestamp": 2}}),
+            json!({"id": "4d5e6f70", "message": {
+                "role": "bashExecution", "command": "cat notes.txt",
+                "output": "Use port 9999 for staging.", "exitCode": 0,
+                "cancelled": false, "truncated": false, "timestamp": 3}}),
+            json!({"id": "eidnara:custom:5e6f7081", "message": {
+                "role": "custom", "customType": "note",
+                "content": "Deploys happen on Fridays.", "display": true, "timestamp": 4}}),
+            json!({"id": "eidnara:branchSummary:6f708192", "message": {
+                "role": "branchSummary", "summary": "The branch chose port 7777.",
+                "fromId": "1a2b3c4d", "timestamp": 5}}),
+            json!({"id": "eidnara:compactionSummary:708192a3", "message": {
+                "role": "compactionSummary", "summary": "Earlier the port was 5555.",
+                "tokensBefore": 10, "timestamp": 6}}),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let messages = codec::pi::derive_pi_window(&rows).unwrap();
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.ck.role == "user")
+                .count()
+                == 5,
+            "the codec gives five of the six rows the wire role `user`"
+        );
+        let mut request = capture_transform_request(&messages);
+        let pi = capture_binding(&project, "pi");
+        request.native_messages = Some(rows.clone());
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            2
+        );
+        let pending = store
+            .pending_memory_captures(project_key, "pi", now_ms())
+            .unwrap();
+        let sources: Vec<(&str, &str)> = pending
+            .iter()
+            .map(|job| (job.role.as_str(), job.text.as_str()))
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                ("user", "Use port 4321 for staging."),
+                ("assistant", "Staging now listens on 4321."),
+            ]
+        );
+        handler.purge_session_state("ses", "session_delete");
+        store
+            .execute_tag_sql_for_test("DELETE FROM memory_capture_jobs")
+            .unwrap();
+        request.native_messages = Some(rows[..5].to_vec());
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            0,
+            "rows that do not pair with the messages name no source"
+        );
+        request.native_messages = None;
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            0,
+            "a request that carries no native rows names no source"
+        );
+        request.native_messages = Some(rows.clone());
+        request.serializer_profile = "owned-llmrunner".into();
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            0,
+            "rows of another serializer profile name no source"
+        );
+        assert_eq!(store.memory_capture_status(project_key).unwrap().pending, 0);
+        request.serializer_profile = "pi".into();
+        assert_eq!(
+            handler
+                .checkpoint_transform_sources(Arc::clone(&store), &pi, &request, messages.len())
+                .await,
+            2,
+            "the same rows under the pi profile name the two sources"
+        );
+    }
+
     #[tokio::test]
     async fn transform_checkpoints_only_pi_delta_messages_and_never_twice() {
         let state = Arc::new(ProducerState::default());
@@ -26826,6 +26992,7 @@ mod tests {
             execute_threshold_percentage: 65.0,
             compaction_enabled: true,
             memory_enabled: true,
+            memory_auto_inject: true,
             memory_auto_capture: false,
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
@@ -40041,6 +40208,60 @@ mod tests {
         }
     }
 
+    /// `memory_auto_inject` gates the memory block of the served messages; a
+    /// history_summarizer firing composes its prompt from the project's
+    /// canonical rows either way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_history_summarizer_firing_reads_project_memory_with_auto_inject_off() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+        let kernel = handler.kernel.kernel_store().unwrap();
+        let session = binding(project.to_str().unwrap(), "ses");
+        kernel
+            .commit(kernel_route_fixtures::intent("scope"), |envelope| {
+                kernel_route_fixtures::ensure_route_scope(envelope, &project)?;
+                Ok(String::new())
+            })
+            .unwrap();
+        kernel_route_fixtures::commit_verified_memory(
+            &kernel,
+            "rule",
+            "mem-rule",
+            &session.kernel_project.scope_id(),
+            "PROJECT_RULES",
+            "Keep the public contract.",
+        );
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_inject: false,
+                    ..default_test_config()
+                },
+                ..session
+            },
+        );
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(
+            response["history_summarizer"]["project_memory"]["kind"], "canonical",
+            "{response}"
+        );
+        assert!(
+            !serde_json::to_string(&response["messages"])
+                .unwrap()
+                .contains("<project-memory>"),
+            "{response}"
+        );
+        wait_for_count(&producer.starts, 1).await;
+        let prompt = producer.prompts.lock().unwrap()[0].clone();
+        assert!(
+            prompt.contains("mem-rule: Keep the public contract."),
+            "{prompt}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_withheld_history_summarizer_memory_read_is_recorded_and_differs_from_an_empty_block()
     {
@@ -43364,6 +43585,7 @@ mod tests {
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
                 user_profile_budget_tokens: 4_000.0,
                 memory_enabled: true,
+                memory_auto_inject: true,
                 inject_docs: true,
                 project_doc_files: crate::project_docs::default_document_paths_for_test(),
                 document_reads: None,
@@ -44016,6 +44238,67 @@ mod tests {
         let history_segments = store.load_history_segments("ses").unwrap();
         assert_eq!(history_segments.len(), 1);
         assert_eq!(history_segments[0].end_message, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_stores_a_transcript_whose_tool_output_was_scanned_as_printed() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output(1, 3, "reattached"));
+        let printed = "first\nDB_PASSWORD=\"Xk7'Qm2Lr8Wv4Zd6Pn9\"\nlast\n";
+        assert!(
+            !context_core::redaction::redact_durable_text(printed)
+                .text
+                .contains("Qm2Lr8Wv4Zd6Pn9")
+        );
+        let messages = vec![
+            ck("m1", 1, "read the environment file"),
+            assistant_tool_call("m2", 2),
+            tool_result("result-m2", 3, printed),
+        ];
+        let (handler, store, dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        seed_awaiting(&store, &messages);
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        let transcripts = store
+            .load_chunk_transcripts_for_range("ses", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(transcripts.len(), 1);
+        let transcript = transcripts[0].transcript.as_deref().unwrap();
+        assert!(!transcript.contains("Qm2Lr8Wv4Zd6Pn9"), "{transcript}");
+        assert!(
+            transcript.contains("output=\"first DB_PASSWORD='<REDACTED:db_password>' last\""),
+            "{transcript}"
+        );
+
+        // The scan ledger's receipt for the transcript counts the store's scan of the text it received, which holds the placeholder.
+        let ledger = rusqlite::Connection::open_with_flags(
+            sqlite_store_path(dir.path().join("data").to_str().unwrap(), DEFAULT_MODULE_ID),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let receipts: Vec<(i64, i64)> = ledger
+            .prepare(
+                "SELECT DISTINCT s.scan_id, s.finding_count,
+                        (SELECT COUNT(*) FROM scan_detections d WHERE d.scan_id = s.scan_id)
+                   FROM field_scans s JOIN scan_owner_copies o USING (scan_id)
+                  WHERE o.field_id = 'chunk_transcript'",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(receipts, [(0, 0)]);
     }
 
     /// A reattachment must use the retry budget; otherwise it restores aliases the live cut removed from an oversized message and can accept facts citing unseen bytes.

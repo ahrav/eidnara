@@ -13,10 +13,33 @@ type LeaseKey = (String, String);
 #[derive(Default)]
 pub(crate) struct NativeCaptureState {
     leases: HashMap<LeaseKey, NativeLease>,
+    waits: CaptureWaits,
+}
+
+/// How long capture publication waits: one call's shared allowance for
+/// committing frozen plans, and the longest one publication waits for the
+/// capture gate and the Kernel writer.
+#[derive(Clone, Copy)]
+pub(crate) struct CaptureWaits {
+    pub(crate) plan_commit_budget: Duration,
+    pub(crate) commit_wait: Duration,
+}
+
+impl Default for CaptureWaits {
+    fn default() -> Self {
+        Self {
+            plan_commit_budget: super::PLAN_COMMIT_BUDGET,
+            commit_wait: super::COMMIT_WAIT,
+        }
+    }
 }
 
 #[cfg(test)]
 impl NativeCaptureState {
+    pub(crate) fn set_waits_for_test(&mut self, waits: CaptureWaits) {
+        self.waits = waits;
+    }
+
     pub(crate) fn expire_ready_for_test(&mut self) {
         for lease in self.leases.values_mut() {
             if lease.plan.is_some() {
@@ -87,12 +110,13 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
         .enumerate()
         .map(|(index, job)| CaptureMessage {
             id: format!("source_{}", index + 1),
-            role: if job.role == "user" {
+            role: if super::is_user_source(job) {
                 CaptureRole::User
             } else {
                 CaptureRole::Assistant
             },
             text: job.text.clone(),
+            own_id: !super::cite::is_hashed_source_id(&job.message_id),
         })
         .collect()
 }
@@ -150,6 +174,11 @@ impl HandlerCore {
     }
 
     fn native_capture_work(&self, store: Arc<MemoryStore>, binding: SessionBinding) -> CaptureWork {
+        let waits = self
+            .native_capture
+            .lock()
+            .expect("native capture mutex")
+            .waits;
         CaptureWork {
             store,
             kernel: Arc::clone(&self.kernel),
@@ -158,6 +187,8 @@ impl HandlerCore {
             cancel: self.cancel.clone(),
             commit_gate: Arc::clone(&self.capture_commit_gate),
             source_capture: Arc::clone(&self.source_capture),
+            plan_commit_budget: waits.plan_commit_budget,
+            commit_wait: waits.commit_wait,
         }
     }
 
@@ -238,7 +269,9 @@ impl HandlerCore {
         let state = Arc::clone(&self.native_capture);
         // The guard travels with the blocking work: a request future dropped
         // mid-claim keeps the reservation until that work has finished, and
-        // the dispatch is recorded only once the work is issued.
+        // the batch's model dispatch is recorded only once the work is
+        // issued. A frozen plan the claim commits and the Kernel refuses
+        // records its own dispatch during the claim and keeps it.
         kernel_routes::blocking(move || {
             let mut guard = guard;
             let (plan, prompt) = match work.claim(primary.as_deref()) {
@@ -440,6 +473,7 @@ pub(super) fn collapse_quotations(
                     && (kept.duplicate_of.is_none() || memory.replaces.is_some())
                 {
                     kept.replaces = memory.replaces;
+                    kept.also_replaces = memory.also_replaces;
                     kept.duplicate_of = memory.duplicate_of;
                 }
             }
@@ -528,16 +562,21 @@ impl CaptureWork {
             .pending_memory_captures(&project, &self.binding.harness, now_ms())
             .map_err(|_| "store_failed")?;
         let mut unprepared = Vec::new();
+        // The frozen plans share one budget, so a busy Kernel writer delays
+        // the extraction window by that budget at most. A plan the budget
+        // does not reach stays ripe for the next call.
+        let budget = Instant::now() + self.plan_commit_budget;
         for job in jobs {
-            if job.prepared.is_some() {
+            if job.prepared.is_none() {
+                unprepared.push(job);
+            } else if Instant::now() < budget {
                 // A replayed plan reads its session's record without waiting.
                 let settlement = super::cite::settlement_key(&job)
                     .map_or(SettlementOutcome::Settled, |key| {
                         self.source_capture.settlement_now(&key)
                     });
-                self.publish_or_recover(&job, settlement)?;
-            } else {
-                unprepared.push(job);
+                let deadline = budget.min(Instant::now() + self.commit_wait);
+                self.publish_or_recover(&job, settlement, deadline)?;
             }
         }
         if unprepared.is_empty() {
@@ -561,7 +600,7 @@ impl CaptureWork {
             return Err("invalid_model_configuration");
         }
         let mut messages = messages_for(&unprepared);
-        let mut existing = self.existing_memories(&messages)?;
+        let mut existing = self.existing_memories(&messages, &unprepared)?;
         let prompt = loop {
             let prompt = render_capture_prompt_with_existing(&messages, &existing)?;
             if prompt.len() <= MAX_NATIVE_PROMPT_BYTES {
@@ -612,6 +651,7 @@ impl CaptureWork {
         };
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
+        let budget = Instant::now() + self.plan_commit_budget;
         for (mut job, decision) in plan.jobs.into_iter().zip(decisions) {
             let decision = match decision {
                 Ok(decision) => decision,
@@ -621,23 +661,26 @@ impl CaptureWork {
                     continue;
                 }
             };
-            let attribution = if job.role == "user" {
-                "User stated"
+            let attribution = if super::is_user_source(&job) {
+                USER_STATED
             } else {
-                "Assistant reported"
+                super::ASSISTANT_REPORTED
             };
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
             let quoted = collapse_quotations(attribution, decision.memories);
+            let prose = super::Prose::of(&job.text);
             let mut memories = quoted.clone();
-            let attached = failure_evidence::attach(&job.text, &mut memories);
+            failure_evidence::attach(&job.text, &mut memories);
+            let attached = keep_statement_text(&job, &prose, &quoted, &mut memories);
             let existing = plan
                 .existing
                 .iter()
                 .filter(|previous| {
                     memories.iter().any(|memory| {
                         memory.replaces.as_deref() == Some(&previous.id)
+                            || memory.also_replaces.contains(&previous.id)
                             || memory.duplicate_of.as_deref() == Some(&previous.id)
                     })
                 })
@@ -681,11 +724,44 @@ impl CaptureWork {
             };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
-                self.publish_or_recover(&job, job_settlement(settlements, &job))?;
+                // The plan's copy of the job predates the dispatch that
+                // produced this output; the backoff counts that dispatch.
+                job.attempts += 1;
+                // The batch shares one budget: every plan is frozen, and a
+                // plan the budget does not reach is committed by the next
+                // drain's plan window.
+                if Instant::now() < budget {
+                    self.publish_or_recover(
+                        &job,
+                        job_settlement(settlements, &job),
+                        budget.min(Instant::now() + self.commit_wait),
+                    )?;
+                }
             }
         }
         Ok(())
     }
+}
+
+/// Restores the quoted text of each memory that is the user's own
+/// statement. A statement is approved as the sentence the user wrote, so it
+/// keeps its exact text and failure lines stay on the other memories of the
+/// source. Returns whether any memory still holds an appended line.
+pub(super) fn keep_statement_text(
+    job: &CaptureJob,
+    prose: &super::Prose<'_>,
+    quoted: &[CapturedMemory],
+    memories: &mut [CapturedMemory],
+) -> bool {
+    let mut attached = false;
+    let states_whole = super::states_whole_message(job);
+    for (memory, quoted) in memories.iter_mut().zip(quoted) {
+        if user_attributed(states_whole, prose, quoted) {
+            memory.content.clone_from(&quoted.content);
+        }
+        attached |= memory.content != quoted.content;
+    }
+    attached
 }
 
 mod failure_evidence;

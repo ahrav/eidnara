@@ -40,10 +40,10 @@ Do not build a second fixture or a second three-way disposition oracle.
 - [KernelClient, lines 550-585](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L550)
   serializes these reads as `kernel.read`, preserving surface and optional
   object IDs. This completes the registered-tool transport trace.
-- [Daemon read, lines 620-691](../../../../../crates/daemon/src/kernel_routes/read.rs#L620)
+- [Daemon read, lines 674-754](../../../../../crates/daemon/src/kernel_routes/read.rs#L674)
   binds the request, applies the requested freshness gate, reads project-visible
   rows, and bounds serialized output. This is not native artifact expansion.
-- [Memory ranking, lines 177-180, 253-299](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L177)
+- [Memory ranking, lines 179-182, 255-301](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L179)
   uses memory decision summaries/rationales. Exact object-id matching is a
   lookup mode. [Lines 188-229](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L178)
   render rejected approaches distinctly and carry their rationale.

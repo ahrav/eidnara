@@ -667,7 +667,9 @@ object describing source capture (Section 7.9), the background publication of
 consented message text, tool results, and configured repository documents as
 Kernel source descriptors. The block also counts the memory-capture
 decisions each committed capture publish wrote, by citation reason and by
-anchor reason; a replayed publish adds nothing. The
+anchor reason, and the user statements a publish stored labeled after the
+Kernel's admission policy refused their approval; a replayed publish adds
+nothing. The
 counters are process-local and start at zero when the daemon starts. The block
 is sanitized field by field: any object survives, a non-object drops the block
 whole, and every field is kept or dropped on its own. Every field is
@@ -688,6 +690,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record; every user statement of that plan is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -863,17 +866,17 @@ A **context** is `{"context_revision": string, "representation": string, "spans"
 
 Receipt state is in memory and cleared by a daemon restart or by uninstalling the limit set; either retires the incarnation, so the earlier keys are `unknown`. It is bounded per project by a key count enforced when a key is minted or a read-back is recorded, and store-wide by a retention measured from creation that MUST be at least twice the 30 s request deadline of Section 11 so one request plus one full-length retry never meets an expired key. The key count has a fixed ceiling; a limit set above it or below the retention floor is refused at installation. A limits change keeps the receipts and applies the new bounds to them at the next access: a narrower count evicts the excess settled receipts at the next mint, and a shorter retention expires the receipts already past it.
 
-**Search lifecycle operations.** `search.lifecycle.status`, `search.lifecycle.rebuild`, `search.lifecycle.disable`, `search.lifecycle.recover`, and `search.lifecycle.abandon` are the operator surface for the search projection's lifecycle record. `eidnara-host search` sends them over a route bound with harness `cli`. The connection key is the operator's authority, as for `host.shutdown` (Section 2), so any route holding it may call them; the harness grants nothing. Bodies are parsed strictly after the envelope keys are removed; any unknown field is `invalid_params`. A route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel its kernel state, as every kernel route does. A daemon with no search lifecycle owner answers `{"kind":"terminal","terminal":"unavailable"}`. A request the owner refuses answers `{"kind":"terminal","terminal":"refused","reason": string}`, the reason bounded to 512 characters.
+**Search lifecycle operations.** `search.lifecycle.status`, `search.lifecycle.rebuild`, `search.lifecycle.disable`, `search.lifecycle.recover`, and `search.lifecycle.abandon` are the operator surface for the search projection's lifecycle record. `eidnara-host search` sends them over a route bound with harness `cli`. The connection key is the operator's authority, as for `host.shutdown` (Section 2), so any route holding it may call them; the harness grants nothing. Bodies are parsed strictly after the envelope keys are removed; any unknown field is `invalid_params`. A route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel its kernel state, as every kernel route does. A daemon with no search lifecycle owner, and a `search.lifecycle.status` whose progress read ended abnormally, answer `{"kind":"terminal","terminal":"unavailable"}`. A request the owner refuses answers `{"kind":"terminal","terminal":"refused","reason": string}`, the reason bounded to 512 characters.
 
 | Method | Body | Answer |
 | --- | --- | --- |
-| `search.lifecycle.status` | none | `{"kind":"status","record": R,"admission": {"state":"admitted"} \| {"state":"refused","reason": code}}` |
+| `search.lifecycle.status` | none | `{"kind":"status","record": R,"admission": {"state":"admitted"} \| {"state":"refused","reason": code},"progress": P}` |
 | `search.lifecycle.rebuild` | none | `{"kind":"recorded","attempt_id","replayed"}`, with `replayed: true` when an operator rebuild is already recorded, or terminal `not_current` when the record is neither Current nor that rebuild |
 | `search.lifecycle.disable` | none | `{"kind":"disabled","record": R}` once the disable closed admission and reconciled its consumer |
 | `search.lifecycle.recover` | `authorization_ref` | `{"kind":"recorded","attempt_id","replayed"}`, with `replayed: true` when a recovery under the same reference is already recorded, or terminal `not_disabled` when the record is neither Disabled nor that recovery |
 | `search.lifecycle.abandon` | `operator_id`, `reason` | `{"kind":"abandoned","consumer_id","record": R}`, or terminal `nothing_to_abandon` when the record is not Disabled, its disable has not released the local family and recorded `through`, or it is already deregistered |
 
-`R` is `{"state":"absent"}`; `{"state":"intent"|"current","transition","cause","attempt_id","consumer_id","generation_id","recovery_target": i64 | null,"episodes":{"allowance","consumed","deadline"}}`; `{"state":"disabled","consumer_id": string | null,"through": i64 | null,"deregistered": bool}`; or `{"state":"unavailable","reason": string}`. A rebuild names the Current seed and reads through the next consumer under cause `OperatorRequest`. A recovery is a new `AuthorizedRecovery` operation under cause `DisabledRecovery` over the current selection. It reads through the consumer that an unfinished construction in the disabled record registered, and otherwise through the consumer after the disabled one. A replayed recovery that finds admission still latched reconciles the recorded recovery before it answers. `authorization_ref` follows the authorization-reference rule (1–128 ASCII letters, digits, `-`, `_`, `.`, `:`). A disable's cleanup runs within the cleanup envelope its record fixes, the shorter of `physical_drain_ms` and `B_recovery_ms` measured from when the disable was recorded, and within the request budget, whichever ends first. An abandonment records the kernel's audited `ConsumerAbandonment` with `operator_id` and `reason`, each 1–512 bytes and redacted before storage, and then runs the disable's cleanup again under the same request budget. It commits only while more than one second of the cleanup envelope remains, and otherwise answers `refused` with the consumer still registered, so an authorized recovery remains available. Its kernel commit is keyed by the consumer, so a retry with the same fields replays it, and a retry that finds the consumer already released runs the cleanup again. A default disable never abandons a consumer.
+`R` is `{"state":"absent"}`; `{"state":"intent"|"current","transition","cause","attempt_id","consumer_id","generation_id","recovery_target": i64 | null,"episodes":{"allowance","consumed","deadline"}}`; `{"state":"disabled","consumer_id": string | null,"through": i64 | null,"deregistered": bool}`; or `{"state":"unavailable","reason": string}`. A rebuild names the Current seed and reads through the next consumer under cause `OperatorRequest`. A recovery is a new `AuthorizedRecovery` operation under cause `DisabledRecovery` over the current selection. It reads through the consumer that an unfinished construction in the disabled record registered, and otherwise through the consumer after the disabled one. A replayed recovery that finds admission still latched reconciles the recorded recovery before it answers. `authorization_ref` follows the authorization-reference rule (1–128 ASCII letters, digits, `-`, `_`, `.`, `:`). A disable's cleanup runs within the cleanup envelope its record fixes, the shorter of `physical_drain_ms` and `B_recovery_ms` measured from when the disable was recorded, and within the request budget, whichever ends first. An abandonment records the kernel's audited `ConsumerAbandonment` with `operator_id` and `reason`, each 1–512 bytes and redacted before storage, and then runs the disable's cleanup again under the same request budget. It commits only while more than one second of the cleanup envelope remains, and otherwise answers `refused` with the consumer still registered, so an authorized recovery remains available. Its kernel commit is keyed by the consumer, so a retry with the same fields replays it, and a retry that finds the consumer already released runs the cleanup again. A default disable never abandons a consumer. `P` is `{"tip": i64 | null,"checkpoint": i64 | null,"lag_commits": i64 | null,"rebuilds":{"recorded": u64,"completed": u64,"renewed": u64},"blocked": string | null}`. `tip` is the Kernel tip read for this answer, `null` when the Kernel could not be read within the operation's budget. `checkpoint` is the commit the selected family had applied when the owner last observed it, `null` until a selected family is observed, after an observation that could not read one, and after a slice that found the record disabled, a disable reconciling, or the owner shut down. `lag_commits` is `tip - checkpoint` floored at zero, `null` when either is. The `rebuilds` counters count, since the daemon started, the first builds and rebuilds its slice loop recorded, the builds that reached Current, and the renewals of a lapsed rebuild. `blocked` is the reason the last slice gave for leaving the record or its Current family where it was (a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild), with `; coverage: <reason>` appended when the last observation of the selected family failed, or the refusal of the recording that slice asked for; it is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends; a slice that hands a supervisor back for joining leaves the earlier value when that supervisor drains, whatever its catch-up episode found, and reports `did not advance: maintenance did not drain: <reason>` when it does not. Its text before `; coverage:` is the reason the daemon logs for that slice, and the value is bounded to 512 characters; it is written for a person, and a program reads only whether it is `null`.
 
 ### 7.9 Native automatic memory capture
 
@@ -895,6 +898,13 @@ IDs are distinct, nonempty, at most 256 UTF-8 bytes, and contain no control
 characters. Role is `user` or `assistant`. Text is nonblank and its aggregate
 size is at most 65,536 bytes. Clients split larger native text on UTF-8
 boundaries. Reasoning, tool output, and synthetic summaries are excluded.
+A `pi` transform also checkpoints the text of its window. Pi gives the wire
+role `user` to bash executions, extension messages, and branch and compaction
+summaries; a window message is a source only when its own native row's role
+is `user` or `assistant`. A transform of another serializer profile, one that
+carries no native rows, and one whose native rows and messages differ in
+number each yield no source. The native role names the kind of Pi entry; it
+does not show who composed the text of a `user` entry.
 Optional `model` is a nonempty provider/model identifier of at most 512 bytes
 without control characters. A checkpoint never invokes a model, with or
 without this hint.
@@ -911,9 +921,18 @@ and 8,192 overall.
 
 A connected harness requests work with the common envelope and
 `method: "memory.capture.next"`; optional `model` supplies the current native
-model when no history-summarizer model chain is configured. The host first
-attempts already-frozen commits, which need no model. It then reserves at most
-one batch per project/harness pair, with at most 16 reservations overall.
+model when no history-summarizer model chain is configured. The host reserves
+at most one batch per project/harness pair, with at most 16 reservations
+overall, and then attempts already-frozen commits, which need no model.
+Each call reads two windows of the pair's ripe sources, oldest first: at
+most 32 frozen plans awaiting a commit, within 1 MiB of retained text and plan
+bytes, and at most 32 sources awaiting extraction, within 64 KiB of source
+text. The windows are independent, so frozen plans take no place in the
+extraction window. The frozen commits of one call share a 10 s budget; a plan
+the budget does not reach stays queued for the next call. A source in the
+extraction window is issued when the call holds the reservation, a model is
+configured, the batch fits the prompt ceiling, and the source is at the
+failure stage of the window's oldest source.
 
 A `work` response contains:
 
@@ -932,10 +951,13 @@ A stale reply cannot remove or publish against a successor reservation.
 Leases are process-local; source jobs and frozen plans are durable. Capture
 queues and leases key on the same canonical project identity the kernel scope
 uses, so a symlinked spelling of one root is the same project and two roots
-that differ only in raw path bytes stay distinct. A dispatch is recorded only
-when work is issued; a `next` request cancelled during preparation records
-none, except that a source whose prompt exceeds the ceiling even alone is
-failed as soon as it is discovered, whatever becomes of the request.
+that differ only in raw path bytes stay distinct. A model dispatch is recorded
+only when work is issued; a `next` request cancelled during preparation
+records none, except that a source whose prompt exceeds the ceiling even alone
+is failed as soon as it is discovered, whatever becomes of the request. A
+frozen plan whose commit the Kernel refuses also records one dispatch per
+refused publication, including in a `next` request that is later cancelled; a
+publication the labeled commit recovers records none.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending
@@ -976,7 +998,7 @@ and `store_failed`; mismatched models and malformed envelopes are errors.
 
 Before freezing, each memory's text begins with its exact supporting quotation,
 prefixed with `User stated:` or `Assistant reported:` from the native role.
-The model's paraphrase is not published. Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the model's quote; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
+The model's paraphrase is not published. Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. A quotation that capture approves as the user's own statement keeps its exact text and takes no failure lines. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the model's quote; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
 among them; distinct replacement targets keep one memory each, since a
 memory supersedes exactly one predecessor. Relevant and sufficiently complete quote selection still depends
@@ -1000,8 +1022,26 @@ source alone; other sources in the batch still commit. A source whose prompt
 exceeds the prompt ceiling even alone is likewise a recorded dispatch and
 model/output failure of that source, so later sources are not held behind it.
 Dispatches are capped at nine per source across owners: a model/output failure
-on or after the ninth dispatch abandons the source. An abandoned source keeps
-its replay identity and its last error, releases its text, no longer counts
+on or after the ninth dispatch abandons the source. A frozen plan the Kernel
+refuses on admission policy, invalid input, or a missing object, and a frozen
+plan the host cannot decode, records one dispatch per refused publication: the
+retry delay doubles with the count, and the refusal that reaches the ninth
+dispatch abandons the source with the error `kernel_write_refused` or
+`invalid_preparation`. A Kernel conflict, which means a target moved under the
+plan or the Kernel holds another receipt for the source, releases the plan
+with the error `reconciliation_conflict`; the source is extracted again after
+the delay of its count, and the conflict met on the ninth dispatch abandons
+it. Any other Kernel failure keeps the plan, records `kernel_write_failed`,
+and retries after the delay of the current count. Each of the three
+recoveries applies to the freeze of the plan the commit read, which the plan
+bytes and the dispatch count read beside them name, so a late answer about an
+earlier plan, or about an earlier freeze of the same bytes, leaves the newer
+one as it is. A publication waits for the capture gate and the Kernel writer
+inside the allowance of its call, 10 seconds for the frozen plans of one
+`memory.capture.next` and 10 seconds for the plans one submission froze; a
+plan the allowance does not reach stays frozen for the next call. An
+abandoned source keeps
+its replay identity and its last error, releases its text and frozen plan, no longer counts
 toward the pending quota or the `pending` status count, is never returned as
 work, and is not revived by a new store owner. The native drain processes at
 most 32 batches per invocation. No model work runs in the daemon after a
@@ -1030,8 +1070,85 @@ reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
-Captured facts remain labeled model inference for explicit
-search, not human approval or automatic-context eligibility. Session deletion
+A captured fact is the user's statement when its source message has the user
+role and reaches capture under its own message id (a source id of the form
+`<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
+and hashed ids, never qualifies, and neither does a `pi` source whose id is
+in the `eidnara:` space Pi reserves for the rows it derives or whose text has
+the form Pi gives a bash execution: `Ran`, the command between backticks, and
+on the next line a fence of three backticks or `(no output)`); its stored text is `User stated: ` followed
+by a verbatim quotation of that message; and the quotation is one or more
+whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
+(closed by a run of the opener's character at least as long), each block a
+line holding only a markup tag opens through the last line closing that tag
+(such as `<context_researcher-augmentation>`), every paragraph holding a list
+item, a heading, a blockquote, an indented code line, a double quotation mark
+of any script, a single opening quotation mark that starts a word, or a line
+ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
+after such a line, every paragraph after one holding a quotation mark or an
+unclosed inline code span, and
+every paragraph that a fence or tag line borders without a blank
+line. An inline code span runs from a run of backticks through the next run
+of the same length in its paragraph; an odd number of backslashes directly
+before an opening run makes its first backtick literal text, and an opening
+run that no later run of its paragraph closes is unclosed and spans to the
+paragraph's end. The quotation starts the
+paragraph, or follows a `.`, `!`, or `?` and whitespace with a first character
+that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
+or `!`, directly before one, or at the paragraph's end, and no lowercase word
+follows it past any punctuation; neither boundary falls
+at a dotted abbreviation, a word of two or more one- or two-letter segments
+such as `e.g.` or `U.S.`; neither boundary falls inside an inline code span,
+so a quotation may hold a whole span; and it contains no `?`, contains no double
+quotation mark, and neither starts nor closes a single quotation. Capture records each such fact with a statement record in the
+`user-statements` domain, an `adr_accepted` decision admitted as explicit user
+text, and admits the fact on that approval, so the Kernel serves it on
+automatic surfaces. The statement record's source is the user message it
+quotes: source kind `user`, source id `memory_capture_statement:` followed by
+the first 32 hexadecimal digits of the capture source's identity, revision 1.
+The Kernel bounds the authority-bearing accepted decisions of one source
+lineage at 64 and one batch proposes at most 64 memories, so the statements of
+one message fit its lineage and the number of live statements in a project has
+no ceiling; a statement leaves when a correction supersedes or retires it.
+When the Kernel's admission policy refuses a statement record, or the
+admission that rests on it, the same frozen plan commits with each of its user
+statements as a labeled memory for explicit search, and
+`decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
+as a replacement stays live and served on `auto_inject` beside the labeled correction, and the labeled commit supersedes
+or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
+for explicit search, not human approval or automatic-context eligibility. The
+`<project-memory>` block of a session's m0 holds the live, project-scoped,
+positive-category facts visible on `auto_inject`, selected newest first until
+`memory.injection_budget_tokens` is spent and rendered grouped by category,
+and leaves out facts captured from that session's own messages. Those facts
+are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
+they take no place from another session's facts. The read loads at most
+eight pages of that size, the payloads of up to 64 MiB of a session's own
+newer facts; past that it stops, keeps the facts it had selected, and
+leaves the older facts out of the block. A fact whose stored payload alone
+passes 8 MiB is left unloaded and ends the read the same way. The extractor's reference memories are ranked from two bounded reads
+at one snapshot: the newest facts on `explicit_search`, and the facts served
+on `auto_inject` in the plain newest window and in the delivery of each
+session whose messages the batch holds; a fact older than every window is
+not offered. A user message may correct earlier facts, and only
+the user's statement may replace a fact served on `auto_inject`: its fact
+supersedes the captured fact it `replaces` (which must share its category
+and at least one content word), retires each further fact it names
+in `also_replaces` (each must share the replaced fact's category and at
+least half of its distinct content words, of which it must have at least
+one; a content word is a run of letters and digits of three or more
+characters, or of two that hold a digit, other than common English function
+words) and a replaced
+memory the host memory tool wrote, and
+retires the statement record of each fact it removes; no surface serves a
+superseded or retired fact. A host `kernel.commit` that supersedes or retires a
+decision admitted as explicit user text, or one admitted on an approval,
+answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
+and defaults to true; the daemon ignores a project-tier value with a warning,
+and each plugin strips it from the project tier. False composes m0 with
+neither the `<project-memory>` nor the user-profile block and m1 with no
+`<new-user-profile>` delta, and turning it off rebuilds m0, while explicit
+search, capture, and the history summarizer's memory read are unchanged. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes

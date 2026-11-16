@@ -4,10 +4,10 @@ HEAD `3a3b916b7`. Surface S2.
 
 ## Discovery trigger
 
-Plan U1 "Patterns to follow: `crates/daemon/src/kernel_routes/read.rs:418`
+Plan U1 "Patterns to follow: `crates/daemon/src/kernel_routes/read.rs:472`
 for the scope-filtered decision read." (the plan cited line 185; the call is
-at line 418 now). In the daemon read, `read_visible_page` is the only bounded
-consumer of the unbounded Kernel API; `newest_page` reads
+at line 472 now). In the daemon read, `read_visible_page` is the only consumer
+of the unbounded Kernel API that bounds its rows; `newest_page` reads
 `visible_chunk_as_of_in_scope`, which ends a chunk by its row and payload
 arguments. Lens: resource boundaries; C6.
 
@@ -23,29 +23,32 @@ arguments. Lens: resource boundaries; C6.
   heap's max is the row a sort-then-truncate drops first.
 - `read.rs:147-181` `NewestRows`: `push` pops when `len > cap` and sets
   `dropped`; `finish` returns `into_sorted_vec` and `dropped`.
-- `read.rs:383-496` `read_visible`, which delegates to `read_visible_page`,
-  the path of the in-process callers and of a `kernel.read` request with
-  `object_ids` (`:670-675`):
-  - `:403-424` Kernel read with `project.scope_term()`.
-  - `:412-413` and `:425-434` build `ScopeFilter` and
-    `NewestRows::new(MAX_READ_ROWS)`, then push each row that passes
+- `read.rs:383-398` `read_visible`, which delegates through
+  `read_visible_within` (`:435-444`) to `read_visible_page` (`:448-550`), the
+  path of the capture read of the `memory` domain, of the classifier's
+  named-id read, and of a `kernel.read` request with `object_ids`
+  (`:724-738`). Each of these callers passes `MAX_READ_ROWS` and
+  `MAX_READ_ROW_BYTES` as the caps:
+  - `:457-478` Kernel read with `project.scope_term()`.
+  - `:466-467` and `:479-488` build `ScopeFilter` and
+    `NewestRows::new(max_rows)`, then push each row that passes
     `selection.keeps`, the `before` cursor (`ServingPosition::precedes`,
     `admission.rs:234-238`, reached through `ReadCursor::position`,
     `read.rs:79-84`; set by `kernel.read` alone), and
     `ScopeFilter::matches`, in that order; the comment explains the bound
     cannot be a SQL `LIMIT`.
-  - `:436-445` payload sizes read via `decision_payload_sizes_as_of` for the
+  - `:490-499` payload sizes read via `decision_payload_sizes_as_of` for the
     kept decision ids before any payload; comment: "a project can retain
     `MAX_READ_ROWS` decisions of ~1 MiB each, and materializing them all
     would allocate gigabytes".
-  - `:446-455` a kept decision without a size entry is
+  - `:500-509` a kept decision without a size entry is
     `CorruptCanonicalRow`.
-  - `:456-472` cumulative cut where payload bytes pass
-    `MAX_READ_ROW_BYTES`; `truncated = true` on cut.
-  - `:473-488` `decisions_for_objects_as_of` for the retained ids; a missing
+  - `:510-526` cumulative cut where payload bytes pass
+    `max_row_bytes`; `truncated = true` on cut.
+  - `:527-542` `decisions_for_objects_as_of` for the retained ids; a missing
     row is `CorruptCanonicalRow`.
 - `read.rs:289-381` `newest_page`, the path of a `kernel.read` request with
-  no `object_ids` (`:676`):
+  no `object_ids` (`:739`):
   - `:310-319` each chunk is one `visible_chunk_as_of_in_scope` call with
     `project.scope_term()` and the cursor position, asking for at least
     `MIN_CHUNK_ROWS` (1,024, `:278`) rows and `MIN_CHUNK_PAYLOAD_BYTES`
@@ -70,7 +73,7 @@ arguments. Lens: resource boundaries; C6.
   (`PAGE_PAYLOAD_INLINE_BYTES`, `:3010`), its kind and stored payload
   (`:3729-3761`).
 - `read.rs:87-97` `ReadResponse.truncated` doc: byte-budget truncation also
-  happens at serialization (`encode_page`, `:585-617`), so the wire flag can
+  happens at serialization (`encode_page`, `:639-671`), so the wire flag can
   be `true` while this one is `false`.
 - Tests: `crates/daemon/tests/kernel_routes.rs:1958`
   `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`;
@@ -87,7 +90,7 @@ arguments. Lens: resource boundaries; C6.
   The route tests' over-cap and over-budget reads carry no `object_ids` and
   so run `newest_page`;
   `:2080` checks the `NewestRows` heap that `read_visible_page` uses, and
-  `crates/daemon/src/kernel_routes/read.rs:1025`
+  `crates/daemon/src/kernel_routes/read.rs:1088`
   `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` puts one row
   more than the cap through `read_visible`.
 
@@ -106,7 +109,7 @@ holds every payload it reads instead of the payloads within its budget.
 ## Timing windows and dependencies
 
 `read_visible_page` follows its row read with two Kernel reads at the same
-`known_as_of` (`visible.known_as_of`, `read.rs:443`, `:479`), so the size map
+`known_as_of` (`visible.known_as_of`, `read.rs:497`, `:533`), so the size map
 and the decision rows describe the same snapshot. The decision rows are read
 after the cut, so a decision retired between the two reads at a later commit
 is still read at the earlier snapshot. `newest_page` reads one chunk or more
@@ -122,7 +125,7 @@ read at `requested`.
   the kept set equals sort-then-truncate (existing for `newest_page` through
   the route tests, for `NewestRows` alone, and for `read_visible_page`
   through `read_visible` at
-  `crates/daemon/src/kernel_routes/read.rs:1025`).
+  `crates/daemon/src/kernel_routes/read.rs:1088`).
 - Decisions whose sizes sum past `MAX_READ_ROW_BYTES`; assert the cut index
   and that `decisions_for_objects_as_of` was called with exactly the retained
   ids on `read_visible_page`, and with only the retained decisions the page

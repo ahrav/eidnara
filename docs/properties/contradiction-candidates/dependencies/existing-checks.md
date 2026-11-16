@@ -46,10 +46,10 @@ folding exists as a check; the goldens imply both (e.g. `HTTPServer` stays
 | `rows_serve_only_to_the_project_their_scope_names` | `:1803` | cross-project rows absent | unaudited |
 | `recorded_cross_project_read_is_empty` | `:1366` | | unaudited |
 | `a_request_naming_another_project_root_is_refused_before_any_work` | `:1487` | project mismatch before work | unaudited |
-| `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` | `crates/daemon/src/kernel_routes/read.rs:1025` | `read_visible` over one decision more than `MAX_READ_ROWS` keeps the newest rows with their decisions and `truncated: true` | unaudited |
+| `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` | `crates/daemon/src/kernel_routes/read.rs:1088` | `read_visible` over one decision more than `MAX_READ_ROWS` keeps the newest rows with their decisions and `truncated: true` | unaudited |
 
 Production guards: `CorruptCanonicalRow` when a visible decision lacks its
-payload size or row in `read_visible_page` (`read.rs:450-455`, `:483-488`),
+payload size or row in `read_visible_page` (`read.rs:504-509`, `:537-542`),
 or its decision in the chunk or in the read by id in `newest_page`
 (`read.rs:338`, `:369-371`).
 
@@ -58,7 +58,7 @@ absence, not a check), and no test drives `visible_domain_decisions_as_of_in_sco
 with a `ScopeTermFilter` on `Dimension::Project` directly; the daemon tests
 reach that filter through `kernel.read`, which passes it to the chunk and
 named-id statements and does not run the domain statement, and through
-`read_visible` (`crates/daemon/src/kernel_routes/read.rs:1025`), which passes
+`read_visible` (`crates/daemon/src/kernel_routes/read.rs:1088`), which passes
 it to the domain statement.
 
 ## S3 budgeted Kernel reads
@@ -153,7 +153,7 @@ through the MemoryReviewer class only as far as this pass found.
 | `a_published_proposal_reads_from_every_root_after_a_newer_root_binds` | `:342` | | unaudited |
 | `review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` | `:409` | `v` field is `invalid_params` (`:643-649`) | unaudited |
 | wire-doc literal test | `crates/daemon/src/memory_reviewer/wire.rs:448-463+` | the doc's `review.accept` terminal set equals the produced set | unaudited |
-| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35920` | | unaudited |
+| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:36087` | | unaudited |
 
 None found: no test drives `store_unavailable` on `review.list`/`review.read`
 through a failing store read, as far as this pass found (the terminal is

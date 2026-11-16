@@ -13,7 +13,7 @@ from a premature row limit. Row and byte pressure need separate witnesses.
 - [read.rs:26-30][caps] defines 8192 rows and one eighth of the wire-body limit
   as the read-byte budget.
 - [read.rs:163-169][heap] drops the serving-order-last retained row on overflow.
-- [read.rs:425-472][cutoff] filters before heap admission and then applies the
+- [read.rs:479-526][cutoff] filters before heap admission and then applies the
   cumulative payload cutoff to the retained newest-first rows.
 - [kernel_routes.rs:1958][row-test] and [2112][byte-test] contain generic cap
   tests. Their existence is not this campaign's pressure evidence. Their
@@ -59,7 +59,7 @@ This record remains unexercised and the existing checks are unaudited.
 
 [caps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L26-L30
 [heap]: ../../../../crates/daemon/src/kernel_routes/read.rs#L163-L169
-[cutoff]: ../../../../crates/daemon/src/kernel_routes/read.rs#L425-L472
+[cutoff]: ../../../../crates/daemon/src/kernel_routes/read.rs#L479-L526
 [row-test]: ../../../../crates/daemon/tests/kernel_routes.rs#L1958
 [byte-test]: ../../../../crates/daemon/tests/kernel_routes.rs#L2112
 [byte-record]: ../catalog.md#canonical-memory-byte-pressure-is-exercised

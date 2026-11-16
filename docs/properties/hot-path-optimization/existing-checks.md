@@ -458,7 +458,7 @@ Production guards go to
 above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
-[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L383-L496
+[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L383-L550
 [injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L676
 [revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L748
 [dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L806
@@ -544,10 +544,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1034
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1262
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1384
-[request-cap]: ../../../crates/daemon/src/lib.rs#L19874
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20606-L20612
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20613-L20622
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20623-L20634
+[request-cap]: ../../../crates/daemon/src/lib.rs#L19898
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20630-L20636
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20637-L20646
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20647-L20658
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -616,7 +616,7 @@ that no related check exists anywhere in the repository.
 [resource-pragma-test]: ../../../crates/storage/src/lib.rs#L5233
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L25974
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L26035
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1956
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L943
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1542

@@ -51,6 +51,55 @@ Each lifecycle slice:
 A slice ends within the manifest's `supervisor_slice_ms`, within the caller's
 budget, and for an Intent within the record's own deadline.
 
+### Lifecycle work past the freshness limit
+
+The gate refuses a hook when the family's coverage observation trails the
+kernel by more than `catchup_lag_commits` (`Denial::Stale`, status code
+`coverage_stale`). The observation is the one the owner last installed, so a
+reader is refused from that observation onward, and until it a reader can
+trail by the limit plus the commits that arrived since the one before.
+
+The lifecycle owner's own work is what brings a trailing family back: the
+Current family's catch-up episode applies the commits it trails by, and a
+rebuild replaces a family whose hold can no longer extend. That work is
+therefore judged by `EvidenceEvaluator::judge_lifecycle_work`, which applies
+every gate `judge` applies (the hook flags, the manifest and evidence
+identities, class coverage, the resource and capability evidence, and
+both-harness evidence) and admits a positive lag of any size; a checkpoint
+past the observed tip is refused for it as for a reader. The frozen hook-to-gate
+contract states this evaluation in CC10
+(`docs/properties/search-projection/construction-contracts.md`). `HookGate` keeps
+both verdicts for each hook. `HookGate::lifecycle_work` marks the calling
+thread for the life of its guard, and that thread's admissions read the
+lifecycle-work verdict while every other thread's read `judge`'s. The owner
+takes the guard in `run_slice`, `request`, and `renew_expired_rebuild`, after
+it takes its manager, so one slice or request holds it at a time. A renewal
+of the gate's evidence withdraws outstanding grants when either verdict of a
+hook turns from admitted to refused.
+
+The effect on a family past the limit:
+
+- A Current family whose hold extends is caught up by the next slice, and the
+  refresh after the episode re-admits readers. A commit burst larger than the
+  limit between two observations costs readers one refused interval and no
+  rebuild.
+- A Current family whose hold is lost (a daemon restart, or the hold's
+  expiry) reports `Rebuild(CatchUpHoldLost)`, and the rebuild is recorded,
+  built, selected, and completed while the predecessor stays past the limit.
+- A reader's pin, the embedding supervisor's slices, and every producer that
+  asks the gate from another thread stay refused as stale until an
+  observation finds the selected family inside the limit. A supervisor the
+  owner's slice starts is admitted with that slice and idles on its own
+  thread until then.
+
+A build is one slice, and the slice holds the owner's manager for its whole
+work. A reader takes the manager to pin, so a search that arrives during a
+build slice waits for its own deadline and answers `deadline`. Between slices
+and until the replacement is selected, a previous family inside the freshness
+limit serves again, and one past the limit stays refused as stale, as the list
+above states. The window is the build's duration, bounded by
+`supervisor_slice_ms`.
+
 ## Rebuilds of a Current family
 
 A slice over a Current record reports `SliceOutcome::Rebuild(cause)` when the
@@ -205,11 +254,13 @@ kernel restore, still refuses the attempt with `TargetBeyondTip`. An
 authorized recovery keeps its target and reports `SnapshotBeyondTarget` once
 the tip has passed it.
 
-A rebuild's construction is admitted on the loaded predecessor family's
-coverage. While the owner holds a predecessor that trails the kernel by more
-than `catchup_lag_commits`, construction and renewal are denied `Stale`; a
-daemon restart loads no predecessor for an unselected rebuild, and the rebuild
-and its renewal are admitted on the unregistered observation.
+A rebuild's construction, renewal, and completion are judged as lifecycle
+work (see [Lifecycle work past the freshness
+limit](#lifecycle-work-past-the-freshness-limit)), so they are admitted while
+the loaded predecessor family trails the kernel by more than
+`catchup_lag_commits`; a daemon restart loads no predecessor for an unselected
+rebuild, and the rebuild and its renewal are admitted on the unregistered
+observation.
 
 The daemon logs `search lifecycle rebuild expired: its deadline passed or the
 wall clock stepped back past its recording` when a slice first finds a
@@ -342,6 +393,38 @@ admits a selected family whose own checks refused the pin. Codes name the gate o
 never record content. OpenCode's `/eidnara-status` renders the block as
 `Search admission`.
 
+`search.lifecycle.status` (`eidnara-host search status`) also carries a
+`progress` block, so an operator or a test harness reads the projection's lag
+and its rebuild outcomes without parsing the log:
+
+| Field | Meaning |
+|---|---|
+| `tip` | The kernel tip read when the status was answered; `null` when the kernel could not be read within the operation's budget. |
+| `checkpoint` | The commit the selected family had applied when the owner last observed it, in a slice or while recording a request or renewal; `null` before a selected family is observed, when the last observation could not read one, and after a slice that found the record disabled, a disable reconciling, or the owner shut down. |
+| `lag_commits` | `tip - checkpoint`, floored at zero; `null` when either is. A reader is refused once the lag an observation finds exceeds `catchup_lag_commits`. |
+| `rebuilds.recorded` | First builds and rebuilds the slice loop recorded since the daemon started. |
+| `rebuilds.completed` | Builds that reached Current since the daemon started, whoever recorded them. |
+| `rebuilds.renewed` | Renewals of a lapsed rebuild since the daemon started. |
+| `blocked` | The reason the last slice gave for leaving the record or its Current family where it was: a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild, with `; coverage: <reason>` appended when the last observation of the selected family failed, or the refusal of the recording that slice asked for. The text before `; coverage:` is the text the log line `search lifecycle <reason>` carries, and the status value is bounded to 512 characters. It is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that hands a supervisor back for joining leaves the earlier value when that supervisor drains, whatever its catch-up episode found, and reports `did not advance: maintenance did not drain: <reason>` when it does not. |
+
+The counters and the observation live in the daemon process and start from
+zero at each start. The slice loop logs `search lifecycle rebuild completed:
+attempt=<id> consumer=<id> cause=<cause> target=<commit> elapsed_ms=<ms>` when
+a build reaches Current. `elapsed_ms` is monotonic time since this process's
+slice loop recorded or last renewed that attempt, and `unknown` for an attempt
+the loop of this process did not record or renew.
+
+A disable wakes the slice loop once its record is persisted. The loop runs
+its claim-source slice and then the lifecycle slice that clears `checkpoint`
+and `blocked`; a status answered before that slice ends still carries the
+earlier values beside the `disabled` record
+(`a_disable_wakes_an_idle_slice_loop`).
+
+The tip read runs on the blocking pool and waits for a kernel reader within
+the operation's budget. A status request dropped during that wait cancels the
+budget, so the read stops waiting and releases its blocking thread
+(`a_cancelled_status_request_stops_waiting_for_a_kernel_reader`).
+
 Every admission, including the one behind the status block, reads the
 lifecycle record fresh. The gate checks the control directory's owner and mode
 from its path metadata, opening the directory only when that metadata does not
@@ -365,7 +448,7 @@ The operator drives these through `eidnara-host search`, which sends the
 
 | Command | Effect |
 |---|---|
-| `eidnara-host search status` | Reports the record and the search admission. |
+| `eidnara-host search status` | Reports the record, the search admission, and the `progress` block. |
 | `eidnara-host search rebuild` | Records a rebuild of the Current family under `Cause::OperatorRequest`. |
 | `eidnara-host search disable` | Closes admission and reconciles the consumer. |
 | `eidnara-host search recover --authorization <ref>` | Records an authorized recovery of a Disabled record. |
@@ -410,3 +493,33 @@ and the refusal of a spent rebuild before its target is released
 retirement, disable, and recovery, including child-process cuts.
 `crates/kernel/tests/kernel_outbox.rs` covers consumer retirement past later
 commits.
+
+The freshness limit has these witnesses. A Current family past the limit is
+refused to another thread while the slice's own thread runs its episode, and
+readers pin it at the tip afterwards
+(`a_current_family_that_trails_the_kernel_past_the_limit_is_refused_to_readers_and_caught_up`);
+a restarted family past the limit, whose hold belongs to the earlier lease,
+is rebuilt to Current while readers stay refused
+(`a_restarted_family_past_the_freshness_limit_rebuilds_to_current`); and
+`judge_lifecycle_work` admits a positive lag while every other gate still
+refuses (`each_invalid_evidence_dimension_denies_on_its_own` in
+`crates/daemon/tests/projection_gates.rs`). A completion and a renewal run
+with more commits than the limit behind the loaded family
+(`a_commit_between_selection_and_retirement_still_completes_the_rebuild`,
+`a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_the_tip`),
+and evidence that refuses lifecycle work over a stale family withdraws the
+grants issued before it
+(`refresh_installs_only_for_valid_records_and_a_selected_projection` in
+`crates/daemon/tests/projection_admission.rs`).
+`crates/daemon/tests/search_projection_soak.rs` runs the daemon with the
+direct-host fixture's admission records: a grown store stays within the
+reader lag bound through commits, wall-clock steps inside the hold's
+lifetime, and searches, and rebuilds once when the hold expires while the
+workload keeps committing
+(`a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches`); a
+family past a reader bound of eight commits is refused to readers and caught
+up with no rebuild
+(`a_family_past_a_small_reader_lag_bound_is_refused_to_readers_and_catches_up`);
+and under the unit-sized records the status surface names the coverage bound
+that stopped serving
+(`unit_sized_limits_stop_serving_a_grown_store_and_the_status_names_the_bound`).

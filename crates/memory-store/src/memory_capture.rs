@@ -18,12 +18,16 @@ use crate::{
 
 pub const MAX_CAPTURE_SOURCE_BYTES: usize = 64 * 1024;
 pub const MAX_CAPTURE_PREPARED_BYTES: usize = 512 * 1024;
+/// The text and frozen-plan bytes one drain window of
+/// `pending_memory_captures` retains. The extraction window is also held to
+/// [`MAX_CAPTURE_SOURCE_BYTES`] of source text.
 const MAX_CAPTURE_BATCH_RETAINED_BYTES: usize = 1024 * 1024;
 pub const MAX_PENDING_CAPTURE_PER_PROJECT: i64 = 1024;
 pub const MAX_PENDING_CAPTURE_TOTAL: i64 = 8192;
 pub const MAX_CAPTURE_FAILURES: u32 = 3;
 pub const MAX_CAPTURE_ATTEMPTS: u32 = 9;
-/// One drain batch: the `LIMIT` of `pending_memory_captures`.
+/// The jobs in one drain window of `pending_memory_captures`, the `LIMIT` of
+/// each window's statement, and the sources one extraction dispatch records.
 const MAX_CAPTURE_BATCH_JOBS: usize = 32;
 /// Mirrors `kernel::source_identity::HARNESSES`; a daemon test pins the two equal.
 pub const CAPTURE_HARNESSES: [&str; 2] = ["opencode", "pi"];
@@ -39,8 +43,15 @@ const CAPTURE_PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// `pending` excludes abandoned jobs; they still count as failed.
 const STATUS_SQL: &str = "SELECT COALESCE(SUM(commit_seq IS NULL AND abandoned_at_ms IS NULL),0),COALESCE(SUM(prepared_json IS NOT NULL),0),COALESCE(SUM(commit_seq IS NOT NULL),0),COALESCE(SUM(commit_seq IS NULL AND last_error IS NOT NULL),0) FROM memory_capture_jobs WHERE project=?1";
-/// Index order is `(project,harness,created_at_ms,rowid)`, so the ORDER BY needs no sorter.
-const PENDING_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND retry_at_ms<=?3 AND (prepared_json IS NOT NULL OR paused_until_ms<=?3) ORDER BY created_at_ms,rowid LIMIT 32";
+/// The frozen-plan window: the oldest 32 ripe jobs that hold a frozen plan.
+/// Index order is `(project,harness,created_at_ms,rowid)`, so the ORDER BY
+/// needs no sorter. The `NULL` test is a top-level term ahead of the deadline
+/// term, so SQLite decides a row of the other window from its record header
+/// and reads no plan bytes for it.
+const PENDING_PLANS_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL AND retry_at_ms<=?3 ORDER BY created_at_ms,rowid LIMIT 32";
+/// The extraction window: the oldest 32 ripe sources that hold no plan and
+/// whose model-failure pause has ended.
+const PENDING_SOURCES_SQL: &str = "SELECT job_id,project,harness,session_id,message_id,role,text,prepared_json,attempts,failures FROM memory_capture_jobs WHERE project=?1 AND harness=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND retry_at_ms<=?3 AND paused_until_ms<=?3 ORDER BY created_at_ms,rowid LIMIT 32";
 /// Without statistics the planner prefers the covering project index, which
 /// holds every completed row; the partial index holds only the pending ones.
 const PENDING_COUNTS_SQL: &str = "SELECT COALESCE(SUM(project=?1),0),COUNT(*) FROM memory_capture_jobs INDEXED BY idx_memory_capture_pending WHERE commit_seq IS NULL AND abandoned_at_ms IS NULL";
@@ -105,6 +116,19 @@ pub struct CaptureQueueStatus {
     pub prepared: i64,
     pub completed: i64,
     pub failed: i64,
+}
+
+/// What a refused, conflicting, or failed kernel commit did to its capture
+/// job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureRefusal {
+    /// The job holds another plan, a later freeze of the same bytes, or
+    /// none, is complete, or is abandoned; it is left as it is.
+    Stale,
+    /// The job stays queued for its next retry.
+    Retried,
+    /// The job reached [`MAX_CAPTURE_ATTEMPTS`] and released its payload.
+    Abandoned,
 }
 
 /// A raw-text digest stored beside the redacted row would confirm guesses
@@ -173,6 +197,17 @@ fn retire_prepared_output_scans(
         DurableWriteFamily::MemoryCapture.owner_kind(),
         &prepared_output_owner(job),
     )
+}
+
+/// A closed error code: lowercase ASCII letters and `_`, at most 64 bytes.
+fn valid_error_code(code: &str) -> Result<(), MemoryStoreError> {
+    if code.is_empty()
+        || code.len() > 64
+        || !code.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
+    {
+        return Err(MemoryStoreError::Serde("invalid capture error code".into()));
+    }
+    Ok(())
 }
 
 /// Capture rows own audits under `project`; retire them before the session
@@ -272,7 +307,12 @@ impl MemoryStore {
         })
     }
 
-    /// Reads at most 32 jobs and 64 KiB of source text. Prepared jobs respect
+    /// Reads two windows, each the oldest ripe jobs of its kind: frozen plans
+    /// awaiting a kernel commit, then sources awaiting extraction. A window
+    /// holds at most 32 jobs and 1 MiB of retained text and plan bytes; the
+    /// extraction window also holds at most 64 KiB of source text. The windows
+    /// are independent, so a plan whose commit keeps failing takes no slot
+    /// from a source that has not reached the model. Prepared jobs respect
     /// commit retry deadlines but do not consume the model-failure allowance.
     pub fn pending_memory_captures(
         &self,
@@ -282,35 +322,37 @@ impl MemoryStore {
     ) -> Result<Vec<CaptureJob>, MemoryStoreError> {
         self.inner
             .with_conn(|conn| {
-                let mut statement = conn.prepare_cached(PENDING_SQL)?;
-                let rows = statement.query_map(params![project, harness, now_ms], |row| {
-                    Ok(CaptureJob {
-                        job_id: row.get(0)?,
-                        project: row.get(1)?,
-                        harness: row.get(2)?,
-                        session_id: row.get(3)?,
-                        message_id: row.get(4)?,
-                        role: row.get(5)?,
-                        text: row.get(6)?,
-                        prepared: row.get(7)?,
-                        attempts: row.get(8)?,
-                        failures: row.get(9)?,
-                    })
-                })?;
                 let mut jobs = Vec::new();
-                let mut bytes = 0;
-                let mut retained_bytes = 0;
-                for row in rows {
-                    let job = row?;
-                    let charge = job.text.len() + job.prepared.as_ref().map_or(0, String::len);
-                    if bytes + job.text.len() > MAX_CAPTURE_SOURCE_BYTES
-                        || retained_bytes + charge > MAX_CAPTURE_BATCH_RETAINED_BYTES
-                    {
-                        break;
+                for (prepared, sql) in [(true, PENDING_PLANS_SQL), (false, PENDING_SOURCES_SQL)] {
+                    let mut statement = conn.prepare_cached(sql)?;
+                    let rows = statement.query_map(params![project, harness, now_ms], |row| {
+                        Ok(CaptureJob {
+                            job_id: row.get(0)?,
+                            project: row.get(1)?,
+                            harness: row.get(2)?,
+                            session_id: row.get(3)?,
+                            message_id: row.get(4)?,
+                            role: row.get(5)?,
+                            text: row.get(6)?,
+                            prepared: row.get(7)?,
+                            attempts: row.get(8)?,
+                            failures: row.get(9)?,
+                        })
+                    })?;
+                    let mut bytes = 0;
+                    let mut retained_bytes = 0;
+                    for row in rows {
+                        let job = row?;
+                        let charge = job.text.len() + job.prepared.as_ref().map_or(0, String::len);
+                        if (!prepared && bytes + job.text.len() > MAX_CAPTURE_SOURCE_BYTES)
+                            || retained_bytes + charge > MAX_CAPTURE_BATCH_RETAINED_BYTES
+                        {
+                            break;
+                        }
+                        bytes += job.text.len();
+                        retained_bytes += charge;
+                        jobs.push(job);
                     }
-                    bytes += job.text.len();
-                    retained_bytes += charge;
-                    jobs.push(job);
                 }
                 Ok(jobs)
             })
@@ -406,21 +448,55 @@ impl MemoryStore {
         })
     }
 
-    /// A rejected kernel transaction made no write. Reconcile again only if
-    /// this is still the same frozen plan; a committed source is immutable.
+    /// The frozen plan a pending job holds and the job's dispatch count, in
+    /// one read that writes nothing. Each freeze follows a dispatch, and each
+    /// refused commit records one, so the count read beside a plan names that
+    /// freeze of it: a later freeze of the same bytes carries a higher count.
+    pub fn frozen_memory_capture(
+        &self,
+        project: &str,
+        job: &str,
+    ) -> Result<Option<(String, u32)>, MemoryStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT prepared_json,attempts FROM memory_capture_jobs WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NOT NULL",
+                    params![project, job],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+            })
+            .map_err(Into::into)
+    }
+
+    /// A rejected kernel transaction made no write. When the job still holds
+    /// `frozen` at the dispatch count `attempts` the commit read beside it,
+    /// its plan is released and the source is extracted again after
+    /// `retry_at_ms`. Each extraction records a dispatch, so a conflict that
+    /// planning again cannot clear ends at [`MAX_CAPTURE_ATTEMPTS`]: the
+    /// source is abandoned, which releases its text and keeps its identity
+    /// and error. A committed source is immutable.
     pub fn retry_memory_capture_reconciliation(
         &self,
         project: &str,
         job: &str,
-        frozen: &str,
-    ) -> Result<(), MemoryStoreError> {
+        (frozen, attempts): (&str, u32),
+        retry_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<CaptureRefusal, MemoryStoreError> {
         prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let tx = tx.tx();
-            let changed = tx.execute("UPDATE memory_capture_jobs SET prepared_json=NULL,last_error='reconciliation_conflict',retry_at_ms=0 WHERE project=?1 AND job_id=?2 AND prepared_json=?3 AND commit_seq IS NULL", params![project, job, frozen])?;
-            if changed == 1 {
-                retire_prepared_output_scans(tx, project, job)?;
+            let changed = tx.execute("UPDATE memory_capture_jobs SET prepared_json=NULL,last_error='reconciliation_conflict',retry_at_ms=?4 WHERE project=?1 AND job_id=?2 AND prepared_json=?3 AND attempts=?5 AND commit_seq IS NULL AND abandoned_at_ms IS NULL", params![project, job, frozen, retry_at_ms, attempts])?;
+            if changed == 0 {
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Stale));
             }
-            Ok(WriteDisposition::Applied(()))
+            retire_prepared_output_scans(tx, project, job)?;
+            let abandoned = tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='' WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND attempts>=?4", params![project, job, now_ms, MAX_CAPTURE_ATTEMPTS])?;
+            if abandoned == 1 {
+                retire_capture_scans(tx, project, job)?;
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Abandoned));
+            }
+            Ok(WriteDisposition::Applied(CaptureRefusal::Retried))
         })
     }
 
@@ -459,12 +535,7 @@ impl MemoryStore {
         model_failure: bool,
         now_ms: i64,
     ) -> Result<(), MemoryStoreError> {
-        if code.is_empty()
-            || code.len() > 64
-            || !code.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
-        {
-            return Err(MemoryStoreError::Serde("invalid capture error code".into()));
-        }
+        valid_error_code(code)?;
         prepared_write(project, job, job)?.execute(&self.inner, |tx| {
             let tx = tx.tx();
             tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,failures=failures+?5 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL",params![project,job,code,retry_at_ms, i64::from(model_failure)])?;
@@ -478,6 +549,62 @@ impl MemoryStore {
                 tx.execute("UPDATE memory_capture_jobs SET failures=0,paused_until_ms=?3 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json IS NULL AND failures>=?4",params![project,job,now_ms.saturating_add(CAPTURE_FAILURE_PAUSE_MS),MAX_CAPTURE_FAILURES])?;
             }
             Ok(WriteDisposition::Applied(()))
+        })
+    }
+
+    /// Records a failure that left the frozen plan `frozen`, read at the
+    /// dispatch count `attempts`, unjudged: the job keeps the plan and waits
+    /// until `retry_at_ms`. A job that holds another plan, a later freeze of
+    /// the same bytes, or none is left as it is.
+    pub fn retain_memory_capture_plan(
+        &self,
+        project: &str,
+        job: &str,
+        (frozen, attempts): (&str, u32),
+        code: &str,
+        retry_at_ms: i64,
+    ) -> Result<CaptureRefusal, MemoryStoreError> {
+        valid_error_code(code)?;
+        prepared_write(project, job, job)?.execute(&self.inner, |tx| {
+            let changed = tx.tx().execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json=?5 AND attempts=?6",params![project,job,code,retry_at_ms,frozen,attempts])?;
+            Ok(WriteDisposition::Applied(if changed == 1 {
+                CaptureRefusal::Retried
+            } else {
+                CaptureRefusal::Stale
+            }))
+        })
+    }
+
+    /// Records a kernel refusal of the frozen plan `frozen`, read at the
+    /// dispatch count `attempts`, as one dispatch.
+    /// The same plan meets the same refusal until canonical state changes, so
+    /// it draws on the [`MAX_CAPTURE_ATTEMPTS`] allowance a model dispatch
+    /// does. Reaching the allowance abandons the source, which releases its
+    /// text and plan and keeps its identity and `code`. A job that holds
+    /// another plan, a later freeze of the same bytes, or none is left as it
+    /// is.
+    pub fn refuse_memory_capture_commit(
+        &self,
+        project: &str,
+        job: &str,
+        (frozen, attempts): (&str, u32),
+        code: &str,
+        retry_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<CaptureRefusal, MemoryStoreError> {
+        valid_error_code(code)?;
+        prepared_write(project, job, job)?.execute(&self.inner, |tx| {
+            let tx = tx.tx();
+            let charged = tx.execute("UPDATE memory_capture_jobs SET last_error=?3,retry_at_ms=?4,attempts=attempts+1 WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json=?5 AND attempts=?6",params![project,job,code,retry_at_ms,frozen,attempts])?;
+            if charged == 0 {
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Stale));
+            }
+            let abandoned = tx.execute("UPDATE memory_capture_jobs SET abandoned_at_ms=?3,text='',prepared_json=NULL WHERE project=?1 AND job_id=?2 AND commit_seq IS NULL AND abandoned_at_ms IS NULL AND prepared_json=?5 AND attempts>=?4",params![project,job,now_ms,MAX_CAPTURE_ATTEMPTS,frozen])?;
+            if abandoned == 1 {
+                retire_capture_scans(tx, project, job)?;
+                return Ok(WriteDisposition::Applied(CaptureRefusal::Abandoned));
+            }
+            Ok(WriteDisposition::Applied(CaptureRefusal::Retried))
         })
     }
 
@@ -865,6 +992,482 @@ mod tests {
         );
     }
 
+    fn numbered_source(index: usize, text: &str) -> CaptureSource<'_> {
+        // Leaked ids keep the borrowed source shape for a handful of rows.
+        CaptureSource {
+            message_id: Box::leak(format!("native-{index}").into_boxed_str()),
+            ..source(text)
+        }
+    }
+
+    #[test]
+    fn refused_plans_and_new_sources_drain_in_separate_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let mut refused = Vec::new();
+        for index in 0..40 {
+            let id = accepted(
+                store
+                    .enqueue_memory_capture(numbered_source(index, "Use staging port 4321."), 1)
+                    .unwrap(),
+            );
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, "{}")
+                    .unwrap()
+                    .is_some()
+            );
+            refused.push(id);
+        }
+        let later = accepted(
+            store
+                .enqueue_memory_capture(numbered_source(40, "The build uses cargo."), 2)
+                .unwrap(),
+        );
+
+        let jobs = store.pending_memory_captures("/project", "pi", 10).unwrap();
+        let (plans, sources): (Vec<_>, Vec<_>) =
+            jobs.iter().partition(|job| job.prepared.is_some());
+        assert_eq!(
+            plans
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            refused[..32],
+            "the oldest 32 frozen plans fill their own window"
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            [later.as_str()],
+            "a source awaiting extraction is read however many plans wait ahead of it"
+        );
+    }
+
+    /// Each window holds 1 MiB of retained bytes of its own, and the 64 KiB
+    /// source-text bound applies to the extraction window alone.
+    #[test]
+    fn each_drain_window_spends_its_own_byte_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        // Three plans of 470 KiB, each with 40 KiB of text: two fill the plan
+        // window's 1 MiB to within less than one source's text, and the
+        // third waits. A budget the two windows shared would admit no source.
+        let plan = format!("\"{}\"", "p".repeat(470 * 1024));
+        // Two plan jobs hold 80 KiB of text, past the 64 KiB the extraction
+        // window admits.
+        let plan_text = "plan text ".repeat(4 * 1024);
+        let source_text = "source text ".repeat(16 * 1024 / 12);
+        let retained = 2 * (plan.len() + plan_text.len());
+        assert!(retained <= MAX_CAPTURE_BATCH_RETAINED_BYTES);
+        assert!(MAX_CAPTURE_BATCH_RETAINED_BYTES - retained < source_text.len());
+        let mut plans = Vec::new();
+        for index in 0..3 {
+            let id = accepted(
+                store
+                    .enqueue_memory_capture(numbered_source(index, &plan_text), 1)
+                    .unwrap(),
+            );
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, &plan)
+                    .unwrap()
+                    .is_some()
+            );
+            plans.push(id);
+        }
+        let mut sources = Vec::new();
+        for index in 3..9 {
+            sources.push(accepted(
+                store
+                    .enqueue_memory_capture(numbered_source(index, &source_text), 2)
+                    .unwrap(),
+            ));
+        }
+        let jobs = store.pending_memory_captures("/project", "pi", 10).unwrap();
+        let ids = |prepared: bool| -> Vec<&str> {
+            jobs.iter()
+                .filter(|job| job.prepared.is_some() == prepared)
+                .map(|job| job.job_id.as_str())
+                .collect()
+        };
+        assert_eq!(
+            ids(true),
+            plans[..2],
+            "the plan window stops at its retained-byte bound"
+        );
+        assert!(
+            jobs.iter()
+                .filter(|job| job.prepared.is_some())
+                .map(|job| job.text.len())
+                .sum::<usize>()
+                > MAX_CAPTURE_SOURCE_BYTES,
+            "the source-text bound applies to the extraction window alone"
+        );
+        assert_eq!(
+            ids(false),
+            sources[..4],
+            "the extraction window holds 64 KiB of source text whatever the plan window retained"
+        );
+    }
+
+    /// A refusal or a conflict names the plan the commit read and the
+    /// dispatch count read beside it. A job that has since frozen another
+    /// plan, or the same bytes again, keeps its dispatch count, its plan,
+    /// and its text.
+    #[test]
+    fn an_answer_about_an_earlier_freeze_leaves_the_job_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let id = accepted(
+            store
+                .enqueue_memory_capture(source("Use staging port 4321."), 1)
+                .unwrap(),
+        );
+        let freeze = |plan: &str| -> u32 {
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, plan)
+                    .unwrap()
+                    .is_some()
+            );
+            let (frozen, attempts) = store
+                .frozen_memory_capture("/project", &id)
+                .unwrap()
+                .expect("the job holds a plan");
+            assert_eq!(frozen, plan);
+            attempts
+        };
+        let row = || -> (u32, Option<String>, String, Option<String>, i64) {
+            store
+                .with_conn_for_test(|conn| {
+                    conn.query_row(
+                        "SELECT attempts,prepared_json,text,last_error,retry_at_ms FROM memory_capture_jobs WHERE job_id=?1",
+                        [&id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                })
+                .unwrap()
+        };
+        let first = freeze("[1]");
+        assert_eq!(first, 1);
+        assert_eq!(
+            store
+                .retry_memory_capture_reconciliation("/project", &id, ("[1]", first), 0, 10)
+                .unwrap(),
+            CaptureRefusal::Retried
+        );
+        assert_eq!(
+            store.frozen_memory_capture("/project", &id).unwrap(),
+            None,
+            "a released job holds no plan"
+        );
+        // The job is dispatched again and freezes the same bytes on the
+        // dispatch before the cap.
+        for _ in 2..MAX_CAPTURE_ATTEMPTS - 1 {
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+        }
+        let second = freeze("[1]");
+        assert_eq!(second, MAX_CAPTURE_ATTEMPTS - 1);
+        let before = row();
+        for (plan, attempts, why) in [
+            ("[1]", first, "the first freeze of the same bytes"),
+            ("[2]", second, "another plan"),
+        ] {
+            assert_eq!(
+                store
+                    .refuse_memory_capture_commit(
+                        "/project",
+                        &id,
+                        (plan, attempts),
+                        "kernel_write_refused",
+                        99,
+                        20
+                    )
+                    .unwrap(),
+                CaptureRefusal::Stale,
+                "a late refusal of {why}"
+            );
+            assert_eq!(row(), before, "{why}");
+            assert_eq!(
+                store
+                    .retry_memory_capture_reconciliation("/project", &id, (plan, attempts), 99, 20)
+                    .unwrap(),
+                CaptureRefusal::Stale,
+                "a late conflict of {why}"
+            );
+            assert_eq!(row(), before, "{why}");
+            assert_eq!(
+                store
+                    .retain_memory_capture_plan(
+                        "/project",
+                        &id,
+                        (plan, attempts),
+                        "kernel_write_failed",
+                        99
+                    )
+                    .unwrap(),
+                CaptureRefusal::Stale,
+                "a late write failure of {why}"
+            );
+            assert_eq!(row(), before, "{why}");
+        }
+        assert_eq!(
+            store
+                .retain_memory_capture_plan(
+                    "/project",
+                    &id,
+                    ("[1]", second),
+                    "kernel_write_failed",
+                    77
+                )
+                .unwrap(),
+            CaptureRefusal::Retried
+        );
+        let kept = row();
+        assert_eq!(
+            kept,
+            (
+                before.0,
+                before.1.clone(),
+                before.2.clone(),
+                Some("kernel_write_failed".into()),
+                77
+            ),
+            "a write failure of the freeze the job holds keeps the plan and sets its wait"
+        );
+        assert_eq!(
+            store
+                .refuse_memory_capture_commit(
+                    "/project",
+                    &id,
+                    ("[1]", second),
+                    "kernel_write_refused",
+                    99,
+                    30
+                )
+                .unwrap(),
+            CaptureRefusal::Abandoned,
+            "a refusal of the freeze the job holds reaches the cap"
+        );
+        let after = row();
+        assert_eq!(
+            (after.0, after.1, after.2, after.3),
+            (
+                MAX_CAPTURE_ATTEMPTS,
+                None,
+                String::new(),
+                Some("kernel_write_refused".into())
+            )
+        );
+    }
+
+    /// A conflict releases the plan and waits for its retry deadline. The
+    /// conflict met on the last dispatch of the allowance abandons the source.
+    #[test]
+    fn a_conflict_backs_off_and_is_abandoned_at_the_dispatch_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let id = accepted(
+            store
+                .enqueue_memory_capture(source("Use staging port 4321."), 1)
+                .unwrap(),
+        );
+        let later = accepted(
+            store
+                .enqueue_memory_capture(numbered_source(1, "The build uses cargo."), 2)
+                .unwrap(),
+        );
+        for dispatch in 1..=MAX_CAPTURE_ATTEMPTS {
+            let now = i64::from(dispatch) * 100;
+            assert!(
+                store
+                    .begin_memory_capture_attempt("/project", &id, 0)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .prepare_memory_capture("/project", &id, "[]")
+                    .unwrap()
+                    .is_some()
+            );
+            let outcome = store
+                .retry_memory_capture_reconciliation(
+                    "/project",
+                    &id,
+                    ("[]", dispatch),
+                    now + 50,
+                    now,
+                )
+                .unwrap();
+            if dispatch < MAX_CAPTURE_ATTEMPTS {
+                assert_eq!(outcome, CaptureRefusal::Retried, "dispatch {dispatch}");
+                let ripe = |at: i64| -> Vec<String> {
+                    store
+                        .pending_memory_captures("/project", "pi", at)
+                        .unwrap()
+                        .into_iter()
+                        .map(|job| job.job_id)
+                        .collect()
+                };
+                assert_eq!(
+                    ripe(now + 49),
+                    std::slice::from_ref(&later),
+                    "the released source waits for its retry deadline"
+                );
+                assert_eq!(ripe(now + 50), [id.as_str(), later.as_str()]);
+            } else {
+                assert_eq!(outcome, CaptureRefusal::Abandoned);
+            }
+        }
+        let status = store.memory_capture_status("/project").unwrap();
+        assert_eq!((status.pending, status.prepared, status.failed), (1, 0, 1));
+        let (text, error): (String, String) = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT text,last_error FROM memory_capture_jobs WHERE job_id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(text, "", "an abandoned source releases its text bytes");
+        assert_eq!(error, "reconciliation_conflict");
+    }
+
+    #[test]
+    fn a_refused_plan_backs_off_by_its_dispatch_count_and_is_abandoned_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open_for_test(dir.path(), "capture");
+        let id = accepted(
+            store
+                .enqueue_memory_capture(source("Use staging port 4321."), 1)
+                .unwrap(),
+        );
+        assert!(
+            store
+                .begin_memory_capture_attempt("/project", &id, 0)
+                .unwrap()
+        );
+        assert!(
+            store
+                .prepare_memory_capture("/project", &id, "{}")
+                .unwrap()
+                .is_some()
+        );
+        // One model dispatch is recorded; each refusal is one more.
+        for refusal in 1..MAX_CAPTURE_ATTEMPTS - 1 {
+            let retry_at = i64::from(refusal) * 100;
+            assert_eq!(
+                store
+                    .refuse_memory_capture_commit(
+                        "/project",
+                        &id,
+                        ("{}", refusal),
+                        "kernel_write_refused",
+                        retry_at,
+                        retry_at
+                    )
+                    .unwrap(),
+                CaptureRefusal::Retried,
+                "refusal {refusal} leaves the plan queued"
+            );
+            assert!(
+                store
+                    .pending_memory_captures("/project", "pi", retry_at - 1)
+                    .unwrap()
+                    .is_empty(),
+                "the plan waits for its retry deadline"
+            );
+            let jobs = store
+                .pending_memory_captures("/project", "pi", retry_at)
+                .unwrap();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].attempts, refusal + 1);
+            assert!(jobs[0].prepared.is_some(), "the frozen plan is kept");
+        }
+        assert_eq!(
+            store
+                .refuse_memory_capture_commit(
+                    "/project",
+                    &id,
+                    ("{}", MAX_CAPTURE_ATTEMPTS - 1),
+                    "kernel_write_refused",
+                    0,
+                    5_000
+                )
+                .unwrap(),
+            CaptureRefusal::Abandoned,
+            "the refusal that reaches the dispatch cap abandons the source"
+        );
+        assert!(
+            store
+                .pending_memory_captures("/project", "pi", i64::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        let status = store.memory_capture_status("/project").unwrap();
+        assert_eq!(
+            (status.pending, status.prepared, status.failed),
+            (0, 0, 1),
+            "an abandoned plan leaves the pending count and stays counted as failed"
+        );
+        let (text, error): (String, String) = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT text,last_error FROM memory_capture_jobs WHERE job_id=?1",
+                    [&id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(text, "", "an abandoned source releases its text bytes");
+        assert_eq!(error, "kernel_write_refused");
+        assert_eq!(
+            store
+                .refuse_memory_capture_commit(
+                    "/project",
+                    &id,
+                    ("{}", MAX_CAPTURE_ATTEMPTS),
+                    "kernel_write_refused",
+                    0,
+                    6_000
+                )
+                .unwrap(),
+            CaptureRefusal::Stale,
+            "an abandoned source records no further refusal"
+        );
+    }
+
     #[test]
     fn non_model_failures_never_abandon_a_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -917,14 +1520,15 @@ mod tests {
                 .any(|step| step.contains("SCAN memory_capture_jobs")),
             "{status:?}"
         );
-        let pending = plan(PENDING_SQL, &["", "pi", "0"]);
-        assert_eq!(
-            pending,
-            [
-                "SEARCH memory_capture_jobs USING INDEX idx_memory_capture_pending (project=? AND harness=?)"
-            ],
-            "the partial index must supply the ORDER BY without a sorter"
-        );
+        for window in [PENDING_PLANS_SQL, PENDING_SOURCES_SQL] {
+            assert_eq!(
+                plan(window, &["", "pi", "0"]),
+                [
+                    "SEARCH memory_capture_jobs USING INDEX idx_memory_capture_pending (project=? AND harness=?)"
+                ],
+                "the partial index must supply the ORDER BY without a sorter"
+            );
+        }
         let counts = plan(PENDING_COUNTS_SQL, &[""]);
         assert_eq!(
             counts,

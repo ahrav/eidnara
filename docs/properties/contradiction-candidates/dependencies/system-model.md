@@ -52,16 +52,20 @@ one snapshot through `served_rows` (`:3589-3605`), which runs
 (`:3818-3955`). The domain/kind predicate is `o.domain_id=:domain_id AND
 o.object_kind='decision'` (`:3852-3856`). The scope prefilter is the `WHERE`
 tail at `:3934-3952`. Rows are then sorted by `object_id` (`:3328`). No row
-limit and no budget parameter exist on this API. The daemon consumer is
-`read_visible` in `crates/daemon/src/kernel_routes/read.rs:383-496`: SQL
-prefilter with `project.scope_term()` (`:411`,
+limit and no budget parameter exist on this API. The bounded daemon consumer is
+`read_visible_page` in `crates/daemon/src/kernel_routes/read.rs:448-550`: SQL
+prefilter with `project.scope_term()` (`:465`,
 `crates/daemon/src/kernel_routes/project.rs:106-111`), then `ScopeFilter`
 (`project.rs:186-222`) judges each kept row, then `NewestRows` heap of
-`MAX_READ_ROWS = 8192` (`read.rs:27`, `:148-181`, `:426-434`), then payload
-sizes before payloads (`:436-472`), then `decisions_for_objects_as_of` for the
-retained ids (`:473-488`). `kernel.read` does not use this API: a request
+`MAX_READ_ROWS = 8192` (`read.rs:27`, `:148-181`, `:480-488`), then payload
+sizes before payloads (`:490-526`), then `decisions_for_objects_as_of` for the
+retained ids (`:527-542`). `domain_decisions_in_serving_order`
+(`read.rs:404-432`) is the second consumer: it applies the same prefilter and
+`ScopeFilter`, sorts every kept row in serving order, and applies no row cap,
+for the canonical-memory delivery walk (`crates/daemon/src/canonical_memory.rs:291`).
+`kernel.read` does not use this API: a request
 with `object_ids` reads `visible_as_of_in_scope` through the same
-`read_visible_page` (`read.rs:415-417`), and a request with none reads, in
+`read_visible_page` (`read.rs:469-471`), and a request with none reads, in
 `newest_page` (`read.rs:289-381`), `visible_chunk_as_of_in_scope`
 (`crates/kernel/src/admission.rs:3249-3276`), which takes a row count and a
 payload budget and has no domain selection.
@@ -209,8 +213,8 @@ C4 `admission.rs:3278-3280`: domain and kind matched in SQL before any row is
 read; a corrupt row outside the domain never fails this read.
 C5 `admission.rs:3220-3225`: the scope restriction is a superset of the
 algebra's verdict.
-C6 `read.rs:27`, `:302`, `:425-426`: the row bound applies after the filter
-on both read paths; `:436`: `read_visible_page` reads payload sizes before
+C6 `read.rs:27`, `:302`, `:479-480`: the row bound applies after the filter
+on both read paths; `:490`: `read_visible_page` reads payload sizes before
 any payload.
 C7 `slice/read.rs:121`: a single decision larger than the bound is returned
 alone; the wait for a pooled reader stops at the budget.

@@ -237,6 +237,75 @@ Environment:
   `eidnara_search` tools must then rank a memory created before admission and
   one created after it through the fused route's dense lane. With the variable
   set, a missing payload file, OpenCode, or Pi fails the suite.
+- The same variable runs `tests/fixture-production-search.test.ts`, which
+  starts the direct-host fixture with
+  `--query-route production --local-embeddings-manifest
+  <payload>/payload-manifest.json` and compares it with the default fixture.
+  It checks the fixture's startup line and `match=fused` results, and reports
+  recall@5 and recall@10 of the legacy snapshot scan and of the production
+  route for paraphrased questions over generic project memories, as one
+  `[paraphrase-recall]` JSON line.
+
+### Production search in the direct-host fixture
+
+The fixture ranks `eidnara_search` through the daemon's production query
+route when it starts with both `--query-route production` and
+`--local-embeddings-manifest <path>`; it refuses either flag alone. `<path>`
+is a built payload's `payload-manifest.json`. The fixture then:
+
+- installs `QueryRouteLimits::production()`, the limits `eidnara-host serve`
+  installs;
+- runs the embedding lane on the payload's `gte-modernbert-base-f32` bundle
+  and ONNX Runtime library through the constructor `eidnara-host serve` uses
+  (`crates/daemon/src/bin/eidnara_host/payload_local_embeddings.rs`). The ONNX
+  Runtime library and the bundle manifest are checked against the SHA-256 the
+  payload manifest records, and each model file against the bundle manifest's
+  digest;
+- installs the fixture search admission pair, the records the
+  `search_admission_records` example writes, under its `--state-root`. The
+  records carry no qualification measurement, and the repository carries no
+  production manifest to copy. They admit the projection under every hook,
+  and `search_admission_records/records.rs` sizes their limits for a data
+  home that fills the kernel's 4 GiB artifact cap at a mean of 4 KiB of
+  evidence per source descriptor revision (1,048,576 revisions), with a
+  source hold of the kernel's 30-day maximum, one hour for a rebuild slice,
+  and a reader lag of 1,024 commits. A rebuild scans every descriptor, holds
+  the whole decoded corpus as one batch, and stages the whole projection
+  file, so the row, byte, and disk limits scale with the store; the file
+  states each derivation.
+
+ModelExecution side calls keep the fixture's own routing: its controlled
+backend, a cassette, or the closures `--harness-runtime` names. The memory
+reviewer stays detached, because it signs requests straight to Bedrock and
+changes memory visibility rather than ranking.
+
+To build the payload, run `bun run inputs:fetch`, which downloads the locked
+model, tokenizer, corpus, and ONNX Runtime archive into `target/host-inputs`
+and verifies each against `release/production-inputs.lock.json`. Then run
+`cargo build -p daemon --bin eidnara-host --locked`,
+`bun run --cwd packages/shm-native build:native`, and `bun run payload:dev`,
+which stages `packages/host-linux-x64-gnu/payload-manifest.json` and
+`payload/` from that cache without a network. A cache copied from another
+machine, or passed with `--inputs-dir <dir>`, is re-verified against the lock.
+
+The route in use is observable four ways:
+
+- the fixture prints `direct_host_fixture: search route production, embedding
+  model <model>, payload <path>, admission from fixture records` on stderr at
+  startup;
+- `session.status` reports `search_admission.state`, which reads `admitted`
+  once the projection opens;
+- `eidnara-host search status`, run with `XDG_DATA_HOME` set to the fixture's
+  `--state-root`, prints the lifecycle record, the admission, and a `progress`
+  block with the projection's lag behind the kernel tip (`lag_commits`), the
+  counts of rebuilds recorded, completed, and renewed since the fixture
+  started, and the reason the last slice gave for leaving the record or its
+  Current family where it was (`blocked`);
+- each result the route ranks renders `match=fused lanes=<lanes>`. A search
+  the route cannot serve, before admission or while the lane starts, carries
+  `Memory: the fused search route is unavailable (<reason>); results come
+  from the legacy snapshot scan.`, as every search on the default fixture
+  does with the reason `disabled`.
 
 ## Incident pool
 

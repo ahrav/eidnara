@@ -11,7 +11,7 @@ the existing canonical reader excludes before bounded selection.
 ## Evidence trail
 
 - [read.rs:104-116][keeps] admits only decisions in the requested memory domain.
-- [read.rs:407-434][filter] applies that predicate and the scope algebra before
+- [read.rs:461-488][filter] applies that predicate and the scope algebra before
   rows enter `NewestRows`; exclusions do not set its dropped flag.
 - [admission.rs:3923-3952][sql] has an inner own-admission join, no domain/kind
   restriction, and a conservative scope prefilter. Unadmitted registry rows
@@ -55,7 +55,7 @@ truncation. K3 supplies pressure; existing generic cap checks remain
   unresolved and must be checked before a metamorphic comparison is evidence.
 
 [keeps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L104-L116
-[filter]: ../../../../crates/daemon/src/kernel_routes/read.rs#L407-L434
+[filter]: ../../../../crates/daemon/src/kernel_routes/read.rs#L461-L488
 [sql]: ../../../../crates/kernel/src/admission.rs#L3923-L3952
 [visible]: ../../../../crates/kernel/src/admission.rs#L3608-L3620
 [late]: ../../../../crates/daemon/src/canonical_memory.rs#L195-L210

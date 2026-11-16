@@ -93,7 +93,7 @@ export type ChunkedObjectRead =
  * whose read still reports truncated without serving its row lands in
  * `unresolvedObjectIds` instead of passing as proven-missing.
  *
- * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`.
+ * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A caller that continues an earlier read passes that read's `knownAsOf` as `asOf`, and every chunk reads that store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`.
  */
 export async function readObjectRowsChunked(args: {
     client: KernelClient;
@@ -104,10 +104,12 @@ export async function readObjectRowsChunked(args: {
     signal?: AbortSignal;
     /** Each chunk's read receives this deadline's remainder, so every chunk ends by the same instant. */
     deadline?: Deadline;
+    /** The store state to read; absent or `null` reads the tip. */
+    asOf?: number | null;
 }): Promise<ChunkedObjectRead> {
     const rows: ReadRow[] = [];
     const unresolvedObjectIds: string[] = [];
-    let snapshot: number | null = null;
+    let snapshot: number | null = args.asOf ?? null;
     const pending: (readonly string[])[] = [];
     for (let start = 0; start < args.objectIds.length; start += MAX_READ_OBJECT_IDS) {
         pending.push(args.objectIds.slice(start, start + MAX_READ_OBJECT_IDS));

@@ -24,19 +24,22 @@ resource boundaries, vacuity.
   .into_iter().map(..).collect()`; also a full `Vec`.
 - `crates/kernel/src/open.rs:595-607` `lock_reader`: the plain reader lock
   used by `read_snapshot` has no deadline.
-- Daemon: `read.rs:426-427`, in `read_visible_page`, applies `NewestRows`
+- Daemon: `read.rs:480-481`, in `read_visible_page`, applies `NewestRows`
   after the full `Vec` is returned; `visible.rows` is consumed by the `for`
-  loop at `:427` with no intermediate binding, so the observable is the
-  Kernel API's return value. The caller is the domain arm at `:418-423`,
-  which `read_visible` reaches for the in-process `DomainDecisions` readers.
+  loop at `:481` with no intermediate binding, so the observable is the
+  Kernel API's return value. The caller is the domain arm at `:472-477`,
+  which `read_visible_within` reaches for the capture read of the `memory`
+  domain. `domain_decisions_in_serving_order` (`:404-432`) calls the API for
+  the canonical-memory delivery walk and returns every row that passes the
+  scope filter, with no row cap.
 - `kernel.read` does not call this API. A request with `object_ids` reads
-  `visible_as_of_in_scope` (`read.rs:415-417`). A request with none reads
+  `visible_as_of_in_scope` (`read.rs:469-471`). A request with none reads
   `visible_chunk_as_of_in_scope` (`read.rs:310-319`), which ends a chunk at
   the first commit boundary that holds `min_rows` rows or passes
   `payload_budget` bytes (`admission.rs:3244-3276`).
 - The daemon cap test `kernel_routes.rs:1958` constructs over-cap rows, reads
   them through `kernel.read` with no `object_ids`, and observes only the wire
-  response. `crates/daemon/src/kernel_routes/read.rs:1025`
+  response. `crates/daemon/src/kernel_routes/read.rs:1088`
   `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` puts 8,193
   same-project `memory` decisions through the domain read by way of
   `read_visible` and observes the daemon's `truncated` flag; the Kernel-side
@@ -63,7 +66,7 @@ None; the cost is in the read itself.
 
 - At least 8193 visible same-project `memory` decisions at one snapshot.
 - Inside an over-cap fixture of `memory` decisions
-  (`crates/daemon/src/kernel_routes/read.rs:1025` builds one), call the Kernel API
+  (`crates/daemon/src/kernel_routes/read.rs:1088` builds one), call the Kernel API
   directly and record `rows.len()` on its return value; assert
   `sometimes(len > MAX_READ_ROWS)` across the campaign. No production marker
   is needed.
