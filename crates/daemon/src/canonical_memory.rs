@@ -248,9 +248,9 @@ fn read_at_tip(
 }
 
 /// The most payload pages one delivery walk loads. A page holds at most the
-/// caller's row and byte caps, and its first row whatever its size, so with
-/// the read caps of 8,192 rows and 8 MiB the walk loads the payloads of up
-/// to 64 MiB of a session's own newer rows before it stops. The limit
+/// caller's row and byte caps, so with the read caps of 8,192 rows and
+/// 8 MiB the walk loads the payloads of up to 64 MiB of a session's own
+/// newer rows before it stops. The limit
 /// bounds the payloads a pass loads. The list of the project's visible
 /// memory rows, which holds no payload, is read and ordered whole before
 /// the walk, as every bounded read of the domain does.
@@ -270,9 +270,10 @@ const MAX_DELIVERY_PAGES: usize = 8;
 /// of them are newer than the rows it is served, and the payloads held at
 /// once stay within three times the byte cap. The walk loads at most
 /// [`MAX_DELIVERY_PAGES`] pages. `truncated` reports that some session's
-/// delivery left out a row it was eligible for at a row or byte cap, or
-/// that the page limit ended the walk with rows not yet judged; the rows
-/// delivered before the cut stay in the response.
+/// delivery left out a row it was eligible for at a row or byte cap, that
+/// a row whose payload alone passes the byte cap ended the walk, or that
+/// the page limit ended it with rows not yet judged; the rows delivered
+/// before the cut stay in the response.
 pub(crate) fn read_other_sessions(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
@@ -329,19 +330,27 @@ pub(crate) fn read_other_sessions(
             .decision_payload_sizes_as_of(&ids, known_as_of)?
             .into_iter()
             .collect();
-        // One page holds the rows whose payloads fit the byte cap together,
-        // and its first row whatever its size.
+        // One page holds the rows whose payloads fit the byte cap together.
+        // A row whose payload alone passes the cap is delivered to no
+        // reader: it is left unloaded and the walk ends at it, as a bounded
+        // read ends at such a row.
         let mut page = Vec::new();
         let mut page_bytes: u64 = 0;
+        let mut oversized = false;
         for id in &ids {
             let size = *sizes
                 .get(id)
                 .ok_or(kernel::KernelError::CorruptCanonicalRow)?;
             page_bytes = page_bytes.saturating_add(size);
-            if !page.is_empty() && page_bytes > max_row_bytes as u64 {
+            if page_bytes > max_row_bytes as u64 {
+                oversized = page.is_empty();
                 break;
             }
             page.push((pending.pop_front().expect("a row per id"), size));
+        }
+        if oversized {
+            response.truncated = true;
+            break;
         }
         let mut decisions: std::collections::HashMap<String, kernel::DecisionRow> = store
             .decisions_for_objects_as_of(&ids[..page.len()], known_as_of)?

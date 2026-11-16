@@ -116,6 +116,7 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
                 CaptureRole::Assistant
             },
             text: job.text.clone(),
+            own_id: !super::cite::is_hashed_source_id(&job.message_id),
         })
         .collect()
 }
@@ -746,24 +747,6 @@ impl CaptureWork {
                     memory.duplicate_of = None;
                 }
             }
-            if quoted.iter().any(|memory| {
-                !user_attributed(&job, &prose, memory)
-                    && memory
-                        .replaces
-                        .iter()
-                        .chain(&memory.also_replaces)
-                        .any(|target| {
-                            plan.existing
-                                .iter()
-                                .any(|previous| previous.id == *target && previous.automatic)
-                        })
-            }) {
-                eprintln!(
-                    "daemon: native memory capture source rejected: only a whole user statement may replace an automatic memory"
-                );
-                self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
-                continue;
-            }
             let mut memories = quoted.clone();
             failure_evidence::attach(&job.text, &mut memories);
             let attached = keep_statement_text(&job, &prose, &quoted, &mut memories);
@@ -847,8 +830,9 @@ pub(super) fn keep_statement_text(
     memories: &mut [CapturedMemory],
 ) -> bool {
     let mut attached = false;
+    let states_whole = super::states_whole_message(job);
     for (memory, quoted) in memories.iter_mut().zip(quoted) {
-        if user_attributed(job, prose, quoted) {
+        if user_attributed(states_whole, prose, quoted) {
             memory.content.clone_from(&quoted.content);
         }
         attached |= memory.content != quoted.content;

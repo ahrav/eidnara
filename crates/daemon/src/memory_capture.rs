@@ -70,6 +70,11 @@ pub struct CaptureMessage {
     pub id: String,
     pub role: CaptureRole,
     pub text: String,
+    /// Internal provenance for the replacement checks: true when the job's
+    /// message id is the harness's own id for the message, false when it is
+    /// a hashed source id.
+    #[serde(skip)]
+    pub own_id: bool,
 }
 
 /// A proposed project memory anchored to the exact source message text.
@@ -301,6 +306,7 @@ fn validate_capture_memories(
     replaced: &mut BTreeSet<String>,
 ) -> Result<(), &'static str> {
     let mut distinct = BTreeSet::new();
+    let prose = Prose::of(&source.text);
     for memory in memories {
         if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
             return Err(
@@ -330,6 +336,7 @@ fn validate_capture_memories(
         {
             return Err("capture names an unprovided memory target");
         }
+        let mut automatic = false;
         for target in memory.replaces.iter().chain(&memory.also_replaces) {
             let Some(previous) = existing.iter().find(|previous| previous.id == *target) else {
                 return Err("capture names an unprovided memory target");
@@ -337,6 +344,10 @@ fn validate_capture_memories(
             if !previous.can_replace || !replaced.insert(target.clone()) {
                 return Err("capture target is protected or already replaced");
             }
+            automatic |= previous.automatic;
+        }
+        if automatic && !(source.own_id && quotes_whole_statements(&prose, &memory.quote)) {
+            return Err("only a whole user statement may replace an automatic memory");
         }
         if let Some(primary) = memory
             .replaces
@@ -1388,22 +1399,37 @@ const ASSISTANT_REPORTED: &str = "Assistant reported";
 /// every check of one job's memories shares a single parse.
 pub(super) struct Prose<'a> {
     text: &'a str,
-    paragraphs: std::cell::OnceCell<Vec<(usize, usize)>>,
+    layout: std::cell::OnceCell<ProseLayout>,
     colons: std::cell::OnceCell<Vec<usize>>,
+}
+
+/// Byte ranges of one message, each list ascending and disjoint.
+struct ProseLayout {
+    paragraphs: Vec<(usize, usize)>,
+    /// The inline code spans that lie in `paragraphs`.
+    code_spans: Vec<(usize, usize)>,
 }
 
 impl<'a> Prose<'a> {
     pub(super) fn of(text: &'a str) -> Self {
         Self {
             text,
-            paragraphs: std::cell::OnceCell::new(),
+            layout: std::cell::OnceCell::new(),
             colons: std::cell::OnceCell::new(),
         }
     }
 
+    fn layout(&self) -> &ProseLayout {
+        self.layout.get_or_init(|| prose_paragraphs(self.text))
+    }
+
     /// The paragraphs as byte ranges, ascending and disjoint.
     fn paragraphs(&self) -> &[(usize, usize)] {
-        self.paragraphs.get_or_init(|| prose_paragraphs(self.text))
+        &self.layout().paragraphs
+    }
+
+    fn code_spans(&self) -> &[(usize, usize)] {
+        &self.layout().code_spans
     }
 
     /// For each paragraph, the offset of its first colon, or its end when it
@@ -1432,19 +1458,34 @@ impl<'a> Prose<'a> {
 /// id is one of those rows whichever path or build enqueued it, so it is
 /// extracted as an assistant source: it is offered to the extractor under
 /// the assistant role, its memories are labeled `Assistant reported`, and it
-/// replaces nothing. A bash execution keeps its host id and is told apart
-/// only where the native row is at hand, at the transform checkpoint.
+/// replaces nothing. A Pi bash execution keeps its host id and uses role
+/// `user`, so source classification also checks the job's text for the Pi
+/// codec's bash-output format.
 pub(super) fn is_user_source(job: &CaptureJob) -> bool {
     job.role == "user"
-        && !(job.harness == "pi" && crate::codec::pi::is_reserved_id(&job.message_id))
+        && !(job.harness == "pi"
+            && (crate::codec::pi::is_reserved_id(&job.message_id)
+                || is_pi_bash_execution_text(&job.text)))
+}
+
+/// The Pi codec writes a bash execution as `Ran`, the command between
+/// backticks, and on the next line the output's fence or `(no output)`. A
+/// command may hold a backtick before a line break, so the match tests each
+/// such position as the command's end.
+fn is_pi_bash_execution_text(text: &str) -> bool {
+    text.strip_prefix("Ran `").is_some_and(|rest| {
+        rest.match_indices("`\n").any(|(at, close)| {
+            let body = &rest[at + close.len()..];
+            body.starts_with("```\n") || body.starts_with("(no output)")
+        })
+    })
 }
 
 /// A captured memory qualifies as the user's own words when it is an
 /// attributed quotation spanning whole statements of a user message that the
 /// job holds whole. `prose` is the job's text.
-fn user_attributed(job: &CaptureJob, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
-    is_user_source(job)
-        && !cite::is_hashed_source_id(&job.message_id)
+fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
+    states_whole
         && memory
             .content
             .strip_prefix(USER_STATED)
@@ -1453,17 +1494,24 @@ fn user_attributed(job: &CaptureJob, prose: &Prose<'_>, memory: &CapturedMemory)
         && quotes_whole_statements(prose, &memory.quote)
 }
 
+/// Whether the job holds a whole message the user typed. The answer reads
+/// the job's text, so each caller takes it once for all of the job's memories.
+pub(super) fn states_whole_message(job: &CaptureJob) -> bool {
+    is_user_source(job) && !cite::is_hashed_source_id(&job.message_id)
+}
+
 #[cfg(test)]
 fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
-    user_attributed(job, &Prose::of(&job.text), memory)
+    user_attributed(states_whole_message(job), &Prose::of(&job.text), memory)
 }
 
 /// Whether each memory of the plan, by index, is the user's own statement.
 fn attributions(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
     let prose = Prose::of(&job.text);
+    let states_whole = states_whole_message(job);
     memories
         .iter()
-        .map(|memory| user_attributed(job, &prose, memory))
+        .map(|memory| user_attributed(states_whole, &prose, memory))
         .collect()
 }
 
@@ -1577,6 +1625,7 @@ fn quotes_whole_statements(prose: &Prose<'_>, quote: &str) -> bool {
     let lead = quote.len() - quote.trim_start().len();
     let paragraphs = prose.paragraphs();
     let colons = prose.colons();
+    let code_spans = prose.code_spans();
     let mut letters = NextAlphanumeric { text, scan: None };
     text.match_indices(quote).any(|(at, _)| {
         let start = at + lead;
@@ -1589,6 +1638,8 @@ fn quotes_whole_statements(prose: &Prose<'_>, quote: &str) -> bool {
             .is_some_and(|index| {
                 let (first, last) = paragraphs[index];
                 end <= last
+                    && !inside_code_span(code_spans, start)
+                    && !inside_code_span(code_spans, end)
                     && bounds_sentences(
                         &text[first..last],
                         start - first,
@@ -1722,6 +1773,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
     let lead = quote.len() - quote.trim_start().len();
     let paragraphs = prose.paragraphs();
     let colons = prose.colons();
+    let code_spans = prose.code_spans();
     let mut cursor = 0;
     let mut judged = 0;
     let mut found: Option<&'t str> = None;
@@ -1744,9 +1796,22 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         // statement rule is kept: the extractor chose it, as it chooses the
         // edges of a quotation that is whole. The other edge is widened to
         // a plain one.
+        // A widened edge joins the quotation's own edge word to the added
+        // words, so that word is held to the rule for added words: a mark
+        // in it that may end or hide a sentence keeps the quotation as
+        // quoted.
+        let quoted = &paragraph[start..end];
         let from = if sentence_starts_at(&paragraph[..start], &paragraph[start..]) {
             start
         } else {
+            let word = quoted.split(char::is_whitespace).next().unwrap_or(quoted);
+            if !adds_plain_words(
+                paragraph[..start].chars().next_back(),
+                word,
+                quoted[word.len()..].chars().next(),
+            ) {
+                return None;
+            }
             plain_sentence_start(&paragraph[..start])
         };
         // Spaces that trail the paragraph are no part of a sentence.
@@ -1761,19 +1826,23 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         }) {
             let closes = !trimmed.ends_with(['.', '!']) && rest.starts_with(['.', '!']);
             end + usize::from(closes)
-        } else if trimmed
-            .trim_end_matches(|ch: char| !ch.is_alphanumeric() && !is_terminator(ch))
-            .ends_with(is_terminator)
-            || trimmed
-                .chars()
-                .next_back()
-                .is_some_and(|ch| !ch.is_ascii() && !ch.is_alphanumeric())
-        {
-            // The quotation ends in a terminator, alone or behind marks of
-            // any kind, or in a mark outside ASCII whose role is unknown,
-            // and its sentence goes on.
-            return None;
         } else {
+            // A quotation whose last word holds a terminator, alone or
+            // behind or inside closing marks such as `.)`, `.</b>`, or
+            // `.[1]`, or a mark outside ASCII whose role is unknown, ends a
+            // sentence where it stands while its paragraph goes on.
+            let word = quoted.rsplit(char::is_whitespace).next().unwrap_or(quoted);
+            if quoted
+                .trim_end_matches(|ch: char| !ch.is_alphanumeric() && !is_terminator(ch))
+                .ends_with(is_terminator)
+                || !adds_plain_words(
+                    quoted[..quoted.len() - word.len()].chars().next_back(),
+                    word,
+                    rest.chars().next(),
+                )
+            {
+                return None;
+            }
             end + plain_sentence_end(rest)
         };
         judged = judged.max(first + to);
@@ -1800,6 +1869,8 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         }
         if statement.len() <= MAX_CAPTURE_MEMORY_BYTES
             && reads_as_statement(statement)
+            && !inside_code_span(code_spans, first + from)
+            && !inside_code_span(code_spans, first + to)
             && bounds_sentences(paragraph, from, to, colons[cursor] - first, |skip| {
                 letters
                     .at_or_after(first + to + skip)
@@ -1925,7 +1996,7 @@ thread_local! {
     static BOUNDARY_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
+fn prose_paragraphs(text: &str) -> ProseLayout {
     #[cfg(test)]
     PROSE_PARSES.with(|parses| parses.set(parses.get() + 1));
     let lines: Vec<(usize, &str)> = text
@@ -1971,6 +2042,7 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
         index = block_end + 1;
     }
     let mut blocks = Vec::new();
+    let mut code_spans = Vec::new();
     let mut index = 0;
     while index < lines.len() {
         if excluded[index] || lines[index].1.trim().is_empty() {
@@ -1998,6 +2070,8 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
     let mut single_open = false;
     for (first, index) in blocks {
         let block = &lines[first..index];
+        let (at, last) = block[block.len() - 1];
+        let range = (block[0].0, at + last.len());
         let bordered = first.checked_sub(1).is_some_and(|above| excluded[above])
             || excluded.get(index).is_some_and(|below| *below);
         let structured = bordered
@@ -2021,15 +2095,78 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
         // A block that holds or follows the first unreadable line is left
         // out with every block after it.
         let readable = unreadable_from.is_none_or(|line| index <= line);
+        let kept = code_spans.len();
+        let unclosed = inline_code_spans(text, range, &mut code_spans);
         if readable && !structured && !introduces && !lead_in && !quoting && !single_open {
-            let (at, last) = block[block.len() - 1];
-            paragraphs.push((block[0].0, at + last.len()));
+            paragraphs.push(range);
+        } else {
+            code_spans.truncate(kept);
         }
         lead_in |= introduces;
-        quoting |= !quotations_close_in_turn(block);
+        quoting |= unclosed || !quotations_close_in_turn(block);
         single_open |= leaves_single_quotation_open(block);
     }
-    paragraphs
+    ProseLayout {
+        paragraphs,
+        code_spans,
+    }
+}
+
+/// A run of backticks opens a code span that the next run of the same length
+/// closes. An odd number of consecutive backslashes immediately before an
+/// opening run makes its first backtick literal text. An opening run with no
+/// closing run in the block `first..last` spans to the block's end, and the
+/// return value reports that span. Each opening run reads the runs up to its
+/// closing run, so the scan is linear in the block.
+fn inline_code_spans(
+    text: &str,
+    (first, last): (usize, usize),
+    spans: &mut Vec<(usize, usize)>,
+) -> bool {
+    let mut runs = Vec::new();
+    let mut at = first;
+    while let Some(found) = text[at..last].find('`') {
+        let start = at + found;
+        let len = text[start..last]
+            .bytes()
+            .take_while(|&byte| byte == b'`')
+            .count();
+        runs.push((start, len));
+        at = start + len;
+    }
+    let mut index = 0;
+    while index < runs.len() {
+        let (mut start, mut len) = runs[index];
+        let escapes = text[first..start]
+            .bytes()
+            .rev()
+            .take_while(|&byte| byte == b'\\')
+            .count();
+        if escapes % 2 == 1 {
+            start += 1;
+            len -= 1;
+        }
+        index += 1;
+        if len == 0 {
+            continue;
+        }
+        let Some(closer) = runs[index..].iter().position(|&(_, run)| run == len) else {
+            spans.push((start, last));
+            return true;
+        };
+        spans.push((start, runs[index + closer].0 + len));
+        index += closer + 1;
+    }
+    false
+}
+
+/// `spans` ascend and are disjoint. A span's first byte and the position
+/// after its last byte are outside it, so a quotation may hold a whole span.
+fn inside_code_span(spans: &[(usize, usize)], at: usize) -> bool {
+    spans
+        .partition_point(|&(open, _)| open < at)
+        .checked_sub(1)
+        .is_some_and(|span| at < spans[span].1)
 }
 
 /// The marks that open or close a quotation in the languages users write
@@ -2131,16 +2268,18 @@ fn leaves_single_quotation_open(block: &[(usize, &str)]) -> bool {
         let mut chars = line.chars().peekable();
         while let Some(ch) = chars.next() {
             if SINGLE_QUOTATION_MARKS.contains(&ch) {
+                let closing_place = previous.is_some_and(|before| {
+                    (before.is_alphabetic() && !before.is_numeric() && !matches!(before, 's' | 'S'))
+                        || matches!(before, '.' | ',' | '!' | ';')
+                }) && chars.peek().is_none_or(|after| !after.is_alphanumeric());
                 // The low-9 mark opens a quotation in every script that
-                // writes it.
-                let ends_word = ch != '\u{201a}'
-                    && previous.is_some_and(|before| {
-                        (before.is_alphabetic()
-                            && !before.is_numeric()
-                            && !matches!(before, 's' | 'S'))
-                            || matches!(before, '.' | ',' | '!' | ';')
-                    })
-                    && chars.peek().is_none_or(|after| !after.is_alphanumeric());
+                // writes it. Where a closing mark would stand inside an
+                // open quotation it has no reading, so the quotation stays
+                // open whatever follows.
+                if ch == '\u{201a}' && open > 0 && closing_place {
+                    return true;
+                }
+                let ends_word = ch != '\u{201a}' && closing_place;
                 if open > 0 && ends_word && !several_words {
                     open -= 1;
                     // An outer quotation that held a nested one holds
@@ -2187,13 +2326,42 @@ fn opens_single_quotation(line: &str) -> bool {
 fn is_list_item(line: &str) -> bool {
     line.trim_start()
         .split_once(char::is_whitespace)
-        .is_some_and(|(marker, _)| {
-            matches!(marker, "-" | "*" | "+")
-                || marker.strip_suffix(['.', ')']).is_some_and(|digits| {
-                    // Digits and numeric letters of any script number a list.
-                    !digits.is_empty() && digits.chars().all(char::is_numeric)
-                })
-        })
+        .is_some_and(|(marker, _)| is_list_marker(marker))
+}
+
+/// Whether the first word of a line marks a list item:
+///
+/// - a bullet, one character that is no letter or digit, such as `-`, `*`,
+///   `+`, `•`, or a dash;
+/// - an ordinal: digits or numeric letters of any script closed by `.` or
+///   `)` or wrapped in parentheses, such as `1.`, `2)`, or `(3)`, or one
+///   letter closed by `)` or wrapped, such as `a)` or `(b)`;
+/// - an enclosed numeral alone, such as `①`.
+///
+/// One letter and a period, as in `A. Smith`, may open a sentence and
+/// marks no list.
+fn is_list_marker(marker: &str) -> bool {
+    let mut chars = marker.chars();
+    let (Some(first), second) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if second.is_none() {
+        return !first.is_alphanumeric() || (first.is_numeric() && !first.is_ascii_digit());
+    }
+    let opened = marker.strip_prefix('(');
+    let inner = opened.unwrap_or(marker);
+    let closers: &[char] = if opened.is_some() {
+        &[')']
+    } else {
+        &[')', '.']
+    };
+    let Some(ordinal) = inner.strip_suffix(closers) else {
+        return false;
+    };
+    let mut letters = ordinal.chars();
+    (!ordinal.is_empty() && ordinal.chars().all(char::is_numeric))
+        || (inner.ends_with(')')
+            && matches!((letters.next(), letters.next()), (Some(letter), None) if letter.is_alphabetic()))
 }
 
 fn tag_name(line: &str) -> Option<(&str, bool)> {
@@ -2563,8 +2731,9 @@ fn write_captured_memories(
     let mut citation = None;
     let recorded_at = now_ms();
     let mut written = 0;
+    let user_source = is_user_source(job);
     for (index, memory) in output.memories.iter().enumerate() {
-        if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !is_user_source(job) {
+        if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !user_source {
             return Err(kernel::KernelError::Conflict);
         }
         let attributed = attributed[index];
@@ -2883,11 +3052,13 @@ mod tests {
                 id: "native-1".into(),
                 role: CaptureRole::User,
                 text: "Use port 4321 for staging. Now fix the test.".into(),
+                own_id: true,
             },
             CaptureMessage {
                 id: "native-2".into(),
                 role: CaptureRole::Assistant,
                 text: "I will investigate.".into(),
+                own_id: true,
             },
         ]
     }
@@ -2982,11 +3153,13 @@ mod tests {
                 id: "u1".into(),
                 role: CaptureRole::User,
                 text: "Use port 4321 for staging.".into(),
+                own_id: true,
             },
             CaptureMessage {
                 id: "u2".into(),
                 role: CaptureRole::User,
                 text: "Staging moved to port 5555.".into(),
+                own_id: true,
             },
         ];
         let existing = vec![ExistingCaptureMemory {
@@ -3015,6 +3188,85 @@ mod tests {
             .as_ref()
             .expect("a refused source must not hold the replacement target it never committed");
         assert_eq!(second.memories[0].replaces.as_deref(), Some("mem_old"));
+    }
+
+    #[test]
+    fn a_source_refused_for_a_partial_quotation_leaves_an_automatic_target_to_a_later_source() {
+        let messages = vec![
+            CaptureMessage {
+                id: "u1".into(),
+                role: CaptureRole::User,
+                text: "We might use port 4321 for staging.".into(),
+                own_id: true,
+            },
+            CaptureMessage {
+                id: "u2".into(),
+                role: CaptureRole::User,
+                text: "Use port 5555 for staging.".into(),
+                own_id: true,
+            },
+        ];
+        let target = |automatic: bool| ExistingCaptureMemory {
+            id: "mem_old".into(),
+            category: "CONFIG_VALUES".into(),
+            content: "User stated: Use port 1234 for staging.".into(),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic,
+        };
+        let text = json!({"version":1,"decisions":[
+            {"message_id":"u1","memories":[
+                {"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"use port 4321 for staging.","replaces":"mem_old"}]},
+            {"message_id":"u2","memories":[
+                {"category":"CONFIG_VALUES","content":"Staging uses port 5555.","quote":"Use port 5555 for staging.","replaces":"mem_old"}]}
+        ]})
+        .to_string();
+        let batch = parse_capture_batch(&text, &messages, &[target(true)]).unwrap();
+        assert!(
+            matches!(
+                batch[0],
+                Err("only a whole user statement may replace an automatic memory")
+            ),
+            "a partial quotation replaces no automatic memory: {:?}",
+            batch[0].as_ref().map(|_| ())
+        );
+        let second = batch[1]
+            .as_ref()
+            .expect("the refused source holds no claim on the automatic target");
+        assert_eq!(second.memories[0].replaces.as_deref(), Some("mem_old"));
+
+        let batch = parse_capture_batch(&text, &messages, &[target(false)]).unwrap();
+        assert!(
+            batch[0].is_ok(),
+            "a partial quotation replaces a memory served on explicit search alone"
+        );
+        assert!(
+            matches!(
+                batch[1],
+                Err("capture target is protected or already replaced")
+            ),
+            "the admitted source holds its claim"
+        );
+
+        let whole = text.replace("use port 4321", "Use port 4321");
+        let mut stated = messages.clone();
+        stated[0].text = "Use port 4321 for staging.".into();
+        let batch = parse_capture_batch(&whole, &stated, &[target(true)]).unwrap();
+        assert!(
+            batch[0].is_ok(),
+            "a whole statement of a message under its own id replaces an automatic memory"
+        );
+        stated[0].own_id = false;
+        let batch = parse_capture_batch(&whole, &stated, &[target(true)]).unwrap();
+        assert!(
+            matches!(
+                batch[0],
+                Err("only a whole user statement may replace an automatic memory")
+            ),
+            "a source under a hashed id states no whole message"
+        );
+        assert!(batch[1].is_ok(), "and it holds no claim");
     }
 
     #[test]
@@ -3410,6 +3662,37 @@ mod tests {
                 "deploy on Fridays",
                 None,
             ),
+            // A terminator inside the quotation's last word, behind a tag
+            // or a reference mark, ends a sentence before more words.
+            (
+                "Never <b>deploy on Fridays.</b> and never on Mondays",
+                "deploy on Fridays.</b>",
+                None,
+            ),
+            (
+                "Never deploy on Fridays.[1] and never on Mondays",
+                "deploy on Fridays.[1]",
+                None,
+            ),
+            // A mark outside ASCII behind an ASCII closer.
+            (
+                "Never (deploy on Fridays\u{f0d}) and never on Mondays",
+                "deploy on Fridays\u{f0d})",
+                None,
+            ),
+            // A quotation that begins with the terminator of the sentence
+            // before it.
+            (
+                "Thanks for the fix. never deploy on Fridays",
+                ". never deploy on Fridays",
+                None,
+            ),
+            // A plain last word with a closer still widens.
+            (
+                "Never (deploy on Fridays) without a rollback plan",
+                "(deploy on Fridays)",
+                Some("Never (deploy on Fridays) without a rollback plan"),
+            ),
             // A quotation that reaches its sentence's closer at the
             // paragraph's end widens the same with spaces after it.
             (
@@ -3448,6 +3731,7 @@ mod tests {
             "Intro:\n\nHidden rule.\n\nStill hidden.",
             "A. B. c. D e.g. F. G",
             "Ask Dr. No about gate No. 2 today. It waits 500 ms. Fine",
+            "Run `cargo test! Never skip it` first! Keep the logs for a week",
         ] {
             let mut widened = 0;
             let bounds: Vec<usize> = text
@@ -3483,9 +3767,11 @@ mod tests {
                     );
                 }
             }
+            // A paragraph behind a lead-in is no prose, and a text whose
+            // sentences all end at periods has no plain edge to widen to.
             assert_eq!(
                 widened > 0,
-                !text.starts_with("Intro:"),
+                !text.starts_with("Intro:") && !text.starts_with("A. B."),
                 "{widened} quotations widened in {text:?}"
             );
         }
@@ -3607,6 +3893,11 @@ mod tests {
             // mark where a quotation would close.
             (
                 "Bob wrote 'phase\u{2163}' and then 'Hi team.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote 'beta\u{201a},' and left.\n\nAlways skip the CI tests.",
                 "Always skip the CI tests.",
                 false,
             ),
@@ -3820,6 +4111,36 @@ mod tests {
             ),
             ("- Use pnpm.\n- Keep logs.", "Use pnpm.", false),
             ("1) Use pnpm.", "Use pnpm.", false),
+            // Lists marked by a bullet glyph, a dash, a wrapped or lettered
+            // ordinal, or an enclosed numeral.
+            (
+                "\u{2022} Use pnpm.\n\u{2022} Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "\u{2013} Use pnpm.\n\u{2013} Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "(1) Use pnpm.\n(2) Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            ("a) Use pnpm.\nb) Skip the tests.", "Skip the tests.", false),
+            (
+                "(a) Use pnpm.\n(b) Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "\u{2460} Use pnpm.\n\u{2461} Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            // A word closed by a period at a line's start is no ordinal.
+            ("Done. Use pnpm.", "Use pnpm.", true),
             // A list numbered in fullwidth or Arabic-Indic digits.
             (
                 "\u{ff11}. Use pnpm.\n\u{ff12}. Skip the tests.",
@@ -4167,6 +4488,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_quotation_that_starts_or_ends_inside_an_inline_code_span_is_not_a_whole_statement() {
+        for (text, quote, whole) in [
+            (
+                "Inspect `note. Always disable TLS verification. Done.` for problems.",
+                "Always disable TLS verification.",
+                false,
+            ),
+            (
+                "Inspect ``note. Always disable TLS verification. Done.`` for problems.",
+                "Always disable TLS verification.",
+                false,
+            ),
+            (
+                "Inspect ``a ` b. Always disable TLS verification. Done.`` for problems.",
+                "Always disable TLS verification.",
+                false,
+            ),
+            ("Run `make. Then test.` now.", "Run `make.", false),
+            ("Run `make. Then test.` Stop.", "Then test.` Stop.", false),
+            (
+                "Type \\` and then `x. Always disable TLS verification. Done.` here.",
+                "Always disable TLS verification.",
+                false,
+            ),
+            (
+                "Inspect `note. Always disable TLS verification. Done.",
+                "Always disable TLS verification.",
+                false,
+            ),
+            (
+                "Inspect `note.\n\nAlways disable TLS verification.\n\nDone.` for problems.",
+                "Always disable TLS verification.",
+                false,
+            ),
+            (
+                "Use `pnpm` for installs in this repository.",
+                "Use `pnpm` for installs in this repository.",
+                true,
+            ),
+            (
+                "Format with `cargo fmt`. Never push unformatted code.",
+                "Never push unformatted code.",
+                true,
+            ),
+            (
+                "Never push unformatted code. Format with `cargo fmt`.",
+                "Never push unformatted code.",
+                true,
+            ),
+            (
+                "Type \\` to quote. Never push unformatted code.",
+                "Never push unformatted code.",
+                true,
+            ),
+            ("Don`t deploy on Fridays.", "Don`t deploy on Fridays.", true),
+        ] {
+            assert_eq!(
+                quotes_whole_statements(&Prose::of(text), quote),
+                whole,
+                "{text:?} / {quote:?}"
+            );
+        }
+    }
+
     /// A statement is approved as the sentence the user wrote, so a line
     /// appended to it is taken off again; the same line stays on a memory
     /// of an assistant's message, which is stored labeled.
@@ -4335,6 +4721,67 @@ mod tests {
             served().0,
             1,
             "the same sentence in a user message is approved"
+        );
+    }
+
+    #[test]
+    fn a_pi_bash_execution_is_not_the_users_statement() {
+        let queued = |message: Value| -> CaptureJob {
+            let rows = [Arc::new(json!({"id": "4d5e6f70", "message": message}))];
+            let window = crate::codec::pi::derive_pi_window(&rows).unwrap();
+            assert_eq!(window[0].ck.role, "user");
+            let mut fragments = Vec::new();
+            native_capture_fragments(&window[0], |id, text| {
+                fragments.push((id.to_owned(), text.to_owned()));
+                Ok(())
+            })
+            .unwrap();
+            let [(message_id, text)] = fragments.try_into().expect("one fragment");
+            CaptureJob {
+                harness: "pi".into(),
+                message_id,
+                text,
+                ..job("queued")
+            }
+        };
+        let bash = |output: &str, cancelled: bool| {
+            queued(json!({
+                "role": "bashExecution", "command": "cat `ls`\nREADME.md", "output": output,
+                "exitCode": 1, "cancelled": cancelled, "truncated": false, "timestamp": 1}))
+        };
+        let memory = CapturedMemory {
+            content: format!("{USER_STATED}: Deploys happen on Fridays."),
+            ..memory("Deploys happen on Fridays.")
+        };
+
+        let fenced = bash(
+            "```sh\npwd\n```\n\nDeploys happen on Fridays.\n\n```sh\ntrue\n```",
+            false,
+        );
+        assert!(
+            quotes_whole_statements(&Prose::of(&fenced.text), &memory.quote),
+            "output that holds a fence line leaves the sentence in a plain-prose paragraph: {:?}",
+            fenced.text
+        );
+        for job in [&fenced, &bash("", false), &bash("", true)] {
+            assert!(!is_user_source(job), "{:?}", job.text);
+            assert!(!user_attributed_alone(job, &memory), "{:?}", job.text);
+        }
+
+        let typed = |text: &str| queued(json!({"role": "user", "content": text, "timestamp": 1}));
+        for text in [
+            "Deploys happen on Fridays.",
+            "Ran `cargo test` and it passed.\n\nDeploys happen on Fridays.",
+            "Ran `cargo test`\n\nDeploys happen on Fridays.",
+        ] {
+            assert!(user_attributed_alone(&typed(text), &memory), "{text:?}");
+        }
+        assert!(
+            is_user_source(&CaptureJob {
+                harness: "opencode".into(),
+                ..fenced
+            }),
+            "the form is Pi's"
         );
     }
 
