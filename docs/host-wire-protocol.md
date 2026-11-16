@@ -1244,8 +1244,10 @@ the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces` (which must share its category
 and at least one content word), retires each further fact it names
 in `also_replaces` (each must share the replaced fact's category and at
-least half of its distinct words of three or more characters other than
-common English function words, of which it must have at least one) and a replaced
+least half of its distinct content words, of which it must have at least
+one; a content word is a run of letters and digits of three or more
+characters, or of two that hold a digit, other than common English function
+words) and a replaced
 memory the host memory tool wrote, and
 retires the statement record of each fact it removes; no surface serves a
 superseded or retired fact. When a capture-owned fact that a correction
@@ -1253,8 +1255,7 @@ supersedes or retires, as its `replaces` target or one of its `also_replaces`
 targets, names a memory under `restates`, that memory is retired with it if it
 is live, belongs to the project, was written by capture or the host memory
 tool, is not served on `auto_inject`, and states the replaced fact: each of
-the two holds at least half of the other's distinct words of three or more
-characters other than common English function words. A memory that holds the
+the two holds at least half of the other's distinct content words. A memory that holds the
 fact among several others is kept, and one with a few more words is retired
 whole. The extractor is offered at most 64 reference memories. Up to
 32 are ranked by BM25 (k1 1.2, b 0.75, over the project's memory summaries)
