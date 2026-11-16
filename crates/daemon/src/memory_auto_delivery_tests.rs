@@ -4183,7 +4183,7 @@ async fn one_batch_settles_its_contests_across_sources_before_any_plan_commits()
 #[tokio::test]
 async fn a_restated_note_is_retired_after_the_plans_targets_are_checked_and_only_when_it_states_the_fact()
  {
-    for (note, retired) in [
+    let notes = [
         (
             "Release branches are cut from main every Thursday morning.",
             true,
@@ -4192,7 +4192,11 @@ async fn a_restated_note_is_retired_after_the_plans_targets_are_checked_and_only
             "Release branches are cut from main every Thursday, the on-call rotation changes on Mondays, and the staging database is refreshed from production each Sunday night.",
             false,
         ),
-    ] {
+    ];
+    for ((note, retired), duplicates) in notes
+        .into_iter()
+        .flat_map(|case| [(case, false), (case, true)])
+    {
         let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
         let written = body(
             handler
@@ -4250,7 +4254,12 @@ async fn a_restated_note_is_retired_after_the_plans_targets_are_checked_and_only
                     },
                     Extracted {
                         quote: question.to_string(),
-                        contests: vec!["mem-agent".to_string()],
+                        contests: if duplicates {
+                            Vec::new()
+                        } else {
+                            vec!["mem-agent".to_string()]
+                        },
+                        duplicate_of: duplicates.then(|| "mem-agent".to_string()),
                         ..Extracted::default()
                     },
                 ]
@@ -4260,7 +4269,11 @@ async fn a_restated_note_is_retired_after_the_plans_targets_are_checked_and_only
         let status = store
             .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
             .unwrap();
-        assert_eq!((status.pending, status.failed), (0, 0), "{note}");
+        assert_eq!(
+            (status.pending, status.failed),
+            (0, 0),
+            "{note}, duplicates {duplicates}"
+        );
         let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
         assert!(
             rows.contains(&(stated(TUESDAY), "visible".to_string()))
@@ -4268,9 +4281,14 @@ async fn a_restated_note_is_retired_after_the_plans_targets_are_checked_and_only
             "the correction replaces the statement: {rows:?}"
         );
         assert_eq!(
+            rows.iter().any(|(summary, _)| summary.contains(question)),
+            !duplicates,
+            "a memory that duplicates the note is written as no row: {rows:?}"
+        );
+        assert_eq!(
             rows.iter().any(|(summary, _)| summary == note),
             !retired,
-            "{note}: {rows:?}"
+            "{note}, duplicates {duplicates}: {rows:?}"
         );
     }
 }

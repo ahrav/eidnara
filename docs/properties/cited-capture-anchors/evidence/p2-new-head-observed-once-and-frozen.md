@@ -11,8 +11,8 @@ that each anchor's oid equals its plan's frozen head.
 ## Evidence trail
 
 `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:776`)
-parses the submission's output, then calls `observe_head` once
-(`:933`) on the binding's canonical project root before the loop that
+parses the submission's output, then calls `observe_head` once (`:910`)
+on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
 same `head` value (`crates/daemon/src/memory_capture.rs:1317`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
