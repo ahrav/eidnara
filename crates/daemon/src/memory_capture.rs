@@ -2865,6 +2865,47 @@ mod tests {
         }
     }
 
+    /// A statement is approved as the sentence the user wrote, so a line
+    /// appended to it is taken off again; the same line stays on a memory
+    /// of an assistant's message, which is stored labeled.
+    #[test]
+    fn an_approved_statement_keeps_its_exact_text_beside_appended_lines() {
+        let quoted = [CapturedMemory {
+            content: format!("{USER_STATED}: Use pnpm."),
+            ..memory("Use pnpm.")
+        }];
+        let appended = || {
+            vec![CapturedMemory {
+                content: format!("{USER_STATED}: Use pnpm.\nerror: lockfile is stale"),
+                ..memory("Use pnpm.")
+            }]
+        };
+        let user = CaptureJob {
+            text: "Use pnpm.".into(),
+            ..job("m1")
+        };
+        let mut memories = appended();
+        assert!(!native::keep_statement_text(
+            &user,
+            &Prose::of(&user.text),
+            &quoted,
+            &mut memories
+        ));
+        assert_eq!(memories[0].content, quoted[0].content);
+        let assistant = CaptureJob {
+            role: "assistant".into(),
+            ..user
+        };
+        let mut memories = appended();
+        assert!(native::keep_statement_text(
+            &assistant,
+            &Prose::of(&assistant.text),
+            &quoted,
+            &mut memories
+        ));
+        assert_eq!(memories[0].content, appended()[0].content);
+    }
+
     #[test]
     fn a_fragment_of_a_long_message_is_not_attributed() {
         let memory = CapturedMemory {

@@ -52,7 +52,7 @@ the link between a marker and its test is the Observed column.
 | `uo-p-served-set-once-per-session-revision` | Two HARD folds with no Kernel change between; a CAS retry. |
 | `uo-p-served-ids-equal-frozen-composition` | A read trimmed by the token budget; a CAS retry. |
 | `uo-p-no-row-when-memory-disabled` | A route bound with `/memory/enabled: false`, then HARD folds on both engines. |
-| `uo-p-no-row-for-withheld-composition` | A Kernel starting or a refusing serving verdict at read time, then a HARD fold. |
+| `uo-p-no-row-for-withheld-composition` | A Kernel starting or a refused tip or visible-row read at read time, then a HARD fold. |
 | `uo-p-producer-matches-request-subagent-flag` | A subagent request on the additive engine with a Canonical read; a primary on each engine. |
 | `uo-p-deleted-at-iff-session-delete-kernel-step` | A delete with the Kernel available; one with it starting; a route close without delete. |
 | `uo-p-last-transform-at-monotone-per-committing-pass` | A committing then a non-committing pass; a Kernel unavailable at the write. |

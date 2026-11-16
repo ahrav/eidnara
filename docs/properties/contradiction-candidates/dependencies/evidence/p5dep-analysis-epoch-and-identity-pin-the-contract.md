@@ -28,11 +28,14 @@ to record with them. Lens: version compatibility; D4 in `system-model.md`.
   "The Unicode version is included because atom and part boundaries come
   from the toolchain's `char` classification tables; the SQLite version
   because `unicode61` folds with the engine's own tables."
-- `tests/lexical_analysis.rs:389-412` `identity_pins_the_manifest`: asserts
+- `tests/lexical_analysis.rs:389-412` `identity_pins_the_manifest` asserts that
   each field appears in the preimage, `ANALYSIS_CONTRACT_EPOCH ==
   "identifier-analysis.v1"`, and `AnalysisIdentity::current().as_str() ==
-  "b624de2e...ba83"` with the message "a changed manifest field changes the
+  recorded_identity()` with the message "a changed manifest field changes the
   identity; update the contract and digest together".
+- `tests/lexical_analysis.rs:415-424` `recorded_identity`: one literal per
+  `char::UNICODE_VERSION`, `"b624de2e...ba83"` for 17.0.0 and
+  `"ea3e83e6...5837"` for 18.0.0; any other version panics.
 - `tests/lexical_analysis.rs:1`: goldens "authored by hand from the
   documented rules rather than from analyzer output" (the hand-written
   digest requirement in the task statement refers to this discipline plus
@@ -46,7 +49,8 @@ A toolchain bump to a Rust release with a newer Unicode table changes
 `char::is_alphanumeric` for newly assigned code points, changing atom
 boundaries for texts containing them. The epoch string stays
 `identifier-analysis.v1`; the identity digest changes and the pinned test
-fails, forcing a deliberate update. A P5 consumer that stored only the epoch
+fails until it records the digest for that Unicode version, forcing a
+deliberate update. A P5 consumer that stored only the epoch
 with its candidate rows would consider rows built under the old toolchain
 current; a consumer that stored the identity digest would see them as stale
 and rebuild. Conversely, a rule edit without an epoch bump still changes

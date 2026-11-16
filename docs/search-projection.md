@@ -30,7 +30,7 @@ states:
 | State | Meaning |
 |---|---|
 | Absent | No projection exists. Installed admission records let the slice loop record the first build (`Cause::Registration`). |
-| Intent | A rebuild or authorized recovery is in progress. The record fixes the cause, attempt identity, consumer binding, allowance, and deadline. A restart resumes it and renews nothing. |
+| Intent | A rebuild or authorized recovery is in progress. The record fixes the cause, attempt identity, consumer binding, allowance, and deadline. A restart resumes it as recorded. A rebuild that lapses before it stages a seed is renewed by the slice loop (see [Expiry and renewal](#expiry-and-renewal)). |
 | Current | The selected family reached its fixed target. Later slices judge it on its coverage and catch it up toward the kernel tip. |
 | Disabled | Admission is closed. Only an authorized recovery reopens the record. |
 | Unavailable | The record cannot be trusted. Every hook is denied and nothing is released. |
@@ -110,7 +110,9 @@ acknowledges it through the tip, and the Current family catches up or
 rebuilds from there. A family that applied the tip before the restart
 recertifies and completes. Each slice that stops before the family reaches
 the tip spends one episode, so a record whose slices keep stopping short is
-blocked once its allowance is spent.
+blocked once its allowance is spent. Its staged seed is selected, so the
+slice loop leaves it for the operator once its deadline passes (see
+[Expiry and renewal](#expiry-and-renewal)).
 
 The completion slice validates the selected family's rows against the kernel
 inventory before it retires the old consumer. The reopen at the start of the
@@ -121,8 +123,99 @@ receipt transaction as its only change since, the selected consumer's
 acknowledgement lies inside the validated prefix, and no pending job's episode
 deadline has passed.
 
-A record whose deadline passes before it completes stays in its intent record
-with every hook denied; `request_rebuild` records only over a Current record.
+## Expiry and renewal
+
+A rebuild's deadline is a wall-clock time in the durable record, so a host
+suspend, a clock step, or a stall longer than the time left expires it while
+the daemon is idle. A renewable record is a Rebuilding record that holds no
+staged seed. A stage certificate persisted in its capture names the capture's
+hold and snapshot, the seed digest a later pin must match, and the checkpoint
+the fixed target equals; renewal keeps the capture and target, and the
+renewed attempt's cleanup discards the unpinned stage before it captures
+again. Its renewal is due (`LifecycleIntent::renewal_due`) when its
+deadline has passed, or when it was recorded more than
+`CLOCK_STEP_TOLERANCE_MS` (1 second) after the current wall clock, as after
+the clock stepped back past its recording. A step back smaller than the
+record's age leaves its recording behind the clock, and the attempt runs
+longer by the size of the step.
+
+A slice over an active record whose deadline has passed, or whose renewal is
+due, installs the records with no coverage, so every hook is denied and a
+cleanup keeps its evidence. When the renewal is due and an embedding
+supervisor is still running, that slice reports `RotateMaintenance` and the
+loop drains the supervisor; a drain that does not resolve is reported as a
+blocked slice and the renewal waits. The next slice reports
+`SliceOutcome::Expired`, and the slice loop calls
+`SearchLifecycleOwner::renew_expired_rebuild`. That call reads the records and
+lane, refreshes admission on the selected family, and has
+`ProjectionLifecycle::renew_expired` rewrite the record for another attempt:
+
+- The transition, generations, consumer binding, cause, attempt identity,
+  target, and capture stay as recorded.
+- The allowance keeps its size with nothing consumed, the deadline becomes one
+  `B_recovery_ms` from the renewal, and the renewal is the record's new
+  recording time, so the renewed attempt is one `B_recovery_ms` from a
+  recording on the current clock.
+
+A manifest that cannot bound the renewed attempt (its replacement
+specification, coverage bounds, or `B_recovery_ms`) refuses the renewal and
+closes admission, as a slice's preparation would. A `B_recovery_ms` within
+the one-second start margin is refused before anything is installed. A
+renewal that still finds an embedding supervisor running refuses and wakes
+the loop, so the next slice hands it back. A record whose renewal is no longer due at the clock
+read just before the write, as when a clock-step lead decays during the
+waits, records nothing, leaves the records installed with no coverage, and
+counts as an attempt; the loop is woken so the next slice judges the active
+record at once. A refused renewal write installs the records with no
+coverage again. The attempt identity keys the construction's consumer
+registration, so the renewed attempt replays that registration's receipt and
+reads through the consumer the expired attempt registered. No consumer is left
+registered without a record that names it, and the replaced family's consumer
+retires when the renewed rebuild completes.
+
+The loop attempts the first renewal at once, including one the first slice
+after a restart finds. Each attempt, whether it records a renewal, is refused,
+or finds the record no longer due, spaces the next one
+from it by `SLICE_IDLE` doubled per earlier attempt, running alongside the
+renewed record's own `B_recovery_ms`. The spacing reaches
+`RENEWAL_BACKOFF_CAP` (10 minutes) at the eighth attempt; from then on a
+rebuild that keeps expiring for a persistent cause is attempted at most once
+per cap interval. A record that reaches Current starts the schedule again.
+
+Two kinds of expired record stay in their intent record with every hook
+denied and report the slice blocked on the deadline. An authorized recovery
+keeps the bound its operator authorized. A rebuild that holds a staged seed
+keeps its accounting by policy: once selection has written the staged
+family's certificate, that certificate binds the record's episode accounting
+and recording time, and a seed pinned before then is left with the same
+rule. An operator's disable reconciles a selected staged family. For an
+unselected staged seed the disable records the stop and reports that the
+disabled selection differs from the handoff; the stop then waits for an
+authorized recovery. `request_rebuild` records only over a
+Current record.
+
+An unselected rebuild whose fixed target the kernel tip has reached cannot
+count on capturing at that target again, since a capture is taken at the tip
+and any commit before it moves the tip past the target. Its builder clears the
+capture first and then releases the target through
+`ProjectionLifecycle::release_target`; the attempt captures a fresh source
+snapshot at the tip and, after building its baseline from it, fixes the target
+again at the kernel tip it then reads. A target ahead of the tip, as after a
+kernel restore, still refuses the attempt with `TargetBeyondTip`. An
+authorized recovery keeps its target and reports `SnapshotBeyondTarget` once
+the tip has passed it.
+
+A rebuild's construction is admitted on the loaded predecessor family's
+coverage. While the owner holds a predecessor that trails the kernel by more
+than `catchup_lag_commits`, construction and renewal are denied `Stale`; a
+daemon restart loads no predecessor for an unselected rebuild, and the rebuild
+and its renewal are admitted on the unregistered observation.
+
+The daemon logs `search lifecycle rebuild expired: its deadline passed or the
+wall clock stepped back past its recording` when a slice first finds a
+record's renewal due, and `search lifecycle renewed expired rebuild:
+attempt=<id> consumer=<id> cause=<cause> renewal_attempts=<n> deadline=<ms>`
+for each renewal.
 
 ## Rollback
 
@@ -284,7 +377,22 @@ audited abandonment is the operator action that releases it.
 ## Witnesses
 
 `crates/daemon/tests/search_lifecycle_owner.rs` covers registration, restart
-resumption, catch-up, the real daemon loop rebuilding after a post-restart
+resumption, catch-up, the renewal of a rebuild a clock step expired
+(`a_rebuild_expired_by_a_clock_step_is_renewed_and_its_consumer_reaches_the_tip`),
+the slice loop's renewal of an expired rebuild found after a restart
+(`the_slice_loop_renews_an_expired_rebuild_found_after_a_restart`), the renewal
+of a record stamped ahead of a clock stepped back
+(`a_rebuild_recorded_ahead_of_a_clock_stepped_back_is_renewed_from_the_current_clock`),
+an expired authorized recovery and an expired rebuild holding an unselected
+staged seed left for the operator
+(`an_expired_authorized_recovery_is_left_for_the_operator`,
+`an_expired_rebuild_holding_an_unselected_staged_seed_is_left_for_the_operator`),
+a refused renewal write
+(`a_refused_renewal_leaves_the_expired_record_and_admits_no_reader`), a renewal
+refused for the start margin
+(`a_renewal_with_no_time_past_the_start_margin_is_refused`), the release
+of a target the tip passed
+(`an_unselected_rebuild_behind_the_tip_releases_its_target_and_completes`), the real daemon loop rebuilding after a post-restart
 commit, direct FTS5 probes over a Current family, and exact-proof invalidation
 across a daemon restart. Rebuilds driven through the owner reach Current for
 `CatchUpHoldLost` (after a restart, after a released hold within one lease, and
@@ -294,6 +402,10 @@ selected), `TokenizerMismatch`, and `EmbeddingModelMismatch` (model and table
 epoch). The build-constant dimensions are covered by the cause mapping's unit
 tests and by `crates/daemon/tests/search_replacement/recovery.rs`, which
 rebuilds each mismatch cause through the recovery coordinator.
+`crates/daemon/tests/search_replacement.rs` covers the release of a target at
+the tip (`a_rebuild_target_at_the_tip_is_released_and_fixed_again_past_it`)
+and the refusal of a spent rebuild before its target is released
+(`a_spent_rebuild_keeps_its_target`).
 `crates/daemon/tests/search_replacement/` covers construction, selection,
 retirement, disable, and recovery, including child-process cuts.
 `crates/kernel/tests/kernel_outbox.rs` covers consumer retirement past later
