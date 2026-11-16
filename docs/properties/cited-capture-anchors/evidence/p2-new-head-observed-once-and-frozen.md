@@ -27,7 +27,7 @@ once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:415`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
-(`crates/daemon/src/memory_capture.rs:1962`), so the receipt covers the head.
+(`crates/daemon/src/memory_capture.rs:2014`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
 handler (`crates/daemon/src/memory_capture/native.rs:439`), before `publish`
@@ -57,7 +57,7 @@ store trigger, so both frozen plans stay readable; a new commit on the
 checked-out branch; a retry while the trigger still refuses completion, after
 which both plans still hold the submit-time head; then the trigger dropped and
 a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
-(`crates/daemon/src/lib.rs:24658`) does this for a repository with
+(`crates/daemon/src/lib.rs:24664`) does this for a repository with
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
 repository declaring SHA-256. The head-observation tests freeze a HEAD
 commit stored whole, as an offset delta, and as an id delta in a pack
@@ -87,7 +87,7 @@ aliased branch loose and in `packed-refs`.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:3866`).
+  (`crates/daemon/src/memory_capture.rs:3934`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
