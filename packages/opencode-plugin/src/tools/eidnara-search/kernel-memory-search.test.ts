@@ -179,6 +179,63 @@ describe("searchKernelMemoryRows match labeling and domain fence", () => {
     });
 });
 
+describe("searchKernelMemoryRows captured failure reports", () => {
+    const framing = "PR 812's CI went red after the rebase:";
+    const rationale = JSON.stringify({
+        source: "memory_capture",
+        session: "ses",
+        message: "native-user-1",
+        quote: framing,
+        model: "custom-native/model",
+    });
+    const captured = readRow({
+        objectId: OBJECT_A,
+        decisionKind: "CONSTRAINTS",
+        summary: `User stated: ${framing}\nerror[E0425]: cannot find value \`config\` in this scope\n--> src/server.rs:88:17`,
+        rationale,
+        seq: 1,
+    });
+    const unrelated = readRow({
+        objectId: OBJECT_B,
+        decisionKind: "CONFIG_VALUES",
+        summary: "User stated: Use port 4321 for staging.",
+        seq: 2,
+    });
+
+    test("a search by the error code or by the change reference finds the one memory", () => {
+        for (const query of [
+            "E0425",
+            "error E0425",
+            "PR 812",
+            "812 CI error",
+            "cannot find value config",
+        ]) {
+            const hits = searchKernelMemoryRows({ rows: [captured, unrelated], query, limit: 5 });
+            expect({ query, ids: hits?.map((hit) => hit.objectId) }).toEqual({
+                query,
+                ids: [OBJECT_A],
+            });
+        }
+    });
+
+    test("the framing sentence alone answers the reference and not the error code", () => {
+        const framingOnly = readRow({
+            objectId: OBJECT_A,
+            decisionKind: "CONSTRAINTS",
+            summary: `User stated: ${framing}`,
+            rationale,
+        });
+        expect(searchKernelMemoryRows({ rows: [framingOnly], query: "E0425", limit: 5 })).toBe(
+            null,
+        );
+        expect(
+            searchKernelMemoryRows({ rows: [framingOnly], query: "PR 812", limit: 5 })?.map(
+                (hit) => hit.objectId,
+            ),
+        ).toEqual([OBJECT_A]);
+    });
+});
+
 describe("searchKernelMemoryRows anti-memory expiry", () => {
     const NOW = 1_700_000_000_000;
     const antiRow = (objectId: string, expiresAt: number | null) =>

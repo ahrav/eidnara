@@ -73,7 +73,7 @@ reader.
   across `crates/`.
 - Findings: `crates/daemon/src/kernel_routes/read.rs:418`, in
   `read_visible_page`, is the only non-test caller; it is reached through
-  `read_visible` from `canonical_memory.rs:227`, `memory_capture.rs:1108`,
+  `read_visible` from `canonical_memory.rs:232`, `memory_capture.rs:1108`,
   `:1948`, and `lib.rs` tests. The `kernel.read` route does not reach it.
 - Missing evidence: none.
 - Conclusion: resolved; P5 would be the second direct caller.

@@ -1165,7 +1165,8 @@ mod tests {
             cases: catalog().into_iter().take(1).collect(),
             operations: 3,
             repetitions: 1,
-            outage_scale: 60,
+            // At 120 the run stops folding for three seconds (a 1 s outage and a 2 s cooldown). Arrivals at half the fold rate leave the window near 500 blocks of its 800-block cap, so a pass that folds a few seconds late archives nothing; an archived span has no transcript and the audit reports it as lost.
+            outage_scale: 120,
             state_dir: dir.path().join("state"),
             witness_runs: BTreeMap::new(),
         };

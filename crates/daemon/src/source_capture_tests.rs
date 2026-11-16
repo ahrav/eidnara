@@ -694,7 +694,7 @@ async fn shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slo
     *panicking.source_capture.before_publish.lock().unwrap() =
         Some(Arc::new(|| panic!("injected worker panic")));
     pass(&panicking, transform_with(&window, "base-1")).await;
-    settle(&panicking).await;
+    settle_panicked(&panicking, || report(&panicking)["worker_panicked"] == 1).await;
     assert_eq!(report(&panicking)["worker_panicked"], 1);
     assert_eq!(report(&panicking)["retained_bytes"], 0);
     assert_eq!(report(&panicking)["active"], 0);
@@ -2824,7 +2824,7 @@ async fn a_crash_between_retire_and_publish_leaves_no_live_row_and_the_next_pass
         panic!("injected crash between retire and publish")
     }));
     document_pass(&handler, "base-2").await;
-    assert_eq!(count(&handler, "worker_panicked"), 1);
+    settle_panicked(&handler, || count(&handler, "worker_panicked") == 1).await;
     assert_eq!(document_identities(&store, "ARCHITECTURE.md"), []);
 
     *handler
@@ -4481,14 +4481,15 @@ async fn every_job_end_leaves_an_ended_settlement_and_an_idle_slot() {
         pi_request(&[user_row(SOURCE.0, SOURCE.1, 0)], "base-1"),
     )
     .await;
-    settle(&handler).await;
+    let panicked = Some(Settlement::Ended {
+        outcome: Count::WorkerPanicked,
+    });
+    settle_panicked(&handler, || {
+        settlement(&handler, &project, SESSION) == panicked
+    })
+    .await;
     assert!(handler.source_capture.is_idle());
-    assert_eq!(
-        settlement(&handler, &project, SESSION),
-        Some(Settlement::Ended {
-            outcome: Count::WorkerPanicked
-        })
-    );
+    assert_eq!(settlement(&handler, &project, SESSION), panicked);
     *handler.source_capture.before_publish.lock().unwrap() = None;
     pass(
         &handler,
@@ -4572,4 +4573,16 @@ async fn a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found()
         decisions[&ids[last]].rationale["citation"],
         "descriptor_not_found"
     );
+}
+
+/// [`settle`] for a job that panics, then a wait for `recorded`, the record the caller asserts next. The job frees its slot while it unwinds and leaves its settlement `Discarded`; the join that follows counts `worker_panicked` and then rewrites the settlement, so the slot is idle before either record exists.
+async fn settle_panicked(handler: &Handler, recorded: impl Fn() -> bool) {
+    settle(handler).await;
+    for _ in 0..500 {
+        if recorded() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the panicking job's end was never recorded");
 }

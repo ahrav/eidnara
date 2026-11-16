@@ -522,7 +522,7 @@ fn question_set(out: &mut String) -> bool {
     });
     let digest = output_outcome(&output);
     // The cause line reports the failure, so its presence answers Q1 and Q2 together.
-    let answered = digest.contains(&format!("\"{cause}\""));
+    let answered = digest.contains(cause);
     let answers = if answered {
         "answerable"
     } else {

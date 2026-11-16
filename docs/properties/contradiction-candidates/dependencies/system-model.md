@@ -140,9 +140,9 @@ S7 routed reads. `docs/host-wire-protocol.md:824-828` and `:848-856`
 (`:855` is `review.use_outcome`, added by #1157).
 `crates/daemon/src/memory_reviewer/wire.rs:1-26`; strict request structs
 (`:33-60`, `deny_unknown_fields`); `bind_review` (`:203-220`) calls
-`kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:446-455`) which
-binds scope (`kernel_route_scope` `:415-441`, project check at `:428-432`)
-before `parse_request_body` (`:463-474`, removes `ENVELOPE_KEYS` `:461`:
+`kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:453-462`) which
+binds scope (`kernel_route_scope` `:422-448`, project check at `:435-439`)
+before `parse_request_body` (`:470-481`, removes `ENVELOPE_KEYS` `:468`:
 `method`, `kind`, `session_id`, `project_root`). `authority_project`
 (`wire.rs:131-139`) maps NotModule to `disabled`, store error to
 `store_unavailable`. Observational harness `cli`
@@ -288,8 +288,9 @@ D4 `crates/retrieval/AGENTS.md` ties the pinned digest to analysis-rule
 changes. The digest preimage (`identity.rs:36-65`) also includes
 `char::UNICODE_VERSION`, `rusqlite::version()`, and `SQLITE_SOURCE_ID`, so a
 toolchain or SQLite bump changes `AnalysisIdentity::current()` and fails
-`identity_pins_the_manifest` (`tests/lexical_analysis.rs:389-412`) with no
-rule change and no epoch change. Documented intent (`identity.rs:35`) is that
+`identity_pins_the_manifest` (`tests/lexical_analysis.rs:389-412`) unless the
+test records a digest for the new Unicode version, with no rule change and no
+epoch change. Documented intent (`identity.rs:35`) is that
 this is deliberate. A P5 consumer that pins the epoch string alone pins less
 than the identity does.
 
@@ -300,7 +301,7 @@ that uses the Kernel API without the daemon filter would see unscoped rows
 the daemon never serves.
 
 D6 `host-wire-protocol.md:825` names the envelope as `method`, `session_id`,
-`project_root`; `ENVELOPE_KEYS` (`kernel_routes/mod.rs:461`) also strips
+`project_root`; `ENVELOPE_KEYS` (`kernel_routes/mod.rs:468`) also strips
 `kind`. A body field named `kind` is therefore not `invalid_params`. The doc
 is silent on `kind`; recorded as a lead, not a defect.
 

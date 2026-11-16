@@ -62,8 +62,8 @@ charges. Numeric caps and decoded-memory accounting remain RP2.9 decisions.
 Recovery may replace derived state, not rewrite canonical truth to match it.
 An obsolete schema/tokenizer/model/policy/identity bundle must not regain
 authority by falling back to a stale projection. The existing canonical reader
-returns a withheld verdict on store or lag failure
-(`crates/daemon/src/canonical_memory.rs:147-173`). Publication validation and
+returns a withheld verdict on store or read failure and, since #1208, serves
+at any consumer lag (`crates/daemon/src/canonical_memory.rs:219-244`). Publication validation and
 canonical authority therefore remain different properties.
 
 ## Distributed coordination

@@ -3492,9 +3492,9 @@ evaluation of this area and its disposition are recorded in
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13
 [pb-polling]: ../../../../crates/host-runtime/src/panic_boundary.rs#L30
 [pb-hook]: ../../../../crates/host-runtime/src/panic_boundary.rs#L36-L50
-[blocking-doc]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L460-L461
-[blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L462
-[spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L358-L362
+[blocking-doc]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L467-L468
+[blocking]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L469
+[spawn-kernel-open]: ../../../../crates/daemon/src/kernel_routes/mod.rs#L365-L369
 [spawn-store-open]: ../../../../crates/daemon/src/lib.rs#L4108-L4116
 [t-panic-stderr]: ../../../../crates/host-runtime/tests/dispatch.rs#L603
 

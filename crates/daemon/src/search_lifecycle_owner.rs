@@ -1,4 +1,4 @@
-//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. An absent record with installed admission records is registered by the slice loop as a first build; every other rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. A slice whose catch-up hold no longer extends, whose selected family is damaged, or whose running identity differs from the selected seed's in a rebuilt dimension reports the rebuild cause, and the slice loop records the replacement through the next registered consumer; the family serves within the freshness limit until the replacement is selected. Embedding maintenance runs one supervisor at a time, rotated round-robin across the bound projects the daemon reports through a roster, each for a fixed tenure of slices; a slice that finds the tenure over or the roster changed hands the supervisor back to the loop, which joins it before the next slice starts the next one.
+//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. An absent record with installed admission records is registered by the slice loop as a first build; every other rebuild or recovery starts from an explicit request, and a restart resumes the record it finds as recorded. A rebuild whose deadline passes, or whose recording the wall clock steps back past, before it stages a seed is renewed by the slice loop with a fresh allowance and deadline under a bounded backoff. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. A slice whose catch-up hold no longer extends, whose selected family is damaged, or whose running identity differs from the selected seed's in a rebuilt dimension reports the rebuild cause, and the slice loop records the replacement through the next registered consumer; the family serves within the freshness limit until the replacement is selected. Embedding maintenance runs one supervisor at a time, rotated round-robin across the bound projects the daemon reports through a roster, each for a fixed tenure of slices; a slice that finds the tenure over or the roster changed hands the supervisor back to the loop, which joins it before the next slice starts the next one.
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -61,6 +61,8 @@ pub const SLICE_IDLE: Duration = Duration::from_secs(5);
 const REPORT_REPEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// How often a budgeted wait for the manager retries while a slice holds it.
 const LOCK_POLL: Duration = Duration::from_millis(1);
+/// The longest spacing between two renewal attempts of a rebuild that has not reached Current. The spacing doubles from `SLICE_IDLE` and reaches this cap at the eighth attempt; from then on a rebuild that keeps expiring for a persistent cause is attempted at most once per cap interval, and one whose cause clears is attempted again within it.
+const RENEWAL_BACKOFF_CAP: Duration = Duration::from_secs(600);
 /// Owner slices one project's supervisor runs before the next bound project takes over.
 pub const MAINTENANCE_TENURE_SLICES: u32 = 4;
 /// The consumer a registered projection reads the kernel through.
@@ -151,6 +153,8 @@ pub enum SliceOutcome {
     Unavailable(String),
     /// The recorded operation did not advance in this slice; the record stays as it was.
     Blocked(String),
+    /// The active record's renewal is due: it is renewable, and its deadline has passed or the wall clock stepped back past its recording. The records stay installed with no coverage, and the loop renews the record through [`SearchLifecycleOwner::renew_expired_rebuild`].
+    Expired,
     /// The selected Current family needs a replacement for `Cause`: its catch-up hold cannot extend, its database is damaged, or the running identity differs from the one it was built under. The loop records the rebuild after the slice releases the manager.
     Rebuild(Cause),
 }
@@ -177,7 +181,7 @@ pub struct SearchLifecycleOwner {
     roster: ProjectRoster,
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
-    /// Woken when a request is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it.
+    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request finds a supervisor running under records a reload replaced, or a renewal finds any supervisor running, so the next slice rotates or hands it back.
     requested: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
@@ -221,7 +225,7 @@ pub enum SliceEvent {
     Episode(EpisodeEvent),
     /// A handed-back supervisor's drain begins under the grace given.
     Draining(Duration),
-    /// The slice loop enters its idle wait, which a recorded request ends early.
+    /// The slice loop enters its idle wait, which a wake of the owner's `requested` signal ends early.
     Idle,
     /// A request has taken its entry clock reading and is about to wait for the manager.
     RequestEntered,
@@ -712,6 +716,135 @@ impl SearchLifecycleOwner {
         self.request(&request, now, budget)
     }
 
+    /// Renews the active record when its renewal is due (see [`LifecycleIntent::renewal_due`]), for another attempt: the record keeps its attempt identity and consumer binding and takes an allowance of the same size with nothing consumed and a deadline one `B_recovery_ms` from now. Returns `None` for any other record. The records and lane are read and admission is refreshed on the selected family first, as a request does, so the renewal is admitted on the evidence a slice of the renewed record installs; a refused write installs the records with no coverage again, as a slice over the expired record does. A `B_recovery_ms` within `DEADLINE_MARGIN_MS` is refused before anything is installed, since no slice could start inside the renewed deadline. A record whose renewal is no longer due at the clock read just before the write, as when a clock-step lead decays during the waits, records nothing and leaves the records installed with no coverage for the next slice to judge.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BuildError`] when the owner is disabled or shut down, the records or lane are unavailable, the record names another kernel incarnation, the manifest cannot bound the renewed attempt or leaves it no time past the start margin, an embedding supervisor is still running (the loop is woken so the next slice hands it back), admission is closed, or the lifecycle refuses the write.
+    pub fn renew_expired_rebuild(
+        &self,
+        budget: &EvalBudget,
+    ) -> Result<Option<LifecycleIntent>, BuildError> {
+        let mut managed = self.lock_within(budget)?;
+        if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
+            return Err(BuildError::Invalid("the owner is disabled or shut down"));
+        }
+        let ControlState::Intent(expired) = ProjectionLifecycle::read_at(&self.home) else {
+            return Ok(None);
+        };
+        let now = crate::now_ms();
+        if !expired.renewal_due(now) {
+            // A renewable record that stopped being due, as when a clock-step lead decayed, wakes the loop to judge it now.
+            if expired.renewable() {
+                self.requested.notify_one();
+            }
+            return Ok(None);
+        }
+        let inputs = AdmissionInputs::read(&self.home)
+            .map_err(|_| IntentRefusal::Denied(Denial::NoManifest))?;
+        let identity = self
+            .identity(inputs.manifest(), budget)
+            .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
+        if identity.kernel_incarnation_id != expired.kernel_incarnation_id {
+            return Err(BuildError::Invalid(
+                "the record names another kernel incarnation",
+            ));
+        }
+        let bound = replacement_spec(
+            inputs.manifest(),
+            identity.clone(),
+            expired.transition,
+            expired.episodes.allowance,
+            &expired.consumer.generation_id,
+        )
+        .and_then(|_| coverage_bounds(inputs.manifest()))
+        .and_then(|_| limit(inputs.manifest(), expired.transition.duration_limit()));
+        let bound = match bound {
+            Ok(bound) => bound,
+            // The refusal is the manifest's, so the gate closes as a slice's preparation would close it.
+            Err(refusal) => {
+                self.close_gate(refusal.code());
+                return Err(BuildError::Invalid(
+                    "manifest limits cannot bound the request",
+                ));
+            }
+        };
+        if bound <= DEADLINE_MARGIN_MS {
+            return Err(BuildError::Invalid(
+                "the renewed deadline leaves no time past the start margin",
+            ));
+        }
+        // A slice hands a running supervisor back before it reports the record expired; a renewal that still finds one refuses and wakes the loop, so admission never renews while a supervisor takes grants.
+        if let Managed::Selection(selection) = &mut *managed
+            && selection.maintenance().is_some()
+        {
+            self.requested.notify_one();
+            return Err(BuildError::Invalid(
+                "an embedding supervisor is running; retry after the next slice hands it back",
+            ));
+        }
+        let selection = match &*managed {
+            Managed::Selection(selection) => Some(&**selection),
+            _ => None,
+        };
+        if let Refresh::Closed(_) = self.refresh(&inputs, selection, &identity, budget) {
+            return Err(BuildError::Invalid("admission is closed"));
+        }
+        // The record is stamped at a clock read after the waits above and after the lifecycle handle opens, so the renewed attempt gets its whole bound; a renewal the waits made no longer due records nothing.
+        let renew = || -> Result<Option<LifecycleIntent>, BuildError> {
+            let lifecycle = ProjectionLifecycle::open(&self.home)?;
+            let now = crate::now_ms();
+            if !expired.renewal_due(now) {
+                // The record is active again; the gate stays as the expired slice left it until the next slice, which the loop is woken for, judges it.
+                self.install_without_coverage(&inputs, &identity);
+                self.requested.notify_one();
+                return Ok(None);
+            }
+            Ok(Some(lifecycle.renew_expired(
+                self.admission.gate(),
+                &expired,
+                now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
+                now,
+            )?))
+        };
+        let renewed = renew()
+            .inspect_err(|_| self.install_without_coverage(&inputs, &identity))?
+            .inspect(|_| self.requested.notify_one());
+        Ok(renewed)
+    }
+
+    /// Refuses when a supervisor still runs under an identity or coverage bounds other than `inputs` and `identity` yield: admission closes and the slice loop is woken to rotate the supervisor.
+    fn refuse_stale_supervisor(
+        &self,
+        managed: &mut Managed,
+        inputs: &AdmissionInputs,
+        identity: &ProjectionIdentity,
+    ) -> Result<(), BuildError> {
+        if let Managed::Selection(selection) = managed
+            && selection.maintenance().is_some()
+            && (*selection.identity() != *identity
+                || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
+        {
+            self.close_gate(None);
+            self.requested.notify_one();
+            return Err(BuildError::Invalid(
+                "maintenance runs under records a reload replaced; retry after the next slice rotates it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Installs `inputs` with no coverage, so every hook is denied while a cleanup keeps the evidence the records approve.
+    fn install_without_coverage(&self, inputs: &AdmissionInputs, identity: &ProjectionIdentity) {
+        let _ = self.admission.refresh_with(
+            inputs.clone(),
+            SelectedProjection {
+                identity,
+                coverage: None,
+            },
+        );
+    }
+
     /// The lifecycle record as the slice loop reads it, for the operator surface.
     pub fn lifecycle_record(&self) -> ControlState {
         ProjectionLifecycle::read_at(&self.home)
@@ -979,22 +1112,24 @@ impl SearchLifecycleOwner {
             ControlState::Intent(intent) => (intent, false),
             ControlState::Current(intent) => (intent, true),
         };
-        // Work on an active record ends within the record's own deadline, which no slice renews, and starts only outside the margin before it; a completed record is revalidated under the slice's bound alone. A record whose deadline has passed is observed under nothing, but the records stay installed with no coverage so a cleanup keeps its evidence while every hook is denied.
+        // Work on an active record ends within the record's own deadline and starts only outside the margin before it; a completed record is revalidated under the slice's bound alone. A record whose deadline has passed, or whose renewal is due, is observed under nothing, but the records stay installed with no coverage so a cleanup keeps its evidence while every hook is denied; the loop renews a record whose renewal is due, and any other expired record waits for the operator.
+        let now = crate::now_ms();
+        let renewal_due = !completed && intent.renewal_due(now);
         let deadline_at = (!completed).then(|| {
-            let until = u64::try_from(intent.episodes.deadline.saturating_sub(crate::now_ms()))
-                .unwrap_or(0);
+            let until = u64::try_from(intent.episodes.deadline.saturating_sub(now)).unwrap_or(0);
             Instant::now() + Duration::from_millis(until)
         });
         let budget = match deadline_at {
-            Some(at) if at <= Instant::now() => {
-                let _ = self.admission.refresh_with(
-                    inputs.clone(),
-                    SelectedProjection {
-                        identity: &identity,
-                        coverage: None,
-                    },
-                );
-                return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
+            Some(at) if renewal_due || at <= Instant::now() => {
+                self.install_without_coverage(&inputs, &identity);
+                if !renewal_due {
+                    return SliceOutcome::Blocked("the record's deadline has passed".to_owned());
+                }
+                // A supervisor still running is handed back first, so the renewal that follows refreshes admission with no supervisor taking grants before the renewed record is durable.
+                return match selection.maintenance() {
+                    Some(handle) => SliceOutcome::RotateMaintenance(handle),
+                    None => SliceOutcome::Expired,
+                };
             }
             Some(at) => budget.bounded_by(at),
             None => budget,
@@ -1011,13 +1146,7 @@ impl SearchLifecycleOwner {
         };
         // An active record's own duration is charged against the transition's bound, as recovery charges it; a record a reloaded bound no longer fits is refused by every slice, so the records are installed with no coverage, as for an expired record: ordinary hooks are denied while a cleanup keeps its evidence.
         if !completed && let Err(denial) = duration_within_bound(inputs.manifest(), &intent) {
-            let _ = self.admission.refresh_with(
-                inputs.clone(),
-                SelectedProjection {
-                    identity: &identity,
-                    coverage: None,
-                },
-            );
+            self.install_without_coverage(&inputs, &identity);
             return SliceOutcome::Blocked(denial.to_string());
         }
         // A supervisor whose bounds the manifest no longer yields is handed back before the gate renews on that manifest: renewal would cancel its grant and at once issue the next one, under which its loop would run a slice on the old bounds until the rotation reached it. The next slice, with no supervisor, installs the manifest and starts one under its bounds.
@@ -1396,17 +1525,7 @@ impl SearchLifecycleOwner {
             ));
         }
         // A supervisor still running under the identity or bounds a reload replaced is not re-admitted under the new records: admission closes, the slice loop is woken to rotate it, and the request is refused until then.
-        if let Managed::Selection(selection) = &mut *managed
-            && selection.maintenance().is_some()
-            && (*selection.identity() != identity
-                || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
-        {
-            self.close_gate(None);
-            self.requested.notify_one();
-            return Err(BuildError::Invalid(
-                "maintenance runs under records a reload replaced; retry after the next slice rotates it",
-            ));
-        }
+        self.refuse_stale_supervisor(&mut managed, &inputs, &identity)?;
         // The records just read are installed before the request's own sizing is judged, so a refused request still leaves the gate on the current records rather than on the evidence the last slice installed or, before the first slice, on its initial closed state; a reload that changed them cancels the earlier grants here.
         let selection = match &*managed {
             Managed::Selection(selection) => Some(&**selection),
@@ -1450,13 +1569,7 @@ impl SearchLifecycleOwner {
         let leave_gate_as_a_slice_would = || match current_fit {
             RecordFit::Fits => {}
             RecordFit::OverDuration => {
-                let _ = self.admission.refresh_with(
-                    inputs.clone(),
-                    SelectedProjection {
-                        identity: &identity,
-                        coverage: None,
-                    },
-                );
+                self.install_without_coverage(&inputs, &identity);
             }
             RecordFit::Unbounded(code) => {
                 self.close_gate(code);
@@ -2192,7 +2305,7 @@ fn replacement_spec(
     })
 }
 
-/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a request recorded during the idle wait ends it. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
+/// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a wake of the owner's `requested` signal, such as a recorded request or renewal, ends the idle wait. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     run_slice_loop(Arc::clone(&owner), cancel).await;
     let releasing = Arc::clone(&owner);
@@ -2203,10 +2316,41 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
     }
 }
 
+/// When the slice loop may next attempt to renew a rebuild whose renewal is due. The first attempt runs at once, including the first after a restart. Every attempt, whether it records a renewal, is refused, or finds the record no longer due, spaces the next one from it by `SLICE_IDLE` doubled per earlier attempt, up to `RENEWAL_BACKOFF_CAP`, and the spacing runs alongside the renewed record's own `B_recovery_ms`. A record that reaches Current starts the schedule again.
+#[derive(Debug)]
+struct RenewalSchedule {
+    attempts: u32,
+    next: Instant,
+}
+
+impl RenewalSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            attempts: 0,
+            next: now,
+        }
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+
+    /// Records an attempt at `now` and returns how many this schedule has recorded.
+    fn attempted(&mut self, now: Instant) -> u32 {
+        let spacing = SLICE_IDLE
+            .saturating_mul(1_u32.checked_shl(self.attempts).unwrap_or(u32::MAX))
+            .min(RENEWAL_BACKOFF_CAP);
+        self.attempts = self.attempts.saturating_add(1);
+        self.next = now + spacing;
+        self.attempts
+    }
+}
+
 async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
     let mut registration_reporter = SliceReporter::default();
     let mut claim_report = None;
+    let mut renewals = RenewalSchedule::new(Instant::now());
     loop {
         // One claim-source slice runs before each lifecycle slice, so a large source backlog advances a bounded page at a time and every lifecycle slice still runs.
         let budget = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
@@ -2285,15 +2429,46 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if cancel.is_cancelled() {
             return;
         }
-        // An unregistered home with installed records records its first build, and a Current family that needs a replacement records its rebuild; the next slice starts either.
-        let registered = match outcome {
-            SliceOutcome::Unregistered => {
-                record_if_admitted(&owner, &cancel, &mut registration_reporter, None).await
+        if matches!(
+            &outcome,
+            SliceOutcome::Current
+                | SliceOutcome::CaughtUp(_)
+                | SliceOutcome::Advanced(RecoveryProgress::Current)
+        ) {
+            renewals = RenewalSchedule::new(Instant::now());
+            registration_reporter = SliceReporter::default();
+        }
+        // An unregistered home with installed records records its first build, a Current family that needs a replacement records its rebuild, and an expired rebuild is renewed once its backoff has passed; the next slice starts any of them.
+        let recording = match outcome {
+            SliceOutcome::Unregistered => Some(Recording::Registration),
+            SliceOutcome::Rebuild(cause) => Some(Recording::Rebuild(cause)),
+            SliceOutcome::Expired if renewals.due(Instant::now()) => Some(Recording::Renewal),
+            _ => None,
+        };
+        let registered = match recording {
+            Some(recording) => {
+                let recorded =
+                    record_if_admitted(&owner, &cancel, &mut registration_reporter, recording)
+                        .await;
+                if recording == Recording::Renewal {
+                    let attempts = renewals.attempted(Instant::now());
+                    if let Some(recorded) = &recorded {
+                        eprintln!(
+                            "daemon: search lifecycle renewed expired rebuild: attempt={} consumer={} cause={:?} renewal_attempts={attempts} deadline={}",
+                            recorded.attempt_id,
+                            recorded.consumer.consumer_id,
+                            recorded.cause,
+                            recorded.episodes.deadline
+                        );
+                    }
+                }
+                // A recording that succeeds ends the run of refusals, so the first refusal of a later stall is printed.
+                if recorded.is_some() {
+                    registration_reporter = SliceReporter::default();
+                }
+                recorded.is_some()
             }
-            SliceOutcome::Rebuild(cause) => {
-                record_if_admitted(&owner, &cancel, &mut registration_reporter, Some(cause)).await
-            }
-            _ => false,
+            None => false,
         };
         let advanced = claims_continue
             || registered
@@ -2315,19 +2490,38 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
     }
 }
 
-/// Records the first build of an unregistered home, or with `rebuild` the replacement of its Current family, on the blocking pool; `true` when a record was written. A refusal repeats every idle period while the records stand, so `reporter` prints it once per repeat interval.
+/// What the slice loop records after a slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recording {
+    /// The first build of an unregistered home.
+    Registration,
+    /// The replacement of the Current family for this cause.
+    Rebuild(Cause),
+    /// The renewal of an expired rebuild.
+    Renewal,
+}
+
+/// Writes `recording` on the blocking pool and returns the record written. A refusal repeats at the next slice that asks for the recording, or for a renewal at the next attempt its schedule allows; `reporter` prints an identical refusal once until the run of refusals ends, and a refusal whose detail changes once per repeat interval.
 async fn record_if_admitted(
     owner: &Arc<SearchLifecycleOwner>,
     cancel: &CancellationToken,
     reporter: &mut SliceReporter,
-    rebuild: Option<Cause>,
-) -> bool {
+    recording: Recording,
+) -> Option<LifecycleIntent> {
     let register_owner = Arc::clone(owner);
     let budget = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let register_budget = budget.bounded_by(Instant::now() + SLICE_IDLE);
-    let mut registration = tokio::task::spawn_blocking(move || match rebuild {
-        None => register_owner.register_projection(crate::now_ms(), &register_budget),
-        Some(cause) => register_owner.request_rebuild(cause, crate::now_ms(), &register_budget),
+    let mut registration = tokio::task::spawn_blocking(move || {
+        let now = crate::now_ms();
+        match recording {
+            Recording::Registration => register_owner
+                .register_projection(now, &register_budget)
+                .map(|recorded| recorded.map(|recorded| recorded.intent)),
+            Recording::Rebuild(cause) => register_owner
+                .request_rebuild(cause, now, &register_budget)
+                .map(|recorded| recorded.map(|recorded| recorded.intent)),
+            Recording::Renewal => register_owner.renew_expired_rebuild(&register_budget),
+        }
     });
     let registration = tokio::select! {
         biased;
@@ -2338,22 +2532,23 @@ async fn record_if_admitted(
         }
     };
     match registration {
-        Ok(Ok(recorded)) => recorded.is_some(),
+        Ok(Ok(recorded)) => recorded,
         Ok(Err(error)) => {
             if let Some(report) = reporter.report(
-                &SliceOutcome::Blocked(match rebuild {
-                    None => format!("registration refused: {error}"),
-                    Some(cause) => format!("{cause:?} rebuild refused: {error}"),
+                &SliceOutcome::Blocked(match recording {
+                    Recording::Registration => format!("registration refused: {error}"),
+                    Recording::Rebuild(cause) => format!("{cause:?} rebuild refused: {error}"),
+                    Recording::Renewal => format!("expired rebuild renewal refused: {error}"),
                 }),
                 Instant::now(),
             ) {
                 eprintln!("daemon: search lifecycle {report}");
             }
-            false
+            None
         }
         Err(join) => {
             eprintln!("daemon: search registration ended abnormally: {join}");
-            false
+            None
         }
     }
 }
@@ -2366,6 +2561,7 @@ enum ReportKind {
     Closed,
     CatchUpBlocked,
     Rebuild,
+    Expired,
 }
 
 /// Decides which slice outcomes reach the log: the first report after an outcome that is not one, a change of kind, and a repeat of the same kind with different detail once per `REPORT_REPEAT_INTERVAL`. A reason that embeds a moving value, such as the kernel tip, would otherwise print on every slice.
@@ -2397,6 +2593,11 @@ impl SliceReporter {
             SliceOutcome::Rebuild(cause) => {
                 (ReportKind::Rebuild, format!("rebuild required: {cause:?}"))
             }
+            SliceOutcome::Expired => (
+                ReportKind::Expired,
+                "rebuild expired: its deadline passed or the wall clock stepped back past its recording"
+                    .to_owned(),
+            ),
             SliceOutcome::Unregistered
             | SliceOutcome::Advanced(_)
             | SliceOutcome::Current
@@ -2750,5 +2951,49 @@ mod tests {
             reporter.report(&blocked("stuck"), start).is_some(),
             "a report after an outcome that is not one prints"
         );
+    }
+
+    #[test]
+    fn an_expired_record_is_reported_once_until_another_outcome_intervenes() {
+        let mut reporter = SliceReporter::default();
+        let start = Instant::now();
+        assert_eq!(
+            reporter.report(&SliceOutcome::Expired, start).as_deref(),
+            Some(
+                "rebuild expired: its deadline passed or the wall clock stepped back past its recording"
+            )
+        );
+        assert!(
+            reporter
+                .report(&SliceOutcome::Expired, start + REPORT_REPEAT_INTERVAL)
+                .is_none()
+        );
+        assert!(reporter.report(&SliceOutcome::Current, start).is_none());
+        assert!(reporter.report(&SliceOutcome::Expired, start).is_some());
+    }
+
+    /// The first attempt is due at once; each attempt spaces the next by `SLICE_IDLE` doubled per earlier attempt, up to the cap; a fresh schedule, as a record that reached Current starts, is due at once again.
+    #[test]
+    fn renewal_attempts_double_their_spacing_to_the_cap_and_restart_at_current() {
+        let start = Instant::now();
+        let mut schedule = RenewalSchedule::new(start);
+        assert!(schedule.due(start));
+        assert_eq!(schedule.attempted(start), 1);
+        assert!(!schedule.due(start + SLICE_IDLE - Duration::from_millis(1)));
+        assert!(schedule.due(start + SLICE_IDLE));
+        let second = start + SLICE_IDLE;
+        assert_eq!(schedule.attempted(second), 2);
+        assert!(!schedule.due(second + SLICE_IDLE * 2 - Duration::from_millis(1)));
+        assert!(schedule.due(second + SLICE_IDLE * 2));
+        let mut at = second;
+        for _ in 0..40 {
+            schedule.attempted(at);
+            at += RENEWAL_BACKOFF_CAP;
+        }
+        assert!(!schedule.due(at - Duration::from_millis(1)));
+        assert!(schedule.due(at), "the spacing stops growing at the cap");
+        let current = at - Duration::from_secs(1);
+        let schedule = RenewalSchedule::new(current);
+        assert!(schedule.due(current));
     }
 }
