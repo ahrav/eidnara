@@ -368,10 +368,10 @@ Required faults and enabling state: A decision admitted, then a committed
 Confidence: high -
 [evidence](evidence/uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search.md).
 `visibility_row` maps `Disputed` to `ExplicitLabeled` (`visibility_row`
-(`crates/kernel/src/admission.rs:4324`)); `surface_visibility` hides it on every
-surface but explicit search (`crates/kernel/src/admission.rs:4197`).
+(`crates/kernel/src/admission.rs:4348`)); `surface_visibility` hides it on every
+surface but explicit search (`crates/kernel/src/admission.rs:4221`).
 Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-(`crates/kernel/src/admission.rs:5083`);
+(`crates/kernel/src/admission.rs:5107`);
 `every_non_active_disposition_has_the_contracted_surface_row`
 (`crates/kernel/tests/kernel_admission.rs:2890`);
 `dispositions_and_sensitivity_only_reduce_visibility`
@@ -429,7 +429,7 @@ its single-row seek.
 Existing check: `both_latest_decision_formulations_choose_the_same_row`
 (`crates/kernel/tests/kernel_admission.rs:2252`);
 `an_event_that_names_a_disposition_keeps_its_own_outcome`
-(`crates/kernel/src/admission.rs:5413`). Status: unaudited.
+(`crates/kernel/src/admission.rs:5437`). Status: unaudited.
 Impact: The dispute join counts event existence (C12), so this record bounds
 what a reader sees, not the join.
 Open questions:
@@ -585,12 +585,12 @@ Required faults and enabling state: A session with committed passes, then
 `session.delete`.
 Confidence: high -
 [evidence](evidence/uo-per-session-pass-timestamps-die-with-the-session.md).
-field `crates/memory-store/src/lib.rs:2513`; writes
+field `crates/memory-store/src/lib.rs:2514`; writes
 `crates/daemon/src/transform.rs:3283`; delete `delete_session`
-(`crates/memory-store/src/lib.rs:8969`).
+(`crates/memory-store/src/lib.rs:8999`).
 Existing check:
 `delete_session_sweeps_every_session_table_once_and_scopes_notes`
-(`crates/memory-store/src/lib.rs:22344`);
+(`crates/memory-store/src/lib.rs:22374`);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 Impact: The use-outcome `last_transform_at` column (#1156) is the Kernel-side
@@ -941,11 +941,11 @@ Existing check: `expiry_retires_an_expired_record_under_a_reserved_receipt`
 `the_sweep_and_the_reads_use_their_indexes`
 (`crates/kernel/src/use_outcome.rs:1100`);
 `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed`
-(`crates/daemon/src/memory_reviewer/lifecycle.rs:829`);
+(`crates/daemon/src/memory_reviewer/lifecycle.rs:870`);
 `a_cancelled_slice_stops_before_the_use_outcome_sweep`
-(`crates/daemon/src/memory_reviewer/lifecycle.rs:928`);
+(`crates/daemon/src/memory_reviewer/lifecycle.rs:969`);
 `a_cited_use_outcome_kept_by_the_sweep_is_not_progress`
-(`crates/daemon/src/memory_reviewer/lifecycle.rs:859`). Status: unaudited.
+(`crates/daemon/src/memory_reviewer/lifecycle.rs:900`). Status: unaudited.
 Impact: A report loses the record it cites, or records never age out.
 Open questions:
 - OQ3-8 resolved at #1154 ticketing: "live" means the citing row's subject
@@ -1416,9 +1416,9 @@ Existing check:
 (`crates/daemon/tests/memory_reviewer_wire.rs:686`);
 `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:641`);
-`packages/cli/src/commands/review-wire.contract.test.ts:107`;
-`packages/cli/src/commands/review-wire.contract.test.ts:125`;
-`packages/cli/src/commands/review-wire.contract.test.ts:137`;
+`packages/cli/src/commands/review-wire.contract.test.ts:111`;
+`packages/cli/src/commands/review-wire.contract.test.ts:141`;
+`packages/cli/src/commands/review-wire.contract.test.ts:153`;
 `packages/cli/src/commands/review.test.ts:781`;
 `packages/cli/src/commands/review.test.ts:822-861`;
 `packages/cli/src/commands/review.test.ts:863`; Kernel half:
@@ -1429,7 +1429,7 @@ Existing check:
 `a_held_reader_pool_bounds_the_count_read`
 (`crates/kernel/tests/kernel_use_outcome.rs:1801`) and
 `review_use_outcome_reads_the_kernel_under_a_bounded_budget`
-(`crates/daemon/tests/memory_reviewer_wire.rs:787`). Status: unaudited.
+(`crates/daemon/tests/memory_reviewer_wire.rs:795`). Status: unaudited.
 Impact: A zero misread as "no harm observed".
 Open questions:
 - OQ3-2 and OQ3-15 resolved at #1157 ticketing: a `review.use_outcome` method

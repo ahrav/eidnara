@@ -195,7 +195,7 @@ Check: `always` - every committed decision row names a live domain and, for each
 Fault/timing angle: a parent retired in an earlier commit, or inserted later in the same envelope
 Required faults and enabling state: a decision naming a missing domain; a decision naming an anchor inserted after it in one envelope
 Confidence: high - [evidence](evidence/p2-decision-parents-must-be-live-at-insert.md). Read `require_parents` at `crates/kernel/src/slice/write.rs:1095`
-Existing check: `crates/kernel/tests/kernel_slice.rs:196`; `crates/kernel/tests/kernel_envelope.rs:669`; for anchors `crates/kernel/tests/kernel_anchor_write.rs:404` (unaudited)
+Existing check: `crates/kernel/tests/kernel_slice.rs:197`; `crates/kernel/tests/kernel_envelope.rs:669`; for anchors `crates/kernel/tests/kernel_anchor_write.rs:404` (unaudited)
 Impact: a decision citing a missing anchor is refused `NotFound`, which fails the envelope and with it the whole capture job
 Open questions: None.
 
@@ -210,7 +210,7 @@ Check: `always` - for every live decision with `evidence_id = e`, `rank(decision
 Fault/timing angle: none
 Required faults and enabling state: evidence stored `Sensitive` cited by a decision asserted `Normal`
 Confidence: high - [evidence](evidence/p2-citing-decision-carries-at-least-its-evidence-class.md). Read `fold_cited_evidence_class` at `crates/kernel/src/slice/write.rs:980`
-Existing check: `crates/kernel/tests/kernel_slice.rs:1453`, `:1526`; `crates/kernel/tests/kernel_review_acceptance.rs:988` (unaudited)
+Existing check: `crates/kernel/tests/kernel_slice.rs:1454`, `:1527`; `crates/kernel/tests/kernel_review_acceptance.rs:988` (unaudited)
 Impact: a decision classified below its evidence leaks the evidence's class through reads; for capture, the same fold would hide every row-cited memory from auto-inject (specification K4, OQ2-10)
 Open questions: None.
 
