@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), proposed re
 
 ## Evidence trail
 
-The U3 tests commit an anchored and cited decision, and decisions for `source_capture_off`, `source_id_unjoinable`, `descriptor_not_found`, and `head_unavailable` (`crates/daemon/src/source_capture_tests.rs:3528`, `:3700`). The U4 tests commit `publish_budget_expired` decisions for a source job past its budget and for a refused handoff (`:4259`, `:4313`).
+The U3 tests commit an anchored and cited decision, and decisions for `source_capture_off`, `source_id_unjoinable`, `descriptor_not_found`, and `head_unavailable` (`crates/daemon/src/source_capture_tests.rs:3501`, `:3667`). The U4 tests commit `publish_budget_expired` decisions for a source job past its budget and for a refused handoff (`:4232`, `:4286`).
 
 ## Failure scenario
 
@@ -18,7 +18,7 @@ None.
 
 ## What a test must construct
 
-The five citation states and both anchor states. U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) constructs `publish_budget_expired` in `crates/daemon/src/source_capture_tests.rs:4259` and `:4313`.
+The five citation states and both anchor states. U4 ([#1136](https://github.com/ahrav/eidnara/issues/1136)) constructs `publish_budget_expired` in `crates/daemon/src/source_capture_tests.rs:4232` and `:4286`.
 
 ## Investigation log
 

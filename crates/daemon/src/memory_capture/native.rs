@@ -495,7 +495,9 @@ pub(super) fn collapse_quotations(
 /// proposals of different categories that name one sentence keep their own
 /// quotations, so one sentence is stored once per category at most and each
 /// clause stays its own memory.
-fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) {
+///
+/// Returns the widened quotations.
+fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) -> Vec<String> {
     let widened: Vec<Option<&str>> = proposed
         .iter()
         .map(|memory| {
@@ -506,6 +508,7 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
             }
         })
         .collect();
+    let mut quotations = Vec::new();
     for index in 0..proposed.len() {
         let Some(statement) = widened[index] else {
             continue;
@@ -516,8 +519,10 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
         });
         if !shared {
             proposed[index].quote = statement.to_owned();
+            quotations.push(statement.to_owned());
         }
     }
+    quotations
 }
 
 impl CaptureWork {
@@ -705,9 +710,13 @@ impl CaptureWork {
             };
             let prose = super::Prose::of(&job.text);
             let mut proposed = decision.memories;
-            if super::is_user_source(&job) && !super::cite::is_hashed_source_id(&job.message_id) {
-                widen_cut_quotations(&prose, &mut proposed);
-            }
+            let widened = if super::is_user_source(&job)
+                && !super::cite::is_hashed_source_id(&job.message_id)
+            {
+                widen_cut_quotations(&prose, &mut proposed)
+            } else {
+                Vec::new()
+            };
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
@@ -715,13 +724,26 @@ impl CaptureWork {
             // A user's statement that repeats an approved memory word for
             // word duplicates that memory, whichever copy the extractor named.
             for memory in &mut quoted {
-                if memory.duplicate_of.is_some()
-                    && let Some(approved) = plan
-                        .existing
-                        .iter()
-                        .find(|previous| previous.automatic && previous.content == memory.content)
+                let Some(target) = &memory.duplicate_of else {
+                    continue;
+                };
+                if let Some(approved) = plan
+                    .existing
+                    .iter()
+                    .find(|previous| previous.automatic && previous.content == memory.content)
                 {
                     memory.duplicate_of = Some(approved.id.clone());
+                } else if widened.contains(&memory.quote)
+                    && plan
+                        .existing
+                        .iter()
+                        .any(|previous| previous.id == *target && previous.automatic)
+                {
+                    // The extractor matched the clause it quoted to an
+                    // approved statement. The widened sentence is another
+                    // text, such as that clause negated, so it is written
+                    // as the user's own statement.
+                    memory.duplicate_of = None;
                 }
             }
             if quoted.iter().any(|memory| {

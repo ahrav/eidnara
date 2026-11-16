@@ -1029,6 +1029,44 @@ fn fill_statement_lineage(handler: &Handler, project: &Path, job: &str) {
         .unwrap();
 }
 
+/// A correction whose statement approval the Kernel refuses is stored
+/// labeled. A labeled fact replaces no approved one: the statement it named
+/// stays live and served, beside the correction on explicit search.
+#[tokio::test]
+async fn a_correction_whose_approval_is_refused_leaves_the_approved_statement_live() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let messages = [("m2", "user", TUESDAY)];
+    let jobs = enqueue(&handler, SECOND, "s2", &messages).await;
+    fill_statement_lineage(&handler, &project, &jobs[0]);
+    drain(&handler, SECOND, "s2", &messages, |_, existing| {
+        vec![Extracted {
+            quote: TUESDAY.to_string(),
+            replaces: ids_containing(existing, "Thursday"),
+            ..Extracted::default()
+        }]
+    })
+    .await;
+    let committed = published(&handler, &project).await;
+    assert_eq!(
+        committed.0,
+        [
+            (stated(THURSDAY), "visible".to_string()),
+            (stated(TUESDAY), "labeled".to_string()),
+        ],
+        "the approved statement stays; the correction is stored for explicit search"
+    );
+    assert_eq!(committed.1, [stated(THURSDAY)]);
+    assert_eq!(committed.2, 1, "the refused approval is counted");
+}
+
 const CITATION_COUNTERS: [&str; 5] = [
     "decisions_cited",
     "decisions_source_capture_off",
@@ -1842,6 +1880,48 @@ async fn a_cut_quotation_widens_only_for_a_user_message_held_whole() {
     assert_eq!(
         live_statement_records(&handler, &project),
         [stated(NEVER_FRIDAYS)]
+    );
+}
+
+/// The extractor cuts a clause out of a negated sentence and names the
+/// approved statement of that clause as the memory that already holds it.
+/// The widened sentence is another text, so it is written as the user's own
+/// statement beside the one the extractor named.
+#[tokio::test]
+async fn a_widened_quotation_is_no_duplicate_of_the_statement_its_clause_matched() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let positive = "Deploy on Fridays.";
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", positive)],
+        |_, _| vec![fact(positive)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", NEVER_FRIDAYS)],
+        |_, existing| {
+            vec![Extracted {
+                quote: CUT.to_string(),
+                duplicate_of: ids_containing(existing, &stated(positive)).pop(),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(positive), "visible".to_string()),
+            (stated(NEVER_FRIDAYS), "visible".to_string()),
+        ],
+        "the negated sentence is stored; it duplicates no statement"
     );
 }
 
