@@ -180,7 +180,7 @@ Fault/timing angle: none.
 Required faults and enabling state: a `bash` part with an integer `exit`; with a null, string, or float `exit`; a non-`bash` part carrying `exit`.
 Confidence: high - [evidence](evidence/il-exit-code-only-for-opencode-bash.md). Code and tests read; the frozen OpenCode 1.18.22 session's four `bash` parts carry `exit` 0 three times and `exit: null` once.
 Existing check: `tv-tests:17`, `:145`; `hs-tests:3619`; `sc-tests:224`; unaudited.
-Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:175-206`).
+Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:175-213`).
 Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata.exit` for `bash`; the frozen session (`crates/daemon/testdata/corpus/sessions/opencode-1.18.22/mix.json`) shows it does.
 
 ### il-truncated-flag-read-per-harness
@@ -294,7 +294,7 @@ Open questions: None.
 ### il-tool-summary-description-precedes-key-arg
 
 Type: safety
-Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1287-1291` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:333`, `:352`) at `history_summarizer_chunk.rs:1295` and `boundary.rs:1867`.
+Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1287-1291` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:437`, `:456`) at `history_summarizer_chunk.rs:1295` and `boundary.rs:1867`.
 Status: active
 Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20052` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20338-20344`, the input at `lib.rs:26936`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.

@@ -173,7 +173,15 @@ const MAX_WHOLE_DIGEST_BYTES: usize = MAX_DIGEST_BYTES + WHOLE_OUTPUT_MAX_BYTES;
 
 /// The outcome digest starts with `; <status>; bytes=N`. `N` counts bytes in all `text` pieces plus one separator byte between adjacent pieces. [`push_whole`] formats text of at most [`WHOLE_OUTPUT_MAX_BYTES`] bytes. Larger text appends `; head="…"` and, when the last nonblank line differs from the first, `; tail="…"`: the first and last nonblank lines with trailing whitespace trimmed, each written by [`push_excerpt`].
 pub(crate) fn outcome_digest(status: ToolStatus, text: &OutputText<'_>) -> String {
-    sized_outcome_digest(status, text, joined_len(text))
+    let bytes = joined_len(text);
+    let mut digest = digest_prefix(status, bytes);
+    if bytes <= WHOLE_OUTPUT_MAX_BYTES {
+        push_whole(&mut digest, text);
+    } else {
+        let (head, tail) = text.excerpt_lines();
+        push_excerpts(&mut digest, head, tail);
+    }
+    digest
 }
 
 fn joined_len(text: &OutputText<'_>) -> usize {
@@ -185,24 +193,23 @@ fn joined_len(text: &OutputText<'_>) -> usize {
     bytes + pieces.saturating_sub(1)
 }
 
-fn sized_outcome_digest(status: ToolStatus, text: &OutputText<'_>, bytes: usize) -> String {
+/// `; <status>; bytes=N`, the start of every outcome digest.
+fn digest_prefix(status: ToolStatus, bytes: usize) -> String {
     let mut digest = String::with_capacity(OUTCOME_CAPACITY);
     digest.push_str("; ");
     digest.push_str(status.as_str());
     let _ = write!(digest, "; bytes={}", bytes);
-    if bytes <= WHOLE_OUTPUT_MAX_BYTES {
-        push_whole(&mut digest, text);
-        return digest;
-    }
-    let (head, tail) = text.excerpt_lines();
+    digest
+}
+
+fn push_excerpts(digest: &mut String, head: Option<&str>, tail: Option<&str>) {
     for (label, line) in [("; head=\"", head), ("; tail=\"", tail)] {
         if let Some(line) = line {
             digest.push_str(label);
-            push_excerpt(&mut digest, line);
+            push_excerpt(digest, line);
             digest.push('"');
         }
     }
-    digest
 }
 
 /// The outcome half of the digest of `output`, read through [`from_output`].
@@ -213,20 +220,27 @@ pub fn output_outcome(output: &memory_store::ToolOutput) -> String {
 
 /// `redact_durable_text` scans printed output before digest rendering because rendering replaces quotes and line breaks needed to detect credentials. The digest preserves the original `bytes=N` and whole or excerpt form. Output with no findings retains its [`output_outcome`] digest.
 ///
-/// Whole-output pieces are joined with newlines before the scan, and the scanned text is truncated to `WHOLE_OUTPUT_MAX_BYTES` because replacement placeholders can exceed credential length. Each excerpt line is scanned separately.
+/// Whole-output pieces are joined with newlines before the scan, and the scanned text is truncated to `WHOLE_OUTPUT_MAX_BYTES` because replacement placeholders can exceed credential length. Each excerpt line is scanned with its neighbouring text by `scanned_head` and `scanned_tail`.
 pub fn stored_output_outcome(output: &memory_store::ToolOutput) -> String {
     let (status, text) = from_output(output);
     let bytes = joined_len(&text);
-    let scanned = if bytes <= WHOLE_OUTPUT_MAX_BYTES {
-        scanned_text(&text.pieces().collect::<Vec<_>>().join("\n")).map(|mut scanned| {
-            scanned.truncate(scanned.floor_char_boundary(WHOLE_OUTPUT_MAX_BYTES));
-            scanned
-        })
-    } else {
-        scanned_excerpt_lines(&text)
-    };
-    let scanned = scanned.as_deref().map(OutputText::Text);
-    sized_outcome_digest(status, scanned.as_ref().unwrap_or(&text), bytes)
+    let mut digest = digest_prefix(status, bytes);
+    let pieces: Vec<&str> = text.pieces().collect();
+    if bytes <= WHOLE_OUTPUT_MAX_BYTES {
+        match scanned_text(&pieces.join("\n")) {
+            Some(mut scanned) => {
+                scanned.truncate(scanned.floor_char_boundary(WHOLE_OUTPUT_MAX_BYTES));
+                push_whole(&mut digest, &OutputText::Text(&scanned));
+            }
+            None => push_whole(&mut digest, &text),
+        }
+        return digest;
+    }
+    let (head, tail) = text.excerpt_lines();
+    let head = head.map(|line| scanned_head(&pieces, line));
+    let tail = tail.and_then(|line| scanned_tail(&pieces, line));
+    push_excerpts(&mut digest, head.as_deref(), tail.as_deref());
+    digest
 }
 
 /// The factor of four accounts for the maximum UTF-8 byte width of a Unicode scalar value.
@@ -235,22 +249,112 @@ const EXCERPT_READ_MAX_BYTES: usize =
 /// The scanned prefix of an excerpt line. `WINDOW_OVERLAP_BYTES` holds the longest finding the scanner reports, so a finding that starts in the first [`EXCERPT_READ_MAX_BYTES`] of the printed line lies whole inside the prefix.
 const EXCERPT_SCAN_BYTES: usize =
     EXCERPT_READ_MAX_BYTES + context_core::redaction::WINDOW_OVERLAP_BYTES;
+/// The longest text a tail's scan reads: `WINDOW_OVERLAP_BYTES` before the tail, which holds every finding that reaches into it, and the tail's scanned prefix.
+const TAIL_SCAN_MAX_BYTES: usize =
+    context_core::redaction::WINDOW_OVERLAP_BYTES + EXCERPT_SCAN_BYTES;
 
-/// A finding replaces the entire excerpt line with its scanned, UTF-8-aligned prefix, discarding any suffix beyond [`EXCERPT_SCAN_BYTES`]. Lines without findings retain their full text. `None` means neither line has a finding.
-fn scanned_excerpt_lines(text: &OutputText<'_>) -> Option<String> {
-    let scanned = |line: &str| scanned_text(&line[..line.floor_char_boundary(EXCERPT_SCAN_BYTES)]);
-    let (head, tail) = text.excerpt_lines();
-    let head = head?;
-    let (scanned_head, scanned_tail) = (scanned(head), tail.and_then(scanned));
-    if scanned_head.is_none() && scanned_tail.is_none() {
-        return None;
+/// The index of the piece that `line` is a slice of, and `line`'s start in that piece.
+fn locate(pieces: &[&str], line: &str) -> Option<(usize, usize)> {
+    pieces.iter().enumerate().find_map(|(index, piece)| {
+        let bytes = piece.as_bytes().as_ptr_range();
+        bytes
+            .contains(&line.as_ptr())
+            .then(|| (index, line.as_ptr() as usize - bytes.start as usize))
+    })
+}
+
+/// The joined text from the start of `head` for [`EXCERPT_SCAN_BYTES`]: the head's scanned prefix and the lines after it.
+fn head_window<'a>(pieces: &[&'a str], head: &'a str) -> Cow<'a, str> {
+    let (rest, following) = match locate(pieces, head) {
+        Some((index, start)) => (&pieces[index][start..], &pieces[index + 1..]),
+        None => (head, &[][..]),
+    };
+    let mut window = Cow::Borrowed(&rest[..rest.floor_char_boundary(EXCERPT_SCAN_BYTES)]);
+    let mut whole = window.len() == rest.len();
+    for piece in following {
+        if !whole || window.len() >= EXCERPT_SCAN_BYTES {
+            break;
+        }
+        let part = &piece[..piece.floor_char_boundary(EXCERPT_SCAN_BYTES - window.len() - 1)];
+        whole = part.len() == piece.len();
+        let window = window.to_mut();
+        window.push('\n');
+        window.push_str(part);
     }
-    let mut lines = scanned_head.unwrap_or_else(|| head.to_owned());
-    if let Some(tail) = tail {
-        lines.push('\n');
-        lines.push_str(scanned_tail.as_deref().unwrap_or(tail));
+    window
+}
+
+/// The head as the stored digest shows it. A finding that starts in the head replaces it with the first nonblank line of the scanned [`head_window`]; any other head is the printed line.
+fn scanned_head<'a>(pieces: &[&'a str], head: &'a str) -> Cow<'a, str> {
+    let scanned = context_core::redaction::redact_durable_text(&head_window(pieces, head));
+    if !scanned
+        .detections
+        .iter()
+        .any(|found| found.offset < head.len())
+    {
+        return Cow::Borrowed(head);
     }
-    Some(lines)
+    Cow::Owned(
+        OutputText::Text(&scanned.text)
+            .head()
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+/// The joined text that ends with the scanned prefix of `tail` and starts up to `WINDOW_OVERLAP_BYTES` before it, the tail's start in that text, and whether the text starts inside a printed line.
+fn tail_window<'a>(pieces: &[&'a str], tail: &'a str) -> (Cow<'a, str>, usize, bool) {
+    let shown = &tail[..tail.floor_char_boundary(EXCERPT_SCAN_BYTES)];
+    let Some((index, start)) = locate(pieces, tail) else {
+        return (Cow::Borrowed(shown), 0, false);
+    };
+    let piece = pieces[index];
+    let from = piece
+        .ceil_char_boundary(start.saturating_sub(context_core::redaction::WINDOW_OVERLAP_BYTES));
+    let last = &piece[from..start + shown.len()];
+    let mut inside = from > 0 && piece.as_bytes()[from - 1] != b'\n';
+    let mut room = context_core::redaction::WINDOW_OVERLAP_BYTES - (start - from);
+    let mut reached_start = from == 0;
+    let mut earlier = Vec::new();
+    for piece in pieces[..index].iter().rev() {
+        if !reached_start || room == 0 {
+            break;
+        }
+        room -= 1;
+        let cut = piece.ceil_char_boundary(piece.len().saturating_sub(room));
+        room -= piece.len() - cut;
+        inside = cut > 0 && piece.as_bytes()[cut - 1] != b'\n';
+        reached_start = cut == 0;
+        earlier.push(&piece[cut..]);
+    }
+    if earlier.is_empty() {
+        return (Cow::Borrowed(last), start - from, inside);
+    }
+    let mut window = String::with_capacity(TAIL_SCAN_MAX_BYTES);
+    for part in earlier.iter().rev() {
+        window.push_str(part);
+        window.push('\n');
+    }
+    let tail_start = window.len() + start;
+    window.push_str(last);
+    (Cow::Owned(window), tail_start, inside)
+}
+
+/// The tail as the stored digest shows it, or `None` to withhold it. A finding that reaches into the tail replaces it with the last nonblank line of the scanned [`tail_window`]; any other tail is the printed line. A scanned line that begins where the window begins inside a printed line was scanned without the text before it, so that tail is withheld.
+fn scanned_tail<'a>(pieces: &[&'a str], tail: &'a str) -> Option<Cow<'a, str>> {
+    let (window, tail_start, starts_inside_a_line) = tail_window(pieces, tail);
+    let scanned = context_core::redaction::redact_durable_text(&window);
+    if !scanned
+        .detections
+        .iter()
+        .any(|found| found.offset + found.length > tail_start)
+    {
+        return Some(Cow::Borrowed(tail));
+    }
+    let scanned_text = OutputText::Text(&scanned.text);
+    let line = scanned_text.tail().unwrap_or_default();
+    let at_window_start = std::ptr::eq(line.as_ptr(), scanned.text.as_ptr());
+    (!(starts_inside_a_line && at_window_start)).then(|| Cow::Owned(line.to_owned()))
 }
 
 /// Returns `text` as `redact_durable_text` rewrites it, or `None` when the scan has no finding.
@@ -544,6 +648,7 @@ mod digest_tests {
         assert_eq!(MIN_CALL_SUMMARY_BYTES, 672);
         assert_eq!(MAX_WHOLE_DIGEST_BYTES, 3_024);
         assert_eq!(EXCERPT_SCAN_BYTES, 98_820);
+        assert_eq!(TAIL_SCAN_MAX_BYTES, 197_124);
     }
 
     /// For output of at most [`WHOLE_OUTPUT_MAX_BYTES`], the digest keeps every line, trims and collapses whitespace, and replaces quotes and marker brackets with single quotes. Blank output produces only the call, status, and byte count. One byte more produces first- and last-nonblank-line excerpts.
@@ -1052,6 +1157,193 @@ mod digest_tests {
                 wide.len(),
                 "日".repeat(654)
             )
+        );
+    }
+
+    #[test]
+    fn a_stored_excerpt_outcome_holds_no_credential_the_scan_finds_with_the_adjacent_line() {
+        let blocks = |texts: &[&str]| {
+            ToolOutput::bare(OutputKind::Content {
+                blocks: texts
+                    .iter()
+                    .map(|text| memory_store::ResultBlock {
+                        kind: memory_store::ResultBlockKind::Text {
+                            text: (*text).to_owned(),
+                        },
+                        provider_extras: Default::default(),
+                    })
+                    .collect(),
+            })
+        };
+        let cases = [
+            (
+                "a tail value whose key is on the line before it",
+                text_output(&format!("{}DB_PASSWORD=\nQm2Lr8Wv4Zd6Pn9Xk7\n", filler())),
+                format!("{}DB_PASSWORD=\nQm2Lr8Wv4Zd6Pn9Xk7\n", filler()),
+                "Qm2Lr8Wv4Zd6Pn9Xk7",
+            ),
+            (
+                "a short tail value whose key is on the line before it",
+                text_output(&format!("{}password=\nhunter-two\n", filler())),
+                format!("{}password=\nhunter-two\n", filler()),
+                "hunter-two",
+            ),
+            (
+                "a key and its value in adjacent content blocks",
+                blocks(&[&filler(), "DB_PASSWORD=", "Qm2Lr8Wv4Zd6Pn9Xk7"]),
+                format!("{}\nDB_PASSWORD=\nQm2Lr8Wv4Zd6Pn9Xk7", filler()),
+                "Qm2Lr8Wv4Zd6Pn9Xk7",
+            ),
+            (
+                "a quoted value that opens on the line before the tail and closes on it",
+                text_output(&format!(
+                    "{}DB_PASSWORD=\"Xk7Qm2Lr8Wv4Zd6Pn9\nAa1Bb2Cc3Dd4Ee5\"\n",
+                    filler()
+                )),
+                format!(
+                    "{}DB_PASSWORD=\"Xk7Qm2Lr8Wv4Zd6Pn9\nAa1Bb2Cc3Dd4Ee5\"\n",
+                    filler()
+                ),
+                "Aa1Bb2Cc3Dd4Ee5",
+            ),
+            (
+                "a key, its separator, and its value on three lines",
+                text_output(&format!("{}DB_PASSWORD\n=\nQm2Lr8Wv4Zd6Pn9Xk7\n", filler())),
+                format!("{}DB_PASSWORD\n=\nQm2Lr8Wv4Zd6Pn9Xk7\n", filler()),
+                "Qm2Lr8Wv4Zd6Pn9Xk7",
+            ),
+            (
+                "a quoted value that opens on the head line and closes on the next",
+                text_output(&format!(
+                    "DB_PASSWORD=\"Xk7Qm2Lr8Wv4Zd6Pn9\nAa1Bb2Cc3Dd4Ee5\"\n{}",
+                    filler()
+                )),
+                format!(
+                    "DB_PASSWORD=\"Xk7Qm2Lr8Wv4Zd6Pn9\nAa1Bb2Cc3Dd4Ee5\"\n{}",
+                    filler()
+                ),
+                "Xk7Qm2Lr8Wv4Zd6Pn9",
+            ),
+        ];
+        for (name, output, printed, credential) in cases {
+            let stored = stored_output_outcome(&output);
+            assert!(
+                !scanned(&printed).contains(credential),
+                "{name}: the scan of the printed output removes the credential"
+            );
+            assert!(!stored.contains(credential), "{name}: {stored}");
+            assert!(stored.contains("<REDACTED:"), "{name}: {stored}");
+            assert_eq!(
+                stored,
+                stored_output_outcome(&text_output(&printed)),
+                "{name}: pieces store the digest of their newline join"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finding_outside_an_excerpt_line_leaves_the_printed_line() {
+        let wide = "\u{65e5}".repeat(40_000);
+        for printed in [
+            format!("{}{CREDENTIAL_LINE}\nlast line\n", filler()),
+            format!("first line\n{CREDENTIAL_LINE}\n{}", filler()),
+            format!("first line\n{wide}\nlast line\n"),
+            format!("first line\n{wide}{CREDENTIAL_LINE}\nlast line\n"),
+        ] {
+            let output = text_output(&printed);
+            assert_eq!(stored_output_outcome(&output), output_outcome(&output));
+        }
+    }
+
+    #[test]
+    fn an_unchanged_excerpt_line_is_borrowed_whatever_its_length() {
+        let long = "x".repeat(3 * context_core::redaction::MAX_REDACTABLE_BYTES);
+        let tail_long = format!("{CREDENTIAL_LINE}\n{long}");
+        let head_long = format!("{long}\n{CREDENTIAL_LINE}");
+        // The credential sits in each window, on the line beside the excerpt line.
+        let pieces = [tail_long.as_str()];
+        assert!(matches!(
+            scanned_tail(&pieces, &tail_long[CREDENTIAL_LINE.len() + 1..]),
+            Some(Cow::Borrowed(line)) if line.len() == long.len()
+        ));
+        let pieces = [head_long.as_str()];
+        assert!(matches!(
+            scanned_head(&pieces, &head_long[..long.len()]),
+            Cow::Borrowed(line) if line.len() == long.len()
+        ));
+        let beside_the_head = format!("first line\n{CREDENTIAL_LINE}\n{}", filler());
+        assert!(matches!(
+            scanned_head(&[beside_the_head.as_str()], &beside_the_head[..10]),
+            Cow::Borrowed("first line")
+        ));
+        for (printed, excerpts) in [
+            (
+                &tail_long,
+                format!(
+                    "; head=\"{SCANNED_CREDENTIAL_LINE}\"; tail=\"{}…\"",
+                    "x".repeat(CLAIM_VALUE_MAX_BYTES - CLIP_MARKER.len())
+                ),
+            ),
+            (
+                &head_long,
+                format!(
+                    "; head=\"{}…\"; tail=\"{SCANNED_CREDENTIAL_LINE}\"",
+                    "x".repeat(CLAIM_VALUE_MAX_BYTES - CLIP_MARKER.len())
+                ),
+            ),
+        ] {
+            assert_eq!(
+                stored_output_outcome(&text_output(printed)),
+                format!("; completed; bytes={}{excerpts}", printed.len())
+            );
+        }
+    }
+
+    #[test]
+    fn an_excerpt_window_holds_the_scanned_prefix_and_the_overlap_before_a_tail() {
+        use context_core::redaction::WINDOW_OVERLAP_BYTES;
+        let (before, line) = ("a".repeat(200_000), "b".repeat(200_000));
+        let joined = format!("{before}\n{line}");
+        let joined_line = &joined[before.len() + 1..];
+
+        let (window, tail_start, inside) = tail_window(&[joined.as_str()], joined_line);
+        assert_eq!(window.len(), TAIL_SCAN_MAX_BYTES);
+        assert_eq!(tail_start, WINDOW_OVERLAP_BYTES);
+        assert!(inside && matches!(window, Cow::Borrowed(_)));
+        assert_eq!(
+            tail_window(&[before.as_str(), line.as_str()], &line),
+            (window, tail_start, inside),
+            "pieces give the window of their newline join"
+        );
+        let short = format!("key\n{line}");
+        assert_eq!(
+            tail_window(&[short.as_str()], &short[4..]),
+            (Cow::Borrowed(&short[..4 + EXCERPT_SCAN_BYTES]), 4, false)
+        );
+
+        let head = head_window(&[joined.as_str()], &joined[..before.len()]);
+        assert_eq!(head.len(), EXCERPT_SCAN_BYTES);
+        let across = format!("head\n{line}");
+        let window = head_window(&[across.as_str()], &across[..4]);
+        assert_eq!(window, across[..EXCERPT_SCAN_BYTES]);
+        let piece = &across[..4];
+        assert_eq!(head_window(&[piece, line.as_str()], piece), window);
+        assert!(matches!(
+            head_window(&[across.as_str()], &across[..4]),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn a_tail_scanned_from_inside_the_line_before_it_is_withheld() {
+        let printed = format!(
+            "first line\n{} DB_PASSWORD=\"Xk7Qm2Lr8Wv4Zd6Pn9\nAa1Bb2Cc3Dd4Ee5\"\n",
+            "x".repeat(context_core::redaction::WINDOW_OVERLAP_BYTES)
+        );
+        assert!(!scanned(&printed).contains("Aa1Bb2Cc3Dd4Ee5"));
+        assert_eq!(
+            stored_output_outcome(&text_output(&printed)),
+            format!("; completed; bytes={}; head=\"first line\"", printed.len())
         );
     }
 

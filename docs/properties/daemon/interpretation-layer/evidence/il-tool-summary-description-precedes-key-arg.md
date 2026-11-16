@@ -16,7 +16,7 @@ are golden-visible and `display_arg` had to reproduce them.
   (`chunk_text.rs:129-137`), 60 scalar values plus `…`.
 - Callers: `history_summarizer_chunk.rs:1290`, `:1295` (through
   `call_summary`), `crates/daemon/src/boundary.rs:1860`, `:1867`,
-  `crates/daemon/src/tool_outcome.rs:333`, `:352`.
+  `crates/daemon/src/tool_outcome.rs:437`, `:456`.
 - Reachability: the summarizer path needs a model chain (`catalog.md`,
   Reachability classes).
 - Tests: `history_summarizer_chunk.rs:3581` (description and key-argument

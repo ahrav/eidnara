@@ -242,11 +242,15 @@ and `digest` render the rest:
   line. A whole output is scanned as its text joined by newlines, and the
   scanned text is cut at 2,000 bytes on a character boundary, because a
   placeholder can be longer than the credential it replaces. An excerpt's
-  line is scanned alone over its first 98,820 bytes, which cover the bytes
-  the excerpt reads and the scanner's longest finding, and the excerpt then
-  clips the scanned line. A finding that needs an adjacent line, such as a
-  value on the tail line whose key is on the line before it, stays in the
-  excerpt. An output with no finding has the digest the summarizer read.
+  line is scanned with its neighbouring text. The head's scan reads the
+  output from the head's start for 98,820 bytes, which cover the bytes the
+  excerpt reads and the scanner's longest finding. The tail's scan reads up
+  to 98,304 bytes before the tail and 98,820 bytes of it, 197,124 bytes at
+  most, so a value on the tail whose key is on the line before it is
+  replaced. A finding that touches a line replaces it with the scanned
+  line, which the excerpt then clips; any other line is the printed line. A
+  tail whose scanned line begins inside the line before it is withheld. An
+  output with no finding has the digest the summarizer read.
   The scan ledger's receipt for the transcript counts the findings of the
   store's scan of the text it receives. A credential the as-printed scan
   replaced arrives as a placeholder, so that receipt counts zero for it.

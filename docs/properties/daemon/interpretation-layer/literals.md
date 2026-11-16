@@ -291,7 +291,7 @@ or rendered output text carries no interpretation of a harness record.
 | Literal | Reason | Locations |
 | --- | --- | --- |
 | <code> commits: {}</code> | format template | `chunk_text.rs:113` |
-| <code>; bytes={}</code> | format template | `tool_outcome.rs:192` |
+| <code>; bytes={}</code> | format template | `tool_outcome.rs:201` |
 | <code>&lt;output&gt;&lt;history_segments&gt;\n&lt;history_segment ...</code> | format template | `history_summarizer_chunk.rs:759` |
 | <code>Messages {start}-{end} were not summarized: {...</code> | format template | `history_summarizer_chunk.rs:756` |
 | <code>OpenCode serialization produced duplicate too...</code> | format template | `codec/opencode.rs:470` |
@@ -354,7 +354,7 @@ or rendered output text carries no interpretation of a harness record.
 | <code>\s{2,}</code> | regular expression or replacement | `chunk_text.rs:221` |
 | <code>(empty)</code> | rendered text, marker, separator, or value | `selection.rs:234`; `chunk_text.rs:40, 41, 144, 146`; `codec/opencode.rs:520, 997, 1168`; `codec/pi.rs:368, 907, 1463, 1521, 1522, 1523, 1581` |
 | <code> </code> | rendered text, marker, separator, or value | `chunk_text.rs:44` |
-| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:278`; `history_summarizer_chunk.rs:1196, 1209` |
+| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `crates/daemon/src/tool_outcome.rs:382`; `history_summarizer_chunk.rs:1196, 1209` |
 | <code>%Y-%m-%d</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1150` |
 | <code>(no output)</code> | rendered text, marker, separator, or value | `codec/pi.rs:344` |
 | <code>+</code> | rendered text, marker, separator, or value | `codec/pi.rs:368` |
@@ -362,10 +362,10 @@ or rendered output text carries no interpretation of a harness record.
 | <code>, </code> | rendered text, marker, separator, or value | `chunk_text.rs:43, 113` |
 | <code>...[truncated]</code> | rendered text, marker, separator, or value | `selection.rs:36` |
 | <code>0123456789abcdef</code> | rendered text, marker, separator, or value | `wire.rs:651` |
-| <code>; </code> | rendered text, marker, separator, or value | `crates/daemon/src/tool_outcome.rs:190` |
-| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:198` |
-| <code>; output=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:443` |
-| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:198` |
+| <code>; </code> | rendered text, marker, separator, or value | `crates/daemon/src/tool_outcome.rs:199` |
+| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:206` |
+| <code>; output=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:547` |
+| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:206` |
 | <code>&lt;!-- OMO_INTERNAL_INITIATOR --&gt;</code> | rendered text, marker, separator, or value | `chunk_text.rs:14` |
 | <code>&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:48` |
 | <code>Execution denied</code> | rendered text, marker, separator, or value | `codec/opencode.rs:1273`; `codec/pi.rs:1773, 1823` |
@@ -377,7 +377,7 @@ or rendered output text carries no interpretation of a harness record.
 | <code>[dropped]</code> | rendered text, marker, separator, or value | `selection.rs:447` |
 | <code>[object]</code> | rendered text, marker, separator, or value | `selection.rs:559` |
 | <code>\&quot;</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1403` |
-| <code>\n</code> | rendered text, marker, separator, or value | `tool_outcome.rs:221`; `history_summarizer_chunk.rs:331, 549`; `codec/opencode.rs:1283`; `codec/pi.rs:1831` |
+| <code>\n</code> | rendered text, marker, separator, or value | `tool_outcome.rs:230`; `history_summarizer_chunk.rs:331, 549`; `codec/opencode.rs:1283`; `codec/pi.rs:1831` |
 | <code>\n&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:43` |
 | <code>\n[… tokens truncated by the daemon to fit th...</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1088` |
 | <code>\n\n(command cancelled)</code> | rendered text, marker, separator, or value | `codec/pi.rs:332` |
