@@ -6,9 +6,10 @@ use std::time::Instant;
 
 use kernel::{
     AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, ChunkRow,
-    CommitIntent, DecisionPayload, DecisionRow, DecisionSpec, DomainSpec, EventKind, KernelError,
-    KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity, ServingPosition, SourceClass,
-    StagingCandidateSpec, Surface, TaintClass, VisibleAsOf, VisibleRow,
+    CommitIntent, DecisionContent, DecisionPayload, DecisionRow, DecisionSpec, DomainSpec,
+    EventKind, KernelError, KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity,
+    ServingPosition, SourceClass, StagingCandidateSpec, Surface, TaintClass, VisibleAsOf,
+    VisibleRow,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -651,7 +652,7 @@ fn a_chunk_after_a_position_serves_exactly_the_rows_that_follow_it() {
 }
 
 /// A chunk carries the decision of each decision object: its payload size as stored and, inside the payload
-/// budget, the row a read by id returns. An object that is no decision carries none, and a decision whose stored
+/// budget, the kind and payload a read by id returns. An object that is no decision carries none, and a decision whose stored
 /// payload does not decode carries its size alone, so the read by id reports it.
 #[test]
 fn a_chunk_carries_each_decision_object_with_its_decision() {
@@ -706,16 +707,23 @@ fn a_chunk_carries_each_decision_object_with_its_decision() {
         }
         let decision = entry.decision.as_ref().expect(id);
         if *id == undecodable {
-            assert_eq!((decision.payload_bytes, decision.row.as_ref()), (2, None));
+            assert_eq!(
+                (decision.payload_bytes, decision.content.as_ref()),
+                (2, None)
+            );
             continue;
         }
         assert_eq!(decision.payload_bytes, sizes[id], "{id}");
-        assert_eq!(decision.row.as_ref(), Some(&stored[id]), "{id}");
+        let content = DecisionContent {
+            decision_kind: stored[id].decision_kind.clone(),
+            payload: stored[id].payload.clone(),
+        };
+        assert_eq!(decision.content.as_ref(), Some(&content), "{id}");
     }
 }
 
 /// A payload budget ends the chunk at the first commit boundary where the rows' payload bytes pass it. The
-/// decision rows the chunk decodes stay within the budget, and every decision keeps its payload size.
+/// decisions the chunk decodes stay within the budget, and every decision keeps its payload size.
 #[test]
 fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_rows() {
     let directory = tempfile::tempdir().unwrap();
@@ -764,7 +772,7 @@ fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_r
             .rows
             .iter()
             .filter_map(|entry| entry.decision.as_ref())
-            .filter(|decision| decision.row.is_some())
+            .filter(|decision| decision.content.is_some())
             .map(|decision| decision.payload_bytes)
             .sum();
         assert!(decoded <= budget, "budget {budget}: decoded {decoded}");
@@ -774,8 +782,11 @@ fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_r
                 decision.map(|decision| decision.payload_bytes),
                 stored.map(|decision| decision.payload_bytes)
             );
-            if let Some(row) = decision.and_then(|decision| decision.row.as_ref()) {
-                assert_eq!(Some(row), stored.and_then(|decision| decision.row.as_ref()));
+            if let Some(content) = decision.and_then(|decision| decision.content.as_ref()) {
+                assert_eq!(
+                    Some(content),
+                    stored.and_then(|decision| decision.content.as_ref())
+                );
             }
         }
         let rest = read(

@@ -8,13 +8,13 @@ use std::collections::{BinaryHeap, HashMap};
 
 use host_runtime::RouteHandle;
 use kernel::{
-    ChunkRow, DecisionRow, KernelError, KernelStore, ScopeTermFilter, ServingPosition, Surface,
-    VisibleRow,
+    ChunkRow, DecisionContent, DecisionPayload, DecisionRow, KernelError, KernelStore,
+    ServingPosition, Surface, VisibleRow,
 };
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::project::{ProjectBinding, ScopeFilter, ScopeTerms, stored_terms};
+use super::project::{ProjectBinding, ScopeFilter, stored_terms};
 use super::serving;
 use super::{InvalidReason, KernelOutcome, blocking, state_only};
 use crate::HandlerCore;
@@ -97,7 +97,6 @@ pub(crate) struct ReadResponse {
 /// The rows a read admits before [`MAX_READ_ROWS`] and [`MAX_READ_ROW_BYTES`] apply, so a bounded read spends its budget only on rows the caller can use rather than on the rest of the project's surface.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RowSelection<'a> {
-    All,
     /// Applied in the kernel query, so a targeted lookup addresses a row the bounded unfiltered read drops.
     Objects(&'a [String]),
     /// Applied in the kernel query as well; `keeps` re-checks each returned row.
@@ -107,7 +106,7 @@ pub(crate) enum RowSelection<'a> {
 impl RowSelection<'_> {
     fn keeps(self, row: &VisibleRow) -> bool {
         match self {
-            Self::All | Self::Objects(_) => true,
+            Self::Objects(_) => true,
             Self::DomainDecisions(domain_id) => {
                 row.object.object_kind == "decision" && row.object.domain_id == domain_id
             }
@@ -179,23 +178,39 @@ impl NewestRows {
     }
 }
 
+/// One page of an unfiltered read: rows in serving order, each decision object beside the content the read serves
+/// for it.
+struct NewestPage {
+    known_as_of: i64,
+    tip: i64,
+    rows: Vec<(VisibleRow, Option<DecisionContent>)>,
+    /// Whether rows follow the page at the snapshot.
+    truncated: bool,
+}
+
 /// The first rows of the project's surface after `before` in serving order, within [`MAX_READ_ROWS`] and with
-/// decision payloads within [`MAX_READ_ROW_BYTES`], and whether more follow. The kernel serves the surface in
-/// chunks of whole commits, newest first, each decision object with its decision, so the read stops once the page
-/// and one further row are in hand; a chunk the scope filter thins is followed by the next.
+/// decision payloads within [`MAX_READ_ROW_BYTES`]. The kernel serves the surface in chunks of whole commits,
+/// newest first, each decision object with its decision, so the read stops once the page and one further row are
+/// in hand; a chunk the scope filter thins is followed by the next.
 fn newest_page(
     store: &KernelStore,
+    project: &ProjectBinding,
     surface: Surface,
-    requested: i64,
+    as_of: Option<i64>,
     before: Option<&ReadCursor>,
-    scope: ScopeTermFilter<'_>,
-    filter: &mut ScopeFilter,
-    terms: &mut ScopeTerms<'_>,
-) -> Result<ReadResponse, KernelError> {
-    let mut rows: Vec<VisibleRow> = Vec::new();
-    let mut decisions: HashMap<String, DecisionRow> = HashMap::new();
-    // Decision objects of the page whose chunk carried no decoded decision row.
-    let mut unread: Vec<String> = Vec::new();
+) -> Result<NewestPage, KernelError> {
+    let requested = match as_of {
+        Some(as_of) => as_of,
+        None => store.tip()?,
+    };
+    // The kernel keeps rows whose scope names another project out of the snapshot, so the read costs the project's rows and the registry entries it skips, and not the other projects' decisions.
+    let scope = project.scope_term();
+    // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
+    let mut filter = ScopeFilter::new(project);
+    let mut terms = stored_terms(store);
+    let mut rows: Vec<(VisibleRow, Option<DecisionContent>)> = Vec::new();
+    // Positions in `rows` of the decision objects whose chunk carried no decoded content.
+    let mut unread: Vec<usize> = Vec::new();
     let mut payload_bytes: u64 = 0;
     let mut position = before.map(|cursor| (cursor.created_commit_seq, cursor.object_id.clone()));
     let read_chunk = |position: &Option<(i64, String)>, rows: usize, payload_bytes: u64| {
@@ -215,6 +230,7 @@ fn newest_page(
     };
     let mut chunk = read_chunk(&position, 0, 0)?;
     let tip = chunk.tip;
+    rows.reserve(chunk.rows.len().min(MAX_READ_ROWS));
     let truncated = 'page: loop {
         let last = chunk.rows.last().map(|entry| {
             (
@@ -223,12 +239,13 @@ fn newest_page(
             )
         });
         for ChunkRow { row, decision } in chunk.rows {
-            if !filter.matches(row.scope_id.as_deref(), terms)? {
+            if !filter.matches(row.scope_id.as_deref(), &mut terms)? {
                 continue;
             }
             if rows.len() == MAX_READ_ROWS {
                 break 'page true;
             }
+            let mut content = None;
             if row.object.object_kind == "decision" {
                 // A visible decision-kind row without its typed decision row at the same snapshot is a canonical-integrity break. Serving it with `decision: null` would be indistinguishable from a non-decision row and silently drop it from memory surfaces, so the read fails closed instead.
                 let decision = decision.ok_or(KernelError::CorruptCanonicalRow)?;
@@ -237,14 +254,12 @@ fn newest_page(
                 if payload_bytes > MAX_READ_ROW_BYTES as u64 {
                     break 'page true;
                 }
-                match decision.row {
-                    Some(decision) => {
-                        decisions.insert(row.object.object_id.clone(), decision);
-                    }
-                    None => unread.push(row.object.object_id.clone()),
+                content = decision.content;
+                if content.is_none() {
+                    unread.push(rows.len());
                 }
             }
-            rows.push(row);
+            rows.push((row, content));
         }
         match last {
             Some(last) if !chunk.exhausted => position = Some(last),
@@ -253,22 +268,30 @@ fn newest_page(
         chunk = read_chunk(&position, rows.len(), payload_bytes)?;
     };
     if !unread.is_empty() {
-        decisions.extend(
-            store
-                .decisions_for_objects_as_of(&unread, requested)?
-                .into_iter()
-                .map(|decision| (decision.object_id.clone(), decision)),
-        );
-        if unread.iter().any(|id| !decisions.contains_key(id)) {
-            return Err(KernelError::CorruptCanonicalRow);
+        let ids: Vec<String> = unread
+            .iter()
+            .map(|&index| rows[index].0.object.object_id.clone())
+            .collect();
+        let mut decisions: HashMap<String, DecisionRow> = store
+            .decisions_for_objects_as_of(&ids, requested)?
+            .into_iter()
+            .map(|decision| (decision.object_id.clone(), decision))
+            .collect();
+        for (index, id) in unread.into_iter().zip(&ids) {
+            let decision = decisions
+                .remove(id)
+                .ok_or(KernelError::CorruptCanonicalRow)?;
+            rows[index].1 = Some(DecisionContent {
+                decision_kind: decision.decision_kind,
+                payload: decision.payload,
+            });
         }
     }
-    Ok(ReadResponse {
+    Ok(NewestPage {
         known_as_of: requested,
         tip,
         rows,
         truncated,
-        decisions,
     })
 }
 
@@ -282,7 +305,8 @@ pub(crate) fn read_visible(
     read_visible_page(store, project, surface, as_of, selection, None)
 }
 
-/// When `before` is set, `read_visible_page` applies the row cap to rows after `before` in serving order.
+/// The selected rows of the project's surface. When `before` is set, `read_visible_page` applies the row cap to
+/// rows after `before` in serving order.
 pub(crate) fn read_visible_page(
     store: &KernelStore,
     project: &ProjectBinding,
@@ -302,31 +326,16 @@ pub(crate) fn read_visible_page(
     let scope = project.scope_term();
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(store);
-    // An id or domain selection is matched in the kernel query, which reads every selected row; an unfiltered read pages the surface in serving order.
-    let selected = match selection {
-        RowSelection::All => None,
+    let visible = match selection {
         RowSelection::Objects(ids) => {
-            Some(store.visible_as_of_in_scope(surface, requested, Some(ids), Some(scope))?)
+            store.visible_as_of_in_scope(surface, requested, Some(ids), Some(scope))?
         }
-        RowSelection::DomainDecisions(domain_id) => {
-            Some(store.visible_domain_decisions_as_of_in_scope(
-                surface,
-                requested,
-                domain_id,
-                Some(scope),
-            )?)
-        }
-    };
-    let Some(visible) = selected else {
-        return newest_page(
-            store,
+        RowSelection::DomainDecisions(domain_id) => store.visible_domain_decisions_as_of_in_scope(
             surface,
             requested,
-            before,
-            scope,
-            &mut filter,
-            &mut terms,
-        );
+            domain_id,
+            Some(scope),
+        )?,
     };
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
     let mut newest = NewestRows::new(MAX_READ_ROWS);
@@ -486,12 +495,19 @@ fn write_int(body: &mut Vec<u8>, value: i64) {
     body.extend_from_slice(&digits[first..]);
 }
 
+/// The part of a decision a row serves.
+#[derive(Clone, Copy)]
+struct ServedDecision<'a> {
+    decision_kind: &'a str,
+    payload: &'a DecisionPayload,
+}
+
 /// Appends one row in its wire shape. Keys are written in the sorted order a `serde_json::Map` emits and values as
 /// `serde_json` encodes them, so the bytes equal the encoding of the row's `json!` tree.
 fn write_row(
     body: &mut Vec<u8>,
     row: &VisibleRow,
-    decision: Option<&DecisionRow>,
+    decision: Option<ServedDecision<'_>>,
     known_as_of: i64,
 ) {
     let object = &row.object;
@@ -499,7 +515,7 @@ fn write_row(
     match decision {
         Some(decision) => {
             body.extend_from_slice(b"{\"decision_kind\":");
-            write_str(body, &decision.decision_kind);
+            write_str(body, decision.decision_kind);
             body.extend_from_slice(b",\"payload\":{\"rationale\":");
             write_str(body, &decision.payload.rationale);
             body.extend_from_slice(b",\"summary\":");
@@ -544,32 +560,40 @@ fn write_row(
     body.push(b'}');
 }
 
-/// Encodes the read's response body: the envelope and the longest prefix of `response.rows` whose encoding fits
+/// The snapshot and flags of a read's response envelope.
+#[derive(Clone, Copy)]
+struct Envelope {
+    gated: bool,
+    known_as_of: i64,
+    tip: i64,
+    /// Whether the read left rows out before the byte budget applied.
+    truncated: bool,
+}
+
+/// Encodes the read's response body: the envelope and the longest prefix of `rows` whose encoding fits
 /// [`MAX_READ_ROW_BYTES`]. Each row is encoded once, straight into the body, and a row that passes the budget is
 /// taken back out. Rows are newest first, so the budget retains a contiguous prefix of the most recent rows.
 /// `truncated` reports rows the read or the budget left out.
-fn encode_body(response: &ReadResponse, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
+fn encode_body<'a>(
+    envelope: Envelope,
+    rows: impl ExactSizeIterator<Item = (&'a VisibleRow, Option<ServedDecision<'a>>)>,
+) -> Result<Vec<u8>, serde_json::Error> {
     // A typical memory row encodes to about 1 KiB; the envelope is under 200 bytes.
     let mut body =
-        Vec::with_capacity(MAX_READ_ROW_BYTES.min(response.rows.len().saturating_mul(1024)) + 256);
+        Vec::with_capacity(MAX_READ_ROW_BYTES.min(rows.len().saturating_mul(1024)) + 256);
     body.extend_from_slice(b"{\"gated\":");
-    serde_json::to_writer(&mut body, &gated)?;
+    serde_json::to_writer(&mut body, &envelope.gated)?;
     body.extend_from_slice(b",\"known_as_of\":");
-    serde_json::to_writer(&mut body, &response.known_as_of)?;
+    serde_json::to_writer(&mut body, &envelope.known_as_of)?;
     body.extend_from_slice(b",\"rows\":[");
     let rows_start = body.len();
-    let mut truncated = response.truncated;
-    for row in &response.rows {
+    let mut truncated = envelope.truncated;
+    for (row, decision) in rows {
         let row_start = body.len();
         if row_start > rows_start {
             body.push(b',');
         }
-        write_row(
-            &mut body,
-            row,
-            response.decisions.get(&row.object.object_id),
-            response.known_as_of,
-        );
+        write_row(&mut body, row, decision, envelope.known_as_of);
         // The `+ 1` charges each row's array separator or bracket byte against the budget.
         if body.len() - rows_start + 1 > MAX_READ_ROW_BYTES {
             body.truncate(row_start);
@@ -580,11 +604,50 @@ fn encode_body(response: &ReadResponse, gated: bool) -> Result<Vec<u8>, serde_js
     body.extend_from_slice(b"],\"state\":");
     serde_json::to_writer(&mut body, &KernelOutcome::Available)?;
     body.extend_from_slice(b",\"tip\":");
-    serde_json::to_writer(&mut body, &response.tip)?;
+    serde_json::to_writer(&mut body, &envelope.tip)?;
     body.extend_from_slice(b",\"truncated\":");
     serde_json::to_writer(&mut body, &truncated)?;
     body.push(b'}');
     Ok(body)
+}
+
+fn encode_response(response: &ReadResponse, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
+    let envelope = Envelope {
+        gated,
+        known_as_of: response.known_as_of,
+        tip: response.tip,
+        truncated: response.truncated,
+    };
+    encode_body(
+        envelope,
+        response.rows.iter().map(|row| {
+            let decision = response.decisions.get(&row.object.object_id);
+            let decision = decision.map(|decision| ServedDecision {
+                decision_kind: &decision.decision_kind,
+                payload: &decision.payload,
+            });
+            (row, decision)
+        }),
+    )
+}
+
+fn encode_page(page: &NewestPage, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
+    let envelope = Envelope {
+        gated,
+        known_as_of: page.known_as_of,
+        tip: page.tip,
+        truncated: page.truncated,
+    };
+    encode_body(
+        envelope,
+        page.rows.iter().map(|(row, content)| {
+            let decision = content.as_ref().map(|content| ServedDecision {
+                decision_kind: &content.decision_kind,
+                payload: &content.payload,
+            });
+            (row, decision)
+        }),
+    )
 }
 
 impl HandlerCore {
@@ -637,12 +700,20 @@ impl HandlerCore {
         let before = parsed.before.clone();
         let gated = parsed.gated;
         let result = blocking(move || {
-            let selection = object_ids
-                .as_deref()
-                .map_or(RowSelection::All, RowSelection::Objects);
-            let response =
-                read_visible_page(&store, &project, surface, as_of, selection, before.as_ref())?;
-            Ok::<_, KernelError>(encode_body(&response, gated))
+            let before = before.as_ref();
+            // An id filter is matched in the kernel query, which reads every named row; an unfiltered read pages the surface in serving order.
+            Ok::<_, KernelError>(match object_ids.as_deref() {
+                Some(ids) => {
+                    let selection = RowSelection::Objects(ids);
+                    let response =
+                        read_visible_page(&store, &project, surface, as_of, selection, before)?;
+                    encode_response(&response, gated)
+                }
+                None => encode_page(
+                    &newest_page(&store, &project, surface, as_of, before)?,
+                    gated,
+                ),
+            })
         })
         .await;
         match result {
@@ -736,7 +807,11 @@ mod tests {
         let row = populated_row();
         let decision = decision(&row.object.object_id);
         let mut encoded = Vec::new();
-        write_row(&mut encoded, &row, Some(&decision), 7);
+        let served = ServedDecision {
+            decision_kind: &decision.decision_kind,
+            payload: &decision.payload,
+        };
+        write_row(&mut encoded, &row, Some(served), 7);
         let written: Value = serde_json::from_slice(&encoded).unwrap();
 
         assert_eq!(
@@ -852,7 +927,7 @@ mod tests {
         for (gated, truncated) in [(true, true), (false, false)] {
             response.truncated = truncated;
             let expected = serde_json::to_vec(&body_value(&response, 2, gated, truncated)).unwrap();
-            let encoded = encode_body(&response, gated).unwrap();
+            let encoded = encode_response(&response, gated).unwrap();
             assert_eq!(
                 String::from_utf8(encoded.clone()).unwrap(),
                 String::from_utf8(expected).unwrap()
@@ -863,8 +938,42 @@ mod tests {
         }
         response.rows.clear();
         assert_eq!(
-            encode_body(&response, false).unwrap(),
+            encode_response(&response, false).unwrap(),
             serde_json::to_vec(&body_value(&response, 0, false, false)).unwrap()
+        );
+    }
+
+    /// A page encodes as the response that holds the same rows and decisions.
+    #[test]
+    fn a_page_encodes_as_the_response_with_its_rows() {
+        let populated = populated_row();
+        let bare = row("observation", "notes");
+        let decision = decision(&populated.object.object_id);
+        let page = NewestPage {
+            known_as_of: 41,
+            tip: 42,
+            rows: vec![
+                (
+                    populated.clone(),
+                    Some(DecisionContent {
+                        decision_kind: decision.decision_kind.clone(),
+                        payload: decision.payload.clone(),
+                    }),
+                ),
+                (bare.clone(), None),
+            ],
+            truncated: true,
+        };
+        let response = ReadResponse {
+            known_as_of: 41,
+            tip: 42,
+            rows: vec![populated.clone(), bare],
+            truncated: true,
+            decisions: HashMap::from([(populated.object.object_id, decision)]),
+        };
+        assert_eq!(
+            String::from_utf8(encode_page(&page, true).unwrap()).unwrap(),
+            String::from_utf8(encode_response(&response, true).unwrap()).unwrap()
         );
     }
 
@@ -909,13 +1018,13 @@ mod tests {
             "eight rows of an eighth of the budget each pass it"
         );
         assert_eq!(
-            encode_body(&response, false).unwrap(),
+            encode_response(&response, false).unwrap(),
             serde_json::to_vec(&body_value(&response, fitting, false, true)).unwrap()
         );
         let mut within = response;
         within.rows.truncate(fitting);
         assert_eq!(
-            encode_body(&within, false).unwrap(),
+            encode_response(&within, false).unwrap(),
             serde_json::to_vec(&body_value(&within, fitting, false, false)).unwrap()
         );
     }
@@ -933,9 +1042,8 @@ mod tests {
             "an observation carries no decision and must not spend the budget"
         );
         let ids = ["memory-decision".to_string()];
-        for selection in [RowSelection::All, RowSelection::Objects(&ids)] {
-            assert!(selection.keeps(&row("decision", "notes")));
-            assert!(selection.keeps(&row("observation", "memory")));
-        }
+        let selection = RowSelection::Objects(&ids);
+        assert!(selection.keeps(&row("decision", "notes")));
+        assert!(selection.keeps(&row("observation", "memory")));
     }
 }

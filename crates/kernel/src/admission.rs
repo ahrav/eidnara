@@ -10,9 +10,7 @@ use super::envelope::{
 use super::object_write;
 use super::redaction::{identity, record, redact};
 use super::scope::Dimension;
-use super::slice::{
-    APPROVAL_REVOKE_KIND, DecisionPayload, DecisionRow, DecisionSpec, DecisionWriteOutcome,
-};
+use super::slice::{APPROVAL_REVOKE_KIND, DecisionPayload, DecisionSpec, DecisionWriteOutcome};
 use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 use crate::CachedSql;
 use crate::current_time_ms;
@@ -22,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "46497c0c333c44ed120c1f7558024ae51775da6a0343a4579a37c79d0f4eeee8";
+    "e270d319144d5cf13fdc13130e0cb780e45bc32047f6a4e695e39fd87c25ddbc";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -254,10 +252,17 @@ pub struct ChunkRow {
 pub struct ChunkDecision {
     /// `length(decision_payload)` in bytes.
     pub payload_bytes: u64,
-    /// The decision row, decoded while the payload bytes the chunk has read stay within the caller's budget.
-    /// `None` past the budget and for a payload that does not decode, so a caller reads that row by id when it
-    /// serves it.
-    pub row: Option<DecisionRow>,
+    /// The decision's kind and payload, decoded while the payload bytes the chunk has read stay within the
+    /// caller's budget. `None` past the budget and for a payload that does not decode, so a caller reads that
+    /// decision by id when it serves it.
+    pub content: Option<DecisionContent>,
+}
+
+/// The part of a decision row a surface serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionContent {
+    pub decision_kind: String,
+    pub payload: DecisionPayload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2978,19 +2983,15 @@ const LAST_SERVED_COLUMN: usize = OBJECT_ROWID_COLUMN;
 /// The first of the decision columns the page statement selects after the served columns, and their aliases in
 /// column order.
 const PAGE_DECISION_COLUMN: usize = LAST_SERVED_COLUMN + 1;
-const PAGE_DECISION_ALIASES: [&str; 11] = [
-    "dec_decision_id",
-    "dec_proposition_id",
-    "dec_scope_id",
-    "dec_anchor_id",
-    "dec_evidence_id",
-    "dec_decision_payload",
+const PAGE_DECISION_ALIASES: [&str; 5] = [
     "dec_created_commit_seq",
     "dec_invalidated_commit_seq",
-    "dec_decision_kind",
     "dec_payload_bytes",
-    "dec_sensitivity_class",
+    "dec_decision_payload",
+    "dec_decision_kind",
 ];
+/// The rows a chunk reserves room for before it reads any: one page of the read route.
+const CHUNK_ROWS_RESERVED: usize = 8192;
 
 /// A text column's bytes borrowed from the row, `None` for SQL NULL.
 fn bytes_column<'r>(
@@ -3656,11 +3657,13 @@ fn served_chunk(
         ServedSelection::CreatedAtOrBefore(newest),
         scope,
         |rows| {
-            let mut visible: Vec<ChunkRow> = Vec::new();
+            // A chunk gathers up to `min_rows` drafts before it finishes any, so the vectors reserve that room once.
+            let reserved = min_rows.min(CHUNK_ROWS_RESERVED);
+            let mut visible: Vec<ChunkRow> = Vec::with_capacity(reserved);
             let mut visible_bytes: u64 = 0;
-            let mut drafts: Vec<Draft> = Vec::new();
+            let mut drafts: Vec<Draft> = Vec::with_capacity(reserved);
             // One entry per draft: the decision read with the object once a history row makes it servable.
-            let mut decisions: Vec<Option<ChunkDecision>> = Vec::new();
+            let mut decisions: Vec<Option<ChunkDecision>> = Vec::with_capacity(reserved);
             let mut draft_bytes: u64 = 0;
             let mut read_bytes: u64 = 0;
             let mut commit = None;
@@ -3700,7 +3703,7 @@ fn served_chunk(
 }
 
 /// The decision the page statement joined to a decision object, when the snapshot holds one. `read_bytes` counts
-/// the payload bytes of every decision read so far; the row is decoded while that count stays within
+/// the payload bytes of every decision read so far; the content is decoded while that count stays within
 /// `payload_budget`, which bounds the payloads a chunk holds to the budget.
 fn chunk_decision(
     row: &rusqlite::Row<'_>,
@@ -3712,40 +3715,30 @@ fn chunk_decision(
         return Ok(None);
     }
     let first = PAGE_DECISION_COLUMN;
-    let Some(created_commit_seq) = row.get::<_, Option<i64>>(first + 6)? else {
+    let Some(created_commit_seq) = row.get::<_, Option<i64>>(first)? else {
         return Ok(None);
     };
-    let invalidated: Option<i64> = row.get(first + 7)?;
+    let invalidated: Option<i64> = row.get(first + 1)?;
     if created_commit_seq > requested || invalidated.is_some_and(|at| at <= requested) {
         return Ok(None);
     }
-    let payload_bytes = row.get::<_, i64>(first + 9)?.max(0) as u64;
+    let payload_bytes = row.get::<_, i64>(first + 2)?.max(0) as u64;
     *read_bytes = read_bytes.saturating_add(payload_bytes);
     let payload = (*read_bytes <= payload_budget)
-        .then(|| bytes_column(row, first + 5))
+        .then(|| bytes_column(row, first + 3))
         .transpose()?
         .flatten()
         .and_then(|payload| serde_json::from_slice::<DecisionPayload>(payload).ok());
-    let decision = match payload {
-        Some(payload) => Some(DecisionRow {
-            decision_id: row.get(first)?,
-            object_id: row.get(0)?,
-            proposition_id: row.get(first + 1)?,
-            scope_id: row.get(first + 2)?,
-            anchor_id: row.get(first + 3)?,
-            evidence_id: row.get(first + 4)?,
-            decision_kind: row.get(first + 8)?,
+    let content = match payload {
+        Some(payload) => Some(DecisionContent {
+            decision_kind: row.get(first + 4)?,
             payload,
-            created_commit_seq,
-            sensitivity: Sensitivity::from_stored_bytes(
-                bytes_column(row, first + 10)?.unwrap_or_default(),
-            ),
         }),
         None => None,
     };
     Ok(Some(ChunkDecision {
         payload_bytes,
-        row: decision,
+        content,
     }))
 }
 
@@ -3845,14 +3838,11 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
     };
     let decision_columns = match selection {
         ServedSelection::CreatedAtOrBefore(_) => {
-            ",dec.decision_id AS dec_decision_id,dec.proposition_id AS dec_proposition_id,
-                    dec.scope_id AS dec_scope_id,dec.anchor_id AS dec_anchor_id,
-                    dec.evidence_id AS dec_evidence_id,dec.decision_payload AS dec_decision_payload,
-                    dec.created_commit_seq AS dec_created_commit_seq,
+            ",dec.created_commit_seq AS dec_created_commit_seq,
                     dec.invalidated_commit_seq AS dec_invalidated_commit_seq,
-                    dec.decision_kind AS dec_decision_kind,
                     length(dec.decision_payload) AS dec_payload_bytes,
-                    dec.sensitivity_class AS dec_sensitivity_class"
+                    dec.decision_payload AS dec_decision_payload,
+                    dec.decision_kind AS dec_decision_kind"
         }
         ServedSelection::Named(_) | ServedSelection::All | ServedSelection::DomainDecisions(_) => {
             ""
