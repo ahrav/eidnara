@@ -20,7 +20,7 @@ Evidence consists of source inspection and documented claims, not executions.
   promoted-memory embedding and shared timer slices to RP2.1.
 - [Canonical memory reader][memory] filters memory-domain visible decisions
   and trims to a rendering budget. It cannot enumerate every source class.
-- `crates/daemon/src/canonical_memory.rs:282-312` is the filtering test, not
+- `crates/daemon/src/canonical_memory.rs:432-462` is the filtering test, not
   the reader. Its existing assertion remains unaudited adjacent evidence.
 - [OpenCode tool decoding][tool] expands one native tool part into a call and,
   for completion/error, a result block. Native record identity is not block count.

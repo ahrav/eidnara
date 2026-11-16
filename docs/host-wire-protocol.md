@@ -1114,9 +1114,10 @@ positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
-they take no place from another session's facts. The read passes over at
-most eight pages of that size, 64 MiB of a session's own newer facts, and
-reports a cut past that. The extractor's reference memories are ranked from two bounded reads
+they take no place from another session's facts. The read loads at most
+eight pages of that size, the payloads of up to 64 MiB of a session's own
+newer facts; past that it stops, keeps the facts it had selected, and
+leaves the older facts out of the block. The extractor's reference memories are ranked from two bounded reads
 at one snapshot: the newest facts on `explicit_search`, and the facts served
 on `auto_inject` in the plain newest window and in the delivery of each
 session whose messages the batch holds; a fact older than every window is
