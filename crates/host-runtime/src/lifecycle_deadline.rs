@@ -37,7 +37,7 @@ impl PollTime {
 
 fn thread_cpu_time() -> Duration {
     #[cfg(test)]
-    if let Some(spent) = test_cpu::spent() {
+    if let Some(spent) = test_cpu::read() {
         return spent;
     }
     let now = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
@@ -54,10 +54,16 @@ pub(crate) mod test_cpu {
 
     thread_local! {
         static SPENT: Cell<Option<Duration>> = const { Cell::new(None) };
+        static READS: Cell<usize> = const { Cell::new(0) };
     }
 
-    pub(crate) fn spent() -> Option<Duration> {
+    pub(crate) fn read() -> Option<Duration> {
+        READS.set(READS.get() + 1);
         SPENT.get()
+    }
+
+    pub(crate) fn reads() -> usize {
+        READS.get()
     }
 
     pub(crate) fn spend(cpu: Duration) {
