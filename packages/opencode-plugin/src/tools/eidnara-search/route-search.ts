@@ -54,9 +54,8 @@ function refusedState(state: MemoryState): RouteSearch {
     return { kind: "refused", text: `Error: ${renderToolStateText(state)}` };
 }
 
-function servesRevision(row: ReadRow | undefined, revision: number): row is ReadRow {
+function servesRevision(row: ReadRow, revision: number): boolean {
     return (
-        row !== undefined &&
         isMemoryDecisionRow(row) &&
         row.object.source_revision === revision &&
         row.object.invalidated_commit_seq === null
@@ -133,7 +132,7 @@ export async function searchThroughRoute(args: {
     }
     if (ranking.length === 0) return { kind: "ranked", results: [], notes };
 
-    // The limit counts memory decisions. A ranked decision of another domain, such as the statement record that approves a memory and repeats its text, takes no place: each read names as many of the next ranked decisions as places remain, and every read after the first reads the store state the first one answered at, so a commit between two reads changes nothing the search renders.
+    // The limit counts memory decisions the read's store state holds. A ranked decision of another domain, such as the statement record that approves a memory and repeats its text, takes no place. A ranked decision whose row the read does not return takes no place either: that store state no longer serves it, its domain is unknown, and the search reports it as changed after ranking. Each read names as many of the next ranked decisions as places remain, and every read after the first reads the store state the first one answered at, so a commit between two reads changes nothing the search renders.
     const nowMs = args.nowMs ?? Date.now();
     const results: KernelMemorySearchResult[] = [];
     const stale: string[] = [];
@@ -166,10 +165,17 @@ export async function searchThroughRoute(args: {
         const rows = new Map(read.rows.map((row) => [row.object.object_id, row]));
         const unresolved = new Set(read.unresolvedObjectIds);
         for (const decision of selected) {
+            if (unresolved.has(decision.objectId)) {
+                places -= 1;
+                continue;
+            }
             const row = rows.get(decision.objectId);
-            if (row !== undefined && !isMemoryDecisionRow(row)) continue;
+            if (row === undefined) {
+                stale.push(decision.objectId);
+                continue;
+            }
+            if (!isMemoryDecisionRow(row)) continue;
             places -= 1;
-            if (unresolved.has(decision.objectId)) continue;
             if (decision.conflicting || !servesRevision(row, decision.revision)) {
                 stale.push(decision.objectId);
                 continue;

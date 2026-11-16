@@ -12,9 +12,9 @@ re-verified at this branch tip.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Bind: `crates/daemon/src/lib.rs:13582-13592`.
+- Bind: `crates/daemon/src/lib.rs:13636-13646`.
 - Wrapup: `prepare_wrapup_fire` (`crates/daemon/src/lib.rs:6074`) reads
-  `self.effective_config` at `crates/daemon/src/lib.rs:6088`.
+  `self.effective_config` at `crates/daemon/src/lib.rs:6116`.
 - Correction: the spec cited `config.rs:2630, 2753, 2762`, which are config
   tests at this tip.
 
@@ -22,7 +22,7 @@ revision.
   `route.open`; the wrapup fire reads the live effective config.
 - Existing check:
   `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-  (`crates/daemon/src/lib.rs:40161`);
+  (`crates/daemon/src/lib.rs:40329`);
   `only_an_available_composition_is_recorded`
   (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
   `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
@@ -59,10 +59,10 @@ that turns it off (and the reverse), then a pass and a wrapup.
 
 - Sources examined: the specification (#1145) open questions and the code cited above.
 - Findings: Gap G4: the summarizer reattach path reads `memory_enabled` from the
-  live effective config (`crates/daemon/src/lib.rs:5269`, used at
-  `crates/daemon/src/lib.rs:5416`), a third consent source beside the frozen
+  live effective config (`crates/daemon/src/lib.rs:5297`, used at
+  `crates/daemon/src/lib.rs:5444`), a third consent source beside the frozen
   binding and the live wrapup config; the fire path states the frozen-config
-  rule in its own comment (`crates/daemon/src/lib.rs:5928`). Recorded, not
+  rule in its own comment (`crates/daemon/src/lib.rs:5956`). Recorded, not
   fixed; whether the reattach should follow the frozen config is an owner
   decision (needs human input).
 - Missing evidence: an owner decision or the named read.

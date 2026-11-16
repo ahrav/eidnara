@@ -18,7 +18,7 @@ revision.
   call in `first_transform` (`crates/daemon/src/lib.rs:10079`) and the call in
   `rerun_transform` (`crates/daemon/src/lib.rs:10006`), and at the call in
   `run_transform` when a committed pass fails its boundary read
-  (`crates/daemon/src/lib.rs:9741`).
+  (`crates/daemon/src/lib.rs:9796`).
 - The slug keeps `revision`; the key is the served-set digest (OQ3-12).
 
 - Guarantee under test: For one (project digest, harness, session, served-set

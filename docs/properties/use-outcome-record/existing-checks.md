@@ -132,9 +132,9 @@ Every location was read at the #1157 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `(TypeScript test at this line)` | `packages/cli/src/commands/review-wire.contract.test.ts:107` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
-| `(TypeScript test at this line)` | `packages/cli/src/commands/review-wire.contract.test.ts:125` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
-| `(TypeScript test at this line)` | `packages/cli/src/commands/review-wire.contract.test.ts:137` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `(TypeScript test at this line)` | `packages/cli/src/commands/review-wire.contract.test.ts:111` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `(TypeScript test at this line)` | `packages/cli/src/commands/review-wire.contract.test.ts:141` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
+| `(TypeScript test at this line)` | `packages/cli/src/commands/review-wire.contract.test.ts:153` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `(TypeScript test at this line)` | `packages/cli/src/commands/review.test.ts:781` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `(TypeScript test at this line)` | `packages/cli/src/commands/review.test.ts:822-861` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `(TypeScript test at this line)` | `packages/cli/src/commands/review.test.ts:863` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |

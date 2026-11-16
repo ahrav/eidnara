@@ -1198,19 +1198,22 @@ no ceiling; a statement leaves when a correction supersedes or retires it.
 When the Kernel's admission policy refuses a statement record, or the
 admission that rests on it, the same frozen plan commits with each of its user
 statements as a labeled memory for explicit search, and
-`decisions_approval_refused` counts them. The labeled commit applies the
-plan's replacements as the approving commit would, so a fact it supersedes or
-retires leaves `auto_inject` while the correction is labeled. Every other captured fact remains labeled model inference
+`decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
+as a replacement stays live and served on `auto_inject` beside the labeled correction, and the labeled commit supersedes
+or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility.
 Each reference memory offered to the extractor carries `user_statement`, true
 when the Kernel serves it on automatic surfaces, which a user's recorded
 statement is. A proposal that names
 `duplicate_of` writes nothing, with one exception: a user's statement that
-duplicates a memory the Kernel does not serve on automatic surfaces, such as
+duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; the name records which memory
-the extractor matched and carries no Kernel dependency. A stored plan of a user source that
+the extractor matched and carries no Kernel dependency. A memory is served as
+approved when it is visible, not labeled, on `explicit_search`; a fact
+reclassified as sensitive stays approved there while `auto_inject` hides it,
+so a repeat of it writes nothing. A stored plan of a user source that
 names `duplicate_of` beside `replaces` or `also_replaces`, or `also_replaces`
 beside no `replaces`, is refused as invalid input; a stored plan of another
 source that names a replacement meets a conflict and is planned again. The

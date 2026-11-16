@@ -18,7 +18,7 @@ A sweep after the evidence's `retain_until`.
 
 ## What a test must construct
 
-A cited decision, a sweep at a far-future instant, and a retirement attempt (`crates/daemon/src/source_capture_tests.rs:3810`); the cited decision's class and empty `evidence_id` (`crates/daemon/src/source_capture_tests.rs:3501`).
+A cited decision, a sweep at a far-future instant, and a retirement attempt (`crates/daemon/src/source_capture_tests.rs:3837`); the cited decision's class and empty `evidence_id` (`crates/daemon/src/source_capture_tests.rs:3528`).
 
 ## Investigation log
 
