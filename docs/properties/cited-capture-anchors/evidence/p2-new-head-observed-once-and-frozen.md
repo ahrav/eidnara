@@ -87,7 +87,7 @@ aliased branch loose and in `packed-refs`.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:5014`).
+  (`crates/daemon/src/memory_capture.rs:5055`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 

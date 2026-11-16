@@ -45,8 +45,8 @@ Corrections to [`../fact-sheet.md`](../fact-sheet.md) found while verifying:
 - The "carry a scope and an evidence citation" doc comment is at
   `crates/kernel/src/envelope.rs:1923-1924`, not "about 1870".
 - The transport envelope keys are at
-  `crates/daemon/src/kernel_routes/mod.rs:461` and the stripping function
-  `parse_request_body` at `:463-473`, not `:458-471`.
+  `crates/daemon/src/kernel_routes/mod.rs:468` and the stripping function
+  `parse_request_body` at `:470-480`, not `:465-478`.
 - The 512 KiB redaction bound is `secret_scanner::MAX_INPUT_BYTES`
   (`crates/secret-scanner/src/api.rs:6`) re-exported as
   `context_core::redaction::MAX_REDACTABLE_BYTES`
@@ -91,9 +91,9 @@ Writer categories known today (FACT):
 Caller-visible crossings: the bearer-authenticated connection
 (`docs/host-wire-protocol.md:26`: the key is the authority; `harness`,
 `session`, `role` are claims). The route binds project and harness
-server-side (`RouteScope`, `crates/daemon/src/kernel_routes/mod.rs:405-411`)
+server-side (`RouteScope`, `crates/daemon/src/kernel_routes/mod.rs:412-418`)
 and strips `session_id` and `project_root` from the body before parsing
-(`mod.rs:461-473`).
+(`mod.rs:468-480`).
 
 Routed elsewhere (not decided here): the JSON field names and shapes of the
 new wire fields (`/software-design:representation-and-model-boundary-design`
@@ -193,7 +193,7 @@ that exist)
 | Kernel evidence | `evidence_id` (`evidence_meta` PK, `schema.rs:139`), existing entity with liveness | Existing; not re-earned here |
 | Repository evidence reference | `{path, git_object_id}` | PROPOSED value: equality is exact byte equality of both fields after admission (section 5 rule A4). No continuity; a different oid is a different reference. Content-addressed outside the Kernel; the daemon does not verify the blob exists (plan scope). |
 | Dispute report | after commit: `admission_decision_id` (`"{commit_seq}:{ordinal}"`, `admission.rs:1745`); before commit: the operation identity `(producer, operation_key, request_digest)` | PROPOSED: NOT EARNED as an entity. A dispute is an immutable appended event; nothing distinguishes "the same dispute" through change. Its idempotent identity is the operation identity (section 5 rule A8). |
-| Reporter | `(derived source class, derived taint class, actor claim, cause, bound session, bound harness)` | PROPOSED value stamped at commit. The session and harness are known only at the route (`RouteScope`, `mod.rs:405-411`) and are not persisted by any column today. |
+| Reporter | `(derived source class, derived taint class, actor claim, cause, bound session, bound harness)` | PROPOSED value stamped at commit. The session and harness are known only at the route (`RouteScope`, `mod.rs:412-418`) and are not persisted by any column today. |
 
 The reporter is a value, not an entity: there is no per-actor principal
 (`docs/host-wire-protocol.md:26`; plan non-goal `ExplicitUser`).
@@ -574,7 +574,7 @@ for the SQL, the read set, and the conflict footprint.
 - Variation point: harness in the tool actor (`agent:<harness>`). Present
   selection (two harnesses), selected at plugin build time, owner: each
   plugin. The daemon already knows the harness from the binding
-  (`mod.rs:410`); A13 proposes the check. NOT EARNED as a runtime
+  (`mod.rs:417`); A13 proposes the check. NOT EARNED as a runtime
   abstraction; a constant per plugin suffices.
 - Variation point for evidence kind (`evidence_id` versus
   `evidence_ref`): a closed two-alternative value, both present now.

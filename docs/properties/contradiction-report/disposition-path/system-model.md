@@ -36,9 +36,9 @@ the difference noted.
   HEAD. The arm carries no `#[cfg]` attribute, so the route is reachable in
   a default build.
 - `kernel_request` binds the route scope from the channel's management
-  binding and the body's `project_root` (`kernel_routes/mod.rs:415-441`),
+  binding and the body's `project_root` (`kernel_routes/mod.rs:422-448`),
   then strips `method, kind, session_id, project_root` before strict
-  parsing (`mod.rs:458-471`). The session id reaches the daemon only
+  parsing (`mod.rs:465-478`). The session id reaches the daemon only
   through the channel binding; no body field or commit-log column carries
   it.
 - `CommitRequest` (`commit.rs:107-127`) is `deny_unknown_fields`;
@@ -229,7 +229,7 @@ disposition row.
    `source_kind`" citing `envelope.rs:1401-1410`. The `commit_log` schema
    (`schema.rs:26`) and the INSERT (`envelope.rs:1484-1499`) carry
    `actor` and `cause` only. `session_id` is stripped at
-   `kernel_routes/mod.rs:461` and `source_kind` is consumed by
+   `kernel_routes/mod.rs:468` and `source_kind` is consumed by
    `resolve_classes`. Joinability today is by `actor` and `cause` text.
    Lead for record `disposition-commit-log-row-carries-actor-and-cause-only`.
 2. Plan P4 R2 says a cited `evidence_id` "must resolve to a live

@@ -33,6 +33,8 @@ const DISABLED_SCHEMA: u32 = 3;
 const CURRENT_SCHEMA: u32 = 4;
 /// A record larger than this is not decoded; it is reported unavailable.
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
+/// How far a record's recording time may lie ahead of the wall clock before a renewable record counts as lapsed. A request stamps its record with the clock it read plus the time it waited, so a lead past one second means the wall clock stepped back.
+pub const CLOCK_STEP_TOLERANCE_MS: i64 = 1_000;
 
 /// The two transitions that persist intent. Every other projection state is derived from the database itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,14 +95,14 @@ pub struct ConsumerBinding {
     pub generation_id: String,
 }
 
-/// The kernel commit the transition must reach; fixed when first established, never moved by a retry, and moved forward only by `ProjectionLifecycle::recertify_target` after selection.
+/// The kernel commit the transition must reach; fixed when first established and kept by a retry that resumes the construction. `ProjectionLifecycle::recertify_target` moves it forward after selection, and `ProjectionLifecycle::release_target` clears it for an unselected rebuild whose capture is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryTarget {
     pub commit_seq: i64,
 }
 
-/// How many episodes the transition may run and how many it has consumed. A restart consumes nothing and grants nothing back.
+/// How many episodes the transition may run and how many it has consumed. A restart consumes nothing and grants nothing back; a renewal of a lapsed rebuild (`ProjectionLifecycle::renew_expired`) grants the allowance again with a fresh deadline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpisodeAccounting {
@@ -214,6 +216,18 @@ impl LifecycleIntent {
             }
         }
         Ok(())
+    }
+
+    /// Whether the slice loop renews this record once it lapses: a Rebuilding record that holds no staged seed. A stage certificate persisted in the capture binds the capture and its snapshot, and the renewed attempt's cleanup discards the unpinned stage. A record holding a staged seed keeps its accounting: once selection writes the staged family's certificate, that certificate binds the record's episode accounting and recording time, and a seed pinned before then follows the same rule. An authorized recovery keeps the bound its operator authorized.
+    pub fn renewable(&self) -> bool {
+        self.transition == Transition::Rebuilding && self.staged_seed_digest.is_none()
+    }
+
+    /// Whether the slice loop renews this record at `now`: it is renewable, and its deadline has passed or it was recorded more than [`CLOCK_STEP_TOLERANCE_MS`] after `now`, as when the wall clock stepped back past its recording. Renewal stamps the record again from `now`, so a clock stepped back past a recording leaves the renewed attempt one `B_recovery_ms` from the current clock. A step back smaller than the record's age leaves its recording behind the clock, and the attempt runs longer by the size of the step.
+    pub fn renewal_due(&self, now: i64) -> bool {
+        self.renewable()
+            && (now > self.episodes.deadline
+                || self.recorded_at > now.saturating_add(CLOCK_STEP_TOLERANCE_MS))
     }
 
     /// Whether `request` is a replay of this record: the same intent in every field the caller supplies.
@@ -876,7 +890,7 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused, because a fixed target moves only forward through `Self::recertify_target`.
+    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused. A fixed target moves forward through `Self::recertify_target` after selection, and `Self::release_target` clears it for an unselected rebuild whose capture is gone.
     ///
     /// # Errors
     ///
@@ -939,6 +953,76 @@ impl ProjectionLifecycle {
             return Err(IntentRefusal::DeadlineExpired);
         }
         intent.recovery_target = Some(target);
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
+    /// Clears the recovery target of `expected`, a Rebuilding record that holds no capture and no staged seed. A capture is taken at the kernel tip, so once the tip reaches a fixed target any commit before the capture puts its snapshot past the target; an unselected rebuild releases the target and fixes it again after its next capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when `transition != Transition::Rebuilding` or the record holds a capture or staged seed, [`IntentRefusal::DeadlineExpired`] when `now > episodes.deadline`, [`IntentRefusal::AllowanceExhausted`] when every episode is consumed, and the refusals of [`Self::admitted_intent`]; each of these leaves the record unchanged. A write error after the rename, such as [`IntentRefusal::DurabilityUnknown`], can leave the released target visible.
+    pub(crate) fn release_target(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+        now: i64,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        if intent.transition != Transition::Rebuilding
+            || intent.staged_seed_digest.is_some()
+            || intent.replacement_capture.is_some()
+        {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        if now > intent.episodes.deadline {
+            return Err(IntentRefusal::DeadlineExpired);
+        }
+        if intent.episodes.consumed >= intent.episodes.allowance {
+            return Err(IntentRefusal::AllowanceExhausted);
+        }
+        intent.recovery_target = None;
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
+    /// Renews `expected`, a record whose renewal is due at `now` (see [`LifecycleIntent::renewal_due`]), for another attempt. The renewed record keeps every field but the episode accounting and `recorded_at`: the allowance keeps its size with nothing consumed, the deadline becomes `deadline`, and `recorded_at` becomes `now`. The attempt identity stays, so the construction's registration commit, keyed by it, replays its receipt and the renewed attempt reads through the consumer the expired one registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when the record's renewal is not due at `now`, [`IntentRefusal::DeadlineExpired`] when `deadline <= now`, and the refusals of [`Self::admitted_intent`].
+    pub(crate) fn renew_expired(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+        deadline: i64,
+        now: i64,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        if !intent.renewal_due(now) {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        if deadline <= now {
+            return Err(IntentRefusal::DeadlineExpired);
+        }
+        intent.episodes = EpisodeAccounting {
+            allowance: intent.episodes.allowance,
+            consumed: 0,
+            deadline,
+        };
+        intent.recorded_at = now;
         self.replace(&intent, &admission)?;
         Ok(intent)
     }
@@ -1729,6 +1813,47 @@ mod tests {
             replacement_capture: None,
             recorded_at: 1,
             prior_disabled: None,
+        }
+    }
+
+    /// A renewal is due one millisecond past the deadline and one millisecond past the tolerance for a recording ahead of the clock, and never for a record holding a staged seed or for an authorized recovery.
+    #[test]
+    fn renewal_is_due_past_the_deadline_or_the_clock_step_tolerance_for_renewable_records() {
+        use super::CLOCK_STEP_TOLERANCE_MS;
+        let record = active();
+        assert!(!record.renewal_due(9));
+        assert!(record.renewal_due(10));
+        let ahead = LifecycleIntent {
+            recorded_at: 100 + CLOCK_STEP_TOLERANCE_MS,
+            episodes: EpisodeAccounting {
+                deadline: 1_000_000,
+                ..record.episodes
+            },
+            ..record.clone()
+        };
+        assert!(!ahead.renewal_due(100));
+        assert!(ahead.renewal_due(99));
+        for kept in [
+            LifecycleIntent {
+                staged_seed_digest: Some("d".repeat(64)),
+                ..record.clone()
+            },
+            LifecycleIntent {
+                transition: Transition::AuthorizedRecovery,
+                cause: Cause::DisabledRecovery,
+                authorization_ref: Some("operator:ok".to_owned()),
+                ..record.clone()
+            },
+        ] {
+            assert!(!kept.renewable());
+            assert!(!kept.renewal_due(10));
+            assert!(
+                !LifecycleIntent {
+                    recorded_at: 100 + CLOCK_STEP_TOLERANCE_MS + 1,
+                    ..kept
+                }
+                .renewal_due(99)
+            );
         }
     }
 
