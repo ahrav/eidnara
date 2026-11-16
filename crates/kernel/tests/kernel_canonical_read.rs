@@ -6,8 +6,8 @@ use std::time::Instant;
 use kernel::{
     AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent,
     DecisionPayload, DecisionSpec, DomainSpec, EventKind, KernelStore, ProviderEgress,
-    RepositoryProvenance, Sensitivity, SourceClass, StagingCandidateSpec, Surface, TaintClass,
-    VisibleAsOf,
+    RepositoryProvenance, Sensitivity, ServingPosition, SourceClass, StagingCandidateSpec, Surface,
+    TaintClass, VisibleAsOf, VisibleRow,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -477,10 +477,107 @@ fn the_domain_selection_reads_no_row_of_another_domains_payload_pressure() {
     );
 }
 
-/// A read bounded to a commit returns exactly the full read's rows created at or before that commit, rows of the
-/// bound's own commit included, with the same visibility and snapshot.
+/// The rows of a full read in serving order: newest commit first, then `object_id` ascending.
+fn serving_order(visible: &VisibleAsOf) -> Vec<VisibleRow> {
+    let mut rows = visible.rows.clone();
+    rows.sort_by(|left, right| {
+        right
+            .object
+            .created_commit_seq
+            .cmp(&left.object.created_commit_seq)
+            .then_with(|| left.object.object_id.cmp(&right.object.object_id))
+    });
+    rows
+}
+
+fn position(row: &VisibleRow) -> ServingPosition<'_> {
+    ServingPosition {
+        created_commit_seq: row.object.created_commit_seq,
+        object_id: &row.object.object_id,
+    }
+}
+
+/// Chunks read back to back serve the full read's rows in serving order at every chunk size. A chunk that leaves
+/// rows unread ends with a whole commit, holds `min_rows` rows, and would hold fewer without its last commit.
 #[test]
-fn the_created_at_or_before_selection_equals_the_filtered_full_read() {
+fn chunks_serve_the_full_read_in_serving_order_and_stop_at_a_commit_boundary() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 40, 300, 4);
+    let tip = store.tip().unwrap();
+    for (surface, requested) in [
+        (Surface::AutoInject, tip),
+        (Surface::ExplicitSearch, tip),
+        (Surface::ExplicitSearch, tip - 2),
+    ] {
+        let all = store
+            .visible_as_of_in_scope(surface, requested, None, None)
+            .unwrap();
+        let expected = serving_order(&all);
+        let mut commits: Vec<i64> = expected
+            .iter()
+            .map(|row| row.object.created_commit_seq)
+            .collect();
+        commits.dedup();
+        assert!(commits.len() > 2, "{surface:?}: {commits:?}");
+        for min_rows in [1, 2, 41, 257, 10_000] {
+            let mut served: Vec<VisibleRow> = Vec::new();
+            let mut chunks = 0;
+            loop {
+                let chunk = store
+                    .visible_chunk_as_of_in_scope(
+                        surface,
+                        requested,
+                        served.last().map(position),
+                        min_rows,
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    (chunk.known_as_of, chunk.tip),
+                    (all.known_as_of, all.tip),
+                    "{surface:?} min_rows {min_rows}"
+                );
+                chunks += 1;
+                let last_commit = chunk.rows.last().map(|row| row.object.created_commit_seq);
+                let exhausted = chunk.exhausted;
+                let before_last_commit = chunk
+                    .rows
+                    .iter()
+                    .filter(|row| Some(row.object.created_commit_seq) != last_commit)
+                    .count();
+                let len = chunk.rows.len();
+                served.extend(chunk.rows);
+                if exhausted {
+                    break;
+                }
+                assert!(len >= min_rows, "{surface:?} min_rows {min_rows}: {len}");
+                assert!(
+                    before_last_commit < min_rows,
+                    "{surface:?} min_rows {min_rows}: the chunk read past the commit that filled it"
+                );
+                if let Some(next) = expected.get(served.len()) {
+                    assert!(
+                        Some(next.object.created_commit_seq) < last_commit,
+                        "{surface:?} min_rows {min_rows}: the chunk split a commit"
+                    );
+                }
+            }
+            assert_eq!(served, expected, "{surface:?} min_rows {min_rows}");
+            if min_rows == 1 {
+                assert!(
+                    chunks >= commits.len(),
+                    "{surface:?}: {chunks} chunks over {} commits",
+                    commits.len()
+                );
+            }
+        }
+    }
+}
+
+/// A position inside a commit serves the rest of that commit by `object_id` and then every older commit; a
+/// position ahead of every row serves the whole read, and the oldest row's position serves nothing.
+#[test]
+fn a_chunk_after_a_position_serves_exactly_the_rows_that_follow_it() {
     let directory = tempfile::tempdir().unwrap();
     let store = store_with(directory.path(), 40, 300, 4);
     let tip = store.tip().unwrap();
@@ -488,34 +585,63 @@ fn the_created_at_or_before_selection_equals_the_filtered_full_read() {
         let all = store
             .visible_as_of_in_scope(surface, tip, None, None)
             .unwrap();
-        let mut commits: Vec<i64> = all
-            .rows
-            .iter()
-            .map(|row| row.object.created_commit_seq)
-            .collect();
-        commits.sort_unstable();
-        commits.dedup();
-        assert!(commits.len() > 2, "{surface:?}: {commits:?}");
-        for bound in commits {
-            let mut expected = all.clone();
-            expected
-                .rows
-                .retain(|row| row.object.created_commit_seq <= bound);
-            let selected = store
-                .visible_created_at_or_before_as_of_in_scope(surface, tip, bound, None)
-                .unwrap();
-            assert_eq!(selected.rows, expected.rows, "{surface:?} at {bound}");
-            assert!(
-                selected
-                    .rows
-                    .iter()
-                    .any(|row| row.object.created_commit_seq == bound),
-                "{surface:?} at {bound}"
-            );
+        let expected = serving_order(&all);
+        let inside_a_commit = expected
+            .windows(2)
+            .position(|pair| pair[0].object.created_commit_seq == pair[1].object.created_commit_seq)
+            .unwrap_or(0);
+        if surface == Surface::ExplicitSearch {
             assert_eq!(
-                (selected.known_as_of, selected.tip),
-                (all.known_as_of, all.tip)
+                expected[inside_a_commit].object.created_commit_seq,
+                expected[inside_a_commit + 1].object.created_commit_seq,
+                "the explicit-search rows hold a commit with two visible rows"
             );
         }
+        for index in [inside_a_commit, expected.len() / 2, expected.len() - 1] {
+            let chunk = store
+                .visible_chunk_as_of_in_scope(
+                    surface,
+                    tip,
+                    Some(position(&expected[index])),
+                    usize::MAX,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                chunk.rows,
+                expected[index + 1..],
+                "{surface:?} after {index}"
+            );
+            assert!(chunk.exhausted);
+        }
+        let ahead = store
+            .visible_chunk_as_of_in_scope(
+                surface,
+                tip,
+                Some(ServingPosition {
+                    created_commit_seq: tip + 1,
+                    object_id: "",
+                }),
+                usize::MAX,
+                None,
+            )
+            .unwrap();
+        assert_eq!(ahead.rows, expected, "{surface:?}");
+        // A position names a row by commit and id, so an id no row carries still splits its commit.
+        let first = &expected[inside_a_commit];
+        let between = format!("{}\u{0}", first.object.object_id);
+        let chunk = store
+            .visible_chunk_as_of_in_scope(
+                surface,
+                tip,
+                Some(ServingPosition {
+                    created_commit_seq: first.object.created_commit_seq,
+                    object_id: &between,
+                }),
+                usize::MAX,
+                None,
+            )
+            .unwrap();
+        assert_eq!(chunk.rows, expected[inside_a_commit + 1..], "{surface:?}");
     }
 }

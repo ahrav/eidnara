@@ -46,9 +46,9 @@ pub use admission::{
     AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition,
     DisputeReporter, EffectiveMaturity, EgressCandidate, EgressSnapshot, Evaluation,
     EvaluationInputs, EventKind, Maturity, Outcome, POLICY_REVISION, PriorDecision,
-    ScopeTermFilter, ServedClass, ServedRow, SourceClass, Surface, SurfaceVisibility, TaintClass,
-    VisibilityRow, VisibleAsOf, VisibleRow, evaluate_admission, served_visibility_row,
-    surface_visibility,
+    ScopeTermFilter, ServedClass, ServedRow, ServingPosition, SourceClass, Surface,
+    SurfaceVisibility, TaintClass, VisibilityRow, VisibleAsOf, VisibleChunk, VisibleRow,
+    evaluate_admission, served_visibility_row, surface_visibility,
 };
 pub use anchor::{
     ANCHOR_CAPTURE_SCHEMA, AnchorCapture, AnchorCondition, AnchorDecodeError, AnchorEvaluation,

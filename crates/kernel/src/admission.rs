@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "2672ed6969139e84c587e1d5d5703e3cb9b3e7504a6ff50f55bb509e7c6169c4";
+    "5a32b215365ad6fbcb40c0bcec0508bd53b2934e604a6fa07239905042ea68b1";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -220,6 +220,24 @@ pub struct VisibleAsOf {
     pub known_as_of: i64,
     pub tip: i64,
     pub rows: Vec<VisibleRow>,
+}
+
+/// A row's position in serving order: `created_commit_seq` descending, then `object_id` ascending in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServingPosition<'a> {
+    pub created_commit_seq: i64,
+    pub object_id: &'a str,
+}
+
+/// Consecutive visible rows of one surface in serving order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleChunk {
+    pub known_as_of: i64,
+    pub tip: i64,
+    /// Every visible row of each commit the chunk reaches, newest commit first.
+    pub rows: Vec<VisibleRow>,
+    /// The snapshot holds no visible row after the last of `rows`.
+    pub exhausted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2931,6 +2949,8 @@ const SUPPORT_EVIDENCE_SENSITIVITY_COLUMN: usize = 34;
 /// what they read today.
 const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [35, 36, 37, 38];
 const OWN_ADMISSION_DECISION_ID_COLUMN: usize = 39;
+/// `o.created_commit_seq`, the column `object_row_from` reads the object's commit from.
+const CREATED_COMMIT_SEQ_COLUMN: usize = 6;
 /// Groups the history rows of one object without reading its identifier text.
 const OBJECT_ROWID_COLUMN: usize = 40;
 const LAST_SERVED_COLUMN: usize = OBJECT_ROWID_COLUMN;
@@ -3162,22 +3182,26 @@ impl KernelStore {
         self.visible_selected_as_of(surface, requested, selection, scope, None)
     }
 
-    /// [`Self::visible_as_of_in_scope`] whose SQL bounds the candidate set to
-    /// `created_commit_seq <= created_at_or_before` before classification.
-    pub fn visible_created_at_or_before_as_of_in_scope(
+    /// The rows [`Self::visible_as_of_in_scope`] serves that follow `after` in serving order, newest first. The
+    /// read walks commits from the newest and stops at the end of the commit that brings the chunk to `min_rows`
+    /// rows, so its cost follows the rows it returns and the rows it judges hidden on the way.
+    pub fn visible_chunk_as_of_in_scope(
         &self,
         surface: Surface,
         requested: i64,
-        created_at_or_before: i64,
+        after: Option<ServingPosition<'_>>,
+        min_rows: usize,
         scope: Option<ScopeTermFilter<'_>>,
-    ) -> Result<VisibleAsOf, KernelError> {
-        self.visible_selected_as_of(
-            surface,
-            requested,
-            ServedSelection::CreatedAtOrBefore(created_at_or_before),
-            scope,
-            None,
-        )
+    ) -> Result<VisibleChunk, KernelError> {
+        let (tip, (rows, exhausted)) = self.read_snapshot(requested, |tx, _| {
+            served_chunk(tx, surface, requested, after, min_rows, scope)
+        })?;
+        Ok(VisibleChunk {
+            known_as_of: requested,
+            tip,
+            rows,
+            exhausted,
+        })
     }
 
     /// [`Self::visible_as_of_in_scope`] restricted to the decision objects of `domain_id`. The domain and kind are
@@ -3228,15 +3252,7 @@ impl KernelStore {
         let read = |tx: &Transaction<'_>, _: i64| {
             let mut rows: Vec<VisibleRow> = served_rows(tx, surface, requested, selection, scope)?
                 .into_iter()
-                .filter_map(|(object, visibility, scope_id)| match visibility {
-                    SurfaceVisibility::Hidden => None,
-                    visibility => Some(VisibleRow {
-                        object,
-                        visibility,
-                        labeled: visibility == SurfaceVisibility::Labeled,
-                        scope_id,
-                    }),
-                })
+                .filter_map(visible_row)
                 .collect();
             rows.sort_unstable_by(|left, right| left.object.object_id.cmp(&right.object.object_id));
             Ok(rows)
@@ -3517,13 +3533,96 @@ fn served_rows(
     )
 }
 
+/// The row a surface serves for one `served_rows` entry; `None` when the surface hides it.
+fn visible_row(
+    (object, visibility, scope_id): (ObjectRow, SurfaceVisibility, Option<String>),
+) -> Option<VisibleRow> {
+    match visibility {
+        SurfaceVisibility::Hidden => None,
+        visibility => Some(VisibleRow {
+            object,
+            visibility,
+            labeled: visibility == SurfaceVisibility::Labeled,
+            scope_id,
+        }),
+    }
+}
+
+/// The visible rows of `surface` that follow `after` in serving order, and whether the snapshot holds none after
+/// them. Commits are read whole from the newest one at or before `after`: the statement orders objects by commit
+/// alone, so the rows of each commit are sorted by `object_id` here. Reading stops at the first commit boundary
+/// with `min_rows` rows gathered.
+fn served_chunk(
+    tx: &Transaction<'_>,
+    surface: Surface,
+    requested: i64,
+    after: Option<ServingPosition<'_>>,
+    min_rows: usize,
+    scope: Option<ScopeTermFilter<'_>>,
+) -> Result<(Vec<VisibleRow>, bool), KernelError> {
+    let newest = after.map_or(requested, |after| after.created_commit_seq);
+    // Drafts are finished in batches so that one approval lookup covers every commit of a batch.
+    let finish = |drafts: &mut Vec<Draft>, visible: &mut Vec<VisibleRow>| {
+        let finished = visible.len();
+        visible.extend(
+            finish_drafts(tx, requested, std::mem::take(drafts))?
+                .into_iter()
+                .filter_map(|row| {
+                    let visibility = row.visibility(surface);
+                    visible_row((row.object, visibility, row.scope_id))
+                })
+                .filter(|row| {
+                    after.is_none_or(|after| {
+                        row.object.created_commit_seq < after.created_commit_seq
+                            || (row.object.created_commit_seq == after.created_commit_seq
+                                && row.object.object_id.as_str() > after.object_id)
+                    })
+                }),
+        );
+        visible[finished..].sort_unstable_by(|left, right| {
+            right
+                .object
+                .created_commit_seq
+                .cmp(&left.object.created_commit_seq)
+                .then_with(|| left.object.object_id.cmp(&right.object.object_id))
+        });
+        Ok::<(), KernelError>(())
+    };
+    served_query(
+        tx,
+        requested,
+        ServedSelection::CreatedAtOrBefore(newest),
+        scope,
+        |rows| {
+            let mut visible: Vec<VisibleRow> = Vec::new();
+            let mut drafts: Vec<Draft> = Vec::new();
+            let mut commit = None;
+            while let Some(row) = rows.next().map_err(map_sqlite)? {
+                let created: i64 = row.get(CREATED_COMMIT_SEQ_COLUMN).map_err(map_sqlite)?;
+                if commit != Some(created) {
+                    if visible.len() + drafts.len() >= min_rows {
+                        finish(&mut drafts, &mut visible)?;
+                        if visible.len() >= min_rows {
+                            return Ok((visible, false));
+                        }
+                    }
+                    commit = Some(created);
+                }
+                fold_history_row(&mut drafts, row, Some(surface))?;
+            }
+            finish(&mut drafts, &mut visible)?;
+            Ok((visible, true))
+        },
+    )
+}
+
 /// The objects a served-class read returns, with the value its statement binds. Each variant is its own
 /// prepared statement, so its predicate is one the planner can serve from an index.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ServedSelection<'a> {
     /// Every object at the snapshot.
     All,
-    /// SQL bounds the candidate set before classification to `created_commit_seq <= :created_at_or_before`.
+    /// The objects created at or before `:created_at_or_before`, newest commit first.
     CreatedAtOrBefore(i64),
     /// The objects a JSON string array of identifiers names, bound as `:ids`.
     Named(&'a str),
@@ -3601,6 +3700,14 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
         ServedSelection::CreatedAtOrBefore(_) => "o.created_commit_seq<=:created_at_or_before AND",
         ServedSelection::DomainDecisions(_) => {
             "o.domain_id=:domain_id AND o.object_kind='decision' AND"
+        }
+    };
+    // The planner walks `idx_objects_known_as_of` backwards for this order, so a reader that stops early leaves the
+    // older commits unread.
+    let order = match selection {
+        ServedSelection::CreatedAtOrBefore(_) => "ORDER BY o.created_commit_seq DESC",
+        ServedSelection::Named(_) | ServedSelection::All | ServedSelection::DomainDecisions(_) => {
+            ""
         }
     };
     let (object_joins, scope_expr, cited_expr) = match selection {
@@ -3687,7 +3794,8 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
                     OR {scope_expr} IS NULL
                     OR {scope_expr} NOT IN (
                         SELECT t.scope_id FROM scope_term t
-                        WHERE t.dimension=:scope_dimension))"
+                        WHERE t.dimension=:scope_dimension))
+             {order}"
     )
 }
 
@@ -3720,6 +3828,24 @@ pub(crate) fn served_classes_selected(
     scope: Option<ScopeTermFilter<'_>>,
     visible_on: Option<Surface>,
 ) -> Result<Vec<ServedRow>, KernelError> {
+    let drafts = served_query(tx, requested, selection, scope, |rows| {
+        let mut drafts: Vec<Draft> = Vec::new();
+        while let Some(row) = rows.next().map_err(map_sqlite)? {
+            fold_history_row(&mut drafts, row, visible_on)?;
+        }
+        Ok(drafts)
+    })?;
+    finish_drafts(tx, requested, drafts)
+}
+
+/// Runs the served-class statement of `selection` and hands its rows to `read`.
+fn served_query<T>(
+    tx: &Transaction<'_>,
+    requested: i64,
+    selection: ServedSelection<'_>,
+    scope: Option<ScopeTermFilter<'_>>,
+    read: impl FnOnce(&mut rusqlite::Rows<'_>) -> Result<T, KernelError>,
+) -> Result<T, KernelError> {
     // Each shape's text is identical on every call, so building it once lets `prepare_cached` hash a stable string instead of a per-call `format!`.
     static NAMED_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::Named("")));
@@ -3764,19 +3890,34 @@ pub(crate) fn served_classes_selected(
             (":scope_value", &scope_value),
         ],
     };
-    // `o` is the outer loop of the statement's `CROSS JOIN`, and every other join is one row per
-    // object, so the history rows of one object arrive consecutively.
-    let mut drafts: Vec<Draft> = Vec::new();
     let mut rows = statement.query(params).map_err(map_sqlite)?;
-    while let Some(row) = rows.next().map_err(map_sqlite)? {
-        let history = HistoryRow::read(row).map_err(map_sqlite)?;
-        match drafts.last_mut() {
-            Some(draft) if draft.object_rowid == history.object_rowid => {
-                draft.fold(row, &history, visible_on).map_err(map_sqlite)?;
-            }
-            _ => drafts.push(Draft::start(row, &history, visible_on).map_err(map_sqlite)?),
+    read(&mut rows)
+}
+
+/// Folds one statement row into its object's draft. `o` is the outer loop of the statement's `CROSS JOIN`, and
+/// every other join is one row per object, so the history rows of one object arrive consecutively and the object
+/// a row continues is the last draft.
+fn fold_history_row(
+    drafts: &mut Vec<Draft>,
+    row: &rusqlite::Row<'_>,
+    visible_on: Option<Surface>,
+) -> Result<(), KernelError> {
+    let history = HistoryRow::read(row).map_err(map_sqlite)?;
+    match drafts.last_mut() {
+        Some(draft) if draft.object_rowid == history.object_rowid => {
+            draft.fold(row, &history, visible_on).map_err(map_sqlite)?;
         }
+        _ => drafts.push(Draft::start(row, &history, visible_on).map_err(map_sqlite)?),
     }
+    Ok(())
+}
+
+/// Resolves the approvals `drafts` name at `requested` and returns the rows that can serve.
+fn finish_drafts(
+    tx: &Transaction<'_>,
+    requested: i64,
+    drafts: Vec<Draft>,
+) -> Result<Vec<ServedRow>, KernelError> {
     let approvals = approval_validity(
         tx,
         requested,

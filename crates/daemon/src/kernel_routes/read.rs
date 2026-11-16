@@ -10,11 +10,14 @@ use std::io::Write;
 use std::sync::Arc;
 
 use host_runtime::RouteHandle;
-use kernel::{DecisionRow, KernelError, KernelStore, Sensitivity, Surface, VisibleRow};
+use kernel::{
+    DecisionRow, KernelError, KernelStore, ScopeTermFilter, Sensitivity, ServingPosition, Surface,
+    VisibleRow,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::project::{ProjectBinding, ScopeFilter, stored_terms};
+use super::project::{ProjectBinding, ScopeFilter, ScopeTerms, stored_terms};
 use super::serving;
 use super::{InvalidReason, KernelOutcome, blocking, state_only};
 use crate::HandlerCore;
@@ -179,6 +182,64 @@ impl NewestRows {
     }
 }
 
+/// The snapshot a read served and the store tip it observed.
+struct Snapshot {
+    known_as_of: i64,
+    tip: i64,
+}
+
+/// The first [`MAX_READ_ROWS`] rows of the project's surface after `before` in serving order, and whether more
+/// follow. The kernel serves the surface in chunks of whole commits, newest first, so the read stops once the page
+/// and one further row are in hand; a chunk the scope filter thins is followed by the next.
+fn newest_page(
+    store: &KernelStore,
+    surface: Surface,
+    requested: i64,
+    before: Option<&ReadCursor>,
+    scope: ScopeTermFilter<'_>,
+    filter: &mut ScopeFilter,
+    terms: &mut ScopeTerms<'_>,
+) -> Result<(Snapshot, Vec<VisibleRow>, bool), KernelError> {
+    let mut rows: Vec<VisibleRow> = Vec::new();
+    let mut tip = None;
+    let mut position = before.map(|cursor| (cursor.created_commit_seq, cursor.object_id.clone()));
+    loop {
+        let chunk = store.visible_chunk_as_of_in_scope(
+            surface,
+            requested,
+            position
+                .as_ref()
+                .map(|(created_commit_seq, object_id)| ServingPosition {
+                    created_commit_seq: *created_commit_seq,
+                    object_id,
+                }),
+            MAX_READ_ROWS + 1 - rows.len(),
+            Some(scope),
+        )?;
+        let snapshot = Snapshot {
+            known_as_of: chunk.known_as_of,
+            tip: *tip.get_or_insert(chunk.tip),
+        };
+        let last = chunk
+            .rows
+            .last()
+            .map(|row| (row.object.created_commit_seq, row.object.object_id.clone()));
+        for row in chunk.rows {
+            if filter.matches(row.scope_id.as_deref(), terms)? {
+                rows.push(row);
+            }
+        }
+        if rows.len() > MAX_READ_ROWS {
+            rows.truncate(MAX_READ_ROWS);
+            return Ok((snapshot, rows, true));
+        }
+        match last {
+            Some(last) if !chunk.exhausted => position = Some(last),
+            _ => return Ok((snapshot, rows, false)),
+        }
+    }
+}
+
 pub(crate) fn read_visible(
     store: &KernelStore,
     project: &ProjectBinding,
@@ -206,37 +267,56 @@ pub(crate) fn read_visible_page(
     // snapshot, so the read costs the project's rows and not the store's. A
     // domain selection is matched in the kernel query too, so rows of other
     // domains are never decoded or judged.
-    let scope = Some(project.scope_term());
-    let visible = match selection {
-        RowSelection::All => match before {
-            Some(cursor) => store.visible_created_at_or_before_as_of_in_scope(
-                surface,
-                requested,
-                cursor.created_commit_seq,
-                scope,
-            )?,
-            None => store.visible_as_of_in_scope(surface, requested, None, scope)?,
-        },
-        RowSelection::Objects(ids) => {
-            store.visible_as_of_in_scope(surface, requested, Some(ids), scope)?
-        }
-        RowSelection::DomainDecisions(domain_id) => {
-            store.visible_domain_decisions_as_of_in_scope(surface, requested, domain_id, scope)?
-        }
-    };
+    let scope = project.scope_term();
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(store);
-    // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
-    let mut newest = NewestRows::new(MAX_READ_ROWS);
-    for row in visible.rows {
-        if selection.keeps(&row)
-            && before.is_none_or(|cursor| cursor.precedes(&row))
-            && filter.matches(row.scope_id.as_deref(), &mut terms)?
-        {
-            newest.push(row);
+    // An id or domain selection is matched in the kernel query, which reads every selected row; an unfiltered read pages the surface in serving order.
+    let selected = match selection {
+        RowSelection::All => None,
+        RowSelection::Objects(ids) => {
+            Some(store.visible_as_of_in_scope(surface, requested, Some(ids), Some(scope))?)
         }
-    }
-    let (mut rows, mut truncated) = newest.finish();
+        RowSelection::DomainDecisions(domain_id) => {
+            Some(store.visible_domain_decisions_as_of_in_scope(
+                surface,
+                requested,
+                domain_id,
+                Some(scope),
+            )?)
+        }
+    };
+    // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
+    let (snapshot, mut rows, mut truncated) = match selected {
+        None => newest_page(
+            store,
+            surface,
+            requested,
+            before,
+            scope,
+            &mut filter,
+            &mut terms,
+        )?,
+        Some(visible) => {
+            let mut newest = NewestRows::new(MAX_READ_ROWS);
+            for row in visible.rows {
+                if selection.keeps(&row)
+                    && before.is_none_or(|cursor| cursor.precedes(&row))
+                    && filter.matches(row.scope_id.as_deref(), &mut terms)?
+                {
+                    newest.push(row);
+                }
+            }
+            let (rows, truncated) = newest.finish();
+            (
+                Snapshot {
+                    known_as_of: visible.known_as_of,
+                    tip: visible.tip,
+                },
+                rows,
+                truncated,
+            )
+        }
+    };
     // Payload sizes are read before any payload: a project can retain [`MAX_READ_ROWS`] decisions of ~1 MiB each, and materializing them all would allocate gigabytes for rows the serialization budget can never carry. A serialized row is at least its payload bytes, so cutting where cumulative payload size passes the budget keeps every row the serializer could keep.
     let decision_ids: Vec<String> = rows
         .iter()
@@ -244,7 +324,7 @@ pub(crate) fn read_visible_page(
         .map(|row| row.object.object_id.clone())
         .collect();
     let payload_sizes: HashMap<String, u64> = store
-        .decision_payload_sizes_as_of(&decision_ids, visible.known_as_of)?
+        .decision_payload_sizes_as_of(&decision_ids, snapshot.known_as_of)?
         .into_iter()
         .collect();
     // A visible decision-kind row without its typed decision row at the same snapshot is a
@@ -280,7 +360,7 @@ pub(crate) fn read_visible_page(
         .map(|row| row.object.object_id.clone())
         .collect();
     let decisions: HashMap<String, DecisionRow> = store
-        .decisions_for_objects_as_of(&retained_decision_ids, visible.known_as_of)?
+        .decisions_for_objects_as_of(&retained_decision_ids, snapshot.known_as_of)?
         .into_iter()
         .map(|decision| (decision.object_id.clone(), decision))
         .collect();
@@ -291,8 +371,8 @@ pub(crate) fn read_visible_page(
         return Err(KernelError::CorruptCanonicalRow);
     }
     Ok(ReadResponse {
-        known_as_of: visible.known_as_of,
-        tip: visible.tip,
+        known_as_of: snapshot.known_as_of,
+        tip: snapshot.tip,
         rows,
         truncated,
         decisions,
