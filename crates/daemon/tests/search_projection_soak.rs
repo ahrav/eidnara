@@ -609,24 +609,35 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
     freshness_ms.sort_unstable();
     latency_ms.sort_unstable();
 
-    // Hold expiry: the wall clock steps past the hold's lifetime, which costs one rebuild of the whole store. The workload keeps committing at the steady rate while the rebuild runs.
+    // Advancing the clock past hold expiry triggers a rebuild. The blocking publisher continues publishing while searches wait for rebuild slices.
     clock.step(hold_ms + DAY_MS - stepped_ms);
     remember(&daemon, memory).await;
     let expiry_started = Instant::now();
+    let rebuild_limit = Duration::from_secs(600);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let publisher = {
+        let kernel = Arc::clone(&kernel);
+        let scope = scope.clone();
+        let stop = Arc::clone(&stop);
+        let mut first = next;
+        tokio::task::spawn_blocking(move || {
+            // The publisher ends on the flag, and at the rebuild's limit if the test ends before it sets the flag.
+            while !stop.load(std::sync::atomic::Ordering::Acquire)
+                && expiry_started.elapsed() < rebuild_limit
+            {
+                let tick_started = Instant::now();
+                publish(&kernel, &scope, first, 2);
+                first += 2;
+                std::thread::sleep(
+                    Duration::from_millis(250).saturating_sub(tick_started.elapsed()),
+                );
+            }
+            first
+        })
+    };
     let mut rebuild_errors: Vec<String> = Vec::new();
     let mut rebuild_searches = 0_u64;
-    let mut rebuild_commits = 0_u64;
     let rebuilt = loop {
-        {
-            let kernel = Arc::clone(&kernel);
-            let scope = scope.clone();
-            let first = next;
-            tokio::task::spawn_blocking(move || publish(&kernel, &scope, first, 2))
-                .await
-                .unwrap();
-            next += 2;
-            rebuild_commits += 3;
-        }
         rebuild_searches += 1;
         let answer = query(&daemon, &marker(memory)).await;
         if let Err(code) = &answer {
@@ -641,12 +652,16 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
             break observed;
         }
         assert!(
-            expiry_started.elapsed() < Duration::from_secs(600),
+            expiry_started.elapsed() < rebuild_limit,
             "the rebuild after the hold expired did not complete: {observed}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
     let rebuilt_in = expiry_started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    let published = publisher.await.unwrap();
+    let rebuild_commits = (published - next) / 2 * 3;
+    next = published;
 
     let facts = kernel.facts(1).unwrap();
     println!(
