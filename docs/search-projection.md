@@ -414,6 +414,12 @@ a build reaches Current. `elapsed_ms` is monotonic time since this process's
 slice loop recorded or last renewed that attempt, and `unknown` for an attempt
 the loop of this process did not record or renew.
 
+A disable wakes the slice loop once its record is persisted. The loop runs
+its claim-source slice and then the lifecycle slice that clears `checkpoint`
+and `blocked`; a status answered before that slice ends still carries the
+earlier values beside the `disabled` record
+(`a_disable_wakes_an_idle_slice_loop`).
+
 The tip read runs on the blocking pool and waits for a kernel reader within
 the operation's budget. A status request dropped during that wait cancels the
 budget, so the read stops waiting and releases its blocking thread

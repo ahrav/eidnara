@@ -203,7 +203,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - the search maintenance loop calls
-`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2488`), which
+`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2490`), which
 runs `ClaimMaterializer` (`:577`, the materializer call at `:596`) and grants
 and checks no projection-gate admission before it publishes claim source
 descriptors. Claim validation on the query route is `explicit-config-only`:

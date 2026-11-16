@@ -181,7 +181,7 @@ pub struct SearchLifecycleOwner {
     roster: ProjectRoster,
     /// Woken when a disable hands the manager back, so a shutdown that found the manager disabling can retry.
     disabled: tokio::sync::Notify,
-    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request finds a supervisor running under records a reload replaced, or a renewal finds any supervisor running, so the next slice rotates or hands it back.
+    /// Woken when a request or renewal is recorded, so the slice loop's idle wait ends and the record is observed with its time still ahead of it; when a renewal finds a renewable record no longer due, so the next slice judges it at once; and when a request finds a supervisor running under records a reload replaced, or a renewal finds any supervisor running, so the next slice rotates or hands it back. A persisted disable also wakes it, so the next slice observes the disable.
     requested: tokio::sync::Notify,
     /// The project digest whose supervisor ran last, how many slices it has had, and the bounds it started under; `None` before the first tenure.
     /// The tenant, its slice count, the bounds its supervisor runs under, and the `B_recovery_ms` those bounds were derived from.
@@ -1864,6 +1864,8 @@ impl SearchLifecycleOwner {
         let ControlState::Disabled(disabled) = ProjectionLifecycle::open(&self.home)?.read() else {
             return Err(BuildError::Invalid("disable did not persist"));
         };
+        // The notification wakes the idle slice loop to observe the persisted disable.
+        self.requested.notify_one();
         // A stop with nothing to reconcile is complete; only cleanup needs the manifest's bounds, so the records are read after this.
         let Some(intent) = disabled.handoff.as_deref() else {
             return Ok(());

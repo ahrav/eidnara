@@ -4919,6 +4919,101 @@ async fn a_request_wakes_an_idle_slice_loop() {
     assert!(began.duration_since(requested) < Duration::from_secs(2));
 }
 
+/// A disable wakes the idle slice loop before `SLICE_IDLE` expires; the status then reports `progress.checkpoint` as `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_disable_wakes_an_idle_slice_loop() {
+    use daemon::search_lifecycle_owner::SLICE_IDLE;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    records(home);
+    let owner = Arc::new(owner(home, &corpus.kernel));
+    let (events_tx, events) = std::sync::mpsc::channel();
+    owner.tap_slice_events_for_test(move |event| match event {
+        SliceEvent::Idle => {
+            let _ = events_tx.send(("idle", Instant::now()));
+        }
+        SliceEvent::Waiting { .. } => {
+            let _ = events_tx.send(("waiting", Instant::now()));
+        }
+        _ => {}
+    });
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let loop_task = tokio::spawn(daemon::search_lifecycle_owner::run_slices(
+        Arc::clone(&owner),
+        cancel.clone(),
+    ));
+    let started = Instant::now();
+    loop {
+        let (progress, tip) = owner.progress(&slice_budget());
+        if matches!(owner.lifecycle_record(), ControlState::Current(_))
+            && progress.checkpoint == tip
+        {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the loop's family did not reach the tip: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let current = Instant::now();
+    let (idle, events) = tokio::task::spawn_blocking(move || {
+        loop {
+            let idle = loop {
+                match events.recv_timeout(Duration::from_secs(20)) {
+                    Ok(("idle", at)) if at >= current => break at,
+                    Ok(_) => continue,
+                    Err(_) => panic!("the loop reaches an idle wait over the Current family"),
+                }
+            };
+            let woken_at_once = events.recv_timeout(Duration::from_millis(500)).is_ok();
+            if !woken_at_once {
+                return (idle, events);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("the disable reconciles");
+    let began = tokio::task::spawn_blocking(move || {
+        loop {
+            match events.recv_timeout(SLICE_IDLE * 2) {
+                Ok(("waiting", at)) if at >= idle => return at,
+                Ok(_) => continue,
+                Err(_) => panic!("a slice begins after the disable"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        began.duration_since(idle) < SLICE_IDLE - Duration::from_secs(1),
+        "the next slice began {:?} after the idle wait started; the loop idles for five seconds unwoken",
+        began.duration_since(idle)
+    );
+    let started = Instant::now();
+    loop {
+        let (progress, _) = owner.progress(&slice_budget());
+        if progress.checkpoint.is_none() {
+            assert_eq!(progress.blocked, None, "{progress:?}");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the woken slice kept the checkpoint: {progress:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.cancel();
+    loop_task.await.unwrap();
+    let _ = owner.shutdown().await;
+}
+
 /// The status reports the commit the loop's family has applied while the family is Current, and reports none once a slice finds the record disabled: a disabled record serves no family for a lag to describe.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_disabled_record_reports_no_checkpoint() {
