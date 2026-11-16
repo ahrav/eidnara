@@ -1675,22 +1675,25 @@ async fn a_fold_into_a_less_restrictive_survivor_is_refused() {
     daemon.handler.shutdown().await.unwrap();
 }
 
-/// The route-owned domain that holds project scopes is not writable by
-/// callers.
+/// The route-owned domain that holds project scopes, and the domain whose
+/// rows approve a captured memory as the user's statement, are not writable
+/// by callers.
 #[tokio::test]
-async fn a_caller_cannot_write_into_the_project_scopes_domain() {
+async fn a_caller_cannot_write_into_a_daemon_owned_domain() {
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
-    let mut squatting = decision_spec(1);
-    squatting["domain_id"] = json!("project-scopes");
-    let refused = daemon
-        .commit(
-            "squat",
-            vec![json!({"op": "insert_decision", "spec": squatting})],
-            vec![],
-        )
-        .await;
-    assert_state(&refused, "invalid", Some("invalid_input"));
+    for (key, domain) in [("squat", "project-scopes"), ("approve", "user-statements")] {
+        let mut squatting = decision_spec(1);
+        squatting["domain_id"] = json!(domain);
+        let refused = daemon
+            .commit(
+                key,
+                vec![json!({"op": "insert_decision", "spec": squatting})],
+                vec![],
+            )
+            .await;
+        assert_state(&refused, "invalid", Some("invalid_input"));
+    }
     assert!(object_ids(&daemon.read("explicit_search", None).await).is_empty());
     daemon.handler.shutdown().await.unwrap();
 }

@@ -777,6 +777,77 @@ describe("eidnara_search through the fused route", () => {
         );
     });
 
+    it("refuses a search whose daemon connection changed before the contest read, on the route and on the fallback", async () => {
+        const observation = "Assistant reported: The client limit is 500 now.";
+        for (const fallback of [false, true]) {
+            class MovingTransport extends FakeKernelTransport {
+                identity = "first";
+                reads = 0;
+                connectionIdentity(): string {
+                    return this.identity;
+                }
+                async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+                    const reply = await super.call(args);
+                    // The daemon is replaced after the read that returns the statement.
+                    if (args.method === "kernel.read" && ++this.reads === 1)
+                        this.identity = "second";
+                    return reply;
+                }
+            }
+            const transport = new MovingTransport(new FakeKernel());
+            const { kernel, run } = harness(transport);
+            kernel.seedDecision({
+                object_id: id(2),
+                decision_kind: "CONFIG_VALUES",
+                summary: observation,
+                source_id: "memory_capture",
+            });
+            kernel.seedDecision({
+                object_id: id(1),
+                decision_kind: "CONFIG_VALUES",
+                summary: "User stated: The gateway admits at most 300 clients.",
+                rationale: JSON.stringify({
+                    source: "memory_capture",
+                    contested_by: { memory: id(2), stated_seq: 1 },
+                }),
+                source_id: "memory_capture",
+                labeled: false,
+            });
+            kernel.routeReply = () =>
+                fallback ? { kind: "terminal", terminal: "disabled" } : fused([{ object: id(1) }]);
+            const execution = await run({ query: fallback ? id(1) : "gateway clients" });
+            expect(execution.status).toBe("invalid");
+            expect(execution.text).toContain("the known snapshot is ahead of the store");
+            expect(execution.text).not.toContain("500 now");
+        }
+    });
+
+    it("shows a contested statement with its observation's served text through the route", async () => {
+        const { kernel, run } = harness();
+        const observation = "Assistant reported: The client limit is 500 now.";
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "CONFIG_VALUES",
+            summary: observation,
+            source_id: "memory_capture",
+        });
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "CONFIG_VALUES",
+            summary: "User stated: The gateway admits at most 300 clients.",
+            rationale: JSON.stringify({
+                source: "memory_capture",
+                contested_by: { memory: id(2), stated_seq: 1 },
+            }),
+            source_id: "memory_capture",
+            labeled: false,
+        });
+        kernel.routeReply = () => fused([{ object: id(1) }]);
+        const execution = await run({ query: "gateway clients" });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.text).toContain(`Contested by ${id(2)}: ${JSON.stringify(observation)}`);
+    });
+
     it("refuses a ranking whose daemon connection changed before hydration", async () => {
         class MovingTransport extends FakeKernelTransport {
             identity = "first";

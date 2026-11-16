@@ -157,13 +157,13 @@ read at `crates/daemon/src/canonical_memory.rs:55-58`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:907`);
+(`crates/daemon/src/canonical_memory.rs:1151`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:965`);
+(`crates/daemon/src/canonical_memory.rs:1209`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:982`);
+(`crates/daemon/src/canonical_memory.rs:1226`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1004`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:1248`). Status: unaudited.
 Impact: A revision that moved without a byte change would record a second serve
 of the same rows.
 Open questions:
@@ -562,7 +562,7 @@ Confidence: high -
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
 (`crates/daemon/src/lib.rs:25584`);
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
-(`crates/daemon/tests/kernel_routes.rs:3849`);
+(`crates/daemon/tests/kernel_routes.rs:3852`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`). Status: unaudited.
 Impact: A teardown that wrote `deleted_at` would mark a live session deleted
@@ -1091,9 +1091,9 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `a_dispute_between_folds_records_the_next_served_set_without_it`
 (`crates/daemon/src/use_outcome_writer_tests.rs:528`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:869`);
+(`crates/daemon/src/canonical_memory.rs:1113`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1004`);
+(`crates/daemon/src/canonical_memory.rs:1248`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
