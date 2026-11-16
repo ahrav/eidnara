@@ -2807,21 +2807,27 @@ fn select_existing_memories(
     sessions: &[Option<&str>],
     caps: (usize, usize),
 ) -> Result<Vec<ExistingCaptureMemory>, &'static str> {
-    let words: HashSet<String> = messages
+    #[derive(Default)]
+    struct BatchWord {
+        shared: bool,
+        term: Option<usize>,
+    }
+    let mut batch: HashMap<String, BatchWord> = HashMap::new();
+    for word in messages
         .iter()
         .flat_map(|message| message.text.split(|ch: char| !ch.is_alphanumeric()))
         .filter(|word| word.chars().count() >= 3)
-        .map(str::to_lowercase)
-        .collect();
+    {
+        batch.entry(word.to_lowercase()).or_default().shared = true;
+    }
     // Each distinct content word of a message is one query term, and each
     // term holds the set of messages that ask it: a batch holds at most 32
     // messages, one bit each.
-    let mut terms: HashMap<String, usize> = HashMap::new();
     let mut asked_by: Vec<u32> = Vec::new();
     for (message, source) in messages.iter().enumerate() {
         for word in content_words(&source.text) {
-            let next = terms.len();
-            let term = *terms.entry(word).or_insert(next);
+            let next = asked_by.len();
+            let term = *batch.entry(word).or_default().term.get_or_insert(next);
             if term == asked_by.len() {
                 asked_by.push(0);
             }
@@ -2887,8 +2893,8 @@ fn select_existing_memories(
     // hold each term. Scoring borrows the reads; only the kept candidates
     // are materialized.
     let mut lowered = String::new();
-    let mut frequency = vec![0_usize; terms.len()];
-    let mut counted = vec![usize::MAX; terms.len()];
+    let mut frequency = vec![0_usize; asked_by.len()];
+    let mut counted = vec![usize::MAX; asked_by.len()];
     let mut candidates: Vec<Candidate<'_>> = read
         .rows
         .iter()
@@ -2903,10 +2909,12 @@ fn select_existing_memories(
         .map(|(index, (row, decision))| {
             let (mut shared, mut length) = (0, 0.0);
             for word in summary_words(&decision.payload.summary) {
-                let word = lower(word, &mut lowered);
-                shared += usize::from(words.contains(word));
                 length += 1.0;
-                if let Some(&term) = terms.get(word)
+                let Some(word) = batch.get(lower(word, &mut lowered)) else {
+                    continue;
+                };
+                shared += usize::from(word.shared);
+                if let Some(term) = word.term
                     && counted[term] != index
                 {
                     counted[term] = index;
@@ -2943,7 +2951,10 @@ fn select_existing_memories(
     for candidate in &mut candidates {
         held.clear();
         for word in summary_words(&candidate.decision.payload.summary) {
-            if let Some(&term) = terms.get(lower(word, &mut lowered)) {
+            if let Some(term) = batch
+                .get(lower(word, &mut lowered))
+                .and_then(|word| word.term)
+            {
                 match held.iter_mut().find(|(seen, _)| *seen == term) {
                     Some((_, count)) => *count += 1.0,
                     None => held.push((term, 1.0)),
@@ -6954,6 +6965,58 @@ mod tests {
         let third = offered((3, 1 << 20));
         assert!(!third.contains(&stated), "{third:?}");
         assert_eq!(third.len(), 3);
+    }
+
+    #[test]
+    fn a_function_word_ranks_by_the_batch_and_a_two_digit_number_by_its_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let reports = [
+            "Gateway listens on 80.",
+            "This should always use that.",
+            "Deploys finish before lunch.",
+            "Backups rotate nightly.",
+        ];
+        for (index, report) in reports.iter().enumerate() {
+            let mut source = job(&format!("job-report-{index}"));
+            source.role = "assistant".into();
+            source.text = (*report).into();
+            let output = PreparedCapture {
+                version: CAPTURE_SCHEMA_VERSION,
+                model: "test/model".into(),
+                existing: vec![],
+                memories: vec![memory(report)],
+                head: FrozenHead::HeadUnavailable,
+            };
+            publish_now(
+                &kernel,
+                &project,
+                &source,
+                &output,
+                &serde_json::to_string(&output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        }
+        let batch = ["Move 80.", "This should always use that."].map(|text| CaptureMessage {
+            id: format!("source_{}", text.len()),
+            role: CaptureRole::User,
+            text: text.into(),
+            own_id: true,
+        });
+        let offered: Vec<String> =
+            select_existing_memories(&kernel, &project, &batch, &[None], (1_000, 1 << 20))
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.content)
+                .collect();
+        assert_eq!(
+            offered,
+            [0, 1, 3, 2].map(|index| reports[index]),
+            "the number's memory, the function words' memory, then the newest first"
+        );
     }
 
     /// A stored plan whose memory names further targets beside no
