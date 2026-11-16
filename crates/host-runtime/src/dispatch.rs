@@ -1325,9 +1325,14 @@ pub async fn open_route<H: HostHandler>(
     let bind_task = shared.spawn_lifecycle(async move {
         let callback =
             crate::panic_boundary::redact_sync(|| handler.bind(handle, target, identity));
-        tokio::select! {
-            outcome = crate::panic_boundary::redact(callback) => Some(outcome),
-            () = tokio::time::sleep(bind_deadline) => {
+        match crate::lifecycle_deadline::within(
+            bind_deadline,
+            crate::panic_boundary::redact(callback),
+        )
+        .await
+        {
+            Ok(outcome) => Some(outcome),
+            Err(crate::lifecycle_deadline::Expired) => {
                 bind_watchdog.fatal.trip(
                     &bind_watchdog.shutdown,
                     "bind callback deadline expired".to_owned(),
@@ -1417,7 +1422,7 @@ async fn run_route_gone<H: HostHandler>(shared: &Arc<HostShared<H>>, handle: Rou
     let watchdog = Arc::clone(shared);
     let task = shared.spawn_lifecycle(async move {
         let callback = crate::panic_boundary::redact_sync(|| handler.route_gone(handle));
-        if timeout(deadline, crate::panic_boundary::redact(callback))
+        if crate::lifecycle_deadline::within(deadline, crate::panic_boundary::redact(callback))
             .await
             .is_err()
         {
