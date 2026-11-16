@@ -13998,7 +13998,7 @@ where
     PreparedSettlement::Response(body)
 }
 
-/// Transform and exact-length bodies take the direct-serialize path; every other outcome, JSON bodies included, takes the owned path.
+/// Transform and exact-length bodies take the direct-serialize path; every other outcome, JSON and emitted bodies included, takes the owned path.
 async fn settle_prepared_via<W, Owned, OwnedReserved, Direct, DirectReserved, Cancelled>(
     outcome: PreparedOutcome,
     cancelled: Cancelled,
@@ -19468,12 +19468,23 @@ mod tests {
         body
     }
 
-    /// Only transform and exact-length bodies take the direct path; JSON bodies stay owned.
+    /// Only transform and exact-length bodies take the direct path; JSON and emitted bodies stay owned.
     #[test]
     fn only_transform_and_exact_bodies_serialize_directly() {
+        struct Fixed;
+        impl crate::dispatch::Emit for Fixed {
+            fn emit(
+                &self,
+                destination: &mut dyn std::io::Write,
+            ) -> Result<(), crate::dispatch::PreparedOutputError> {
+                destination.write_all(b"{}")?;
+                Ok(())
+            }
+        }
         assert!(direct_transform().serializes_directly());
         assert!(PreparedOutput::cached_bytes(b"x".to_vec()).serializes_directly());
         assert!(!PreparedOutput::json(json!({"a": 1})).serializes_directly());
+        assert!(!PreparedOutput::emit(Arc::new(Fixed)).serializes_directly());
     }
 
     /// Which reservation a settlement took, and the bytes it produced.
@@ -19511,9 +19522,19 @@ mod tests {
         }
     }
 
-    /// The production branch sends transform and exact-length bodies to the direct reservation with the owned path's bytes, and JSON bodies to the owned reservation.
+    /// The production branch sends transform and exact-length bodies to the direct reservation with the owned path's bytes, and JSON and emitted bodies to the owned reservation.
     #[tokio::test]
     async fn transform_and_exact_bodies_settle_direct_with_the_owned_bytes() {
+        struct Fixed;
+        impl crate::dispatch::Emit for Fixed {
+            fn emit(
+                &self,
+                destination: &mut dyn std::io::Write,
+            ) -> Result<(), crate::dispatch::PreparedOutputError> {
+                destination.write_all(b"{}")?;
+                Ok(())
+            }
+        }
         for output in [
             direct_transform(),
             PreparedOutput::cached_bytes(b"exact-body".to_vec()),
@@ -19524,12 +19545,16 @@ mod tests {
                 Some(Reserved::Direct(expected))
             );
         }
-        let output = PreparedOutput::json(json!({"a": [1, 2]}));
-        let expected = owned_bytes(output.clone()).await;
-        assert_eq!(
-            settle_recording(PreparedOutcome::Response(output)).await,
-            Some(Reserved::Owned(expected))
-        );
+        for output in [
+            PreparedOutput::json(json!({"a": [1, 2]})),
+            PreparedOutput::emit(Arc::new(Fixed)),
+        ] {
+            let expected = owned_bytes(output.clone()).await;
+            assert_eq!(
+                settle_recording(PreparedOutcome::Response(output)).await,
+                Some(Reserved::Owned(expected))
+            );
+        }
     }
 
     /// Charges a response holds travel with its direct serializer and return once it runs; a retained clone and an error outcome hold none.

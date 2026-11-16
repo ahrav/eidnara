@@ -265,8 +265,8 @@ pub struct ChunkDecision {
     /// `length(decision_payload)` in bytes.
     pub payload_bytes: u64,
     /// The decision's kind and stored payload, held while the payload bytes the chunk holds stay within the
-    /// caller's budget. `None` past the budget and for a payload over [`PAGE_PAYLOAD_INLINE_BYTES`], so a caller
-    /// reads that decision by id when it serves it.
+    /// caller's budget. `None` past the budget and for a payload over 64 KiB, which the page statement leaves in
+    /// its row, so a caller reads that decision by id when it serves it.
     pub content: Option<DecisionContent>,
 }
 
