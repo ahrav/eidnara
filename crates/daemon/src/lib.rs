@@ -5578,18 +5578,18 @@ impl HandlerCore {
 
     /// The canonical memory read for one pass, trimmed to the configured memory
     /// budget; `None` when memory is disabled, so a disabled deployment never
-    /// touches the kernel store for it.
+    /// touches the kernel store for it. It serves the canonical rows at the tip
+    /// at any consumer lag; lag marks come from a fresh kernel health block,
+    /// and a read without one keeps the report's prior verdict.
     fn project_memory_read(
         &self,
         binding: &SessionBinding,
         cfg: &DaemonConfig,
-        now_ms: i64,
     ) -> Option<canonical_memory::CanonicalMemoryRead> {
         cfg.memory_enabled.then(|| {
             canonical_memory::read_project_memory(
                 &self.kernel,
                 &binding.kernel_project,
-                now_ms,
                 cfg.memory_budget_tokens,
             )
         })
@@ -6138,7 +6138,7 @@ impl HandlerCore {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
-                project_memory: self.project_memory_read(binding, &cfg, now),
+                project_memory: self.project_memory_read(binding, &cfg),
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     cfg.history_summarizer_context_limit_tokens,
@@ -9658,7 +9658,7 @@ impl HandlerCore {
         // every attempt the transform makes, composes from the same pinned
         // snapshot. `None` when memory is disabled, so the kernel store is not
         // touched for a block that is never rendered.
-        let project_memory = self.project_memory_read(&binding, &binding.config, pass_now);
+        let project_memory = self.project_memory_read(&binding, &binding.config);
         let env = PassEnv {
             store,
             parsed,
@@ -20330,13 +20330,13 @@ mod tests {
                 let (expected_text, expected_end) = match budget {
                     1 => ("[1-2] U: «s1»α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\""
+                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; output=\"tool output 🙂\""
                             .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\"\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
+                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; output=\"tool output 🙂\"\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -20368,8 +20368,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "cc8e4171645e669d0e79005cfff6da6e5dfbdf9bf3a45673d0e91200d3759e2a",
-                    128 => "74d1738475d92a8383985a5733703b35109322ad062ab909693192dfc03f9322",
-                    _ => "8e0816dfc8297ff468c8fd662e3982bf78d8866d0a4af825210a43f8a4a2edd1",
+                    128 => "c8840b8897a7539e77f599d5a643e909e72c23d078b866654409fa67a425dd9e",
+                    _ => "798b8bf14d5f583d1646a8b2c182ca6f697be6c6ee75ba67f452676ff0a7c722",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -25027,10 +25027,10 @@ mod tests {
             "User stated: Use port 4321 for staging.",
             "store the attributed source quotation, not the extractor's broadened environment"
         );
+        // The canonical read pins the kernel tip the capture just committed.
         let injected = canonical_memory::read_project_memory(
             &handler.kernel,
             &kernel_routes::ProjectBinding::new(&project),
-            now_ms(),
             4000.0,
         );
         assert!(
@@ -39695,6 +39695,7 @@ mod tests {
 
         let fired = call_transform(&handler, big_messages()).await;
         assert_eq!(fired["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
         let after = status();
         let firing = &after["history_summarizer"]["recent_firings"][0];
@@ -42674,6 +42675,7 @@ mod tests {
         without_usage.as_object_mut().unwrap().remove("usage");
         let fired = call_transform_request(&handler, without_usage).await;
         assert_eq!(fired["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
         wait_for_idle(&store).await;
         let firing = &store
             .load("ses")
@@ -44901,6 +44903,109 @@ mod tests {
         assert!(store.load_pass_trace(&session).unwrap().is_none());
         assert!(v.get("history_summarizer").is_none());
     }
+    #[tokio::test]
+    async fn a_captured_failure_report_keeps_its_error_line_beside_its_reference() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let framing = "PR 812's CI went red after the rebase:";
+        let text = format!(
+            "{framing}\n```\n   Compiling server v0.4.0\nerror[E0425]: cannot find value `config` in this scope\n  --> src/server.rs:88:17\n```"
+        );
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":text}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[
+            {"category":"CONSTRAINTS","content":"PR 812 fails CI after the rebase.","quote":framing}
+        ]}]});
+        let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(memories.rows.len(), 1);
+        let payload = &memories.decisions.values().next().unwrap().payload;
+        assert_eq!(
+            payload.summary,
+            "User stated: PR 812's CI went red after the rebase:\nerror[E0425]: cannot find value `config` in this scope\n--> src/server.rs:88:17",
+            "the stored memory carries the reference and the error identity together"
+        );
+        let rationale: Value = serde_json::from_str(&payload.rationale).unwrap();
+        assert_eq!(rationale["quote"], framing);
+    }
+
+    #[tokio::test]
+    async fn a_plan_the_secret_scan_refuses_with_failure_lines_freezes_its_quotations() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&state), default_test_config()).await;
+        handler.bind_route(test_route(7), capture_binding(&project, "pi"));
+        let framing = "The release job for PR 812 fails:";
+        let text = format!(
+            "{framing}\n```\nERROR: required secret is empty: NPM_TOKEN=\nError: Process completed with exit code 1.\n```"
+        );
+        let request = json!({"method":"memory.capture","session_id":"ses","messages":[{"id":"native-user-1","role":"user","text":text}]});
+        assert_eq!(
+            tool_body(handler.handle_memory_capture(test_route(7), &request).await)["state"],
+            "accepted"
+        );
+        let next = json!({"method":"memory.capture.next","session_id":"ses","model":"custom-native/model"});
+        let work = tool_body(
+            handler
+                .handle_native_capture_next(test_route(7), &next)
+                .await,
+        );
+        assert_eq!(work["state"], "work");
+        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[
+            {"category":"CONSTRAINTS","content":"PR 812's release job fails.","quote":framing}
+        ]}]});
+        let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
+        assert_eq!(
+            tool_body(
+                handler
+                    .handle_native_capture_submit(test_route(7), &submission)
+                    .await
+            )["state"],
+            "processed"
+        );
+        let status = store.memory_capture_status(&capture_key(&project)).unwrap();
+        assert_eq!((status.completed, status.failed), (1, 0));
+        let memories = kernel_routes::read::read_visible(
+            &handler.kernel.kernel_store().unwrap(),
+            &kernel_routes::ProjectBinding::new(&project),
+            kernel::Surface::ExplicitSearch,
+            None,
+            kernel_routes::read::RowSelection::DomainDecisions("memory"),
+        )
+        .unwrap();
+        assert_eq!(
+            memories.decisions.values().next().unwrap().payload.summary,
+            format!("User stated: {framing}")
+        );
+    }
+
     #[test]
     fn module_status_emits_exact_numeric_state_sync_epoch_alongside_boolean_signal() {
         let (handler, _store, _dir, _project) =

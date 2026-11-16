@@ -172,8 +172,12 @@ measured separately under one named estimator.
 The summarizer sees each tool result as one digest:
 
 ```text
+<call>; <status>; bytes=N[; output="…"]
 <call>; <status>; bytes=N[; head="…"][; tail="…"]
 ```
+
+The first form shows an output of at most 2,000 bytes whole; the second
+shows a larger one through two excerpts.
 
 `<call>` is the call's `TC:` summary: `TC: <description>`, `TC: <name>(<key
 arg>)`, or `TC: <name>`, and `TC: <tool name>` for a result whose call is
@@ -189,23 +193,48 @@ and `digest` render the rest:
 - `bytes` is the byte length of the result's text: a text variant as is, a
   JSON value serialized, content blocks' text joined by newlines, or a
   denial's reason.
-- `head` and `tail` are the first and last nonblank lines with trailing
-  whitespace trimmed; one nonblank line is `head` alone. A double quote or a
-  citation-marker bracket in a line becomes a single quote, and any other
+- `output` is the whole text of an output of at most 2,000 bytes
+  (`WHOLE_OUTPUT_MAX_BYTES`). Each whitespace run, line breaks and the joins
+  between content blocks included, becomes one space, with none at either
+  end, and a double quote or a citation-marker bracket becomes a single
+  quote, so the field stays one quoted value on the digest's transcript line.
+  An output made only of whitespace has no `output` field. The limit is a
+  quarter of the smallest chunk budget the producer derives
+  (`MIN_HISTORY_SUMMARIZER_CHUNK_TOKENS`, 8,000 tokens). An encoded token
+  holds at least one byte, so one whole output costs at most 2,000 tokens
+  under any tokenization, a quarter of the smallest configured chunk and a
+  sixteenth of the 32,000-token chunk a 128,000-token summarizer window
+  derives. A firing retried past `SHRINK_CHUNK_AFTER_FAILURES` halves its
+  budget, down to a sixteenth (500 tokens for the smallest chunk), and one
+  message may hold several results; when a message's parts outgrow the
+  firing budget, `presented_input` cuts the text and withdraws every alias
+  the cut reaches, as it does for any oversized message.
+  The limit reads the smallest budget, so a result's digest is the same
+  under every summarizer configuration and the boundary's per-block digest
+  cache stays valid when the configuration changes.
+- For a larger output, `head` and `tail` are the first and last nonblank
+  lines with trailing whitespace trimmed; one nonblank line is `head` alone.
+  A double quote or a citation-marker bracket in a line becomes a single
+  quote, and any other
   whitespace character, such as a carriage return or a Unicode line
   separator, becomes a space. Each excerpt therefore stays one quoted field
   on the digest's transcript line, as normalized message text does. Each
   excerpt is then clipped to 128 bytes (the claim-value bound) on a
   character boundary with a `…` clip marker.
-- The whole digest is at most 1 KiB; a longer call summary is clipped the
-  same way. Output bytes reach the summarizer only through the two excerpts.
-  The excerpts travel in the summarizer request as the chunk's transcript
+- An excerpt digest is at most 1 KiB; a longer call summary is clipped the
+  same way. Beside a whole output, the call summary keeps at least 672 bytes,
+  the room an excerpt outcome at its 352-byte capacity leaves, so a whole
+  output's digest is at most 1 KiB plus the 2,000-byte limit
+  (`MAX_WHOLE_DIGEST_BYTES`, 3,024 bytes). Output bytes of a larger output
+  reach the summarizer only through the two excerpts.
+  The output text travels in the summarizer request as the chunk's transcript
   text does, to the owner's selected provider through the harness adapter
   that already carried the full tool output; secret redaction applies where
   the kernel writes durable text and where evaluator cassettes record a
   frame.
 - The summarizer's system prompt documents these fields in its `TC:`
-  notation, and a test pins them to the claim-value bound.
+  notation, and a test pins them to the claim-value bound and the
+  whole-output limit.
 
 Both `TC:` sites render the digest through this one formatter and the one
 call-summary formatter. The chunk builder shows it for each result: under
@@ -230,18 +259,24 @@ The boundary computes a result's outcome half once per block content. The
 boundary token cache stores it beside the block's token count, keyed by the
 block id and validated by the block's byte length and content hash, so a warm
 trigger check reads no tool output and serializes no JSON. A cold block's
-digest reads its first and last nonblank lines in full and serializes a JSON
-output once, alongside the token count the same pass computes.
+digest reads a whole output of at most 2,000 bytes, or the first and last
+nonblank lines of a larger one, and serializes a JSON output once, alongside
+the token count the same pass computes. A cached whole outcome is at most
+about 2 KiB, and the cache counts its bytes against its retained-bytes budget.
 
 In the chunk builder, a digest joins its message's presented part, frozen
 `transformed` under that part's `sN` alias, so a citation through it
 addresses digest bytes, and an alias a budget cut reaches is withdrawn.
 
-C5's bash result is the witness: the tool `completed`, and its `tail`
-carries the `connection refused` line the inference rests on. The replay
-exposure model appends the same digests after the text of each record that
-carries text, so a span annotated on a tool block stays `absent` while the
-excerpts reach the producer.
+C5's bash result is the witness: the tool `completed`, and its 90-byte
+output, `connection refused` line included, reaches the producer whole in the
+`output` field. The replay exposure model appends the same digests after the
+text of each record that carries text but scores only text blocks, so a span
+annotated on a tool block stays `absent` and fires
+`cf_u2_tool_output_obligation_omitted` even when the digest carries the
+output whole. Every corpus tool output is under 2,000 bytes, so crediting
+digest text would also need a corpus case with a larger output to keep the
+omitted case exercised.
 
 ### Tool vocabulary
 
