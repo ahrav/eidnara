@@ -1,6 +1,6 @@
 //! `Handler` owns the primary host lifecycle, transforms already-decoded wire items, and persists per-session state in the single-writer `memory-store`.
 
-// `deny(unsafe_code)` permits the one scoped `allow` in `vector_mapped`, which maps a pinned layer's int8 codes for the candidate scan.
+// `deny(unsafe_code)` permits the scoped `allow`s in `vector_mapped`, which maps a pinned layer's int8 codes for the candidate scan, and in `process_memory`, which calls glibc `mallinfo2`, `mallopt`, and `malloc_trim`.
 #![deny(unsafe_code)]
 
 pub mod attestation_verifier;
@@ -82,6 +82,7 @@ pub mod message_cleanup;
 pub mod metered_decode;
 pub mod packing;
 mod parallel_map;
+pub mod process_memory;
 pub(crate) mod project_docs;
 pub(crate) mod prompt_surface;
 pub(crate) mod repository_identity;
@@ -4770,7 +4771,17 @@ impl HandlerCore {
                     .unregister_memory_classifier_run(&session);
             }
             self.purge_session_state(&session, "route_teardown");
+            self.release_c_heap_when_due();
         }
+    }
+
+    fn release_c_heap_when_due(&self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let _ = self
+            .admission()
+            .spawn_blocking(process_memory::release_free_c_heap_when_due);
     }
 
     /// Drops every process-local cache and coordinator entry keyed by `session`.
@@ -8890,6 +8901,7 @@ impl HandlerCore {
                         "state_sync_epoch": STATE_SYNC_EPOCH,
                     },
                     "memory_holders": self.memory_holder_metrics(),
+                    "process_memory": process_memory::ProcessMemory::sample().to_json(),
                     "kernel": kernel,
                     "memory_reviewer": self.memory_reviewer_status.reported().to_json(),
                 })),
@@ -13700,6 +13712,9 @@ impl CompositeComponent for Handler {
     }
 
     async fn health(&self) -> HealthReport {
+        if process_memory::health_probe_starts_a_check() {
+            self.release_c_heap_when_due();
+        }
         let now = now_ms().max(0) as u64;
         let phase = self.store_open.phase.load(Ordering::Acquire);
         let mut report = match phase {

@@ -1909,9 +1909,13 @@ mod unix {
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(unix)]
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    unix::run().await
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    daemon::process_memory::limit_c_heap_arenas();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?
+        .block_on(unix::run())
 }
 
 #[cfg(not(unix))]
