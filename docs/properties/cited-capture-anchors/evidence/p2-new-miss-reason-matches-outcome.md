@@ -18,7 +18,7 @@ None.
 
 ## What a test must construct
 
-Each reason constructed separately, with the `publish_budget_expired` and deferred-unit constructions listed in the investigation log: `crates/daemon/src/source_capture_tests.rs:3501` (cited and descriptor not found), `crates/daemon/src/source_capture_tests.rs:3667` (source capture off, hashed id, plain, unborn, and SHA-256 roots, detached HEAD); the hashed fragment id the checkpoint writes passes the shape test (`crates/daemon/src/memory_capture.rs:5905`).
+Each reason constructed separately, with the `publish_budget_expired` and deferred-unit constructions listed in the investigation log: `crates/daemon/src/source_capture_tests.rs:3501` (cited and descriptor not found), `crates/daemon/src/source_capture_tests.rs:3667` (source capture off, hashed id, plain, unborn, and SHA-256 roots, detached HEAD); the hashed fragment id the checkpoint writes passes the shape test (`crates/daemon/src/memory_capture.rs:6399`).
 
 ## Investigation log
 

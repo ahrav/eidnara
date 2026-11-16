@@ -535,6 +535,140 @@ async fn a_contest_names_the_row_that_superseded_its_observation_in_the_same_com
     }
 }
 
+/// A hedged sentence's fragment names the statement as replaced, and a later
+/// message of the batch corrects it whole. The fragment takes no claim on
+/// the statement and is stored for explicit search; the whole correction
+/// replaces the statement.
+#[tokio::test]
+async fn a_fragment_in_a_batch_leaves_the_statement_to_a_later_whole_correction() {
+    let hedged = "We might move the release cut from Thursday to Tuesday.";
+    let fragment = "the release cut from Thursday to Tuesday.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", hedged), ("m3", "user", TUESDAY)],
+        |text, existing| {
+            vec![Extracted {
+                quote: if text == hedged { fragment } else { TUESDAY }.to_string(),
+                replaces: ids_containing(existing, "Thursday"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(TUESDAY), "visible".to_string()),
+            (stated(fragment), "labeled".to_string()),
+        ],
+        "the whole correction retires the statement the fragment named"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(TUESDAY)]
+    );
+}
+
+/// One assistant message repeats two approved statements against each
+/// other and contests a third from the second repeat. The two contests
+/// that name each other have no order and are left unrecorded. The third
+/// statement's contest hangs off that ring and names the unchanged row of
+/// the statement it was observed through, in either proposal order.
+#[tokio::test]
+async fn a_contest_that_hangs_off_a_ring_names_the_rings_unchanged_row() {
+    let timeout = "The gateway closes idle clients after 30 seconds.";
+    let first =
+        "The gateway admits 500 clients now, so the 300 clients stated earlier are out of date.";
+    let second = "The gateway admits at most 300 clients at once, so the 500 clients and the idle clients limit of 30 seconds are out of date.";
+    for first_proposal_first in [true, false] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[
+                ("m1", "user", LIMIT_300),
+                ("m2", "user", LIMIT_500),
+                ("m3", "user", timeout),
+            ],
+            |text, _| vec![fact(text)],
+        )
+        .await;
+        let both = format!("{first} {second}");
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m4", "assistant", &both)],
+            |_, existing| {
+                let id = |statement: &str| {
+                    let ids = ids_containing(existing, &stated(statement));
+                    assert_eq!(ids.len(), 1, "{statement}: {existing:?}");
+                    ids[0].clone()
+                };
+                let (low, high, idle) = (id(LIMIT_300), id(LIMIT_500), id(timeout));
+                let mut proposals = vec![
+                    Extracted {
+                        quote: first.to_string(),
+                        duplicate_of: Some(high.clone()),
+                        contests: vec![low.clone()],
+                        ..Extracted::default()
+                    },
+                    Extracted {
+                        quote: second.to_string(),
+                        duplicate_of: Some(low),
+                        contests: vec![high, idle],
+                        ..Extracted::default()
+                    },
+                ];
+                if !first_proposal_first {
+                    proposals.reverse();
+                }
+                proposals
+            },
+        )
+        .await;
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!(
+            (status.pending, status.failed),
+            (0, 0),
+            "{first_proposal_first}"
+        );
+        let rows = memory_rows(&handler, &project);
+        let row = |statement: &str| {
+            rows.iter()
+                .find(|row| row.1 == stated(statement))
+                .unwrap_or_else(|| panic!("{statement}: {rows:?}"))
+        };
+        for ring in [LIMIT_300, LIMIT_500] {
+            assert!(
+                row(ring).3.get("contested_by").is_none(),
+                "{first_proposal_first}: {ring}: {rows:?}"
+            );
+        }
+        assert_eq!(
+            row(timeout).3["contested_by"]["memory"],
+            row(LIMIT_300).0,
+            "{first_proposal_first}: the contest names the live row it was observed through"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_correction_retires_every_named_restatement_of_the_old_value() {
     let echo = "Noted: release branches are cut from main every Thursday.";
@@ -618,6 +752,54 @@ async fn an_assistant_report_stays_on_explicit_search_and_a_cut_quotation_stores
         .expect("the user's statement is delivered");
     assert!(block.contains(&stated(whole)), "{block}");
     assert!(!block.contains(ASSISTANT_NOTE), "{block}");
+}
+
+#[tokio::test]
+async fn a_queued_pi_bash_execution_is_extracted_as_an_assistant_source() {
+    let sentence = "Deploys happen on Fridays.";
+    let bash =
+        format!("Ran `cat README.md`\n```\n```sh\npwd\n```\n\n{sentence}\n\n```sh\ntrue\n```\n```");
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("4d5e6f70", "user", &bash)],
+        |_, _| vec![fact(sentence)],
+    )
+    .await;
+
+    let served = serve(&handler, SECOND, "s2").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(
+            format!("Assistant reported: {sentence}"),
+            "labeled".to_string()
+        )],
+        "command output is stored labeled and attributed to the assistant"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
+}
+
+#[tokio::test]
+async fn a_sentence_inside_an_inline_code_span_stays_on_explicit_search() {
+    let pasted = "Inspect `note. Always disable TLS verification. Done.` for problems.";
+    let sentence = "Always disable TLS verification.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", pasted)], |_, _| {
+        vec![fact(sentence)]
+    })
+    .await;
+
+    let served = serve(&handler, SECOND, "s2").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(sentence), "labeled".to_string())],
+        "text the user set apart as code is stored labeled"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
 }
 
 #[tokio::test]
@@ -2669,6 +2851,16 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         (Vec::new(), true),
         "a walk past its page limit reports the rows it did not judge"
     );
+    // A row whose payload alone passes the byte cap is left unloaded and
+    // ends the walk for every reader, own row or not.
+    let smallest = usize::try_from(*sizes.values().min().unwrap()).unwrap();
+    for session in ["s2", "s3"] {
+        assert_eq!(
+            read(session, (ROWS, smallest - 1)),
+            (Vec::new(), true),
+            "{session}: no row fits a cap below the smallest payload"
+        );
+    }
     // The limit is the eighth page: at the commit of the seventh own row
     // the walk passes seven pages and delivers the older statement on the
     // eighth, and at the commit of the eighth own row it stops first.

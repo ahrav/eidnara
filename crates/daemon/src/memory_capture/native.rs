@@ -116,6 +116,7 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
                 CaptureRole::Assistant
             },
             text: job.text.clone(),
+            own_id: !super::cite::is_hashed_source_id(&job.message_id),
         })
         .collect()
 }
@@ -820,6 +821,7 @@ impl CaptureWork {
                 super::ASSISTANT_REPORTED
             };
             let prose = &proses[index];
+            let states_whole = super::states_whole_message(job);
             let mut proposed = decision.memories;
             let widened = if super::is_user_source(job)
                 && !super::cite::is_hashed_source_id(&job.message_id)
@@ -876,7 +878,7 @@ impl CaptureWork {
                         && previous.contested
                         && super::statement_text(&previous.content)
                             != super::statement_text(&memory.content)
-                }) && user_attributed(job, prose, memory)
+                }) && user_attributed(states_whole, prose, memory)
                 {
                     memory.duplicate_of = None;
                 }
@@ -885,7 +887,7 @@ impl CaptureWork {
             // user's approved statement. Its targets among those become
             // contests: the statement stays and is shown beside the quotation.
             for memory in &mut memories {
-                if user_attributed(job, prose, memory) {
+                if user_attributed(states_whole, prose, memory) {
                     continue;
                 }
                 let automatic = |target: &String| {
@@ -1013,8 +1015,9 @@ pub(super) fn keep_statement_text(
     memories: &mut [CapturedMemory],
 ) -> bool {
     let mut attached = false;
+    let states_whole = super::states_whole_message(job);
     for (memory, quoted) in memories.iter_mut().zip(quoted) {
-        if user_attributed(job, prose, quoted) {
+        if user_attributed(states_whole, prose, quoted) {
             memory.content.clone_from(&quoted.content);
         }
         attached |= memory.content != quoted.content;
