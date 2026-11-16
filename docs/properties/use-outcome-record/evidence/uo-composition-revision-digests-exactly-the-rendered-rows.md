@@ -17,7 +17,7 @@ revision.
   per positive row (`crates/daemon/src/canonical_memory.rs:55-58`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:346`)).
+  (`crates/daemon/src/canonical_memory.rs:681`)).
 - The four tests named under Existing check are unchanged since `a0e3f2993`; the
   spec cited their `fn` lines, and the production code was not cited.
 
@@ -25,13 +25,13 @@ revision.
   rendered positive-category rows, sorted by object id, after the token-budget
   trim.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:748`);
+  (`crates/daemon/src/canonical_memory.rs:1142`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:806`);
+  (`crates/daemon/src/canonical_memory.rs:1200`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:823`);
+  (`crates/daemon/src/canonical_memory.rs:1217`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:845`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1239`). Status: unaudited.
 
 ## Failure scenario
 

@@ -251,10 +251,12 @@ fn read_at_tip(
 }
 
 /// The most payload pages one delivery walk loads. A page holds at most the
-/// read caps, 8,192 rows and 8 MiB, so the walk passes over up to 64 MiB
-/// of a session's own newer rows before it stops; a project's memory is
-/// orders of magnitude smaller, and the bound keeps one transform pass from
-/// reading a store of any size.
+/// caller's row and byte caps, and its first row whatever its size, so with
+/// the read caps of 8,192 rows and 8 MiB the walk loads the payloads of up
+/// to 64 MiB of a session's own newer rows before it stops. The limit
+/// bounds the payloads a pass loads. The list of the project's visible
+/// memory rows, which holds no payload, is read and ordered whole before
+/// the walk, as every bounded read of the domain does.
 const MAX_DELIVERY_PAGES: usize = 8;
 
 /// The project's injectable memory rows at `tip` that a pass delivers to each
@@ -271,8 +273,9 @@ const MAX_DELIVERY_PAGES: usize = 8;
 /// of them are newer than the rows it is served, and the payloads held at
 /// once stay within three times the byte cap. The walk loads at most
 /// [`MAX_DELIVERY_PAGES`] pages. `truncated` reports that some session's
-/// delivery left out a row it was eligible for, or that the page limit
-/// ended the walk.
+/// delivery left out a row it was eligible for at a row or byte cap, or
+/// that the page limit ended the walk with rows not yet judged; the rows
+/// delivered before the cut stay in the response.
 pub(crate) fn read_other_sessions(
     store: &kernel::KernelStore,
     project: &ProjectBinding,

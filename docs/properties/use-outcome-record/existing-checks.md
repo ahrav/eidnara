@@ -58,15 +58,15 @@ Every location was read at the #1157 branch tip.
 
 | Check | Location | Records | Status |
 | --- | --- | --- | --- |
-| `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes` | `crates/daemon/src/canonical_memory.rs:710` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
-| `revision_changes_only_when_the_rendered_inputs_change` | `crates/daemon/src/canonical_memory.rs:748` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `rows_the_renderer_drops_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:806` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:823` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
-| `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:845` | `uo-composition-revision-digests-exactly-the-rendered-rows`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes` | `crates/daemon/src/canonical_memory.rs:1104` | `uo-p-served-ids-equal-frozen-composition` | unaudited |
+| `revision_changes_only_when_the_rendered_inputs_change` | `crates/daemon/src/canonical_memory.rs:1142` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `rows_the_renderer_drops_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:1200` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `bytes_past_the_render_cap_do_not_move_the_revision` | `crates/daemon/src/canonical_memory.rs:1217` | `uo-composition-revision-digests-exactly-the-rendered-rows` | unaudited |
+| `rows_past_the_memory_budget_are_neither_injected_nor_digested` | `crates/daemon/src/canonical_memory.rs:1239` | `uo-composition-revision-digests-exactly-the-rendered-rows`, `uo-p-served-ids-equal-frozen-composition` | unaudited |
 | `a_subagent_pass_under_native_authority_reports_native_authority` | `crates/daemon/src/fold_authority_handler_tests.rs:143` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
-| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:25416` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
-| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:26466` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
-| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:40106` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
+| `route_teardown_keeps_an_admitted_checkpoint_alive` | `crates/daemon/src/lib.rs:25442` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
+| `session_delete_waits_for_the_capture_gate_off_the_runtime_worker` | `crates/daemon/src/lib.rs:26621` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
+| `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired` | `crates/daemon/src/lib.rs:40262` | `uo-consent-gate-source-is-the-route-frozen-config` | unaudited |
 | `the_acceptance_gate_opens_only_for_an_owner_only_record_of_the_live_pair` | `crates/daemon/src/memory_reviewer/activation.rs:385` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_gate_opens_only_for_a_matching_attested_owner_only_record` | `crates/daemon/src/memory_reviewer/activation.rs:448` | `uo-activation-gate-closes-on-kernel-baseline-or-incarnation-change` | unaudited |
 | `the_maintenance_slice_expires_use_outcomes_with_the_activation_gate_closed` | `crates/daemon/src/memory_reviewer/lifecycle.rs:829` | `uo-p-sweep-retires-only-expired-uncited-rows` | unaudited |
@@ -76,10 +76,10 @@ Every location was read at the #1157 branch tip.
 | `session_delete_with_the_kernel_starting_deletes_nothing` | `crates/daemon/src/source_capture_tests.rs:1627` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
 | `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages` | `crates/daemon/src/source_capture_tests.rs:1699` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate` | unaudited |
 | `the_capture_report_reaches_host_status_field_for_field` | `crates/daemon/src/source_capture_tests.rs:845` | `uo-status-counters-are-closed-vocabulary-exact-integers-with-unavailable-not-zero` | unaudited |
-| `canonical_memory_composes_the_project_memory_block_and_pins_the_snapshot` | `crates/daemon/src/transform.rs:13886` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
-| `project_memory_revision_change_requests_a_hard_fold` | `crates/daemon/src/transform.rs:13993` | `uo-served-rows-are-the-frozen-m0-rows-between-hard-folds` | unaudited |
-| `a_pressure_refold_reports_its_frozen_composition` | `crates/daemon/src/transform.rs:20895` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
-| `subagent_first_active_render_commits_tagged_bytes_before_replay` | `crates/daemon/src/transform.rs:23784` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
+| `canonical_memory_composes_the_project_memory_block_and_pins_the_snapshot` | `crates/daemon/src/transform.rs:13985` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
+| `project_memory_revision_change_requests_a_hard_fold` | `crates/daemon/src/transform.rs:14092` | `uo-served-rows-are-the-frozen-m0-rows-between-hard-folds` | unaudited |
+| `a_pressure_refold_reports_its_frozen_composition` | `crates/daemon/src/transform.rs:20994` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
+| `subagent_first_active_render_commits_tagged_bytes_before_replay` | `crates/daemon/src/transform.rs:23883` | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | unaudited |
 | `an_equal_digest_replays_and_another_harness_or_role_conflicts` | `crates/daemon/src/use_outcome_writer_tests.rs:131` | `uo-p-served-set-once-per-session-revision` | unaudited |
 | `only_an_available_composition_is_recorded` | `crates/daemon/src/use_outcome_writer_tests.rs:181` | `uo-consent-gate-source-is-the-route-frozen-config`, `uo-p-no-row-when-memory-disabled`, `uo-p-no-row-for-withheld-composition` | unaudited |
 | `a_failed_write_changes_nothing_the_harness_receives_and_a_later_fold_repairs_it` | `crates/daemon/src/use_outcome_writer_tests.rs:282` | `uo-composition-freeze-persists-at-every-hard-fold-site` | unaudited |
@@ -114,7 +114,7 @@ Every location was read at the #1157 branch tip.
 | `review_use_outcome_answers_an_unready_kernel_with_its_state_and_no_count` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:641` | `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
 | `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:41` | `uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate`, `uo-per-session-pass-timestamps-die-with-the-session`, `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
 | `a_delete_with_nothing_live_commits_nothing_and_an_unready_kernel_converges_on_retry` | `crates/daemon/src/use_outcome_lifecycle_tests.rs:90` | `uo-p-record-survives-session-delete`, `uo-p-deleted-at-iff-session-delete-kernel-step` | unaudited |
-| `route_teardown_releases_the_staged_upload_while_the_session_stays_bound` | `crates/daemon/tests/kernel_routes.rs:3849` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
+| `route_teardown_releases_the_staged_upload_while_the_session_stays_bound` | `crates/daemon/tests/kernel_routes.rs:3852` | `uo-route-teardown-purges-process-state-but-deletes-no-durable-row` | unaudited |
 | `review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it` | `crates/daemon/tests/memory_reviewer_wire.rs:15` | `uo-review-reads-authorize-by-bearer-and-project-binding-not-owner` | unaudited |
 | `an_observational_route_reads_the_same_outcomes_as_an_ordinary_route` | `crates/daemon/tests/memory_reviewer_wire.rs:260` | `uo-review-reads-authorize-by-bearer-and-project-binding-not-owner` | unaudited |
 | `review_use_outcome_counts_serves_and_later_disputes_of_one_decision` | `crates/daemon/tests/memory_reviewer_wire.rs:686` | `uo-review-reads-authorize-by-bearer-and-project-binding-not-owner`, `uo-p-counts-exact-and-unavailable-not-zero` | unaudited |
