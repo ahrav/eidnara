@@ -601,7 +601,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-scan-grammar]: ../../../../crates/daemon/src/lib.rs#L21032
 [t-scan-corpora]: ../../../../crates/daemon/src/lib.rs#L21070
 [t-scan-swar]: ../../../../crates/daemon/src/ingress_scan.rs#L364
-[t-witness]: ../../../../crates/daemon/src/lib.rs#L21121
+[t-witness]: ../../../../crates/daemon/src/lib.rs#L22202
 [t-token]: ../../../../crates/daemon/src/lib.rs#L21156
 [t-decode-diff]: ../../../../crates/daemon/src/lib.rs#L21392
 [t-entry-diff]: ../../../../crates/daemon/src/lib.rs#L21557
@@ -612,7 +612,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-held]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L262
 [t-restart-scratch]: ../../../../crates/daemon/src/lib.rs#L21842
 [t-cap-alloc]: ../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L207
-[t-observed]: ../../../../crates/daemon/src/lib.rs#L22478
+[t-observed]: ../../../../crates/daemon/src/lib.rs#L27710
 [t-footprint]: ../../../../crates/daemon/src/lib.rs#L20629
 [t-meter]: ../../../../crates/daemon/src/lib.rs#L20669
 [t-small]: ../../../../crates/daemon/src/lib.rs#L20706

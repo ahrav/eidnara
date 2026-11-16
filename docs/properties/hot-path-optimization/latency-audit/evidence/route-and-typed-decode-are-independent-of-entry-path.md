@@ -356,12 +356,12 @@ against those failures.
 [decode-live]: ../../../../../crates/daemon/src/metered_decode.rs#L327-L349
 [test-entry]: ../../../../../crates/daemon/src/lib.rs#L8626-L8638
 [t-probe]: ../../../../../crates/daemon/src/lib.rs#L21784-L21843
-[t-witness]: ../../../../../crates/daemon/src/lib.rs#L19505-L19535
+[t-witness]: ../../../../../crates/daemon/src/lib.rs#L22202-L22232
 [t-token]: ../../../../../crates/daemon/src/lib.rs#L22236-L22249
 [t-corpus]: ../../../../../crates/daemon/src/lib.rs#L22251-L22451
 [t-decode-diff]: ../../../../../crates/daemon/src/lib.rs#L19765-L19896
 [t-entry-diff]: ../../../../../crates/daemon/src/lib.rs#L19918-L19961
-[t-observed]: ../../../../../crates/daemon/src/lib.rs#L21887-L21915
+[t-observed]: ../../../../../crates/daemon/src/lib.rs#L27710-L27746
 [t-cap-live]: ../../../../../crates/daemon/src/lib.rs#L19349-L19426
 [t-peak]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L102-L163
 [t-peak-escaped]: ../../../../../crates/daemon/tests/parse_charge_covers_typed_decode.rs#L178-L199

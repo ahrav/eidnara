@@ -9,9 +9,11 @@ confirmation; historical citations and exercise are not carried forward.
 
 [The async transform handler][pass] pins one canonical read before its
 synchronous transform closure. Emergency reruns at [8338-8442][retry] reuse it.
-[The kernel query][sql] has an inner admission join and no memory domain/kind
-predicate. It materializes a full Vec before caller selection. Unadmitted
-objects therefore are not part of its candidate result.
+[The kernel query][sql] has an inner admission join. At the baseline it had no
+memory domain/kind predicate; since #443 its `DomainDecisions` shape carries
+one (`crates/kernel/src/admission.rs:3852-3856`). It materializes a full Vec
+before caller selection. Unadmitted objects therefore are not part of its
+candidate result.
 
 [The route reader][read] applies domain/kind and scope filtering before newest
 selection and payload-prefix truncation. Serving order is commit sequence
