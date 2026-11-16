@@ -232,6 +232,28 @@ and `digest` render the rest:
   that already carried the full tool output; secret redaction applies where
   the kernel writes durable text and where evaluator cassettes record a
   frame.
+- The transcript the store keeps for a chunk is the chunk's text with each
+  tool result rendered by `stored_output_outcome`
+  (`stored_chunk_transcript`). The durable secret scan reads the output as
+  the tool printed it, and the digest renders the scanned text with the
+  printed output's `bytes` and its whole or excerpt form. The scan runs
+  before the digest collapses line breaks and rewrites double quotes,
+  because scanner rules match a quoted credential by its delimiter and its
+  line. A whole output is scanned as its text joined by newlines, and the
+  scanned text is cut at 2,000 bytes on a character boundary, because a
+  placeholder can be longer than the credential it replaces. An excerpt's
+  line is scanned with its neighbouring text. The head's scan reads the
+  output from the head's start for 98,820 bytes, which cover the bytes the
+  excerpt reads and the scanner's longest finding. The tail's scan reads up
+  to 98,304 bytes before the tail and 98,820 bytes of it, 197,124 bytes at
+  most, so a value on the tail whose key is on the line before it is
+  replaced. A finding that touches a line replaces it with the scanned
+  line, which the excerpt then clips; any other line is the printed line. A
+  tail whose scanned line begins inside the line before it is withheld. An
+  output with no finding has the digest the summarizer read.
+  The scan ledger's receipt for the transcript counts the findings of the
+  store's scan of the text it receives. A credential the as-printed scan
+  replaced arrives as a placeholder, so that receipt counts zero for it.
 - The summarizer's system prompt documents these fields in its `TC:`
   notation, and a test pins them to the claim-value bound and the
   whole-output limit.

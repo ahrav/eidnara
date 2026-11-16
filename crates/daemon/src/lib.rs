@@ -5410,6 +5410,11 @@ impl HandlerCore {
                         )
                     });
                 let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
+                let chunk_transcript = history_summarizer_chunk::stored_chunk_transcript(
+                    parsed.messages.as_slice(),
+                    &live,
+                    &chunk.chunk,
+                );
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
                         .iter()
@@ -5488,7 +5493,7 @@ impl HandlerCore {
                                 project_path: &project_path,
                                 observed_chunk_fingerprint: &observed,
                                 validation_chunk: &chunk.chunk,
-                                chunk_transcript: &chunk.text,
+                                chunk_transcript: &chunk_transcript,
 
                                 boundary_dates: &boundary_dates,
                                 prior_history_segments: &prior_history_segments,
@@ -44280,6 +44285,67 @@ mod tests {
         let history_segments = store.load_history_segments("ses").unwrap();
         assert_eq!(history_segments.len(), 1);
         assert_eq!(history_segments[0].end_message, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_stores_a_transcript_whose_tool_output_was_scanned_as_printed() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output(1, 3, "reattached"));
+        let printed = "first\nDB_PASSWORD=\"Xk7'Qm2Lr8Wv4Zd6Pn9\"\nlast\n";
+        assert!(
+            !context_core::redaction::redact_durable_text(printed)
+                .text
+                .contains("Qm2Lr8Wv4Zd6Pn9")
+        );
+        let messages = vec![
+            ck("m1", 1, "read the environment file"),
+            assistant_tool_call("m2", 2),
+            tool_result("result-m2", 3, printed),
+        ];
+        let (handler, store, dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        seed_awaiting(&store, &messages);
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        let transcripts = store
+            .load_chunk_transcripts_for_range("ses", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(transcripts.len(), 1);
+        let transcript = transcripts[0].transcript.as_deref().unwrap();
+        assert!(!transcript.contains("Qm2Lr8Wv4Zd6Pn9"), "{transcript}");
+        assert!(
+            transcript.contains("output=\"first DB_PASSWORD='<REDACTED:db_password>' last\""),
+            "{transcript}"
+        );
+
+        // The scan ledger's receipt for the transcript counts the store's scan of the text it received, which holds the placeholder.
+        let ledger = rusqlite::Connection::open_with_flags(
+            sqlite_store_path(dir.path().join("data").to_str().unwrap(), DEFAULT_MODULE_ID),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let receipts: Vec<(i64, i64)> = ledger
+            .prepare(
+                "SELECT DISTINCT s.scan_id, s.finding_count,
+                        (SELECT COUNT(*) FROM scan_detections d WHERE d.scan_id = s.scan_id)
+                   FROM field_scans s JOIN scan_owner_copies o USING (scan_id)
+                  WHERE o.field_id = 'chunk_transcript'",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(receipts, [(0, 0)]);
     }
 
     /// A reattachment must use the retry budget; otherwise it restores aliases the live cut removed from an oversized message and can accept facts citing unseen bytes.

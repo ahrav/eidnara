@@ -443,9 +443,31 @@ pub fn build_history_summarizer_chunk(
         token_budget,
         eligible_end_ordinal,
         None,
+        crate::tool_outcome::output_outcome,
     )
     .0
 }
+
+/// The text of `chunk` with each tool result rendered by [`crate::tool_outcome::stored_output_outcome`]. `messages` and `blocks` must be the inputs used to build `chunk`.
+pub fn stored_chunk_transcript(
+    messages: &[Arc<IngressMessage>],
+    blocks: &[FlatBlock],
+    chunk: &HistorySummarizerChunk,
+) -> String {
+    build_chunk(
+        messages,
+        blocks,
+        chunk.start_index,
+        usize::MAX,
+        chunk.end_index.saturating_add(1),
+        None,
+        crate::tool_outcome::stored_output_outcome,
+    )
+    .0
+    .text
+}
+
+type OutcomeDigest = fn(&memory_store::ToolOutput) -> String;
 
 fn build_chunk<'a>(
     messages: &'a [Arc<IngressMessage>],
@@ -454,6 +476,7 @@ fn build_chunk<'a>(
     token_budget: usize,
     eligible_end_ordinal: u64,
     identities: Option<IdentitySelection<'a>>,
+    outcome: OutcomeDigest,
 ) -> (HistorySummarizerBuiltChunk, Option<IdentitySelection<'a>>) {
     let total_count = messages
         .iter()
@@ -497,7 +520,12 @@ fn build_chunk<'a>(
         .collect::<Vec<_>>();
     crate::parallel_map::map_until(
         eligible,
-        |(), message| (message_meta(&message), message_part(&message, &tool_pairs)),
+        |(), message| {
+            (
+                message_meta(&message),
+                message_part(&message, &tool_pairs, outcome),
+            )
+        },
         |(meta, part)| {
             if !builder.push_message(meta, part) {
                 return false;
@@ -612,6 +640,8 @@ pub struct AssembledHistorySummarizerFiring {
     /// The budget the prompt was presented under, after the retry shrink.
     pub token_budget: usize,
     pub chunk: HistorySummarizerBuiltChunk,
+    /// The transcript the store keeps for `chunk`, built by [`stored_chunk_transcript`].
+    pub chunk_transcript: String,
 
     pub chunk_fingerprint: String,
     pub selected_range_identities: Vec<HistorySummarizerSelectedMessageIdentity>,
@@ -825,7 +855,7 @@ impl AssembledHistorySummarizerFiring {
             history_segment_set_generation: self.history_segment_set_generation,
             observed_chunk_fingerprint: &self.chunk_fingerprint,
             validation_chunk: &self.chunk.chunk,
-            chunk_transcript: &self.chunk.text,
+            chunk_transcript: &self.chunk_transcript,
 
             boundary_dates: &self.boundary_dates,
             prior_history_segments: &self.prior_history_segments,
@@ -929,6 +959,7 @@ pub fn assemble_history_summarizer_firing(
         token_budget,
         eligible_end,
         Some(IdentitySelection::new(block_identities_by_mid)),
+        crate::tool_outcome::output_outcome,
     );
     // A placeholder firing calls no model, so its chunk can spend the configured budget the retry shrink withheld on reaching the result of a tool arc that opens the chunk; a result even that budget cannot hold leaves the chunk as built.
     if chunk_failures >= PLACEHOLDER_AFTER_FAILURES
@@ -941,6 +972,7 @@ pub fn assemble_history_summarizer_firing(
             config.token_budget,
             reach + 1,
             Some(IdentitySelection::new(block_identities_by_mid)),
+            crate::tool_outcome::output_outcome,
         );
         if reaching.chunk.end_index >= reach {
             chunk = reaching;
@@ -1045,6 +1077,7 @@ pub fn assemble_history_summarizer_firing(
             placeholder_output: (chunk_failures >= PLACEHOLDER_AFTER_FAILURES)
                 .then(|| placeholder_output(&chunk.chunk, chunk_failures)),
             chunk_failures,
+            chunk_transcript: stored_chunk_transcript(messages, live, &chunk.chunk),
             chunk,
             project_memory: project_memory.map(CanonicalMemoryRead::composition),
         },
@@ -1145,6 +1178,7 @@ fn message_meta(message: &FlatMessage<'_>) -> MessageMeta {
 fn message_part(
     message: &FlatMessage<'_>,
     pairs: &crate::tool_outcome::ToolPairs<'_>,
+    outcome: OutcomeDigest,
 ) -> MessagePart {
     if message.role == "system" {
         return MessagePart::Noise;
@@ -1152,7 +1186,7 @@ fn message_part(
     if (message.role == "tool" && !has_text_parts(message))
         || (message.role == "user" && !has_meaningful_user_text(message))
     {
-        let summaries = tool_parts(message, pairs, true)
+        let summaries = tool_parts(message, pairs, true, outcome)
             .into_iter()
             .map(|(part, _)| part)
             .collect::<Vec<_>>();
@@ -1166,9 +1200,10 @@ fn message_part(
     let text_parts = text_parts(message);
     let narrative_parts = text_parts.len();
     // A message with narrative shows the digests of the tool results it holds; one without also shows its calls that have no result here. Digests follow the compacted narrative and bare calls.
-    let (calls, digests): (Vec<_>, Vec<_>) = tool_parts(message, pairs, narrative_parts == 0)
-        .into_iter()
-        .partition(|(_, digest)| !digest);
+    let (calls, digests): (Vec<_>, Vec<_>) =
+        tool_parts(message, pairs, narrative_parts == 0, outcome)
+            .into_iter()
+            .partition(|(_, digest)| !digest);
     let mut all_parts = text_parts;
     all_parts.extend(calls.into_iter().map(|(part, _)| part));
     let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role);
@@ -1239,11 +1274,12 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
         .any(|text| !text.is_empty() && !is_system_directive(text))
 }
 
-/// `tool_parts` returns summaries and result digests in block order; each tuple's boolean marks a result digest ([`crate::tool_outcome::digest`]). A result's call half comes from `pairs`. With `bare_calls`, a call paired with no result in its own message contributes its summary.
+/// `tool_parts` returns summaries and result digests in block order; each tuple's boolean marks a result digest ([`crate::tool_outcome::digest`]). A result's call half comes from `pairs` and its outcome half from `outcome`. With `bare_calls`, a call paired with no result in its own message contributes its summary.
 fn tool_parts(
     message: &FlatMessage<'_>,
     pairs: &crate::tool_outcome::ToolPairs<'_>,
     bare_calls: bool,
+    outcome: OutcomeDigest,
 ) -> Vec<(String, bool)> {
     let mut parts = Vec::new();
     for block in &message.blocks {
@@ -1257,7 +1293,7 @@ fn tool_parts(
                 tool_name, output, ..
             } => {
                 let call = crate::tool_outcome::call_summary(pairs, &block.id, tool_name);
-                let outcome = crate::tool_outcome::output_outcome(output);
+                let outcome = outcome(output);
                 parts.push((crate::tool_outcome::digest(&call, &outcome), true));
             }
             _ => {}
@@ -2644,6 +2680,171 @@ mod tests {
         assert_eq!(validated.unprocessed_from, placeholder.to_ordinal + 1);
     }
 
+    /// The trailing user text makes the session exceed the assembler's minimum chunk size.
+    fn session_reading(output: &str) -> Vec<Arc<IngressMessage>> {
+        vec![
+            msg("m0", 0, "user", vec![text("Read the configuration.")]),
+            msg(
+                "m1",
+                1,
+                "assistant",
+                vec![
+                    BlockKind::ToolCall {
+                        id: "call".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"filePath":"app.config"}),
+                        provider_executed: false,
+                    },
+                    BlockKind::ToolResult {
+                        id: "call".to_string(),
+                        tool_name: "read".to_string(),
+                        output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
+                            text: output.to_string(),
+                        }),
+                        provider_executed: false,
+                    },
+                    text("I read the configuration."),
+                ],
+            ),
+            msg(
+                "m2",
+                2,
+                "user",
+                vec![text(&format!("Continue. {}", "word ".repeat(2_500)))],
+            ),
+        ]
+    }
+
+    fn fire_request_transcript(firing: &AssembledHistorySummarizerFiring) -> String {
+        let (_dir, store) = store_for_tests();
+        firing
+            .as_fire_request(
+                &store,
+                "ses-retry",
+                "/proj",
+                "proj",
+                "opencode",
+                memory_store::summarizer_timeline::FiringTrigger::default(),
+            )
+            .chunk_transcript
+            .to_string()
+    }
+
+    #[test]
+    fn the_stored_transcript_holds_no_credential_the_scan_removes_from_a_tool_output() {
+        let filler = "plain line\n".repeat(crate::tool_outcome::WHOLE_OUTPUT_MAX_BYTES / 11 + 1);
+        for (output, secret, presented) in [
+            (
+                "<configuration>\n  <add key=\"Username\" value=\"ci\" />\n  <add key=\"ClearTextPassword\" value=\"Q7m9Pv2Lr8Wk4Zd6\" />\n</configuration>\n".to_string(),
+                "Q7m9Pv2Lr8Wk4Zd6",
+                "output=\"<configuration> <add key='Username' value='ci' /> <add key='ClearTextPassword' value='Q7m9Pv2Lr8Wk4Zd6' /> </configuration>\"".to_string(),
+            ),
+            (
+                "first\nDB_PASSWORD=\"Xk7'Qm2Lr8Wv4Zd6Pn9\"\nlast\n".to_string(),
+                "Qm2Lr8Wv4Zd6Pn9",
+                "output=\"first DB_PASSWORD='Xk7'Qm2Lr8Wv4Zd6Pn9' last\"".to_string(),
+            ),
+            (
+                "first\napi_token='Xk7\"Qm2!Lr8#Wv4'\nlast\n".to_string(),
+                "Qm2!Lr8#Wv4",
+                "output=\"first api_token='Xk7'Qm2!Lr8#Wv4' last\"".to_string(),
+            ),
+            (
+                format!("DB_PASSWORD=\"Xk7'Qm2Lr8Wv4Zd6Pn9\"\n{filler}"),
+                "Qm2Lr8Wv4Zd6Pn9",
+                "head=\"DB_PASSWORD='Xk7'Qm2Lr8Wv4Zd6Pn9'\"; tail=\"plain line\"".to_string(),
+            ),
+            (
+                format!("{filler}DB_PASSWORD=\"Xk7'Qm2Lr8Wv4Zd6Pn9\"\n"),
+                "Qm2Lr8Wv4Zd6Pn9",
+                "head=\"plain line\"; tail=\"DB_PASSWORD='Xk7'Qm2Lr8Wv4Zd6Pn9'\"".to_string(),
+            ),
+            (
+                format!(
+                    "{} DB_PASSWORD=\"Xk7Qm2Lr8Wv4Zd6Pn9Aa1Bb2Cc3Dd4Ee5\"\n{filler}",
+                    "x".repeat(100)
+                ),
+                "Xk7Qm2Lr8Wv",
+                format!(
+                    "head=\"{} DB_PASSWORD='Xk7Qm2Lr8Wv…\"; tail=\"plain line\"",
+                    "x".repeat(100)
+                ),
+            ),
+        ] {
+            assert!(
+                !context_core::redaction::redact_durable_text(&output)
+                    .text
+                    .contains(secret),
+                "the scan removes the credential from the output as printed: {output}"
+            );
+            let firing = assemble_messages_after_failures(session_reading(&output), 0);
+            assert!(
+                firing.chunk.text.contains(&presented),
+                "{}",
+                firing.chunk.text
+            );
+            let transcript = fire_request_transcript(&firing);
+            assert!(!transcript.contains(secret), "{transcript}");
+            assert!(transcript.contains("<REDACTED:"), "{transcript}");
+            let stored = context_core::redaction::redact_durable_text(&transcript).text;
+            assert!(!stored.contains(secret), "{stored}");
+        }
+    }
+
+    #[test]
+    fn the_stored_transcript_is_the_chunk_text_when_the_scan_finds_nothing() {
+        let messages: Vec<_> = (0..40)
+            .map(|ordinal| {
+                if ordinal % 2 == 0 {
+                    return msg(
+                        &format!("m{ordinal}"),
+                        ordinal,
+                        "user",
+                        vec![text(&format!("Read \"file {}\".", ordinal + 1))],
+                    );
+                }
+                let small = format!(
+                    "{{\"ordinal\": {ordinal}, \"note\": \"it's «quoted»\"}}\n{}",
+                    "word ".repeat(300)
+                );
+                let large = format!("{small}{}", "more words\n".repeat(400));
+                msg(
+                    &format!("m{ordinal}"),
+                    ordinal,
+                    "assistant",
+                    vec![
+                        BlockKind::ToolCall {
+                            id: format!("call{ordinal}"),
+                            name: "read".to_string(),
+                            input: json!({"filePath": format!("file \"{ordinal}\".json")}),
+                            provider_executed: false,
+                        },
+                        BlockKind::ToolResult {
+                            id: format!("call{ordinal}"),
+                            tool_name: "read".to_string(),
+                            output: memory_store::ToolOutput::bare(
+                                memory_store::OutputKind::Text {
+                                    text: if ordinal % 4 == 1 { small } else { large },
+                                },
+                            ),
+                            provider_executed: false,
+                        },
+                        text(&format!("I read it. {}", "word ".repeat(300))),
+                    ],
+                )
+            })
+            .collect();
+        let firing = assemble_messages_after_failures(messages, 0);
+        assert!(
+            (3..39).contains(&firing.to_ordinal),
+            "the chunk holds a whole output and an excerpted one and stops at its budget: {}",
+            firing.to_ordinal
+        );
+        assert!(firing.chunk.text.contains("; output=\"{'ordinal': 1,"));
+        assert!(firing.chunk.text.contains("; head=\"{'ordinal': 3,"));
+        assert_eq!(fire_request_transcript(&firing), firing.chunk.text);
+    }
+
     /// Reaching the result stays within the configured budget: a result the full budget cannot hold leaves the shrunken chunk as built rather than rendering an oversized prompt nobody reads.
     #[test]
     fn placeholder_reach_stays_within_the_configured_budget() {
@@ -3582,5 +3783,47 @@ mod digest_chunk_tests {
         for ordinal in [3, 6] {
             assert!(marked.iter().any(|(at, _)| *at == ordinal), "{marked:?}");
         }
+    }
+
+    #[test]
+    fn the_stored_transcript_of_a_later_chunk_starts_at_the_chunk() {
+        let messages = [
+            msg(
+                "u0",
+                0,
+                "user",
+                vec![BlockKind::Text {
+                    text: "EARLIER".to_owned(),
+                }],
+            ),
+            msg(
+                "u1",
+                1,
+                "user",
+                vec![BlockKind::Text {
+                    text: "go".to_owned(),
+                }],
+            ),
+            msg(
+                "a2",
+                2,
+                "assistant",
+                vec![
+                    call("c1"),
+                    result(
+                        "c1",
+                        OutputKind::Text {
+                            text: "built\n".to_owned(),
+                        },
+                    ),
+                ],
+            ),
+        ];
+        let projection = project_messages(&messages).unwrap();
+        let built = build(&messages, 10_000);
+        assert_eq!(built.chunk.start_index, 1);
+        let stored = stored_chunk_transcript(&messages, &projection.blocks, &built.chunk);
+        assert_eq!(stored, built.text);
+        assert!(!stored.contains("EARLIER"), "{stored}");
     }
 }

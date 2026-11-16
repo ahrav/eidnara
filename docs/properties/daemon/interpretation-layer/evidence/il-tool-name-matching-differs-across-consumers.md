@@ -16,7 +16,7 @@ by different rules, so one spelling could mean two tools.
 - Injection read-back: `is_injected_todo_tool` (`tool_vocabulary.rs:156-158`)
   under `IgnoreAsciiCase`, called at `crates/daemon/src/injection.rs:435`.
 - Outcome: `exit_code` under `Exact` (`tool_vocabulary.rs:202`).
-- Summary line: `history_summarizer_chunk.rs:1290-1302` shows the raw name.
+- Summary line: `history_summarizer_chunk.rs:1326-1338` shows the raw name.
 - The dedup selector's raw-name rule is gone with the selector (U4).
 - `crates/daemon/src/tool_vocabulary_tests.rs:17` pins 25 names at each
   consumer; `:257` holds every tabled name under case flips and one prefix.

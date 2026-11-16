@@ -19,7 +19,7 @@ production file.
 - The classification ([`literals.md`](../literals.md)) finds vocabulary rows
   outside the module: `crates/daemon/src/injection.rs:21-24` (`medium`,
   `completed`, `cancelled`), `:407-409` (`content`, `status`, `priority`),
-  `:465` (`todos`), and `crates/daemon/src/history_summarizer_chunk.rs:1292`
+  `:465` (`todos`), and `crates/daemon/src/history_summarizer_chunk.rs:1328`
   (`description`).
 - Each is a generic word, so the gate's token rule does not match it.
 
