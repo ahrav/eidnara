@@ -18,13 +18,21 @@ pub(crate) struct PollTime(Arc<AtomicU64>);
 
 impl PollTime {
     pub(crate) async fn timing<F: Future>(self, future: F) -> F::Output {
+        self.timing_polls(future, true).await
+    }
+
+    /// `timing_polls` accumulates the thread CPU time spent polling `future`; the poll that
+    /// returns the output is included when `time_final_poll` is set.
+    async fn timing_polls<F: Future>(self, future: F, time_final_poll: bool) -> F::Output {
         let mut future = std::pin::pin!(future);
         std::future::poll_fn(|cx| {
             let entered = thread_cpu_time();
             let poll = future.as_mut().poll(cx);
-            let spent = thread_cpu_time().saturating_sub(entered);
-            let nanos = u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX);
-            self.0.fetch_add(nanos, Ordering::Relaxed);
+            if time_final_poll || poll.is_pending() {
+                let spent = thread_cpu_time().saturating_sub(entered);
+                let nanos = u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX);
+                self.0.fetch_add(nanos, Ordering::Relaxed);
+            }
             poll
         })
         .await
@@ -73,7 +81,7 @@ pub(crate) mod test_cpu {
 
 pub(crate) async fn within<F: Future>(deadline: Duration, future: F) -> Result<F::Output, Expired> {
     let polls = PollTime::default();
-    within_timed(deadline, polls.clone().timing(future), &polls).await
+    within_timed(deadline, polls.clone().timing_polls(future, false), &polls).await
 }
 
 /// Returns `future`'s output, or `Expired` once the charged steps cover `deadline`.
@@ -320,6 +328,13 @@ mod tests {
             "{:?}",
             sleeping.total()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_future_ready_on_its_first_poll_reads_the_thread_cpu_clock_once() {
+        let reads = test_cpu::reads();
+        assert_eq!(within(DEADLINE, async { 3 }).await.expect("ready"), 3);
+        assert_eq!(test_cpu::reads() - reads, 1);
     }
 
     #[tokio::test(start_paused = true)]
