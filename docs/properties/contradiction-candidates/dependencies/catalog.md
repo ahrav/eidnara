@@ -315,7 +315,7 @@ Open questions:
 ### p5dep-daemon-bounds-rows-after-the-scope-filter
 
 Type: safety
-Reachability: default-production - `kernel.read` (`read.rs:671-677`) serves a
+Reachability: default-production - `kernel.read` (`read.rs:670-677`) serves a
 request with `object_ids` through `read_visible_page` (`read.rs:395`) and a
 request with none through `newest_page` (`read.rs:289`); `read_visible`
 (`read.rs:383`) puts the in-process callers, the `DomainDecisions` readers

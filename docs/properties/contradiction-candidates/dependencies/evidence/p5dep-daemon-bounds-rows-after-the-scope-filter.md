@@ -25,7 +25,7 @@ arguments. Lens: resource boundaries; C6.
   `dropped`; `finish` returns `into_sorted_vec` and `dropped`.
 - `read.rs:383-496` `read_visible`, which delegates to `read_visible_page`,
   the path of the in-process callers and of a `kernel.read` request with
-  `object_ids` (`:671-675`):
+  `object_ids` (`:670-675`):
   - `:403-424` Kernel read with `project.scope_term()`.
   - `:412-413` and `:425-434` build `ScopeFilter` and
     `NewestRows::new(MAX_READ_ROWS)`, then push each row that passes

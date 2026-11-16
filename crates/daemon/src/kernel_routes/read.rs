@@ -68,7 +68,7 @@ impl ReadRequest {
 }
 
 /// A row's position in serving order (`created_commit_seq` descending, `object_id` ascending), as the row reports it in `object`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadCursor {
     created_commit_seq: i64,
@@ -291,7 +291,7 @@ fn newest_page(
     project: &ProjectBinding,
     surface: Surface,
     as_of: Option<i64>,
-    before: Option<&ReadCursor>,
+    before: Option<ReadCursor>,
 ) -> Result<Page, KernelError> {
     let requested = match as_of {
         Some(as_of) => as_of,
@@ -306,7 +306,7 @@ fn newest_page(
     // Positions in `rows` of the decision objects whose chunk carried no payload the page can serve as stored.
     let mut unread: Vec<usize> = Vec::new();
     let mut payload_bytes: u64 = 0;
-    let mut position = before.cloned();
+    let mut position = before;
     let read_chunk = |position: Option<&ReadCursor>, rows: usize, payload_bytes: u64| {
         store.visible_chunk_as_of_in_scope(
             surface,
@@ -662,16 +662,16 @@ impl HandlerCore {
         }
         let store = scope.store.clone();
         let project = scope.project.clone();
-        let object_ids = parsed.object_ids.clone();
-        let before = parsed.before.clone();
+        let object_ids = parsed.object_ids;
+        let before = parsed.before;
         let gated = parsed.gated;
         let result = blocking(move || {
-            let before = before.as_ref();
             // An id filter is matched in the kernel query, which reads every named row; an unfiltered read pages the surface in serving order.
             let page = match object_ids.as_deref() {
                 Some(ids) => {
                     let selection = RowSelection::Objects(ids);
-                    read_visible_page(&store, &project, surface, as_of, selection, before)?.into()
+                    read_visible_page(&store, &project, surface, as_of, selection, before.as_ref())?
+                        .into()
                 }
                 None => newest_page(&store, &project, surface, as_of, before)?,
             };
