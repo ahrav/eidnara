@@ -20,9 +20,11 @@ spans lines. Code references were verified at `41d889ea4` and re-checked at
 `aff5a00e6`; the nine files are identical at both, and the two `lib.rs`
 references that moved are updated. The `tool_outcome.rs` rows, the `lib.rs`
 references, and the counts were re-checked when the summarizer digest gained
-its whole-output form, which adds the one literal `; output="`.
+its whole-output form, which adds the one literal `; output="`, and again
+when the stored transcript gained its scanned digest, which adds one
+occurrence of `\n`.
 
-The extraction finds 257 distinct string literals at 896 occurrences.
+The extraction finds 257 distinct string literals at 897 occurrences.
 156 of them name a field, a tool, an argument key, or a discriminator
 value; they fill the 173 rows below (39 vocabulary, 35 Eidnara-owned,
 99 contract) and cover 755 occurrences. The other 101 are listed under
@@ -81,7 +83,7 @@ generic vocabulary literals are not:
   `todos`, `content`, `status`, `priority`, the status values `completed` and
   `cancelled`, and the default priority `medium`. The tool author chose these
   keys; a harness with no to-do tool never emits them.
-- `history_summarizer_chunk.rs:1292` reads the `description` argument key.
+- `history_summarizer_chunk.rs:1328` reads the `description` argument key.
 
 The gate does not see them because they are generic words. The record
 [`il-vocabulary-literals-live-in-one-module`](catalog.md#il-vocabulary-literals-live-in-one-module)
@@ -96,8 +98,8 @@ not defined once:
 
 - `synthetic_todo_` at `injection.rs:20` and `codec/opencode.rs:1074`.
 - The `eidnara_note` actions `read` and `dismiss` at `tool_vocabulary.rs:37`,
-  beside the note handler's own spellings at `lib.rs:13214`, `:13532` and the
-  tool schema at `lib.rs:19008`, and `conditional_note_evaluation.rs:1905`.
+  beside the note handler's own spellings at `lib.rs:13219`, `:13537` and the
+  tool schema at `lib.rs:19013`, and `conditional_note_evaluation.rs:1905`.
 - The placeholder `tool`, used for a missing native tool name or call id, at
   `codec/opencode.rs:1382` and `codec/pi.rs:458`, `:862`, `:878`, `:889`,
   `:1127`, `:1129`, `:1885`.
@@ -120,7 +122,7 @@ not defined once:
 | `completed` | vocabulary | `todowrite` item status value | no | `injection.rs:22, 23, 24` |
 | `content` | vocabulary | `todowrite` item key the injection read-back parses | no | `injection.rs:407` |
 | `content` | vocabulary | diff key | no | `tool_vocabulary.rs:50` |
-| `description` | vocabulary | argument key the summary line prefers | no | `history_summarizer_chunk.rs:1292` |
+| `description` | vocabulary | argument key the summary line prefers | no | `history_summarizer_chunk.rs:1328` |
 | `edit` | vocabulary | tool name in a tool-vocabulary table | no | `tool_vocabulary.rs:28, 33` |
 | `exit` | vocabulary | tool-authored `state.metadata.exit` key | no | `tool_vocabulary.rs:203` |
 | `file_path` | vocabulary | path key | yes | `tool_vocabulary.rs:41` |
@@ -147,16 +149,16 @@ not defined once:
 | `write` | vocabulary | tool name in a tool-vocabulary table | no | `tool_vocabulary.rs:28, 33` |
 | `A` | Eidnara-owned | transcript role tag for assistant | - | `chunk_text.rs:173`; `history_summarizer_chunk.rs:286, 305, 345` |
 | `action` | Eidnara-owned | `eidnara_note` argument key naming the action | - | `tool_vocabulary.rs:38` |
-| `audio` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1221` |
+| `audio` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1256` |
 | `data_base64` | Eidnara-owned | media-source type | - | `codec/opencode.rs:637, 642, 1243`; `codec/pi.rs:969, 1840, 1864` |
 | `dismiss` | Eidnara-owned | `eidnara_note` action whose call carries no value once read | - | `tool_vocabulary.rs:37` |
-| `document` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1224` |
+| `document` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1259` |
 | `drop` | Eidnara-owned | reduction kind | - | `selection.rs:65, 1125` |
 | `edit_marker` | Eidnara-owned | reduction kind | - | `selection.rs:67, 1126` |
 | `eidnara:` | Eidnara-owned | reserved prefix of a Pi row id Eidnara writes | - | `codec/pi.rs:38` |
-| `file` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1223` |
+| `file` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1258` |
 | `harness` | Eidnara-owned | media-source type and key | - | `codec/opencode.rs:692`; `codec/pi.rs:951, 952, 1735, 1743` |
-| `image` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1220` |
+| `image` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1255` |
 | `itemId` | Eidnara-owned | extras key holding the split item id of a Pi call id | - | `codec/pi.rs:857, 883, 1137, 1642, 1664` |
 | `M` | Eidnara-owned | transcript role tag for any other role | - | `chunk_text.rs:180` |
 | `nativeToolCallId` | Eidnara-owned | extras key holding the split native call id of a Pi call id | - | `codec/pi.rs:859, 883, 1140, 1635, 1668` |
@@ -164,7 +166,7 @@ not defined once:
 | `opencode` | Eidnara-owned | harness identifier the codec writes into a media source | - | `codec/opencode.rs:29` |
 | `path` | Eidnara-owned | key of the reduced call input the wire writes | - | `wire.rs:488` |
 | `pi` | Eidnara-owned | harness identifier the codec writes into a media source | - | `codec/pi.rs:34` |
-| `placeholder:` | Eidnara-owned | reserved prefix of a placeholder run id | - | `history_summarizer_chunk.rs:743` |
+| `placeholder:` | Eidnara-owned | reserved prefix of a placeholder run id | - | `history_summarizer_chunk.rs:773` |
 | `raw` | Eidnara-owned | media-source key holding the native part | - | `codec/opencode.rs:646`; `codec/pi.rs:973, 1844` |
 | `rawAttachment` | Eidnara-owned | extras key holding the native attachment | - | `codec/opencode.rs:678, 1313` |
 | `rawResultPart` | Eidnara-owned | extras key holding the native result part | - | `codec/pi.rs:942, 1725, 1785` |
@@ -179,7 +181,7 @@ not defined once:
 | `tool_result` | Eidnara-owned | CK block kind tag | - | `history_summarizer_chunk.rs:399`; `codec/opencode.rs:529, 965`; `codec/pi.rs:630, 1153` |
 | `U` | Eidnara-owned | transcript role tag for user | - | `chunk_text.rs:174` |
 | `unknown` | Eidnara-owned | kind label of an opaque block | - | `codec/opencode.rs:178`; `codec/pi.rs:932, 1034, 1035, 1115, 1116, 1744` |
-| `video` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1222` |
+| `video` | Eidnara-owned | media-kind label in the summarizer line | - | `history_summarizer_chunk.rs:1257` |
 | `agent` | contract | OpenCode part type | - | `codec/opencode.rs:238` |
 | `api` | contract | Pi assistant field | - | `codec/pi.rs:1521, 1613` |
 | `args` | contract | call input field | - | `codec/opencode.rs:487` |
@@ -254,7 +256,7 @@ not defined once:
 | `summary` | contract | OpenCode `info.summary` flag | - | `codec/opencode.rs:104, 266` |
 | `summary` | contract | Pi message summary field | - | `codec/pi.rs:274, 284` |
 | `synthetic` | contract | OpenCode part flag | - | `codec/opencode.rs:1130` |
-| `system` | contract | role value | - | `history_summarizer_chunk.rs:530, 899, 1149` |
+| `system` | contract | role value | - | `history_summarizer_chunk.rs:558, 929, 1183` |
 | `text` | contract | part type or text field | - | `codec/opencode.rs:180, 182, 186, 189, 889, 953, 976, 977, 988, 997, 1159, 1161, 1168`; `codec/pi.rs:598, 620, 729, 753, 778, 793, 911, 924, 930, 1017, 1018, 1023, 1055, 1056, 1059, 1163, 1275, 1327, 1443, 1444, 1562, 1603, 1604, 1706, 1708, 1709, 1727, 1728, 1766, 1769, 1772, 1773, 1789, 1790, 1791` |
 | `textSignature` | contract | Pi text item field | - | `codec/pi.rs:730, 826, 1448, 1451, 1566, 1569, 1652, 1653` |
 | `thinking` | contract | content item type or field | - | `codec/opencode.rs:188, 190`; `codec/pi.rs:600, 731, 794, 1061, 1068, 1080, 1455, 1456, 1462, 1463, 1574, 1581` |
@@ -264,7 +266,7 @@ not defined once:
 | `time_created` | contract | OpenCode store column | - | `codec/opencode.rs:127` |
 | `timeCreated` | contract | OpenCode time field | - | `codec/opencode.rs:128` |
 | `timestamp` | contract | Pi message field | - | `codec/pi.rs:220, 1235, 1239, 1503, 1533, 1536` |
-| `tool` | contract | message role value | - | `wire.rs:397`; `injection.rs:170`; `history_summarizer_chunk.rs:1152`; `codec/opencode.rs:1037, 1059, 1146`; `codec/pi.rs:111, 1501` |
+| `tool` | contract | message role value | - | `wire.rs:397`; `injection.rs:170`; `history_summarizer_chunk.rs:1186`; `codec/opencode.rs:1037, 1059, 1146`; `codec/pi.rs:111, 1501` |
 | `tool` | contract | OpenCode part type value | - | `codec/opencode.rs:216, 451, 1008, 1022, 1081, 1177, 1198` |
 | `tool` | contract | OpenCode part field naming the tool | - | `tool_outcome.rs:24`; `codec/opencode.rs:890, 892, 1010, 1024, 1083, 1179, 1200, 1379` |
 | `toolCall` | contract | Pi content item type | - | `codec/pi.rs:608, 808, 1086, 1471, 1513, 1587` |
@@ -278,7 +280,7 @@ not defined once:
 | `type` | contract | type discriminator field of a part, a content item, a media source, or a store row | - | `codec/opencode.rs:176, 451, 637, 642, 644, 646, 682, 692, 693, 835, 889, 890, 892, 976, 987, 996, 1008, 1022, 1081, 1159, 1161, 1168, 1177, 1198, 1235, 1242, 1326`; `codec/pi.rs:728, 753, 951, 964, 1016, 1054, 1327, 1443, 1455, 1462, 1471, 1513, 1562, 1574, 1581, 1587, 1603, 1706, 1708, 1726, 1735, 1743, 1766, 1769, 1772, 1789, 1790, 1805, 1840, 1842, 1844, 1855, 1857, 1863` |
 | `url` | contract | file part field | - | `codec/opencode.rs:639, 644, 1247, 1252, 1253, 1254, 1326`; `codec/pi.rs:742, 971, 1805, 1841, 1842, 1869, 1870, 1871` |
 | `usage` | contract | Pi assistant field | - | `codec/pi.rs:1524` |
-| `user` | contract | role value | - | `chunk_text.rs:174`; `history_summarizer_chunk.rs:1153, 1204`; `codec/opencode.rs:165, 1128, 1133`; `codec/pi.rs:76, 89, 116, 1237, 1536` |
+| `user` | contract | role value | - | `chunk_text.rs:174`; `history_summarizer_chunk.rs:1187, 1239`; `codec/opencode.rs:165, 1128, 1133`; `codec/pi.rs:76, 89, 116, 1237, 1536` |
 
 ## Excluded literals
 
@@ -289,21 +291,21 @@ or rendered output text carries no interpretation of a harness record.
 | Literal | Reason | Locations |
 | --- | --- | --- |
 | <code> commits: {}</code> | format template | `chunk_text.rs:113` |
-| <code>; bytes={}</code> | format template | `tool_outcome.rs:178` |
-| <code>&lt;output&gt;&lt;history_segments&gt;\n&lt;history_segment ...</code> | format template | `history_summarizer_chunk.rs:729` |
-| <code>Messages {start}-{end} were not summarized: {...</code> | format template | `history_summarizer_chunk.rs:726` |
+| <code>; bytes={}</code> | format template | `tool_outcome.rs:192` |
+| <code>&lt;output&gt;&lt;history_segments&gt;\n&lt;history_segment ...</code> | format template | `history_summarizer_chunk.rs:759` |
+| <code>Messages {start}-{end} were not summarized: {...</code> | format template | `history_summarizer_chunk.rs:756` |
 | <code>OpenCode serialization produced duplicate too...</code> | format template | `codec/opencode.rs:470` |
-| <code>TC: {description}</code> | format template | `history_summarizer_chunk.rs:1296` |
-| <code>TC: {name}</code> | format template | `history_summarizer_chunk.rs:1300` |
-| <code>TC: {name}({key_arg})</code> | format template | `history_summarizer_chunk.rs:1298` |
-| <code>[media:{kind} {} {filename}]</code> | format template | `history_summarizer_chunk.rs:1227` |
-| <code>[media:{kind} {}]</code> | format template | `history_summarizer_chunk.rs:1228` |
+| <code>TC: {description}</code> | format template | `history_summarizer_chunk.rs:1332` |
+| <code>TC: {name}</code> | format template | `history_summarizer_chunk.rs:1336` |
+| <code>TC: {name}({key_arg})</code> | format template | `history_summarizer_chunk.rs:1334` |
+| <code>[media:{kind} {} {filename}]</code> | format template | `history_summarizer_chunk.rs:1262` |
+| <code>[media:{kind} {}]</code> | format template | `history_summarizer_chunk.rs:1263` |
 | <code>[{start_ordinal}-{end_ordinal}]</code> | format template | `chunk_text.rs:108` |
 | <code>[{start_ordinal}]</code> | format template | `chunk_text.rs:106` |
 | <code>[{} items]</code> | format template | `selection.rs:556, 568` |
 | <code>[{}]</code> | format template | `selection.rs:513` |
 | <code>\n\nCommand exited with code {code}</code> | format template | `codec/pi.rs:334` |
-| <code>daemon: history_summarizer project memory wit...</code> | format template | `history_summarizer_chunk.rs:867` |
+| <code>daemon: history_summarizer project memory wit...</code> | format template | `history_summarizer_chunk.rs:897` |
 | <code>data:{media_type};base64,</code> | format template | `codec/opencode.rs:640` |
 | <code>data:{};base64,{data}</code> | format template | `codec/opencode.rs:1248` |
 | <code>message id at ordinal {ordinal} is empty</code> | format template | `wire.rs:197` |
@@ -316,9 +318,9 @@ or rendered output text carries no interpretation of a harness record.
 | <code>pi native message {index} is not an {{id, mes...</code> | format template | `codec/pi.rs:140` |
 | <code>tool_result {tool_call_id} at {mid}#{block_in...</code> | format template | `wire.rs:209` |
 | <code>unsupported wire block {kind} at {mid}#{block...</code> | format template | `wire.rs:203` |
-| <code>{ALIAS_OPEN}{alias}{ALIAS_CLOSE}</code> | format template | `history_summarizer_chunk.rs:1378` |
+| <code>{ALIAS_OPEN}{alias}{ALIAS_CLOSE}</code> | format template | `history_summarizer_chunk.rs:1414` |
 | <code>{PI_RESERVED_ID_PREFIX}synthetic:{}</code> | format template | `codec/pi.rs:1546` |
-| <code>{PLACEHOLDER_RUN_ID_PREFIX}{session_id}</code> | format template | `history_summarizer_chunk.rs:736` |
+| <code>{PLACEHOLDER_RUN_ID_PREFIX}{session_id}</code> | format template | `history_summarizer_chunk.rs:766` |
 | <code>{active_count} todos</code> | format template | `injection.rs:146` |
 | <code>{digest:x}</code> | format template | `injection.rs:125, 461` |
 | <code>{id}:{n}</code> | format template | `codec/pi.rs:1553` |
@@ -327,18 +329,18 @@ or rendered output text carries no interpretation of a harness record.
 | <code>{mid}#call:{call_id}</code> | format template | `wire.rs:596` |
 | <code>{number:e}</code> | format template | `codec/pi.rs:366` |
 | <code>{number}</code> | format template | `codec/pi.rs:364` |
-| <code>{session_id}#retry{failures}</code> | format template | `history_summarizer_chunk.rs:647` |
+| <code>{session_id}#retry{failures}</code> | format template | `history_summarizer_chunk.rs:677` |
 | <code>{{{}}}</code> | format template | `selection.rs:509` |
 | <code>{} {}:{} {}</code> | format template | `chunk_text.rs:115` |
 | <code>{}:{}</code> | format template | `selection.rs:503` |
-| <code>{}{}</code> | format template | `selection.rs:468, 550`; `injection.rs:126`; `history_summarizer_chunk.rs:1089, 1312` |
+| <code>{}{}</code> | format template | `selection.rs:468, 550`; `injection.rs:126`; `history_summarizer_chunk.rs:1122, 1348` |
 | <code>CK wire block identity must serialize</code> | panic, expect, or error text | `wire.rs:699` |
 | <code>a host entry id</code> | panic, expect, or error text | `codec/pi.rs:150` |
 | <code>a reserved id</code> | panic, expect, or error text | `codec/pi.rs:148` |
 | <code>a selected identity serializes</code> | panic, expect, or error text | `history_summarizer_chunk.rs:146` |
 | <code>decimal digits are ASCII</code> | panic, expect, or error text | `wire.rs:423` |
 | <code>defer returned early</code> | panic, expect, or error text | `selection.rs:1001` |
-| <code>firing assembly charges selected identities</code> | panic, expect, or error text | `history_summarizer_chunk.rs:950` |
+| <code>firing assembly charges selected identities</code> | panic, expect, or error text | `history_summarizer_chunk.rs:982` |
 | <code>hex digits are ASCII</code> | panic, expect, or error text | `wire.rs:656` |
 | <code>one receipt per projected block</code> | panic, expect, or error text | `wire.rs:381` |
 | <code>$1</code> | regular expression or replacement | `chunk_text.rs:45` |
@@ -352,18 +354,18 @@ or rendered output text carries no interpretation of a harness record.
 | <code>\s{2,}</code> | regular expression or replacement | `chunk_text.rs:221` |
 | <code>(empty)</code> | rendered text, marker, separator, or value | `selection.rs:234`; `chunk_text.rs:40, 41, 144, 146`; `codec/opencode.rs:520, 997, 1168`; `codec/pi.rs:368, 907, 1463, 1521, 1522, 1523, 1581` |
 | <code> </code> | rendered text, marker, separator, or value | `chunk_text.rs:44` |
-| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:217`; `history_summarizer_chunk.rs:1162, 1174` |
-| <code>%Y-%m-%d</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1117` |
+| <code> / </code> | rendered text, marker, separator, or value | `chunk_text.rs:115`; `tool_outcome.rs:278`; `history_summarizer_chunk.rs:1196, 1209` |
+| <code>%Y-%m-%d</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1150` |
 | <code>(no output)</code> | rendered text, marker, separator, or value | `codec/pi.rs:344` |
 | <code>+</code> | rendered text, marker, separator, or value | `codec/pi.rs:368` |
 | <code>,</code> | rendered text, marker, separator, or value | `selection.rs:509, 513`; `chunk_text.rs:42` |
 | <code>, </code> | rendered text, marker, separator, or value | `chunk_text.rs:43, 113` |
 | <code>...[truncated]</code> | rendered text, marker, separator, or value | `selection.rs:36` |
 | <code>0123456789abcdef</code> | rendered text, marker, separator, or value | `wire.rs:651` |
-| <code>; </code> | rendered text, marker, separator, or value | `crates/daemon/src/tool_outcome.rs:170` |
-| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:185` |
-| <code>; output=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:382` |
-| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:185` |
+| <code>; </code> | rendered text, marker, separator, or value | `crates/daemon/src/tool_outcome.rs:190` |
+| <code>; head=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:198` |
+| <code>; output=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:443` |
+| <code>; tail=\&quot;</code> | rendered text, marker, separator, or value | `tool_outcome.rs:198` |
 | <code>&lt;!-- OMO_INTERNAL_INITIATOR --&gt;</code> | rendered text, marker, separator, or value | `chunk_text.rs:14` |
 | <code>&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:48` |
 | <code>Execution denied</code> | rendered text, marker, separator, or value | `codec/opencode.rs:1273`; `codec/pi.rs:1773, 1823` |
@@ -374,10 +376,10 @@ or rendered output text carries no interpretation of a harness record.
 | <code>[]</code> | rendered text, marker, separator, or value | `injection.rs:233, 328`; `history_summarizer_chunk.rs:124` |
 | <code>[dropped]</code> | rendered text, marker, separator, or value | `selection.rs:447` |
 | <code>[object]</code> | rendered text, marker, separator, or value | `selection.rs:559` |
-| <code>\&quot;</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1367` |
-| <code>\n</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:331, 521`; `codec/opencode.rs:1283`; `codec/pi.rs:1831` |
+| <code>\&quot;</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1403` |
+| <code>\n</code> | rendered text, marker, separator, or value | `tool_outcome.rs:221`; `history_summarizer_chunk.rs:331, 549`; `codec/opencode.rs:1283`; `codec/pi.rs:1831` |
 | <code>\n&lt;/summary&gt;</code> | rendered text, marker, separator, or value | `codec/pi.rs:43` |
-| <code>\n[… tokens truncated by the daemon to fit th...</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1055` |
+| <code>\n[… tokens truncated by the daemon to fit th...</code> | rendered text, marker, separator, or value | `history_summarizer_chunk.rs:1088` |
 | <code>\n\n(command cancelled)</code> | rendered text, marker, separator, or value | `codec/pi.rs:332` |
 | <code>\n\n[Output truncated. Full output: </code> | rendered text, marker, separator, or value | `codec/pi.rs:350` |
 | <code>\n&#96;&#96;&#96;</code> | rendered text, marker, separator, or value | `codec/pi.rs:343` |
@@ -387,5 +389,5 @@ or rendered output text carries no interpretation of a harness record.
 | <code>&#96;&#96;&#96;\n</code> | rendered text, marker, separator, or value | `codec/pi.rs:343` |
 | <code>application/octet-stream</code> | rendered text, marker, separator, or value | `codec/opencode.rs:624`; `codec/pi.rs:960, 1838` |
 | <code>attachment</code> | rendered text, marker, separator, or value | `codec/opencode.rs:694` |
-| <code>…</code> | rendered text, marker, separator, or value | `tool_outcome.rs:154` |
+| <code>…</code> | rendered text, marker, separator, or value | `tool_outcome.rs:161` |
 | <code>Option::is_none</code> | serde attribute path | `wire.rs:128, 130, 133, 140, 142` |

@@ -129,6 +129,13 @@ impl OutputText<'_> {
             (!body.is_empty()).then(|| &body[body.rfind('\n').map_or(0, |newline| newline + 1)..])
         })
     }
+
+    /// Returns [`Self::head`] and, when it is a different line, [`Self::tail`].
+    fn excerpt_lines(&self) -> (Option<&str>, Option<&str>) {
+        let head = self.head();
+        let tail = head.and_then(|head| self.tail().filter(|tail| !std::ptr::eq(*tail, head)));
+        (head, tail)
+    }
 }
 
 /// The status and output text of a tool result as its wire block holds it, the shape the summarizer reads. An error output variant or a denied execution is `error`. The text is the output variant's text as is, its JSON serialized, the text of its content blocks joined by newlines, or a denial's reason.
@@ -166,22 +173,28 @@ const MAX_WHOLE_DIGEST_BYTES: usize = MAX_DIGEST_BYTES + WHOLE_OUTPUT_MAX_BYTES;
 
 /// The outcome digest starts with `; <status>; bytes=N`. `N` counts bytes in all `text` pieces plus one separator byte between adjacent pieces. [`push_whole`] formats text of at most [`WHOLE_OUTPUT_MAX_BYTES`] bytes. Larger text appends `; head="…"` and, when the last nonblank line differs from the first, `; tail="…"`: the first and last nonblank lines with trailing whitespace trimmed, each written by [`push_excerpt`].
 pub(crate) fn outcome_digest(status: ToolStatus, text: &OutputText<'_>) -> String {
-    let mut digest = String::with_capacity(OUTCOME_CAPACITY);
-    digest.push_str("; ");
-    digest.push_str(status.as_str());
+    sized_outcome_digest(status, text, joined_len(text))
+}
+
+fn joined_len(text: &OutputText<'_>) -> usize {
     let (pieces, bytes) = text
         .pieces()
         .fold((0_usize, 0_usize), |(pieces, bytes), piece| {
             (pieces + 1, bytes + piece.len())
         });
-    let bytes = bytes + pieces.saturating_sub(1);
+    bytes + pieces.saturating_sub(1)
+}
+
+fn sized_outcome_digest(status: ToolStatus, text: &OutputText<'_>, bytes: usize) -> String {
+    let mut digest = String::with_capacity(OUTCOME_CAPACITY);
+    digest.push_str("; ");
+    digest.push_str(status.as_str());
     let _ = write!(digest, "; bytes={}", bytes);
     if bytes <= WHOLE_OUTPUT_MAX_BYTES {
         push_whole(&mut digest, text);
         return digest;
     }
-    let head = text.head();
-    let tail = head.and_then(|head| text.tail().filter(|tail| !std::ptr::eq(*tail, head)));
+    let (head, tail) = text.excerpt_lines();
     for (label, line) in [("; head=\"", head), ("; tail=\"", tail)] {
         if let Some(line) = line {
             digest.push_str(label);
@@ -196,6 +209,54 @@ pub(crate) fn outcome_digest(status: ToolStatus, text: &OutputText<'_>) -> Strin
 pub fn output_outcome(output: &memory_store::ToolOutput) -> String {
     let (status, text) = from_output(output);
     outcome_digest(status, &text)
+}
+
+/// `redact_durable_text` scans printed output before digest rendering because rendering replaces quotes and line breaks needed to detect credentials. The digest preserves the original `bytes=N` and whole or excerpt form. Output with no findings retains its [`output_outcome`] digest.
+///
+/// Whole-output pieces are joined with newlines before the scan, and the scanned text is truncated to `WHOLE_OUTPUT_MAX_BYTES` because replacement placeholders can exceed credential length. Each excerpt line is scanned separately.
+pub fn stored_output_outcome(output: &memory_store::ToolOutput) -> String {
+    let (status, text) = from_output(output);
+    let bytes = joined_len(&text);
+    let scanned = if bytes <= WHOLE_OUTPUT_MAX_BYTES {
+        scanned_text(&text.pieces().collect::<Vec<_>>().join("\n")).map(|mut scanned| {
+            scanned.truncate(scanned.floor_char_boundary(WHOLE_OUTPUT_MAX_BYTES));
+            scanned
+        })
+    } else {
+        scanned_excerpt_lines(&text)
+    };
+    let scanned = scanned.as_deref().map(OutputText::Text);
+    sized_outcome_digest(status, scanned.as_ref().unwrap_or(&text), bytes)
+}
+
+/// The factor of four accounts for the maximum UTF-8 byte width of a Unicode scalar value.
+const EXCERPT_READ_MAX_BYTES: usize =
+    4 * (crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES + 1);
+/// The scanned prefix of an excerpt line. `WINDOW_OVERLAP_BYTES` holds the longest finding the scanner reports, so a finding that starts in the first [`EXCERPT_READ_MAX_BYTES`] of the printed line lies whole inside the prefix.
+const EXCERPT_SCAN_BYTES: usize =
+    EXCERPT_READ_MAX_BYTES + context_core::redaction::WINDOW_OVERLAP_BYTES;
+
+/// A finding replaces the entire excerpt line with its scanned, UTF-8-aligned prefix, discarding any suffix beyond [`EXCERPT_SCAN_BYTES`]. Lines without findings retain their full text. `None` means neither line has a finding.
+fn scanned_excerpt_lines(text: &OutputText<'_>) -> Option<String> {
+    let scanned = |line: &str| scanned_text(&line[..line.floor_char_boundary(EXCERPT_SCAN_BYTES)]);
+    let (head, tail) = text.excerpt_lines();
+    let head = head?;
+    let (scanned_head, scanned_tail) = (scanned(head), tail.and_then(scanned));
+    if scanned_head.is_none() && scanned_tail.is_none() {
+        return None;
+    }
+    let mut lines = scanned_head.unwrap_or_else(|| head.to_owned());
+    if let Some(tail) = tail {
+        lines.push('\n');
+        lines.push_str(scanned_tail.as_deref().unwrap_or(tail));
+    }
+    Some(lines)
+}
+
+/// Returns `text` as `redact_durable_text` rewrites it, or `None` when the scan has no finding.
+fn scanned_text(text: &str) -> Option<String> {
+    let scanned = context_core::redaction::redact_durable_text(text);
+    (!scanned.detections.is_empty()).then_some(scanned.text)
 }
 
 /// The summarizer's view of one tool result: `call`, the call's `TC:` summary, followed by its [`outcome_digest`]. The call summary is clipped on a character boundary with a clip marker to what the outcome leaves of [`MAX_DIGEST_BYTES`], and the call-summary budget retains at least [`MIN_CALL_SUMMARY_BYTES`] even when `outcome` exhausts [`MAX_DIGEST_BYTES`].
@@ -420,6 +481,7 @@ fn push_whole(out: &mut String, text: &OutputText<'_>) {
 mod digest_tests {
     use super::*;
     use crate::history_summarizer_citations::CLAIM_VALUE_MAX_BYTES;
+    use memory_store::{OutputKind, ToolOutput};
     use proptest::prelude::*;
 
     fn completed(call: &str, output: &str) -> String {
@@ -481,6 +543,7 @@ mod digest_tests {
         assert_eq!(WHOLE_OUTPUT_MAX_BYTES, 2_000);
         assert_eq!(MIN_CALL_SUMMARY_BYTES, 672);
         assert_eq!(MAX_WHOLE_DIGEST_BYTES, 3_024);
+        assert_eq!(EXCERPT_SCAN_BYTES, 98_820);
     }
 
     /// For output of at most [`WHOLE_OUTPUT_MAX_BYTES`], the digest keeps every line, trims and collapses whitespace, and replaces quotes and marker brackets with single quotes. Blank output produces only the call, status, and byte count. One byte more produces first- and last-nonblank-line excerpts.
@@ -876,6 +939,219 @@ mod digest_tests {
                 outcome_digest(ToolStatus::Completed, &OutputText::Blocks(&blocks)),
                 outcome_digest(ToolStatus::Completed, &OutputText::Text(&joined))
             );
+            prop_assert_eq!(
+                stored_output_outcome(&ToolOutput::bare(OutputKind::Content { blocks })),
+                stored_output_outcome(&text_output(&joined))
+            );
+        }
+
+        #[test]
+        fn a_stored_outcome_with_no_finding_is_the_presented_outcome(text in any_text()) {
+            for text in [text.clone(), format!("{text}\n{}", filler()), format!("{}{text}", filler())] {
+                let output = text_output(&text);
+                prop_assert_eq!(stored_output_outcome(&output), output_outcome(&output));
+            }
+        }
+    }
+
+    const CREDENTIAL_LINE: &str = "DB_PASSWORD=\"Xk7'Qm2Lr8Wv4Zd6Pn9\"";
+    const CREDENTIAL: &str = "Qm2Lr8Wv4Zd6Pn9";
+    const SCANNED_CREDENTIAL_LINE: &str = "DB_PASSWORD='<REDACTED:db_password>'";
+
+    fn text_output(text: &str) -> ToolOutput {
+        ToolOutput::bare(OutputKind::Text {
+            text: text.to_owned(),
+        })
+    }
+
+    fn scanned(text: &str) -> String {
+        context_core::redaction::redact_durable_text(text).text
+    }
+
+    #[test]
+    fn the_scan_removes_the_credential_from_printed_text_and_leaves_it_in_a_presented_digest() {
+        let printed = format!("first\n{CREDENTIAL_LINE}\nlast\n");
+        assert!(!scanned(&printed).contains(CREDENTIAL));
+        let presented = output_outcome(&text_output(&printed));
+        assert!(presented.contains(CREDENTIAL));
+        assert!(scanned(&presented).contains(CREDENTIAL));
+    }
+
+    #[test]
+    fn a_stored_whole_outcome_renders_the_scanned_text_under_the_printed_size() {
+        let printed = format!("first\n{CREDENTIAL_LINE}\nlast\n");
+        assert_eq!(
+            stored_output_outcome(&text_output(&printed)),
+            format!(
+                "; completed; bytes={}; output=\"first {SCANNED_CREDENTIAL_LINE} last\"",
+                printed.len()
+            )
+        );
+        let blocks = ["first", CREDENTIAL_LINE, "last"]
+            .map(|text| memory_store::ResultBlock {
+                kind: memory_store::ResultBlockKind::Text {
+                    text: text.to_owned(),
+                },
+                provider_extras: Default::default(),
+            })
+            .to_vec();
+        assert_eq!(
+            stored_output_outcome(&ToolOutput::bare(OutputKind::ErrorContent { blocks })),
+            format!(
+                "; error; bytes={}; output=\"first {SCANNED_CREDENTIAL_LINE} last\"",
+                printed.len() - 1
+            )
+        );
+    }
+
+    #[test]
+    fn a_stored_whole_outcome_stays_bounded_when_placeholders_outgrow_the_credentials() {
+        let printed = format!("{CREDENTIAL_LINE}\n").repeat(WHOLE_OUTPUT_MAX_BYTES / 34);
+        assert!(printed.len() <= WHOLE_OUTPUT_MAX_BYTES);
+        assert!(scanned(&printed).len() > WHOLE_OUTPUT_MAX_BYTES);
+        let stored = stored_output_outcome(&text_output(&printed));
+        assert!(
+            stored.starts_with(&format!(
+                "; completed; bytes={}; output=\"{SCANNED_CREDENTIAL_LINE} {SCANNED_CREDENTIAL_LINE} ",
+                printed.len()
+            )),
+            "{stored}"
+        );
+        assert!(!stored.contains(CREDENTIAL), "{stored}");
+        let built = digest(&"c".repeat(2 * MAX_DIGEST_BYTES), &stored);
+        assert!(built.len() <= MAX_WHOLE_DIGEST_BYTES);
+    }
+
+    #[test]
+    fn a_stored_whole_outcome_is_cut_at_the_whole_output_limit_on_a_character_boundary() {
+        let growth = SCANNED_CREDENTIAL_LINE.len() - CREDENTIAL_LINE.len();
+        let at_limit = format!(
+            "first\n{CREDENTIAL_LINE}\n{}",
+            "x".repeat(WHOLE_OUTPUT_MAX_BYTES - CREDENTIAL_LINE.len() - 7)
+        );
+        assert_eq!(at_limit.len(), WHOLE_OUTPUT_MAX_BYTES);
+        assert_eq!(
+            stored_output_outcome(&text_output(&at_limit)),
+            format!(
+                "; completed; bytes={}; output=\"first {SCANNED_CREDENTIAL_LINE} {}\"",
+                at_limit.len(),
+                "x".repeat(WHOLE_OUTPUT_MAX_BYTES - CREDENTIAL_LINE.len() - 7 - growth)
+            )
+        );
+
+        let wide = format!("{CREDENTIAL_LINE}\n{}", "日".repeat(655));
+        assert_eq!(wide.len(), WHOLE_OUTPUT_MAX_BYTES - 1);
+        assert!(
+            !scanned(&wide).is_char_boundary(WHOLE_OUTPUT_MAX_BYTES),
+            "the limit falls inside a character of the scanned text"
+        );
+        assert_eq!(
+            stored_output_outcome(&text_output(&wide)),
+            format!(
+                "; completed; bytes={}; output=\"{SCANNED_CREDENTIAL_LINE} {}\"",
+                wide.len(),
+                "日".repeat(654)
+            )
+        );
+    }
+
+    #[test]
+    fn a_stored_excerpt_outcome_renders_each_scanned_line_under_the_printed_size() {
+        let first = format!("{CREDENTIAL_LINE}\n{}", filler());
+        let last = format!("{}{CREDENTIAL_LINE}\n", filler());
+        let both = format!("{CREDENTIAL_LINE}\n{}{CREDENTIAL_LINE}\n", filler());
+        let only = format!("{CREDENTIAL_LINE} {}", "x".repeat(WHOLE_OUTPUT_MAX_BYTES));
+        let clipped = format!(
+            "{} DB_PASSWORD=\"Xk7Qm2Lr8Wv4Zd6Pn9Aa1Bb2Cc3Dd4Ee5\"\n{}",
+            "x".repeat(100),
+            filler()
+        );
+        let past_the_scan = format!(
+            "{CREDENTIAL_LINE} {}",
+            "x".repeat(context_core::redaction::MAX_REDACTABLE_BYTES)
+        );
+        let long_credential = format!(
+            "{} DB_PASSWORD=\"{}\"\n{}",
+            "x".repeat(100),
+            "Xk7Qm2Lr8Wv4Zd6Pn9Aa1Bb2Cc3Dd4Ee5".repeat(20),
+            filler()
+        );
+        assert!(long_credential.find('\n').unwrap() > EXCERPT_READ_MAX_BYTES);
+        for (printed, excerpts) in [
+            (
+                &first,
+                format!("; head=\"{SCANNED_CREDENTIAL_LINE}\"; tail=\"FILLER middle line\""),
+            ),
+            (
+                &last,
+                format!("; head=\"FILLER middle line\"; tail=\"{SCANNED_CREDENTIAL_LINE}\""),
+            ),
+            (
+                &both,
+                format!("; head=\"{SCANNED_CREDENTIAL_LINE}\"; tail=\"{SCANNED_CREDENTIAL_LINE}\""),
+            ),
+            (
+                &only,
+                format!(
+                    "; head=\"{SCANNED_CREDENTIAL_LINE} {}…\"",
+                    "x".repeat(
+                        CLAIM_VALUE_MAX_BYTES
+                            - SCANNED_CREDENTIAL_LINE.len()
+                            - 1
+                            - CLIP_MARKER.len()
+                    )
+                ),
+            ),
+            (
+                &clipped,
+                format!(
+                    "; head=\"{} DB_PASSWORD='<REDACTED:d…\"; tail=\"FILLER middle line\"",
+                    "x".repeat(100)
+                ),
+            ),
+            (
+                &past_the_scan,
+                format!(
+                    "; head=\"{SCANNED_CREDENTIAL_LINE} {}…\"",
+                    "x".repeat(
+                        CLAIM_VALUE_MAX_BYTES
+                            - SCANNED_CREDENTIAL_LINE.len()
+                            - 1
+                            - CLIP_MARKER.len()
+                    )
+                ),
+            ),
+            (
+                &long_credential,
+                format!(
+                    "; head=\"{} DB_PASSWORD='<REDACTED:d…\"; tail=\"FILLER middle line\"",
+                    "x".repeat(100)
+                ),
+            ),
+        ] {
+            assert!(printed.len() > WHOLE_OUTPUT_MAX_BYTES);
+            let output = text_output(printed);
+            assert!(
+                scanned(&output_outcome(&output)).contains("Qm2Lr8Wv"),
+                "the scan of the presented digest leaves the credential: {printed}"
+            );
+            assert_eq!(
+                stored_output_outcome(&output),
+                format!("; completed; bytes={}{excerpts}", printed.len())
+            );
+        }
+    }
+
+    #[test]
+    fn an_excerpt_reads_no_more_of_its_line_than_the_scan_covers() {
+        for character in ['x', '"', '\u{a0}', '\u{e9}', '\u{65e5}', '\u{1f642}'] {
+            let line = character.to_string().repeat(4 * CLAIM_VALUE_MAX_BYTES);
+            let read: String = line.chars().take(CLAIM_VALUE_MAX_BYTES + 1).collect();
+            assert!(read.len() <= EXCERPT_READ_MAX_BYTES);
+            let (mut whole, mut prefix) = (String::new(), String::new());
+            push_excerpt(&mut whole, &line);
+            push_excerpt(&mut prefix, &read);
+            assert_eq!(whole, prefix, "{character:?}");
         }
     }
 }

@@ -73,7 +73,7 @@ evidence, not proof.
   `transform.rs:11895`. Class-driven supersession (edit markers, the
   `todowrite` keep-one, zero-value drops) also needs `smart_drops`, which
   defaults false (`config.rs:168`) and reaches selection unchanged
-  (`crates/daemon/src/lib.rs:9752`, `transform.rs:4164-4165`), plus an
+  (`crates/daemon/src/lib.rs:9757`, `transform.rs:4164-4165`), plus an
   emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`,
   `:980`). Capture runs only when `source_capture_enabled` is
   set (`config.rs:154` defaults it false; `sc.rs:291-302` gates on it). The
@@ -81,8 +81,8 @@ evidence, not proof.
   non-empty model chain: `model_chain` defaults empty (`config.rs:149`),
   `eidnara_folds` requires it (`config.rs:190-194`),
   `prepare_history_summarizer_with` returns before the trigger estimate when
-  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10144`), and the firing
-  assembler returns `NoModels` (`history_summarizer_chunk.rs:860-864`).
+  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10149`), and the firing
+  assembler returns `NoModels` (`history_summarizer_chunk.rs:890-894`).
 - `test-only`: the subject is a CI step or an authoring-time artifact, not a
   daemon code path: the literal gate (`scripts/forbid-tool-literals.sh`, run
   by `.github/workflows/ci.yml:302-303`) and the literal classification table
@@ -180,7 +180,7 @@ Fault/timing angle: none.
 Required faults and enabling state: a `bash` part with an integer `exit`; with a null, string, or float `exit`; a non-`bash` part carrying `exit`.
 Confidence: high - [evidence](evidence/il-exit-code-only-for-opencode-bash.md). Code and tests read; the frozen OpenCode 1.18.22 session's four `bash` parts carry `exit` 0 three times and `exit: null` once.
 Existing check: `tv-tests:17`, `:145`; `hs-tests:3619`; `sc-tests:224`; unaudited.
-Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:168-193`).
+Impact: an exit code attributed to a tool whose `exit` means something else would enter the frozen request digest. The digest grammar's `[; exit=N]` (#1066 D9) is still not emitted (`to.rs:175-206`).
 Open questions: None. The source asked whether OpenCode 1.18.22 writes `metadata.exit` for `bash`; the frozen session (`crates/daemon/testdata/corpus/sessions/opencode-1.18.22/mix.json`) shows it does.
 
 ### il-truncated-flag-read-per-harness
@@ -202,7 +202,7 @@ Open questions:
 ### il-path-arg-key-order-first-match
 
 Type: safety
-Reachability: default-production - wire flattening (`wire.rs:540`, every `ToolCall` of every transform request, on the additive-only path as well as the fold path) reads `PATH_KEYS`. The other two sites are explicit-config-only: edit supersession (`sel.rs:649`) runs on the fold path with `smart_drops` set and a reclaim batch or ride (see Reachability classes), and the summarizer `TC:` line (`chunk_text.rs:122`, through `history_summarizer_chunk.rs:1290`) needs a model chain.
+Reachability: default-production - wire flattening (`wire.rs:540`, every `ToolCall` of every transform request, on the additive-only path as well as the fold path) reads `PATH_KEYS`. The other two sites are explicit-config-only: edit supersession (`sel.rs:649`) runs on the fold path with `smart_drops` set and a reclaim batch or ride (see Reachability classes), and the summarizer `TC:` line (`chunk_text.rs:122`, through `history_summarizer_chunk.rs:1326`) needs a model chain.
 Status: active
 Exercised: partial - `tv-tests:66` `each_site_keeps_its_key_order` runs fourteen inputs, including two recognized keys, a non-string first key, `file_path` alone, and a 61-scalar value, through `path_arg` and `extract_key_arg`; `selection-golden.json` and the `TC:` goldens hold `filePath` inputs. The table holds `pattern` alone but no input pairing `pattern` with `filePath`, so the display precedence between them is not asserted.
 Guarantee: Each site returns the value of the first key in its ordered list whose value is a JSON string, skipping absent or non-string values: `PATH_KEYS` = `["filePath", "file_path", "path"]` for wire extraction and edit supersession (`tv.rs:41`), and `DISPLAY_PATH_KEYS` = `["filePath", "path", "pattern", "query"]` then `DISPLAY_SYMBOL_KEYS` = `["symbol", "module", "action"]` for the summary line (`tv.rs:43`, `:45`).
@@ -210,7 +210,7 @@ Check: `always` - `tv.rs:166-170` `first_string` returns the first `as_str` hit;
 Fault/timing angle: none.
 Required faults and enabling state: `{filePath: 1, file_path: "f", path: "p"}`; `{path: "p", filePath: "f"}`; `{file_path: "c"}` alone; `{pattern: "p", filePath: "f"}`.
 Confidence: high - [evidence](evidence/il-path-arg-key-order-first-match.md). The lists and the U4 table read at `41d889ea4`.
-Existing check: `tv-tests:66`, `:127`; `sel.rs:1461` `selection_golden_matches_ts_selectors`; `history_summarizer_chunk.rs:3319`, `:3380`; unaudited.
+Existing check: `tv-tests:66`, `:127`; `sel.rs:1461` `selection_golden_matches_ts_selectors`; `history_summarizer_chunk.rs:3520`, `:3581`; unaudited.
 Impact: a tool using `file_path` gets edit supersession and a wire `path` but a bare `TC: name` summary. The #1072 key list differs from both lists (lead L8).
 Open questions:
 - Is the summary line's omission of `file_path` intentional (display) or an oversight? U4 preserved it and `tv-tests:66` pins it. (needs human input)
@@ -237,7 +237,7 @@ Type: safety
 Reachability: explicit-config-only - selection's `classify` (`sel.rs:645`) and tier lookup (`sel.rs:749-755`) and the injection read-back (`injection.rs:435`) run only on the fold path (see Reachability classes); `exit_code` (`to.rs:33`) is capture-only. The source labelled this record default-production.
 Status: active
 Exercised: yes - `tv-tests:17` `each_consumer_keeps_its_name_rule` pins `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash`, `MCP_READ`, `mcp_mcp_edit`, and every tabled name at each consumer; `tv-tests:257` holds every tabled name under any ASCII case and one `mcp_` prefix.
-Guarantee: Three name rules apply: selection evaluates the name lowercased with one leading `mcp_` removed (`tv.rs:78-84` `normalize`, applied in `classify` at `tv.rs:107` and `tier` at `tv.rs:137`); the injection read-back compares the raw name ignoring ASCII case (`tv.rs:156-158`); `exit_code` compares the raw name exactly (`tv.rs:202`). The summary formatter shows the raw name and matches nothing (`history_summarizer_chunk.rs:1290-1302`).
+Guarantee: Three name rules apply: selection evaluates the name lowercased with one leading `mcp_` removed (`tv.rs:78-84` `normalize`, applied in `classify` at `tv.rs:107` and `tier` at `tv.rs:137`); the injection read-back compares the raw name ignoring ASCII case (`tv.rs:156-158`); `exit_code` compares the raw name exactly (`tv.rs:202`). The summary formatter shows the raw name and matches nothing (`history_summarizer_chunk.rs:1326-1338`).
 Check: `always` - for a name `N`, selection's edit, `todowrite`, `eidnara_*`, and zero-value rules evaluate `classify(N)`; injection evaluates `N.eq_ignore_ascii_case("todowrite")`; `exit_code` evaluates `N == "bash"`. Each is a deterministic function of `N`. `always` because the rules are static.
 Fault/timing angle: none.
 Required faults and enabling state: names `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash`: `Edit` and `mcp_edit` are edit tools for supersession; `MCP_TodoWrite` is `todowrite` for selection's keep-one but not for the injection read-back; `Bash` yields no `exit_code`.
@@ -294,15 +294,15 @@ Open questions: None.
 ### il-tool-summary-description-precedes-key-arg
 
 Type: safety
-Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1254` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:272`, `:291`) at `history_summarizer_chunk.rs:1259` and `boundary.rs:1867`.
+Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1287-1291` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:333`, `:352`) at `history_summarizer_chunk.rs:1295` and `boundary.rs:1867`.
 Status: active
-Exercised: partial - `history_summarizer_chunk.rs:3380` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20047` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20333-20339`, the input at `lib.rs:26931`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
+Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20052` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20338-20344`, the input at `lib.rs:26936`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
-Check: `always` - `history_summarizer_chunk.rs:1290-1302`. `always` because the function is pure.
+Check: `always` - `history_summarizer_chunk.rs:1326-1338`. `always` because the function is pure.
 Fault/timing angle: none.
 Required faults and enabling state: inputs with a description and a path; with a 61-scalar path; with neither.
 Confidence: high - [evidence](evidence/il-tool-summary-description-precedes-key-arg.md). The source stated the description arm as `name(description)`; the code renders the description alone, and this record states the code.
-Existing check: `history_summarizer_chunk.rs:3319`, `:3380`; `lib.rs:20047`; `tv-tests:66`; the chunk golden; unaudited.
+Existing check: `history_summarizer_chunk.rs:3520`, `:3581`; `lib.rs:20052`; `tv-tests:66`; the chunk golden; unaudited.
 Impact: `display_arg` must reproduce the precedence and the marker byte for byte, or the chunk golden changes.
 Open questions: None.
 
@@ -335,7 +335,7 @@ Confidence: high - [evidence](evidence/il-vocabulary-literals-live-in-one-module
 Existing check: `scripts/forbid-tool-literals.sh` and `scripts/forbid-tool-literals.test.ts`; unaudited.
 Impact: a harness renaming a to-do field or the `description` key is fixed outside the module, and the #1072 resolver could copy a list a second time.
 Open questions:
-- Contract-versus-code: `injection.rs:21-24`, `:407-409`, and `:465` read the `todowrite` input schema (`todos`, `content`, `status`, `priority`, `completed`, `cancelled`, `medium`), and `history_summarizer_chunk.rs:1292` reads `description`. Each is vocabulary by R5 and lives outside the module; the gate misses them because they are generic words. Move them behind module queries, or record them as accepted residue? (needs human input: daemon owner)
+- Contract-versus-code: `injection.rs:21-24`, `:407-409`, and `:465` read the `todowrite` input schema (`todos`, `content`, `status`, `priority`, `completed`, `cancelled`, `medium`), and `history_summarizer_chunk.rs:1328` reads `description`. Each is vocabulary by R5 and lives outside the module; the gate misses them because they are generic words. Move them behind module queries, or record them as accepted residue? (needs human input: daemon owner)
 Falsifier or legal witness: Falsifier: a distinctive literal such as `"filePath"` in `sel.rs` after U4. Legal witness: `sel.rs:649` reads the path through `tool_vocabulary::path_arg` and the gate is green.
 
 ### il-classify-total-with-unknown
@@ -434,7 +434,7 @@ Confidence: medium - [evidence](evidence/il-literal-classified-contract-or-vocab
 Existing check: none beyond the table; unaudited.
 Impact: an unclassified literal is moved into or out of the module by habit, and the gate's set drifts from the classification.
 Open questions:
-- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`), the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:13214`, `:13532`, `:19008`, `crates/daemon/src/conditional_note_evaluation.rs:1905`), and the placeholder `tool` for a missing native tool name or call id (`codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`, `:878`, `:889`, `:1127`, `:1129`, `:1885`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
+- These Eidnara-owned spellings are not defined once: `synthetic_todo_` (`injection.rs:20`, `codec/opencode.rs:1074`), the `eidnara_note` actions `read` and `dismiss` (`tv.rs:37`, `lib.rs:13219`, `:13537`, `:19013`, `crates/daemon/src/conditional_note_evaluation.rs:1905`), and the placeholder `tool` for a missing native tool name or call id (`codec/opencode.rs:1382`; `codec/pi.rs:458`, `:862`, `:878`, `:889`, `:1127`, `:1129`, `:1885`). Define each once and reference it, or accept the spellings? (needs human input: daemon owner)
 Falsifier or legal witness: Falsifier: `state.metadata.exit` recorded as contract. Legal witness: `info` contract, `filePath` vocabulary, `eidnara_note` Eidnara-owned.
 
 ### il-path-arg-harness-neutral

@@ -232,6 +232,21 @@ and `digest` render the rest:
   that already carried the full tool output; secret redaction applies where
   the kernel writes durable text and where evaluator cassettes record a
   frame.
+- The transcript the store keeps for a chunk is the chunk's text with each
+  tool result rendered by `stored_output_outcome`
+  (`stored_chunk_transcript`). The durable secret scan reads the output as
+  the tool printed it, and the digest renders the scanned text with the
+  printed output's `bytes` and its whole or excerpt form. The scan runs
+  before the digest collapses line breaks and rewrites double quotes,
+  because scanner rules match a quoted credential by its delimiter and its
+  line. A whole output is scanned as its text joined by newlines, and the
+  scanned text is cut at 2,000 bytes on a character boundary, because a
+  placeholder can be longer than the credential it replaces. An excerpt's
+  line is scanned alone over its first 98,820 bytes, which cover the bytes
+  the excerpt reads and the scanner's longest finding, and the excerpt then
+  clips the scanned line. A finding that needs an adjacent line, such as a
+  value on the tail line whose key is on the line before it, stays in the
+  excerpt. An output with no finding has the digest the summarizer read.
 - The summarizer's system prompt documents these fields in its `TC:`
   notation, and a test pins them to the claim-value bound and the
   whole-output limit.
