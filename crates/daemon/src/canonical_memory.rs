@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 use kernel::{Surface, SurfaceVisibility};
 use memory_store::ProjectMemoryComposition;
 
-use crate::kernel_routes::read::{ReadResponse, RowSelection, read_visible};
+use crate::kernel_routes::read::{MAX_READ_ROW_BYTES, MAX_READ_ROWS, ReadResponse};
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding};
 use crate::m0_compose::trim_memories_to_budget;
 use crate::memory_render::{is_positive_memory_category, render_memory_line};
@@ -199,13 +199,16 @@ impl CanonicalMemoryRead {
 ///
 /// The read admits only memory-domain decisions before the row and byte caps apply, so a project whose other domains or observations are busy cannot crowd its memory rows out of the bounded read.
 ///
+/// Capture rows whose rationale names `session_id` are left out: the reading session holds those statements in its own conversation. They are judged before the row and byte caps apply (see [`read_other_sessions`]), so they spend neither cap, and the token budget trims what remains.
+///
 /// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of the project's verdict logs one line naming the project's digest.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
+    session_id: &str,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
-    let read = read_at_tip(kernel, project, memory_budget_tokens);
+    let read = read_at_tip(kernel, project, session_id, memory_budget_tokens);
     let published = kernel.health_block();
     let fresh = !published.is_stale();
     let facts = published.block.facts.as_ref().filter(|_| fresh);
@@ -219,6 +222,7 @@ pub(crate) fn read_project_memory(
 fn read_at_tip(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
+    session_id: &str,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
     let store = match kernel.kernel_store() {
@@ -229,18 +233,173 @@ fn read_at_tip(
         Ok(tip) => tip,
         Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     };
-    match read_visible(
+    match read_other_sessions(
         &store,
         project,
-        Surface::AutoInject,
-        Some(tip),
-        RowSelection::DomainDecisions(MEMORY_DOMAIN_ID),
+        &[Some(session_id)],
+        tip,
+        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
     ) {
         Ok(response) => {
             CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
         }
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
+}
+
+/// The most payload pages one delivery walk loads. A page holds at most the
+/// caller's row and byte caps, so with the read caps of 8,192 rows and
+/// 8 MiB the walk loads the payloads of up to 64 MiB of a session's own
+/// newer rows before it stops. The limit
+/// bounds the payloads a pass loads. The list of the project's visible
+/// memory rows, which holds no payload, is read and ordered whole before
+/// the walk, as every bounded read of the domain does.
+const MAX_DELIVERY_PAGES: usize = 8;
+
+/// The project's injectable memory rows at `tip` that a pass delivers to each
+/// of `sessions`: for one session, the newest rows under the row and byte
+/// caps among the rows whose capture rationale names another session or
+/// none. A reader given as `None` leaves out no row, so its delivery is the
+/// plain newest window. With several readers the response holds the union
+/// of their deliveries, which is at most twice the caps, because a row a
+/// session leaves out is kept only while another reader still has room.
+///
+/// A row's session is in its decision payload. The rows are walked in
+/// serving order and their payloads are loaded one page at a time, each page
+/// within the caps, so a session's own rows spend neither cap however many
+/// of them are newer than the rows it is served, and the payloads held at
+/// once stay within three times the byte cap. The walk loads at most
+/// [`MAX_DELIVERY_PAGES`] pages. `truncated` reports that some session's
+/// delivery left out a row it was eligible for at a row or byte cap, that
+/// a row whose payload alone passes the byte cap ended the walk, or that
+/// the page limit ended it with rows not yet judged; the rows delivered
+/// before the cut stay in the response.
+pub(crate) fn read_other_sessions(
+    store: &kernel::KernelStore,
+    project: &ProjectBinding,
+    sessions: &[Option<&str>],
+    tip: i64,
+    (max_rows, max_row_bytes): (usize, usize),
+) -> Result<ReadResponse, kernel::KernelError> {
+    struct Delivery<'s> {
+        session: Option<&'s str>,
+        rows: usize,
+        bytes: u64,
+        full: bool,
+    }
+    let (known_as_of, tip, candidates) =
+        crate::kernel_routes::read::domain_decisions_in_serving_order(
+            store,
+            project,
+            Surface::AutoInject,
+            tip,
+            MEMORY_DOMAIN_ID,
+        )?;
+    let mut deliveries: Vec<Delivery<'_>> = sessions
+        .iter()
+        .map(|&session| Delivery {
+            session,
+            rows: 0,
+            bytes: 0,
+            full: false,
+        })
+        .collect();
+    let mut response = ReadResponse {
+        known_as_of,
+        tip,
+        rows: Vec::new(),
+        truncated: false,
+        decisions: std::collections::HashMap::new(),
+    };
+    let mut pending = std::collections::VecDeque::from(candidates);
+    let mut pages = 0;
+    while !pending.is_empty() && deliveries.iter().any(|delivery| !delivery.full) {
+        // The walk's work is bounded: past the page limit the rows not yet
+        // judged are left out and the response reports the cut.
+        if pages == MAX_DELIVERY_PAGES {
+            response.truncated = true;
+            break;
+        }
+        pages += 1;
+        let ids: Vec<String> = pending
+            .iter()
+            .take(max_rows.max(1))
+            .map(|row| row.object.object_id.clone())
+            .collect();
+        let sizes: std::collections::HashMap<String, u64> = store
+            .decision_payload_sizes_as_of(&ids, known_as_of)?
+            .into_iter()
+            .collect();
+        // One page holds the rows whose payloads fit the byte cap together.
+        // A row whose payload alone passes the cap is delivered to no
+        // reader: it is left unloaded and the walk ends at it, as a bounded
+        // read ends at such a row.
+        let mut page = Vec::new();
+        let mut page_bytes: u64 = 0;
+        let mut oversized = false;
+        for id in &ids {
+            let size = *sizes
+                .get(id)
+                .ok_or(kernel::KernelError::CorruptCanonicalRow)?;
+            page_bytes = page_bytes.saturating_add(size);
+            if page_bytes > max_row_bytes as u64 {
+                oversized = page.is_empty();
+                break;
+            }
+            page.push((pending.pop_front().expect("a row per id"), size));
+        }
+        if oversized {
+            response.truncated = true;
+            break;
+        }
+        let mut decisions: std::collections::HashMap<String, kernel::DecisionRow> = store
+            .decisions_for_objects_as_of(&ids[..page.len()], known_as_of)?
+            .into_iter()
+            .map(|decision| (decision.object_id.clone(), decision))
+            .collect();
+        for (row, size) in page {
+            let decision = decisions
+                .remove(&row.object.object_id)
+                .ok_or(kernel::KernelError::CorruptCanonicalRow)?;
+            let owner = crate::memory_capture::is_capture_memory(&row.object)
+                .then(|| capture_session(&decision.payload.rationale))
+                .flatten();
+            let mut delivered = false;
+            for delivery in deliveries.iter_mut().filter(|delivery| !delivery.full) {
+                if owner.is_some() && owner.as_deref() == delivery.session {
+                    continue;
+                }
+                if delivery.rows == max_rows
+                    || delivery.bytes.saturating_add(size) > max_row_bytes as u64
+                {
+                    delivery.full = true;
+                    response.truncated = true;
+                } else {
+                    delivery.rows += 1;
+                    delivery.bytes += size;
+                    delivered = true;
+                }
+            }
+            if delivered {
+                response
+                    .decisions
+                    .insert(row.object.object_id.clone(), decision);
+                response.rows.push(row);
+            }
+        }
+    }
+    Ok(response)
+}
+
+fn capture_session(rationale: &str) -> Option<std::borrow::Cow<'_, str>> {
+    #[derive(serde::Deserialize)]
+    struct CaptureRationale<'a> {
+        #[serde(borrow)]
+        session: Option<std::borrow::Cow<'a, str>>,
+    }
+    serde_json::from_str::<CaptureRationale<'_>>(rationale)
+        .ok()
+        .and_then(|rationale| rationale.session)
 }
 
 /// The verdict the report compares for `read`, marked with `facts`, the lag facts of a fresh health block; a served read without them is unsampled.
