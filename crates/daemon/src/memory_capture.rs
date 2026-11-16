@@ -372,9 +372,9 @@ const FUNCTION_WORDS: [&str; 24] = [
 ];
 
 /// The words two memories are compared by: runs of letters and digits of
-/// three or more characters, and shorter runs that hold a digit, so a
-/// version or a port such as the `22` of `1.22` counts while `is` and `to`
-/// do not.
+/// three or more characters, and runs of two that hold a digit, so the `22`
+/// of `1.22` and a port such as `80` count. A single character, such as the
+/// `1` many versions share, and a short word such as `is` or `Go` do not.
 fn content_words(content: &str) -> BTreeSet<String> {
     let content = [USER_STATED, ASSISTANT_REPORTED]
         .iter()
@@ -382,7 +382,10 @@ fn content_words(content: &str) -> BTreeSet<String> {
         .unwrap_or(content);
     content
         .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| word.chars().count() >= 3 || word.chars().any(char::is_numeric))
+        .filter(|word| {
+            let length = word.chars().count();
+            length >= 3 || (length == 2 && word.chars().any(char::is_numeric))
+        })
         .map(str::to_lowercase)
         .filter(|word| !FUNCTION_WORDS.contains(&word.as_str()))
         .collect()
@@ -3472,8 +3475,12 @@ mod tests {
     #[test]
     fn content_words_keep_numerals_and_drop_short_words() {
         let words = |text: &str| -> Vec<String> { content_words(text).into_iter().collect() };
-        assert_eq!(words("User stated: Use Go 1.22."), ["1", "22"]);
-        assert_eq!(words("Use Go 1.23, not Go 1.22."), ["1", "22", "23"]);
+        assert_eq!(words("User stated: Use Go 1.22."), ["22"]);
+        assert_eq!(words("Use Go 1.23, not Go 1.22."), ["22", "23"]);
+        assert_eq!(
+            words("Keep 1 replica in zone 2."),
+            ["keep", "replica", "zone"]
+        );
         assert_eq!(words("It is up to us."), Vec::<String>::new());
         assert_eq!(words("Use port 80 for staging."), ["80", "port", "staging"]);
     }
