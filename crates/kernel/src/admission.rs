@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "2672ed6969139e84c587e1d5d5703e3cb9b3e7504a6ff50f55bb509e7c6169c4";
+    "026dd283fc3212b258854a0747a3e7e4aba5aeb3777032f01fffaaaac219b927";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -220,6 +220,63 @@ pub struct VisibleAsOf {
     pub known_as_of: i64,
     pub tip: i64,
     pub rows: Vec<VisibleRow>,
+}
+
+/// A row's position in serving order: `created_commit_seq` descending, then `object_id` ascending in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServingPosition<'a> {
+    pub created_commit_seq: i64,
+    pub object_id: &'a str,
+}
+
+impl ServingPosition<'_> {
+    /// Whether `object` follows this position in serving order.
+    pub fn precedes(&self, object: &ObjectRow) -> bool {
+        object.created_commit_seq < self.created_commit_seq
+            || (object.created_commit_seq == self.created_commit_seq
+                && object.object_id.as_str() > self.object_id)
+    }
+}
+
+/// Consecutive visible rows of one surface in serving order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleChunk {
+    pub known_as_of: i64,
+    pub tip: i64,
+    /// Rows in serving order. The chunk holds each commit it reaches whole, and the commit of the position it
+    /// follows from the row after that position.
+    pub rows: Vec<ChunkRow>,
+    /// The snapshot holds no visible row after the last of `rows`.
+    pub exhausted: bool,
+}
+
+/// One row of a [`VisibleChunk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkRow {
+    pub row: VisibleRow,
+    /// The decision of a decision object as the snapshot holds it; `None` for any other object and for a decision
+    /// object whose decision row the snapshot lacks.
+    pub decision: Option<ChunkDecision>,
+}
+
+/// The decision of one [`ChunkRow`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkDecision {
+    /// `length(decision_payload)` in bytes.
+    pub payload_bytes: u64,
+    /// The decision's kind and stored payload, held while the payload bytes the chunk holds stay within the
+    /// caller's budget. `None` past the budget and for a payload over 64 KiB, which the page statement leaves in
+    /// its row, so a caller reads that decision by id when it serves it.
+    pub content: Option<DecisionContent>,
+}
+
+/// The part of a decision row a surface serves, with the payload as the row stores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionContent {
+    pub decision_kind: String,
+    /// The stored payload bytes, unchecked: for a decision the kernel wrote, the JSON `serde_json` encodes for
+    /// its [`DecisionPayload`](crate::DecisionPayload).
+    pub stored_payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2931,9 +2988,26 @@ const SUPPORT_EVIDENCE_SENSITIVITY_COLUMN: usize = 34;
 /// what they read today.
 const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [35, 36, 37, 38];
 const OWN_ADMISSION_DECISION_ID_COLUMN: usize = 39;
+/// `o.object_kind` and `o.created_commit_seq`, at the positions `object_row_from` reads them from.
+const OBJECT_KIND_COLUMN: usize = 1;
+const CREATED_COMMIT_SEQ_COLUMN: usize = 6;
 /// Groups the history rows of one object without reading its identifier text.
 const OBJECT_ROWID_COLUMN: usize = 40;
 const LAST_SERVED_COLUMN: usize = OBJECT_ROWID_COLUMN;
+/// The first of the decision columns the page statement selects after the served columns, and their aliases in
+/// column order.
+const PAGE_DECISION_COLUMN: usize = LAST_SERVED_COLUMN + 1;
+const PAGE_DECISION_ALIASES: [&str; 5] = [
+    "dec_created_commit_seq",
+    "dec_invalidated_commit_seq",
+    "dec_payload_bytes",
+    "dec_decision_payload",
+    "dec_decision_kind",
+];
+/// The largest decision payload the page statement returns with its row. SQLite copies a result column's whole
+/// value for every row it returns, so a larger payload is selected as NULL and its decision is read by id when a
+/// page serves it.
+const PAGE_PAYLOAD_INLINE_BYTES: u64 = 64 * 1024;
 
 /// A text column's bytes borrowed from the row, `None` for SQL NULL.
 fn bytes_column<'r>(
@@ -3117,6 +3191,11 @@ fn decided_row(
 }
 
 // policy-digest:serving-end
+/// The most rows a chunk read reserves room for before it reads any. A chunk gathers the rows its caller asks
+/// for before it resolves their approvals, so the request is reserved once; a request above this grows the
+/// vectors as rows arrive.
+const CHUNK_ROWS_RESERVED: usize = 1 << 14;
+
 impl KernelStore {
     /// Serving reads must use this filtered view; `known_as_of` remains an audit/replay view.
     ///
@@ -3162,22 +3241,38 @@ impl KernelStore {
         self.visible_selected_as_of(surface, requested, selection, scope, None)
     }
 
-    /// [`Self::visible_as_of_in_scope`] whose SQL bounds the candidate set to
-    /// `created_commit_seq <= created_at_or_before` before classification.
-    pub fn visible_created_at_or_before_as_of_in_scope(
+    /// The rows [`Self::visible_as_of_in_scope`] serves that follow `after` in serving order, newest first, each
+    /// decision object with its decision. The read walks commits from the newest and stops at the end of the
+    /// commit that brings the chunk to `min_rows` rows or its decision payloads past `payload_budget` bytes, so
+    /// its cost follows the rows it returns and the rows it judges hidden on the way. A `min_rows` of zero reads
+    /// as one, so a chunk that leaves rows unread holds a row to continue from.
+    pub fn visible_chunk_as_of_in_scope(
         &self,
         surface: Surface,
         requested: i64,
-        created_at_or_before: i64,
+        after: Option<ServingPosition<'_>>,
+        min_rows: usize,
+        payload_budget: u64,
         scope: Option<ScopeTermFilter<'_>>,
-    ) -> Result<VisibleAsOf, KernelError> {
-        self.visible_selected_as_of(
-            surface,
-            requested,
-            ServedSelection::CreatedAtOrBefore(created_at_or_before),
-            scope,
-            None,
-        )
+    ) -> Result<VisibleChunk, KernelError> {
+        let min_rows = min_rows.max(1);
+        let (tip, (rows, exhausted)) = self.read_snapshot(requested, |tx, _| {
+            served_chunk(
+                tx,
+                surface,
+                requested,
+                after,
+                min_rows,
+                payload_budget,
+                scope,
+            )
+        })?;
+        Ok(VisibleChunk {
+            known_as_of: requested,
+            tip,
+            rows,
+            exhausted,
+        })
     }
 
     /// [`Self::visible_as_of_in_scope`] restricted to the decision objects of `domain_id`. The domain and kind are
@@ -3228,15 +3323,7 @@ impl KernelStore {
         let read = |tx: &Transaction<'_>, _: i64| {
             let mut rows: Vec<VisibleRow> = served_rows(tx, surface, requested, selection, scope)?
                 .into_iter()
-                .filter_map(|(object, visibility, scope_id)| match visibility {
-                    SurfaceVisibility::Hidden => None,
-                    visibility => Some(VisibleRow {
-                        object,
-                        visibility,
-                        labeled: visibility == SurfaceVisibility::Labeled,
-                        scope_id,
-                    }),
-                })
+                .filter_map(visible_row)
                 .collect();
             rows.sort_unstable_by(|left, right| left.object.object_id.cmp(&right.object.object_id));
             Ok(rows)
@@ -3517,14 +3604,171 @@ fn served_rows(
     )
 }
 
+/// The row a surface serves for one `served_rows` entry; `None` when the surface hides it.
+fn visible_row(
+    (object, visibility, scope_id): (ObjectRow, SurfaceVisibility, Option<String>),
+) -> Option<VisibleRow> {
+    match visibility {
+        SurfaceVisibility::Hidden => None,
+        visibility => Some(VisibleRow {
+            object,
+            visibility,
+            labeled: visibility == SurfaceVisibility::Labeled,
+            scope_id,
+        }),
+    }
+}
+
+/// The visible rows of `surface` that follow `after` in serving order, and whether the snapshot holds none after
+/// them. Commits are read whole from the newest one at or before `after`: the page statement orders objects by
+/// commit, so the rows of each commit are sorted by `object_id` here. Reading stops at the first commit boundary
+/// with `min_rows` rows gathered or with their decision payloads past `payload_budget` bytes.
+fn served_chunk(
+    tx: &Transaction<'_>,
+    surface: Surface,
+    requested: i64,
+    after: Option<ServingPosition<'_>>,
+    min_rows: usize,
+    payload_budget: u64,
+    scope: Option<ScopeTermFilter<'_>>,
+) -> Result<(Vec<ChunkRow>, bool), KernelError> {
+    let newest = after.map_or(requested, |after| after.created_commit_seq);
+    // Drafts are finished in batches so that one approval lookup covers every commit of a batch. Returns the
+    // payload bytes of the rows the batch adds.
+    let finish = |drafts: &mut Vec<Draft>,
+                  decisions: &mut Vec<Option<ChunkDecision>>,
+                  visible: &mut Vec<ChunkRow>| {
+        let approvals = draft_approvals(tx, requested, drafts)?;
+        let finished = visible.len();
+        visible.extend(
+            drafts
+                .drain(..)
+                .zip(decisions.drain(..))
+                .filter_map(|(draft, decision)| {
+                    let row = draft.finish(&approvals)?;
+                    let visibility = row.visibility(surface);
+                    let row = visible_row((row.object, visibility, row.scope_id))?;
+                    Some(ChunkRow { row, decision })
+                })
+                .filter(|entry| after.is_none_or(|after| after.precedes(&entry.row.object))),
+        );
+        visible[finished..].sort_unstable_by(|left, right| {
+            right
+                .row
+                .object
+                .created_commit_seq
+                .cmp(&left.row.object.created_commit_seq)
+                .then_with(|| left.row.object.object_id.cmp(&right.row.object.object_id))
+        });
+        Ok::<u64, KernelError>(
+            visible[finished..]
+                .iter()
+                .filter_map(|entry| entry.decision.as_ref())
+                .fold(0, |bytes, decision| {
+                    bytes.saturating_add(decision.payload_bytes)
+                }),
+        )
+    };
+    served_query(
+        tx,
+        requested,
+        ServedSelection::Page(newest),
+        scope,
+        |rows| {
+            let reserved = min_rows.min(CHUNK_ROWS_RESERVED);
+            let mut visible: Vec<ChunkRow> = Vec::with_capacity(reserved);
+            let mut visible_bytes: u64 = 0;
+            let mut drafts: Vec<Draft> = Vec::with_capacity(reserved);
+            // One entry per draft: the decision of an object the surface can serve.
+            let mut decisions: Vec<Option<ChunkDecision>> = Vec::with_capacity(reserved);
+            let mut draft_bytes: u64 = 0;
+            let mut held_bytes: u64 = 0;
+            let mut commit = None;
+            while let Some(row) = rows.next().map_err(map_sqlite)? {
+                let created: i64 = row.get(CREATED_COMMIT_SEQ_COLUMN).map_err(map_sqlite)?;
+                if commit != Some(created) {
+                    if visible.len() + drafts.len() >= min_rows
+                        || visible_bytes.saturating_add(draft_bytes) > payload_budget
+                    {
+                        let added = finish(&mut drafts, &mut decisions, &mut visible)?;
+                        visible_bytes = visible_bytes.saturating_add(added);
+                        draft_bytes = 0;
+                        if visible.len() >= min_rows || visible_bytes > payload_budget {
+                            return Ok((visible, false));
+                        }
+                    }
+                    commit = Some(created);
+                }
+                fold_history_row(&mut drafts, row, Some(surface))?;
+                if decisions.len() < drafts.len() {
+                    decisions.push(None);
+                }
+                // The decision is read from the first row that leaves the object servable after `after`; every
+                // row of an object carries the same decision columns.
+                if let (Some(draft), Some(decision @ None)) = (drafts.last(), decisions.last_mut())
+                    && let Some(object) = &draft.latest.object
+                    && after.is_none_or(|after| after.precedes(object))
+                {
+                    *decision = chunk_decision(row, requested, &mut held_bytes, payload_budget)
+                        .map_err(map_sqlite)?;
+                    if let Some(decision) = decision {
+                        draft_bytes = draft_bytes.saturating_add(decision.payload_bytes);
+                    }
+                }
+            }
+            finish(&mut drafts, &mut decisions, &mut visible)?;
+            Ok((visible, true))
+        },
+    )
+}
+
+/// The decision the page statement joined to a decision object, when the snapshot holds one. `held_bytes` counts
+/// the payload bytes of the decisions held so far; a decision's payload is held while that count stays within
+/// `payload_budget`, which bounds the payloads a chunk holds to the budget. The payload stays as stored, so a
+/// caller that serves the stored text of a row reads each payload once.
+fn chunk_decision(
+    row: &rusqlite::Row<'_>,
+    requested: i64,
+    held_bytes: &mut u64,
+    payload_budget: u64,
+) -> rusqlite::Result<Option<ChunkDecision>> {
+    if text_column(row, OBJECT_KIND_COLUMN)? != Some("decision") {
+        return Ok(None);
+    }
+    let first = PAGE_DECISION_COLUMN;
+    let Some(created_commit_seq) = row.get::<_, Option<i64>>(first)? else {
+        return Ok(None);
+    };
+    let invalidated: Option<i64> = row.get(first + 1)?;
+    if created_commit_seq > requested || invalidated.is_some_and(|at| at <= requested) {
+        return Ok(None);
+    }
+    let payload_bytes = row.get::<_, i64>(first + 2)?.max(0) as u64;
+    let mut content = None;
+    if held_bytes.saturating_add(payload_bytes) <= payload_budget
+        && let Some(payload) = bytes_column(row, first + 3)?
+    {
+        *held_bytes = held_bytes.saturating_add(payload_bytes);
+        content = Some(DecisionContent {
+            decision_kind: row.get(first + 4)?,
+            stored_payload: payload.to_vec(),
+        });
+    }
+    Ok(Some(ChunkDecision {
+        payload_bytes,
+        content,
+    }))
+}
+
 /// The objects a served-class read returns, with the value its statement binds. Each variant is its own
 /// prepared statement, so its predicate is one the planner can serve from an index.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ServedSelection<'a> {
     /// Every object at the snapshot.
     All,
-    /// SQL bounds the candidate set before classification to `created_commit_seq <= :created_at_or_before`.
-    CreatedAtOrBefore(i64),
+    /// One page read: the objects created at or before `:created_at_or_before` in the page statement's order,
+    /// each with the decision columns a page serves.
+    Page(i64),
     /// The objects a JSON string array of identifiers names, bound as `:ids`.
     Named(&'a str),
     /// The decision objects of one domain, bound as `:domain_id`.
@@ -3595,13 +3839,33 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
     // set term in the scope algebra, so the prefilter keeps every scope
     // constrained on the dimension for the caller to judge.
     let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
-    let ids_predicate = match selection {
-        ServedSelection::Named(_) => "o.object_id IN (SELECT value FROM json_each(:ids)) AND",
-        ServedSelection::All => "",
-        ServedSelection::CreatedAtOrBefore(_) => "o.created_commit_seq<=:created_at_or_before AND",
-        ServedSelection::DomainDecisions(_) => {
-            "o.domain_id=:domain_id AND o.object_kind='decision' AND"
-        }
+    // The page statement orders by the registry's commit index read backwards, so the planner walks
+    // `idx_objects_known_as_of` and a reader that stops early leaves the older commits unread. The order names
+    // every index column, so the rows of one object are adjacent whatever plan serves the order.
+    let (ids_predicate, decision_columns, order) = match selection {
+        ServedSelection::Named(_) => (
+            "o.object_id IN (SELECT value FROM json_each(:ids)) AND",
+            String::new(),
+            "",
+        ),
+        ServedSelection::All => ("", String::new(), ""),
+        ServedSelection::DomainDecisions(_) => (
+            "o.domain_id=:domain_id AND o.object_kind='decision' AND",
+            String::new(),
+            "",
+        ),
+        ServedSelection::Page(_) => (
+            "o.created_commit_seq<=:created_at_or_before AND",
+            format!(
+                ",dec.created_commit_seq AS dec_created_commit_seq,
+                    dec.invalidated_commit_seq AS dec_invalidated_commit_seq,
+                    length(dec.decision_payload) AS dec_payload_bytes,
+                    CASE WHEN length(dec.decision_payload)<={PAGE_PAYLOAD_INLINE_BYTES}
+                         THEN dec.decision_payload END AS dec_decision_payload,
+                    dec.decision_kind AS dec_decision_kind"
+            ),
+            "ORDER BY o.created_commit_seq DESC,o.invalidated_commit_seq DESC,o.object_id DESC",
+        ),
     };
     let (object_joins, scope_expr, cited_expr) = match selection {
         ServedSelection::DomainDecisions(_) => (
@@ -3609,9 +3873,7 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
             "dec.scope_id",
             "dec.evidence_id",
         ),
-        ServedSelection::Named(_)
-        | ServedSelection::All
-        | ServedSelection::CreatedAtOrBefore(_) => (
+        ServedSelection::Named(_) | ServedSelection::All | ServedSelection::Page(_) => (
             "LEFT JOIN observations obs ON obs.object_id=o.object_id
              LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id",
             "COALESCE(dec.scope_id,obs.scope_id)",
@@ -3657,7 +3919,7 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
                     {s_trigger} AS s_trigger_sensitivity_class,
                     {s_trigger_evidence} AS s_trigger_evidence_sensitivity_class,
                     d.admission_decision_id AS d_admission_decision_id,
-                    o.rowid AS o_rowid
+                    o.rowid AS o_rowid{decision_columns}
              FROM object_registry o
              LEFT JOIN decisions dec ON dec.object_id=o.object_id
              {object_joins}
@@ -3687,7 +3949,8 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
                     OR {scope_expr} IS NULL
                     OR {scope_expr} NOT IN (
                         SELECT t.scope_id FROM scope_term t
-                        WHERE t.dimension=:scope_dimension))"
+                        WHERE t.dimension=:scope_dimension))
+             {order}"
     )
 }
 
@@ -3720,22 +3983,50 @@ pub(crate) fn served_classes_selected(
     scope: Option<ScopeTermFilter<'_>>,
     visible_on: Option<Surface>,
 ) -> Result<Vec<ServedRow>, KernelError> {
+    let drafts = served_query(tx, requested, selection, scope, |rows| {
+        let mut drafts: Vec<Draft> = Vec::new();
+        while let Some(row) = rows.next().map_err(map_sqlite)? {
+            fold_history_row(&mut drafts, row, visible_on)?;
+        }
+        Ok(drafts)
+    })?;
+    let approvals = draft_approvals(tx, requested, &drafts)?;
+    Ok(drafts
+        .into_iter()
+        .filter_map(|draft| draft.finish(&approvals))
+        .collect())
+}
+
+/// Runs the served-class statement of `selection` and hands its rows to `read`.
+fn served_query<T>(
+    tx: &Transaction<'_>,
+    requested: i64,
+    selection: ServedSelection<'_>,
+    scope: Option<ScopeTermFilter<'_>>,
+    read: impl FnOnce(&mut rusqlite::Rows<'_>) -> Result<T, KernelError>,
+) -> Result<T, KernelError> {
     // Each shape's text is identical on every call, so building it once lets `prepare_cached` hash a stable string instead of a per-call `format!`.
     static NAMED_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::Named("")));
     static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(ServedSelection::All));
-    static CREATED_SQL: LazyLock<String> =
-        LazyLock::new(|| served_classes_sql(ServedSelection::CreatedAtOrBefore(0)));
+    static PAGE_SQL: LazyLock<String> =
+        LazyLock::new(|| served_classes_sql(ServedSelection::Page(0)));
     static DOMAIN_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::DomainDecisions("")));
     let sql = match selection {
         ServedSelection::Named(_) => NAMED_SQL.as_str(),
         ServedSelection::All => ALL_SQL.as_str(),
-        ServedSelection::CreatedAtOrBefore(_) => CREATED_SQL.as_str(),
+        ServedSelection::Page(_) => PAGE_SQL.as_str(),
         ServedSelection::DomainDecisions(_) => DOMAIN_SQL.as_str(),
     };
     let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
-    assert_served_columns(&statement);
+    let decision_aliases: &[&str] = match selection {
+        ServedSelection::Page(_) => &PAGE_DECISION_ALIASES,
+        ServedSelection::Named(_) | ServedSelection::All | ServedSelection::DomainDecisions(_) => {
+            &[]
+        }
+    };
+    assert_served_columns(&statement, decision_aliases);
     let scope_dimension = scope.map(|scope| scope.dimension.as_str());
     let scope_value = scope.map(|scope| scope.value);
     // Binding a name the statement lacks is an error, so each shape binds only its own selector.
@@ -3757,27 +4048,42 @@ pub(crate) fn served_classes_selected(
             (":scope_dimension", &scope_dimension),
             (":scope_value", &scope_value),
         ],
-        ServedSelection::CreatedAtOrBefore(created_at_or_before) => &[
+        ServedSelection::Page(created_at_or_before) => &[
             (":governing_as_of", &requested),
             (":created_at_or_before", created_at_or_before),
             (":scope_dimension", &scope_dimension),
             (":scope_value", &scope_value),
         ],
     };
-    // `o` is the outer loop of the statement's `CROSS JOIN`, and every other join is one row per
-    // object, so the history rows of one object arrive consecutively.
-    let mut drafts: Vec<Draft> = Vec::new();
     let mut rows = statement.query(params).map_err(map_sqlite)?;
-    while let Some(row) = rows.next().map_err(map_sqlite)? {
-        let history = HistoryRow::read(row).map_err(map_sqlite)?;
-        match drafts.last_mut() {
-            Some(draft) if draft.object_rowid == history.object_rowid => {
-                draft.fold(row, &history, visible_on).map_err(map_sqlite)?;
-            }
-            _ => drafts.push(Draft::start(row, &history, visible_on).map_err(map_sqlite)?),
+    read(&mut rows)
+}
+
+/// Folds one statement row into its object's draft. `o` is the outer loop of the statement's `CROSS JOIN`, and
+/// every other join is one row per object, so the history rows of one object arrive consecutively and the object
+/// a row continues is the last draft.
+fn fold_history_row(
+    drafts: &mut Vec<Draft>,
+    row: &rusqlite::Row<'_>,
+    visible_on: Option<Surface>,
+) -> Result<(), KernelError> {
+    let history = HistoryRow::read(row).map_err(map_sqlite)?;
+    match drafts.last_mut() {
+        Some(draft) if draft.object_rowid == history.object_rowid => {
+            draft.fold(row, &history, visible_on).map_err(map_sqlite)?;
         }
+        _ => drafts.push(Draft::start(row, &history, visible_on).map_err(map_sqlite)?),
     }
-    let approvals = approval_validity(
+    Ok(())
+}
+
+/// Whether each approval `drafts` name is valid at `requested`.
+fn draft_approvals(
+    tx: &Transaction<'_>,
+    requested: i64,
+    drafts: &[Draft],
+) -> Result<HashMap<String, bool>, KernelError> {
+    approval_validity(
         tx,
         requested,
         drafts.iter().flat_map(|draft| {
@@ -3795,11 +4101,7 @@ pub(crate) fn served_classes_selected(
                         .filter_map(|lineage| lineage.approval_object_id.as_deref()),
                 )
         }),
-    )?;
-    Ok(drafts
-        .into_iter()
-        .filter_map(|draft| draft.finish(&approvals))
-        .collect())
+    )
 }
 
 /// Whether a stored class differs from `first` as SQL `<>` judges them: a NULL on either side is no difference.
@@ -4102,7 +4404,7 @@ fn approval_validity<'a>(
 /// desynced constant reads a type-compatible wrong value and misgates
 /// visibility instead of erroring. A few string compares per call is
 /// negligible next to the multi-join query this guards.
-fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
+fn assert_served_columns(statement: &rusqlite::Statement<'_>, decision_aliases: &[&str]) {
     // Per-field checks catch swapped interior aliases that count and
     // block-anchor checks miss.
     let expected = [
@@ -4179,11 +4481,15 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
     ];
     assert_eq!(
         statement.column_count(),
-        LAST_SERVED_COLUMN + 1,
+        PAGE_DECISION_COLUMN + decision_aliases.len(),
         "served_rows must select exactly {} columns",
-        LAST_SERVED_COLUMN + 1
+        PAGE_DECISION_COLUMN + decision_aliases.len()
     );
-    for (index, alias) in expected {
+    let decisions = decision_aliases
+        .iter()
+        .enumerate()
+        .map(|(offset, alias)| (PAGE_DECISION_COLUMN + offset, *alias));
+    for (index, alias) in expected.into_iter().chain(decisions) {
         assert_eq!(
             statement.column_name(index).ok(),
             Some(alias),
@@ -5941,6 +6247,12 @@ mod tests {
             "fn trigger_evidence_sensitivity_sql(",
             "fn strictest_support_evidence_sql(",
             "fn served_classes_selected(",
+            "fn served_query<",
+            "fn fold_history_row(",
+            "fn draft_approvals(",
+            "fn visible_row(",
+            "fn served_chunk(",
+            "fn chunk_decision(",
             "fn class_differs<",
             "fn stored_class<",
             "struct HistoryRow<",
@@ -6598,6 +6910,226 @@ mod tests {
         assert!(
             long <= 2 * short,
             "200 support citations cost {short} VM steps beside one own row and {long} beside 41"
+        );
+    }
+
+    /// One of the two commits of the chunk cost store.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Commit {
+        First,
+        Newest,
+    }
+
+    /// VM steps and rows of one chunk read over a store of two commits: the first holds the seed decision, the
+    /// newest holds one decision, and `extra` admitted objects sit in the commit `extra_in` names. The chunk
+    /// follows the start of the commit `after` names, or starts at the newest row.
+    fn chunk_read_steps(
+        (extra, extra_in): (usize, Commit),
+        min_rows: usize,
+        after: Option<Commit>,
+    ) -> (usize, usize) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, first_commit) = store_with_one_decision(directory.path());
+        let newest_commit = store
+            .commit(
+                crate::CommitIntent {
+                    producer: "served-fold-test".to_string(),
+                    operation_key: "newest".to_string(),
+                    request_digest: "b".repeat(64),
+                    actor: "test".to_string(),
+                    cause: "proof".to_string(),
+                },
+                |envelope| {
+                    envelope.insert_decision(crate::DecisionSpec {
+                        decision_id: "decision-two".to_string(),
+                        object_id: "two".to_string(),
+                        domain_id: "memory".to_string(),
+                        proposition_id: None,
+                        scope_id: None,
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "adr_accepted".to_string(),
+                        payload: crate::DecisionPayload {
+                            summary: "two".to_string(),
+                            rationale: "two".to_string(),
+                        },
+                        source_kind: "fixture".to_string(),
+                        source_id: "src/two".to_string(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                    })?;
+                    envelope.record_admission(AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some("two".to_string()),
+                        source_class: Some(SourceClass::ExplicitUser),
+                        taint_class: Some(TaintClass::UserExplicit),
+                        event: AdmissionEvent {
+                            kind: EventKind::AcceptedAdr,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "fixture".to_string(),
+                        },
+                    })?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap()
+            .commit_seq;
+        drop(store);
+        let seq = |commit: Commit| match commit {
+            Commit::First => first_commit,
+            Commit::Newest => newest_commit,
+        };
+        let extra_commit = seq(extra_in);
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 WHERE {extra}>0 UNION ALL SELECT i+1 FROM n WHERE i<{extra})
+                 INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 )
+                 SELECT 'extra-'||i,'evidence','memory','fixture','src/extra-'||i,1,{extra_commit},'normal'
+                 FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 1 WHERE {extra}>0 UNION ALL SELECT i+1 FROM n WHERE i<{extra})
+                 INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                     outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                 )
+                 SELECT 'extra-admission-'||i,'extra-'||i,'fixture','src/extra-'||i,1,'explicit_user',
+                        'user_explicit','other','verified','verified','active','automatic','admit','normal',1,
+                        'fixture',{extra_commit},1
+                 FROM n;"
+            ))
+            .unwrap();
+        drop(connection);
+        let store = KernelStore::open(directory.path()).unwrap();
+        let after = after.map(|commit| ServingPosition {
+            created_commit_seq: seq(commit),
+            object_id: "",
+        });
+        let read = |tx: &Transaction<'_>| {
+            served_chunk(
+                tx,
+                Surface::ExplicitSearch,
+                newest_commit,
+                after,
+                min_rows,
+                u64::MAX,
+                None,
+            )
+        };
+        let (_, measured) = store
+            .read_snapshot(newest_commit, |tx, _| {
+                // The first read warms the query path before VM-step counting begins.
+                read(tx)?;
+                let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let counter = std::sync::Arc::clone(&steps);
+                tx.progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .map_err(map_sqlite)?;
+                let chunk = read(tx);
+                tx.progress_handler(0, None::<fn() -> bool>)
+                    .map_err(map_sqlite)?;
+                let (rows, _) = chunk?;
+                Ok((steps.load(Ordering::Relaxed), rows.len()))
+            })
+            .unwrap();
+        measured
+    }
+
+    /// A chunk that its newest commit fills stops at that commit's end: the objects of older commits add no work
+    /// to it, while a chunk that asks for every row reads them all.
+    #[test]
+    fn a_chunk_the_newest_commit_fills_does_not_read_the_older_commits() {
+        let (alone, alone_rows) = chunk_read_steps((0, Commit::First), 1, None);
+        let (beside_older, rows) = chunk_read_steps((400, Commit::First), 1, None);
+        assert_eq!((alone_rows, rows), (1, 1));
+        assert!(
+            beside_older <= 2 * alone,
+            "one row cost {alone} VM steps alone and {beside_older} beside 400 older objects"
+        );
+        let (every_row, rows) = chunk_read_steps((400, Commit::First), usize::MAX, None);
+        assert_eq!(rows, 402);
+        assert!(
+            every_row >= 20 * beside_older,
+            "402 rows cost {every_row} VM steps and the first row alone {beside_older}"
+        );
+    }
+
+    /// A chunk after a position starts its read at that position's commit: the objects of newer commits add no
+    /// work to it, while a chunk from the start reads them.
+    #[test]
+    fn a_chunk_after_a_position_does_not_read_the_newer_commits() {
+        let first = Some(Commit::First);
+        let (alone, alone_rows) = chunk_read_steps((0, Commit::Newest), usize::MAX, first);
+        let (below_newer, rows) = chunk_read_steps((400, Commit::Newest), usize::MAX, first);
+        assert_eq!(alone_rows, rows);
+        assert!(rows >= 1, "the first commit serves its seed decision");
+        assert!(
+            below_newer <= 2 * alone,
+            "the first commit cost {alone} VM steps alone and {below_newer} below 400 newer objects"
+        );
+        let (from_start, all) = chunk_read_steps((400, Commit::Newest), usize::MAX, None);
+        assert_eq!(all, rows + 401);
+        assert!(
+            from_start >= 20 * below_newer,
+            "the whole surface cost {from_start} VM steps and the first commit {below_newer}"
+        );
+    }
+
+    /// The page statement takes its commit order from the registry's commit index: the outer loop searches
+    /// `idx_objects_known_as_of`, and the statement's own `ORDER BY` adds no sorter, so a reader that stops
+    /// early leaves the older commits unread.
+    #[test]
+    fn the_page_statement_reads_the_commit_index_in_commit_order() {
+        let directory = tempfile::tempdir().unwrap();
+        KernelStore::open(directory.path()).unwrap();
+        let connection = rusqlite::Connection::open_with_flags(
+            directory.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                served_classes_sql(ServedSelection::Page(0))
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::named_params! {
+                    ":governing_as_of": 1_i64,
+                    ":created_at_or_before": 1_i64,
+                    ":scope_dimension": Option::<&str>::None,
+                    ":scope_value": Option::<&str>::None,
+                },
+                |row| Ok((row.get::<_, i64>(1)?, row.get::<_, String>(3)?)),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let outer: Vec<&str> = plan
+            .iter()
+            .filter(|(parent, _)| *parent == 0)
+            .map(|(_, step)| step.as_str())
+            .collect();
+        assert!(
+            outer[0]
+                .starts_with("SEARCH o USING INDEX idx_objects_known_as_of (created_commit_seq<?)"),
+            "expected the commit index as the outer loop, planner chose: {outer:?}"
+        );
+        assert!(
+            !outer.iter().any(|step| step.contains("ORDER BY")),
+            "the statement's order must come from the index: {outer:?}"
         );
     }
 

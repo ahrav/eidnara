@@ -18,11 +18,11 @@ evidence. Inspected 2026-09-19 at
   captures the kernel tip and reads the bound project's `auto_inject`
   memory-domain decisions at it, at any consumer lag. Failure returns
   `Withheld`.
-- [kernel_routes/read.rs:182-238](../../../../../crates/daemon/src/kernel_routes/read.rs#L182-L238)
+- [kernel_routes/read.rs:383-434](../../../../../crates/daemon/src/kernel_routes/read.rs#L383-L434)
   filters by the bound project and scope before applying row limits.
 - [canonical_memory.rs:339-374](../../../../../crates/daemon/src/canonical_memory.rs#L339-L374)
   keeps visible positive decisions, then trims to the memory budget.
-- [admission.rs:3775-3785](../../../../../crates/kernel/src/admission.rs#L3775-L3785)
+- [admission.rs:4686-4698](../../../../../crates/kernel/src/admission.rs#L4686-L4698)
   distinguishes verified active automatic visibility from candidate/labeled,
   rejected review-only, and quarantined audit-only states.
 - [m0_compose.rs:71-109,234-237](../../../../../crates/daemon/src/m0_compose.rs#L71-L109)
