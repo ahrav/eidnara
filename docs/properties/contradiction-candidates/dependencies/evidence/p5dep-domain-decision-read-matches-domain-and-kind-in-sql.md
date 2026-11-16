@@ -1,7 +1,8 @@
 # p5dep-domain-decision-read-matches-domain-and-kind-in-sql
 
-HEAD `3a3b916b7`; the `admission.rs` references are re-verified at the
-#1166 branch tip. Surface S2.
+HEAD `3a3b916b7`; the `admission.rs`, `read.rs`, `canonical_memory.rs`,
+`memory_capture.rs`, and `kernel_canonical_read.rs` references are
+re-verified at the #1209 branch tip. Surface S2.
 
 ## Discovery trigger
 

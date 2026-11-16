@@ -1,6 +1,7 @@
 # p5dep-daemon-bounds-rows-after-the-scope-filter
 
-HEAD `3a3b916b7`. Surface S2.
+HEAD `3a3b916b7`; the `read.rs`, `admission.rs`, and `kernel_routes.rs`
+references are re-verified at the #1209 branch tip. Surface S2.
 
 ## Discovery trigger
 

@@ -582,7 +582,7 @@ the kernel. Five adjacent observations, not disagreements:
 [split-min]: ../../../../../crates/host-runtime/src/wire.rs#L585-L587
 [split]: ../../../../../crates/host-runtime/src/wire.rs#L589-L599
 [native-reserve]: ../../../../../packages/shm-native/src/lib.rs#L1024
-[measure]: ../../../../../crates/daemon/src/dispatch.rs#L123-L142
+[measure]: ../../../../../crates/daemon/src/dispatch.rs#L334-L352
 [write-to]: ../../../../../crates/daemon/src/dispatch.rs#L475-L501
 [settle-with]: ../../../../../crates/daemon/src/lib.rs#L12111-L12166
 [settle-prepared]: ../../../../../crates/daemon/src/lib.rs#L12168-L12183

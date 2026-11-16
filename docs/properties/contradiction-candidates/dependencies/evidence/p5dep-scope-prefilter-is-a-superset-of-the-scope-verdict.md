@@ -1,6 +1,7 @@
 # p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict
 
-HEAD `3a3b916b7`. Surface S2.
+HEAD `3a3b916b7`; the `admission.rs`, `project.rs`, and `read.rs` references
+are re-verified at the #1209 branch tip. Surface S2.
 
 ## Discovery trigger
 

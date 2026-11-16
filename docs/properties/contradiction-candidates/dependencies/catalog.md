@@ -345,8 +345,8 @@ only for the retained decisions whose stored payload it cannot serve as
 stored.
 Check: `always` - on both paths, `rows.len() <= 8192`; `truncated == (filtered_count >
 8192 || payload_cut)`, where the filtered set holds the rows that pass the
-selection, the cursor, and the scope filter; the kept set equals
-sort-then-truncate of the filtered set; no `decisions_for_objects_as_of` call names an id outside the retained
+selection, the cursor, and the scope filter; the retained set is a prefix of
+sort-then-truncate of the filtered set, whole when no payload cut applies; no `decisions_for_objects_as_of` call names an id outside the retained
 set; and `sum(payload_sizes[retained]) <= MAX_READ_ROW_BYTES` or the retained
 set is exactly the prefix the cut allows. `always` because every read must
 hold these bounds.

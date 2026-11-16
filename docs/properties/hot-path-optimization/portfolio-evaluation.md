@@ -242,11 +242,11 @@ module for request and store-row builders
 full-sort comparison tests (`:1958-2013`, `:2112-2152`, `:2078-2109`).
 K3 needs more than 8192 admitted visible candidates; K4 needs more than 8 MiB
 of stored payload before a target. Both are seed-size questions, not
-mechanism questions. K1's owner gate is real: `visible_as_of_in_scope`
-decodes every candidate row inside `query_map` before the caller applies
-domain and kind selection (`crates/kernel/src/admission.rs:3309-3315`,
-`:3370-3371`), so a pushdown removes the error path for excluded corrupt
-rows. The catalog states this correctly (`catalog.md:129-132`).
+mechanism questions. K1's owner gate is resolved: the domain read matches
+domain and kind in the served-row query before any row is decoded
+(`crates/kernel/src/admission.rs:3278-3280`, `:3852-3856`), so a corrupt row
+outside the domain does not fail the read. The owner approved that
+suppression during #443, and the catalog records it (`catalog.md:114-116`).
 
 **History (H1 to H4).** The four goldens exist under
 `crates/daemon/testdata/` and the real-estimator test at

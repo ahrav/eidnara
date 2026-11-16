@@ -13,9 +13,11 @@ the existing canonical reader excludes before bounded selection.
 - [read.rs:104-116][keeps] admits only decisions in the requested memory domain.
 - [read.rs:461-488][filter] applies that predicate and the scope algebra before
   rows enter `NewestRows`; exclusions do not set its dropped flag.
-- [admission.rs:3923-3952][sql] has an inner own-admission join, no domain/kind
-  restriction, and a conservative scope prefilter. Unadmitted registry rows
-  are not its returned candidates.
+- [admission.rs:3923-3952][sql] has an inner own-admission join and a
+  conservative scope prefilter. Its `{ids_predicate}` adds the domain and
+  kind restriction for the `DomainDecisions` shape alone
+  (`crates/kernel/src/admission.rs:3852-3856`). Unadmitted registry rows are
+  not its returned candidates.
 - [admission.rs:3608-3620][visible] removes Hidden rows from the visible result.
 - [canonical_memory.rs:195-210][late] filters Visible/positive categories and
   trims the memory budget after the route reader has applied its caps.

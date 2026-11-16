@@ -253,8 +253,8 @@ kernel-route boundary. T3 and T4 are default-production: the daemon sends
 every transform and exact-length response through the direct path. T3's
 check applies unchanged to a `MeasuredSource::Json` response, which the owned
 path measures structurally (`measure_json`,
-`crates/daemon/src/dispatch.rs:580-585`) and serializes once into the
-reserved body (`MeasuredOutput::write_to`, `:441-457`); the serializer-based
+`crates/daemon/src/dispatch.rs:616-621`) and serializes once into the
+reserved body (`MeasuredOutput::write_to`, `:476-501`); the serializer-based
 count runs only for a value past the wire cap.
 
 [unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
