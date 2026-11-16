@@ -1984,6 +1984,16 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         (Vec::new(), true),
         "a walk past its page limit reports the rows it did not judge"
     );
+    // A row whose payload alone passes the byte cap is left unloaded and
+    // ends the walk for every reader, own row or not.
+    let smallest = usize::try_from(*sizes.values().min().unwrap()).unwrap();
+    for session in ["s2", "s3"] {
+        assert_eq!(
+            read(session, (ROWS, smallest - 1)),
+            (Vec::new(), true),
+            "{session}: no row fits a cap below the smallest payload"
+        );
+    }
     // The limit is the eighth page: at the commit of the seventh own row
     // the walk passes seven pages and delivers the older statement on the
     // eighth, and at the commit of the eighth own row it stops first.
