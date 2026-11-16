@@ -335,7 +335,7 @@ wrapup reads the live config (`prepare_wrapup_fire`
 `SessionBinding.config` versus `effective_config` at the two call sites.
 Existing check:
 `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-(`crates/daemon/src/lib.rs:40106`); `only_an_available_composition_is_recorded`
+(`crates/daemon/src/lib.rs:40081`); `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
 `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:600`). Status: unaudited.
@@ -532,7 +532,7 @@ Existing check:
 `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
 (`crates/daemon/src/source_capture_tests.rs:1699`);
 `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-(`crates/daemon/src/lib.rs:26466`);
+(`crates/daemon/src/lib.rs:26441`);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 Impact: #1156 places the `deleted_at` write in this Kernel step; a reordering
@@ -560,7 +560,7 @@ Confidence: high -
 `unbind_route` (`crates/daemon/src/lib.rs:4728`) calls `purge_session_state`
 (`crates/daemon/src/lib.rs:4768`), which clears in-memory maps only.
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-(`crates/daemon/src/lib.rs:25416`);
+(`crates/daemon/src/lib.rs:25391`);
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`

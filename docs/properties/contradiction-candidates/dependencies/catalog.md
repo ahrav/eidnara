@@ -329,7 +329,7 @@ over-cap row counts, and `:2112` and `:7174` over-budget payloads. On the
 constructs over-cap inputs for `NewestRows` alone,
 `crates/daemon/src/kernel_routes/read.rs:1025` puts one row more than
 `MAX_READ_ROWS` through `read_visible`, and
-`crates/daemon/src/lib.rs:38067` puts over-budget payloads through
+`crates/daemon/src/lib.rs:38042` puts over-budget payloads through
 `read_visible`.
 Guarantee: after the Kernel read, the optional `before` cursor of
 `kernel.read`, and the daemon `ScopeFilter` (`read.rs:329`, `:428-430`),

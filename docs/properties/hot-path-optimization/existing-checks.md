@@ -544,10 +544,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1034
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1262
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1384
-[request-cap]: ../../../crates/daemon/src/lib.rs#L19899
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20631-L20637
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20638-L20647
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20648-L20659
+[request-cap]: ../../../crates/daemon/src/lib.rs#L19874
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20606-L20612
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20613-L20622
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20623-L20634
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -616,7 +616,7 @@ that no related check exists anywhere in the repository.
 [resource-pragma-test]: ../../../crates/storage/src/lib.rs#L5233
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L25999
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L25974
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1956
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L943
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1542
