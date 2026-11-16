@@ -1613,9 +1613,19 @@ pub(crate) fn is_capture_memory(object: &kernel::ObjectRow) -> bool {
         && object.source_kind == CAPTURE_SOURCE_KIND
 }
 
-/// The lineages a user correction may replace: capture rows, whichever role
-/// they quote, and memories the agent wrote with the host memory tool.
-const REPLACEABLE_SOURCES: [&str; 2] = [CAPTURE_SOURCE_ID, "eidnara_memory"];
+/// The source id of the memories the agent writes with the host memory tool.
+const AGENT_MEMORY_SOURCE_ID: &str = "eidnara_memory";
+
+/// Whether a user correction may replace `object`: a capture decision,
+/// whichever role it quotes, or a memory decision the agent wrote with the
+/// host memory tool. The check reads the row's structure, as
+/// [`is_capture_memory`] does.
+fn is_replaceable(object: &kernel::ObjectRow) -> bool {
+    is_capture_memory(object)
+        || (object.object_kind == "decision"
+            && object.domain_id == "memory"
+            && object.source_id == AGENT_MEMORY_SOURCE_ID)
+}
 
 /// The attribution native capture prefixes to a user message's quotation.
 const USER_STATED: &str = "User stated";
@@ -1843,9 +1853,11 @@ pub(super) fn quotes_whole_sentences(prose: &Prose<'_>, quote: &str) -> bool {
     })
 }
 
-/// The question marks the statement rule recognizes: ASCII, fullwidth, and
-/// Arabic.
-const QUESTION_MARKS: [char; 3] = ['?', '\u{ff1f}', '\u{61f}'];
+/// The question marks the statement rule recognizes: ASCII, fullwidth,
+/// Arabic, the interrobang, the doubled and mixed forms, and the small form.
+const QUESTION_MARKS: [char; 8] = [
+    '?', '\u{ff1f}', '\u{61f}', '\u{203d}', '\u{2047}', '\u{2048}', '\u{2049}', '\u{fe56}',
+];
 
 /// Whether trimmed text can be a statement: nonempty, no question mark of
 /// [`QUESTION_MARKS`], no quotation mark of [`QUOTATION_FAMILIES`], no
@@ -1947,8 +1959,12 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         let to = if sentence_ends_at(&paragraph[start..end], rest) {
             let closes = !trimmed.ends_with(['.', '!']) && rest.starts_with(['.', '!']);
             end + usize::from(closes)
-        } else if trimmed.ends_with(is_terminator) {
-            // The quotation ends in a terminator and its sentence goes on.
+        } else if trimmed
+            .trim_end_matches([')', ']', '}', '*', '_', '`', '~'])
+            .ends_with(is_terminator)
+        {
+            // The quotation ends in a terminator, alone or behind closing
+            // brackets or emphasis marks, and its sentence goes on.
             return None;
         } else {
             end + plain_sentence_end(rest)
@@ -1984,9 +2000,14 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
 
 /// Sentence terminators of other scripts: the ideographic and halfwidth full
 /// stops, the fullwidth full stop and exclamation mark, the Devanagari
-/// dandas, the Arabic full stop, and the ellipsis.
-const OTHER_TERMINATORS: [char; 8] = [
+/// dandas, the Arabic, Armenian, Ethiopic, Myanmar, and Khmer full stops,
+/// the double exclamation mark, the small full stop, the one-dot leader,
+/// and the ellipsis. The list is finite: a terminator outside it reads as
+/// part of a sentence.
+const OTHER_TERMINATORS: [char; 17] = [
     '\u{3002}', '\u{ff61}', '\u{ff0e}', '\u{ff01}', '\u{964}', '\u{965}', '\u{6d4}', '\u{2026}',
+    '\u{589}', '\u{1362}', '\u{104a}', '\u{104b}', '\u{17d4}', '\u{203c}', '\u{fe52}', '\u{2024}',
+    '\u{fe57}',
 ];
 
 /// A character that can end a sentence in some script.
@@ -2038,18 +2059,23 @@ fn plain_sentence_end(after: &str) -> usize {
 
 /// Whether the words widening adds on one side of a quotation are plainly
 /// part of the quotation's own line and sentence: they hold no line break,
-/// no `.`, `!`, or `?` except directly before a letter or digit, and no
-/// terminator of another script. An ASCII terminator inside a token, such
-/// as the dots of `v1.2` or `a.b.c`, is part of that token; one before
-/// whitespace, a closing bracket, or an emphasis mark may end a sentence.
+/// no `.`, `!`, or `?` except directly before an ASCII letter or digit, and
+/// no terminator of another script. An ASCII terminator inside a token,
+/// such as the dots of `v1.2` or `a.b.c`, is part of that token; one before
+/// whitespace, a closing bracket, an emphasis mark, or a letter of another
+/// script may end a sentence.
 fn adds_plain_words(added: &str) -> bool {
     let mut chars = added.chars().peekable();
     while let Some(ch) = chars.next() {
         let ends = if ch.is_ascii() {
-            // A letter or digit after the mark keeps it inside a token; a
-            // closing bracket, an emphasis mark, or whitespace after it
-            // leaves it a sentence end.
-            is_terminator(ch) && chars.peek().is_none_or(|next| !next.is_alphanumeric())
+            // An ASCII letter or digit after the mark keeps it inside a
+            // token, as in a version or a file name; a closing bracket, an
+            // emphasis mark, whitespace, or a letter of another script after
+            // it leaves it a sentence end.
+            is_terminator(ch)
+                && chars
+                    .peek()
+                    .is_none_or(|next| !next.is_ascii_alphanumeric())
         } else {
             // Scripts that write these marks often write no space after one.
             is_terminator(ch)
@@ -2129,6 +2155,12 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
     }
     let mut paragraphs = Vec::new();
     let mut lead_in = false;
+    // The first line that holds a line break other than its own line feed.
+    // Its real lines cannot be told apart, so a fence, a tag, a list item,
+    // or a colon line inside it is hidden, and what follows it is unknown.
+    let unreadable_from = lines
+        .iter()
+        .position(|(_, line)| line.contains(is_line_break));
     // Set by the first paragraph whose quotation marks do not open and
     // close in turn within it. Where a quotation that crosses paragraphs
     // ends is unknown, so every later paragraph is treated as quoted.
@@ -2148,7 +2180,6 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
                             || start.trim_end().chars().all(|ch| ch == '-')))
                     || line.starts_with("    ")
                     || line.starts_with('\t')
-                    || line.contains(is_line_break)
                     || line.contains(is_quotation_mark)
                     || opens_single_quotation(line)
             });
@@ -2157,7 +2188,10 @@ fn prose_paragraphs(text: &str) -> Vec<(usize, usize)> {
                 .trim_end_matches(['*', '_'])
                 .ends_with([':', '\u{ff1a}'])
         });
-        if !structured && !introduces && !lead_in && !quoting && !single_open {
+        // A block that holds or follows the first unreadable line is left
+        // out with every block after it.
+        let readable = unreadable_from.is_none_or(|line| index <= line);
+        if readable && !structured && !introduces && !lead_in && !quoting && !single_open {
             let (at, last) = block[block.len() - 1];
             paragraphs.push((block[0].0, at + last.len()));
         }
@@ -2190,12 +2224,12 @@ fn is_quotation_mark(ch: char) -> bool {
 
 /// Marks every script that uses them writes at the start of a quotation:
 /// the corner brackets, the low-9 mark, and the heavy ornaments.
-const OPENING_ONLY: [char; 6] = [
-    '\u{300c}', '\u{300e}', '\u{201e}', '\u{301d}', '\u{275d}', '\u{276e}',
+const OPENING_ONLY: [char; 7] = [
+    '\u{300c}', '\u{300e}', '\u{201e}', '\u{301d}', '\u{275d}', '\u{276e}', '\u{275b}',
 ];
 /// Marks every script that uses them writes at the end of a quotation.
-const CLOSING_ONLY: [char; 6] = [
-    '\u{300d}', '\u{300f}', '\u{301e}', '\u{301f}', '\u{275e}', '\u{276f}',
+const CLOSING_ONLY: [char; 7] = [
+    '\u{300d}', '\u{300f}', '\u{301e}', '\u{301f}', '\u{275e}', '\u{276f}', '\u{275c}',
 ];
 
 /// Whether every quotation mark of one paragraph opens or closes a
@@ -2265,10 +2299,16 @@ fn leaves_single_quotation_open(block: &[(usize, &str)]) -> bool {
         let mut chars = line.chars().peekable();
         while let Some(ch) = chars.next() {
             if SINGLE_QUOTATION_MARKS.contains(&ch) {
-                let ends_word = previous.is_some_and(|before| {
-                    (before.is_alphabetic() && !matches!(before, 's' | 'S'))
-                        || matches!(before, '.' | ',' | '!' | ';')
-                }) && chars.peek().is_none_or(|after| !after.is_alphanumeric());
+                // The low-9 mark opens a quotation in every script that
+                // writes it.
+                let ends_word = ch != '\u{201a}'
+                    && previous.is_some_and(|before| {
+                        (before.is_alphabetic()
+                            && !before.is_numeric()
+                            && !matches!(before, 's' | 'S'))
+                            || matches!(before, '.' | ',' | '!' | ';')
+                    })
+                    && chars.peek().is_none_or(|after| !after.is_alphanumeric());
                 if open > 0 && ends_word && !several_words {
                     open -= 1;
                     // An outer quotation that held a nested one holds
@@ -2368,7 +2408,7 @@ fn is_abbreviation(word: &str, following: &str) -> bool {
     let single = word.strip_suffix('.').unwrap_or(word);
     let number_follows = following
         .trim_start_matches(|ch: char| ch == '.' || ch.is_whitespace())
-        .starts_with(|ch: char| ch.is_ascii_digit());
+        .starts_with(char::is_numeric);
     if TITLES.contains(&single)
         || (number_follows
             && NUMBERED
@@ -2389,10 +2429,15 @@ fn sentence_ends_at(quote: &str, after: &str) -> bool {
     if quote.ends_with(QUESTION_MARKS) {
         return after.is_empty() || after.starts_with(char::is_whitespace);
     }
-    if is_abbreviation(
-        quote.rsplit(char::is_whitespace).next().unwrap_or_default(),
-        after,
-    ) {
+    // An abbreviation keeps a period inside its sentence: the quotation's
+    // own closing period, or the period that directly follows it.
+    let at_period = quote.ends_with('.') || (!quote.ends_with('!') && after.starts_with('.'));
+    if at_period
+        && is_abbreviation(
+            quote.rsplit(char::is_whitespace).next().unwrap_or_default(),
+            after,
+        )
+    {
         return false;
     }
     let continues_lowercase = |tail: &str| {
@@ -2654,7 +2699,7 @@ fn select_existing_memories(
             id: row.object.object_id.clone(),
             category: decision.decision_kind.clone(),
             content: decision.payload.summary.clone(),
-            can_replace: REPLACEABLE_SOURCES.contains(&row.object.source_id.as_str()),
+            can_replace: is_replaceable(&row.object),
             automatic: row.visibility == kernel::SurfaceVisibility::Visible,
             contested: is_capture_memory(&row.object)
                 && decision.payload.rationale.contains("contested_by")
@@ -2694,7 +2739,7 @@ fn checked_capture_target(
     let row = served.get(target).ok_or(kernel::KernelError::Conflict)?;
     if row.visibility(kernel::Surface::ExplicitSearch) == kernel::SurfaceVisibility::Hidden
         || (replacing
-            && (!REPLACEABLE_SOURCES.contains(&state.object.source_id.as_str())
+            && (!is_replaceable(&state.object)
                 || row.object.sensitivity != kernel::Sensitivity::Normal))
     {
         return Err(kernel::KernelError::Conflict);
@@ -2767,9 +2812,7 @@ fn retire_restated(
         Err(error) => return Err(error),
     };
     if state.object.invalidated_commit_seq.is_none()
-        && state.object.object_kind == "decision"
-        && state.object.domain_id == "memory"
-        && REPLACEABLE_SOURCES.contains(&state.object.source_id.as_str())
+        && is_replaceable(&state.object)
         && !approved(envelope, restated)?
     {
         envelope.retire_decision(restated)?;
@@ -2946,9 +2989,29 @@ fn contest_statements(
     mut renamed: HashMap<String, String>,
     recorded_at: i64,
 ) -> Result<(), kernel::KernelError> {
+    let mut remaining: Vec<(&PendingContest<'_>, &String)> = pending
+        .iter()
+        .flat_map(|contest| contest.targets.iter().map(move |target| (contest, target)))
+        .collect();
     let mut contested = HashSet::new();
-    for contest in pending {
-        for target in contest.targets {
+    // A statement one contest targets and another names as its observation
+    // is rewritten before the contest that names it, so that contest
+    // records the row that superseded it. Each pass writes the contests
+    // whose observation no remaining contest will rewrite. Contests that
+    // name each other in a ring have no such order and are left unrecorded.
+    while !remaining.is_empty() {
+        let waiting: HashSet<&str> = remaining
+            .iter()
+            .map(|(_, target)| target.as_str())
+            .collect();
+        let (ready, blocked): (Vec<_>, Vec<_>) =
+            remaining.into_iter().partition(|(contest, target)| {
+                contest.observation == **target || !waiting.contains(contest.observation.as_str())
+            });
+        if ready.is_empty() {
+            break;
+        }
+        for (contest, target) in ready {
             if removed.contains(target.as_str()) || !contested.insert(target.as_str()) {
                 continue;
             }
@@ -2970,14 +3033,19 @@ fn contest_statements(
                 }
             }
         }
+        // A target already contested in this commit takes no second contest.
+        remaining = blocked
+            .into_iter()
+            .filter(|(_, target)| !contested.contains(target.as_str()))
+            .collect();
     }
     Ok(())
 }
 
-/// A stored statement's text for comparison: without edge whitespace and
-/// without its closing `.` or `!`.
+/// A stored statement's quotation for comparison: without its attribution
+/// label, edge whitespace, and closing `.` or `!`.
 pub(super) fn statement_text(text: &str) -> &str {
-    text.trim().trim_end_matches(['.', '!'])
+    unattributed(text).trim().trim_end_matches(['.', '!'])
 }
 
 /// Whether the Kernel serves live memory `target` on automatic surfaces: the
@@ -3410,6 +3478,29 @@ mod tests {
         parse_capture_output_with_existing(text, messages, &[])
     }
 
+    /// A repeat is compared by its quotation: the label, the padding after
+    /// it, and a closing `.` or `!` are no part of the statement, and a
+    /// question mark is.
+    #[test]
+    fn a_statements_comparison_text_is_its_quotation_without_label_or_closing_mark() {
+        for text in [
+            "User stated: The limit is 300.",
+            "User stated:  The limit is 300. ",
+            "The limit is 300!",
+            " The limit is 300",
+        ] {
+            assert_eq!(statement_text(text), "The limit is 300", "{text:?}");
+        }
+        assert_eq!(
+            statement_text("User stated: Is the limit 300?"),
+            "Is the limit 300?"
+        );
+        assert_ne!(
+            statement_text("User stated: The limit is 300."),
+            statement_text("User stated: The limit is 300 requests.")
+        );
+    }
+
     #[test]
     fn a_statement_lineage_names_its_source_message() {
         let job = |job_id: &str| CaptureJob {
@@ -3446,6 +3537,24 @@ mod tests {
             superseded_by: None,
             sensitivity: kernel::Sensitivity::Normal,
         };
+        // A correction replaces a capture decision or an agent-written
+        // memory. A memory on the capture lineage with another source kind,
+        // and a row of another domain, are another writer's.
+        for (kind, domain, source, replaceable) in [
+            (CAPTURE_SOURCE_KIND, "memory", CAPTURE_SOURCE_ID, true),
+            ("user", "memory", AGENT_MEMORY_SOURCE_ID, true),
+            ("assistant", "memory", AGENT_MEMORY_SOURCE_ID, true),
+            ("user", "memory", CAPTURE_SOURCE_ID, false),
+            (CAPTURE_SOURCE_KIND, "notes", CAPTURE_SOURCE_ID, false),
+            ("user", "notes", AGENT_MEMORY_SOURCE_ID, false),
+            ("user", "memory", "another_tool", false),
+        ] {
+            assert_eq!(
+                is_replaceable(&object(kind, domain, source)),
+                replaceable,
+                "{kind} {domain} {source}"
+            );
+        }
         let source = statement_source_id(&job(&first));
         assert!(is_statement_record(&object(
             "user",
@@ -3943,6 +4052,36 @@ mod tests {
                 "deploy on Fridays",
                 None,
             ),
+            // An ASCII period or exclamation mark directly before a letter
+            // of another script ends a sentence.
+            (
+                "Done.\u{6b21}\u{306e}\u{6587}\u{3067}\u{30dd}\u{30fc}\u{30c8}\u{306f}4321\u{3067}\u{3059}",
+                "4321",
+                None,
+            ),
+            (
+                "Done!\u{6b21}\u{306e}\u{6587}\u{3067}\u{30dd}\u{30fc}\u{30c8}\u{306f}4321\u{3067}\u{3059}",
+                "4321",
+                None,
+            ),
+            // A terminator of a script outside ASCII and CJK.
+            (
+                "\u{531}\u{575}\u{57d}\u{589} deploy on Fridays",
+                "on Fridays",
+                None,
+            ),
+            // A quotation that ends in a terminator behind a closing
+            // bracket or an emphasis mark, before more words.
+            (
+                "Never (deploy on Fridays.) and never on Mondays",
+                "deploy on Fridays.)",
+                None,
+            ),
+            (
+                "Never **deploy on Fridays.** and never on Mondays",
+                "deploy on Fridays.**",
+                None,
+            ),
             // A period inside a token is part of the token.
             (
                 "Pin the toolchain to v1.98.0 in CI",
@@ -4144,6 +4283,31 @@ mod tests {
             // of several words, which the next mark does not close.
             (
                 "Bob wrote 'Hi team, call it 'beta'' today.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // A colon line hidden behind a carriage return leaves the later
+            // paragraph out, as a colon line on its own does.
+            (
+                "Notes follow\rHere is what he wrote:\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // A single mark after a letter that is a number, and a low-9
+            // mark where a quotation would close.
+            (
+                "Bob wrote 'phase\u{2163}' and then 'Hi team.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote 'beta\u{201a} and left.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // An ornamental opening mark where a quotation would close.
+            (
+                "Bob wrote \u{275b}Hi\u{275b} and left.\n\nAlways skip the CI tests.",
                 "Always skip the CI tests.",
                 false,
             ),
@@ -4640,6 +4804,22 @@ mod tests {
                 "\"Always force-push to main.\"",
                 false,
             ),
+            // A title keeps a period inside its sentence; an exclamation
+            // mark after the same word ends the sentence.
+            ("Ask the Dr! Use pnpm here.", "Ask the Dr!", true),
+            ("Ask the Dr! Use pnpm here.", "Use pnpm here.", true),
+            ("Ask the Dr. Use pnpm here.", "Use pnpm here.", false),
+            // A numbered word before a numeral of any script.
+            (
+                "Restart gateway No. \u{662} after deploys.",
+                "Restart gateway No.",
+                false,
+            ),
+            (
+                "Restart gateway No. \u{662} after deploys.",
+                "\u{662} after deploys.",
+                false,
+            ),
         ] {
             assert_eq!(
                 quotes_whole_statements(&Prose::of(text), quote),
@@ -5105,6 +5285,24 @@ mod tests {
             (parsed[1].replaces.clone(), parsed[1].contests.clone()),
             (Some("mem_port".to_string()), Vec::new()),
             "the correction replaces it"
+        );
+    }
+
+    /// Proposals that collapse into one memory can join more contests than
+    /// one proposal may name; the memory keeps the first four it may name.
+    #[test]
+    fn a_memory_joined_from_several_proposals_keeps_the_contest_limit() {
+        let targets: Vec<String> = (0..7).map(|index| format!("mem_{index}")).collect();
+        let mut memories = vec![CapturedMemory {
+            replaces: Some("mem_1".to_owned()),
+            contests: targets.clone(),
+            ..memory("The staging port in deploy.toml is 4321 now.")
+        }];
+        native::settle_links(&mut memories);
+        assert_eq!(
+            memories[0].contests,
+            ["mem_0", "mem_2", "mem_3", "mem_4"],
+            "the replaced target is passed over and four contests are kept"
         );
     }
 

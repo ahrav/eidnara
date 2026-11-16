@@ -10,9 +10,9 @@ that each anchor's oid equals its plan's frozen head.
 
 ## Evidence trail
 
-`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:764`)
+`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:770`)
 parses the submission's output, then calls `observe_head` once
-(`:652`) on the binding's canonical project root before the loop that
+(`:905`) on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
 same `head` value (`crates/daemon/src/memory_capture.rs:1299`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
@@ -27,7 +27,7 @@ once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:415`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
-(`crates/daemon/src/memory_capture.rs:3070`), so the receipt covers the head.
+(`crates/daemon/src/memory_capture.rs:3138`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
 handler (`crates/daemon/src/memory_capture/native.rs:439`), before `publish`
@@ -87,7 +87,7 @@ aliased branch loose and in `packed-refs`.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:6145`).
+  (`crates/daemon/src/memory_capture.rs:6343`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 

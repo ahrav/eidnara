@@ -27,7 +27,7 @@ import {
     parseAntiMemoryContent,
 } from "../../shared/kernel-client/anti-memory";
 import { isRecord } from "../../shared/record-type-guard";
-import { splitQueryOperands } from "./bounds";
+import { MAX_RENDER_FIELD_BYTES, splitQueryOperands } from "./bounds";
 
 /** The observation that contests a user's statement: the contesting memory's own result id and the quoted excerpt of its text. `excerpt` is absent when the observation's row could not be read. */
 export interface MemoryContest {
@@ -206,27 +206,38 @@ export function antiMemoryPayloadOfRow(row: ReadRow): AntiMemoryPayload | null |
 
 /** The source id of the rows automatic capture writes; capture records a contest in the rationale of those rows (host wire protocol, section 7.9). */
 const CAPTURE_SOURCE_ID = "memory_capture";
+/** The source kind of those rows. */
+const CAPTURE_SOURCE_KIND = "assistant";
 
 /** The longest contest text a result shows, in characters; the daemon cuts the `<project-memory>` block's contest text at the same length (host wire protocol, section 7.9). */
 export const CONTEST_EXCERPT_CHARS = 240;
 
-/** The contesting text as one bounded, quoted literal: whitespace runs and line breaks fold to single spaces, the text is cut to `CONTEST_EXCERPT_CHARS` characters with an ellipsis, and the result is a JSON string, so the text stays inside its quotation marks whatever it holds. */
+/** The most bytes a quoted contest excerpt holds, one rendered field's bound; the daemon applies the same bound (host wire protocol, section 7.9). */
+export const CONTEST_EXCERPT_BYTES = MAX_RENDER_FIELD_BYTES;
+
+/** Runs of characters with the Unicode `White_Space` property, which the daemon folds with `str::split_whitespace`. JavaScript's `\s` holds U+FEFF and lacks U+0085, so the property is named. */
+const UNICODE_WHITESPACE = /\p{White_Space}+/u;
+
+/** The contesting text as one bounded, quoted literal: runs of Unicode whitespace fold to single spaces, the text is cut to `CONTEST_EXCERPT_CHARS` characters with an ellipsis, and to fewer when the quoted form would pass `CONTEST_EXCERPT_BYTES`, and the result is a JSON string, so the text stays inside its quotation marks whatever it holds. The daemon builds the same literal from the same text. */
 export function contestExcerpt(text: string): string {
-    const folded = text.split(/\s+/u).filter(Boolean).join(" ");
+    const folded = text.split(UNICODE_WHITESPACE).filter(Boolean).join(" ");
     const chars = Array.from(folded);
-    const shown =
-        chars.length > CONTEST_EXCERPT_CHARS
-            ? `${chars.slice(0, CONTEST_EXCERPT_CHARS).join("")}\u2026`
-            : folded;
-    return JSON.stringify(shown);
+    for (let kept = Math.min(chars.length, CONTEST_EXCERPT_CHARS); ; kept -= 1) {
+        const shown = chars.slice(0, kept).join("") + (kept < chars.length ? "\u2026" : "");
+        const quoted = JSON.stringify(shown);
+        if (Buffer.byteLength(quoted, "utf8") <= CONTEST_EXCERPT_BYTES || kept === 0) return quoted;
+    }
 }
 
 /** The id of the memory a capture recorded as contradicting a user's statement. The record names the memory and holds none of its text. `undefined` for a row capture did not write and for a rationale that names no contesting memory. */
 function contestingMemoryOf(row: ReadRow, decision: ReadDecision): string | undefined {
     const { rationale } = decision.payload;
-    if (row.object.source_id !== CAPTURE_SOURCE_ID || !rationale.includes("contested_by")) {
-        return undefined;
-    }
+    // The shape of a capture decision, as the daemon's `is_capture_memory` reads it.
+    const captured =
+        isMemoryDecisionRow(row) &&
+        row.object.source_id === CAPTURE_SOURCE_ID &&
+        row.object.source_kind === CAPTURE_SOURCE_KIND;
+    if (!captured || !rationale.includes("contested_by")) return undefined;
     let parsed: unknown;
     try {
         parsed = JSON.parse(rationale);
@@ -270,7 +281,7 @@ export async function resolveContests(args: {
             pending.map((result) => result.contestingMemoryId).filter((id) => !known.has(id)),
         ),
     ];
-    let unread = false;
+    const unreadIds = new Set<string>();
     if (missing.length > 0) {
         const read = await readObjectRowsChunked({
             client: args.client,
@@ -283,14 +294,16 @@ export async function resolveContests(args: {
         });
         if (read.ok && (args.asOf === null || read.knownAsOf === args.asOf)) {
             for (const row of read.rows) known.set(row.object.object_id, row);
+            // An id a capped read left out is unread, not absent.
+            for (const id of read.unresolvedObjectIds) unreadIds.add(id);
         } else {
-            unread = true;
+            for (const id of missing) unreadIds.add(id);
         }
     }
     let unresolved = false;
     for (const result of pending) {
         const row = known.get(result.contestingMemoryId);
-        if (row === undefined && unread && missing.includes(result.contestingMemoryId)) {
+        if (row === undefined && unreadIds.has(result.contestingMemoryId)) {
             result.contestedBy = { memory: result.contestingMemoryId };
             unresolved = true;
         } else if (row !== undefined && servesAsObservation(row) && row.decision) {

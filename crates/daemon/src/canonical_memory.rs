@@ -244,6 +244,13 @@ pub(crate) fn read_project_memory(
     }
 }
 
+/// The most payload pages one delivery walk loads. A page holds at most the
+/// read caps, 8,192 rows and 8 MiB, so the walk passes over up to 64 MiB
+/// of a session's own newer rows before it stops; a project's memory is
+/// orders of magnitude smaller, and the bound keeps one transform pass from
+/// reading a store of any size.
+const MAX_DELIVERY_PAGES: usize = 8;
+
 /// The project's injectable memory rows at `tip` that a pass delivers to each
 /// of `sessions`: for one session, the newest rows under the row and byte
 /// caps among the rows whose capture rationale names another session or
@@ -256,8 +263,10 @@ pub(crate) fn read_project_memory(
 /// serving order and their payloads are loaded one page at a time, each page
 /// within the caps, so a session's own rows spend neither cap however many
 /// of them are newer than the rows it is served, and the payloads held at
-/// once stay within three times the byte cap. `truncated` reports that some
-/// session's delivery left out a row it was eligible for.
+/// once stay within three times the byte cap. The walk loads at most
+/// [`MAX_DELIVERY_PAGES`] pages. `truncated` reports that some session's
+/// delivery left out a row it was eligible for, or that the page limit
+/// ended the walk.
 pub(crate) fn read_other_sessions(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
@@ -296,7 +305,15 @@ pub(crate) fn read_other_sessions(
         decisions: std::collections::HashMap::new(),
     };
     let mut pending = std::collections::VecDeque::from(candidates);
+    let mut pages = 0;
     while !pending.is_empty() && deliveries.iter().any(|delivery| !delivery.full) {
+        // The walk's work is bounded: past the page limit the rows not yet
+        // judged are left out and the response reports the cut.
+        if pages == MAX_DELIVERY_PAGES {
+            response.truncated = true;
+            break;
+        }
+        pages += 1;
         let ids: Vec<String> = pending
             .iter()
             .take(max_rows.max(1))
@@ -375,20 +392,32 @@ fn capture_session(rationale: &str) -> Option<std::borrow::Cow<'_, str>> {
 /// its full text through explicit search.
 pub(crate) const CONTEST_EXCERPT_CHARS: usize = 240;
 
-/// The contesting text as one bounded, quoted literal: whitespace runs and
-/// line breaks fold to single spaces, the text is cut to
-/// [`CONTEST_EXCERPT_CHARS`] characters with an ellipsis, and the result is
+/// The most bytes a quoted contest excerpt holds: the size explicit search
+/// bounds one rendered field at. Text of control characters, each six bytes
+/// when quoted, is cut to fewer characters to fit.
+pub(crate) const CONTEST_EXCERPT_BYTES: usize = 1024;
+
+/// The contesting text as one bounded, quoted literal: runs of Unicode
+/// whitespace fold to single spaces, the text is cut to
+/// [`CONTEST_EXCERPT_CHARS`] characters with an ellipsis, and to fewer when
+/// the quoted form would pass [`CONTEST_EXCERPT_BYTES`], and the result is
 /// a JSON string, so the text stays inside its quotation marks whatever it
-/// holds.
+/// holds. Explicit search builds the same literal from the same text.
 pub(crate) fn contest_excerpt(text: &str) -> String {
     let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let cut: String = folded.chars().take(CONTEST_EXCERPT_CHARS).collect();
-    let shown = if cut.len() < folded.len() {
-        format!("{cut}\u{2026}")
-    } else {
-        cut
-    };
-    serde_json::Value::String(shown).to_string()
+    let chars: Vec<char> = folded.chars().collect();
+    let mut kept = chars.len().min(CONTEST_EXCERPT_CHARS);
+    loop {
+        let mut shown: String = chars[..kept].iter().collect();
+        if kept < chars.len() {
+            shown.push('\u{2026}');
+        }
+        let quoted = serde_json::Value::String(shown).to_string();
+        if quoted.len() <= CONTEST_EXCERPT_BYTES || kept == 0 {
+            return quoted;
+        }
+        kept -= 1;
+    }
 }
 
 /// The contested line: the statement, the day it was first recorded, the day
@@ -420,8 +449,9 @@ fn contested_line(
 /// record in its rationale. `None` for a decision that is not contested and
 /// for a row capture did not write.
 ///
-/// Every session is shown the contest, the one whose message recorded it
-/// included. The statement came from another session, and that session's
+/// Every session whose block holds the statement is shown the contest, the
+/// one whose message recorded it included; the session that made the
+/// statement is delivered neither. The statement came from another session, and that session's
 /// own observation of the newer value can leave its conversation at a
 /// fold; the contest line is then what keeps it from reading the stated
 /// value as current.
@@ -510,7 +540,17 @@ fn show_contests(
             }
         }
     }
-    let recorded = |commit_seq: i64| store.commit_recorded_at(commit_seq);
+    // Each commit's time is read once for the pass, however many contested
+    // statements share it.
+    let mut times = std::collections::HashMap::new();
+    let mut recorded = |commit_seq: i64| -> Result<Option<i64>, kernel::KernelError> {
+        if let Some(time) = times.get(&commit_seq) {
+            return Ok(*time);
+        }
+        let time = store.commit_recorded_at(commit_seq)?;
+        times.insert(commit_seq, time);
+        Ok(time)
+    };
     for (statement, contested_seq, contest) in contests {
         let (Some(text), Some(decision)) = (
             observations.get(&contest.memory),
@@ -680,6 +720,16 @@ mod tests {
         assert_eq!(shown.chars().count(), CONTEST_EXCERPT_CHARS + 1);
         let exact = "x".repeat(CONTEST_EXCERPT_CHARS);
         assert_eq!(contest_excerpt(&exact), format!("\"{exact}\""));
+        // Unicode whitespace folds, and a character outside that set stays:
+        // explicit search folds the same set.
+        assert_eq!(contest_excerpt("a\u{85}b\u{2003}c"), "\"a b c\"");
+        assert_eq!(contest_excerpt("a\u{feff}b"), "\"a\u{feff}b\"");
+        // Control characters take six bytes each when quoted, so the cut
+        // lands where the quoted excerpt fits one rendered field.
+        let control = contest_excerpt(&"\u{1}".repeat(CONTEST_EXCERPT_CHARS));
+        assert!(control.len() <= CONTEST_EXCERPT_BYTES, "{}", control.len());
+        let shown: String = serde_json::from_str(&control).unwrap();
+        assert_eq!(shown, format!("{}\u{2026}", "\u{1}".repeat(169)));
     }
 
     #[test]

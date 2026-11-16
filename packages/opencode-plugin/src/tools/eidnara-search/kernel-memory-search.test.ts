@@ -6,6 +6,7 @@ import {
 } from "../../shared/kernel-client/anti-memory";
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import {
+    CONTEST_EXCERPT_BYTES,
     CONTEST_EXCERPT_CHARS,
     contestExcerpt,
     memoryResultFromRow,
@@ -397,10 +398,65 @@ describe("a contested statement in explicit search", () => {
         expect(packed.text.endsWith(`\nContested by ${OBJECT_B}`)).toBe(true);
     });
 
+    test("an observation a capped read leaves out is named without its text", async () => {
+        class CappedTransport extends FakeKernelTransport {
+            async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+                const reply = (await super.call(args)) as { rows?: unknown[]; truncated?: boolean };
+                // The byte budget cut the one named row off.
+                if (args.method === "kernel.read") return { ...reply, rows: [], truncated: true };
+                return reply;
+            }
+        }
+        const kernel = new FakeKernel();
+        kernel.seedDecision({
+            object_id: OBJECT_B,
+            decision_kind: "CONFIG_VALUES",
+            summary: observation,
+            source_id: "memory_capture",
+        });
+        const kernelClient = new KernelClient({
+            transport: new CappedTransport(kernel),
+            enabled: true,
+            sessionId: "ses-contest",
+            projectRoot: "git:contest-project",
+        });
+        const result = memoryResultFromRow(contested(contestedBy(record)), 1, "exact");
+        const note = await resolveContests({
+            client: kernelClient,
+            results: [result],
+            rows: [],
+            asOf: null,
+        });
+        expect(note).toContain("could not be read");
+        expect(result.source === "memory" ? result.contestedBy : undefined).toEqual({
+            memory: OBJECT_B,
+        });
+    });
+
+    test("a row on the capture lineage with another source kind shows no contest", async () => {
+        const row = contested(contestedBy(record));
+        const foreign: ReadRow = { ...row, object: { ...row.object, source_kind: "user" } };
+        expect(await shown(foreign, [observed()])).toEqual({
+            contest: undefined,
+            note: undefined,
+            reads: 0,
+        });
+    });
+
+    test("the excerpt folds the daemon's whitespace set and fits one rendered field", () => {
+        // U+0085 is whitespace for the daemon and not for JavaScript's `\s`; U+FEFF is the reverse.
+        expect(contestExcerpt("a\u0085b\u2003c")).toBe('"a b c"');
+        expect(contestExcerpt("a\ufeffb")).toBe(JSON.stringify("a\ufeffb"));
+        const control = contestExcerpt("\u0001".repeat(CONTEST_EXCERPT_CHARS));
+        expect(Buffer.byteLength(control, "utf8")).toBeLessThanOrEqual(CONTEST_EXCERPT_BYTES);
+        expect(control.endsWith('\u2026"')).toBe(true);
+        expect(JSON.parse(control)).toBe(`${"\u0001".repeat(169)}\u2026`);
+    });
+
     test("a statement longer than one result field keeps its contest line, and the excerpt keeps its closing mark", async () => {
         const long = `User stated: ${"The gateway admits at most 300 clients at once. ".repeat(40)}`;
         const row = contested(contestedBy(record), "memory_capture", long);
-        // 240 control characters each take six bytes in the quoted excerpt, past one field's 1,024 bytes.
+        // 240 control characters each take six bytes when quoted, so the excerpt is cut to fit one field's 1,024 bytes.
         const control = observed();
         control.decision = {
             decision_kind: "CONFIG_VALUES",
@@ -416,7 +472,7 @@ describe("a contested statement in explicit search", () => {
         const packed = packSearchResults(OBJECT_A, [hit]);
         expect(long.length).toBeGreaterThan(1024);
         const excerpt = contestExcerpt("\u0001".repeat(CONTEST_EXCERPT_CHARS));
-        expect(excerpt.length).toBeGreaterThan(1024);
+        expect(excerpt.endsWith('"')).toBe(true);
         expect(packed.text).toContain(`Contested by ${OBJECT_B}: ${excerpt}`);
     });
 

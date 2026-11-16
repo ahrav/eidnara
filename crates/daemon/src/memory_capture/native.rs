@@ -519,11 +519,17 @@ pub(super) fn settle_links(memories: &mut Vec<CapturedMemory>) -> Vec<bool> {
             memory.duplicate_of = None;
         }
         let duplicate = memory.duplicate_of.clone();
+        // Collapse and conversion can join the contests of several
+        // proposals; the joined memory keeps the first
+        // `MAX_CONTESTS_PER_MEMORY` it may name.
+        let mut named = 0;
         memory.contests.retain(|target| {
-            let kept = !removed.contains(target)
+            let kept = named < super::MAX_CONTESTS_PER_MEMORY
+                && !removed.contains(target)
                 && duplicate.as_ref() != Some(target)
                 && !contested.contains(target);
             if kept {
+                named += 1;
                 contested.push(target.clone());
             }
             kept

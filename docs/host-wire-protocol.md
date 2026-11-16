@@ -1014,10 +1014,13 @@ to the paragraph's end or the next exclamation or question mark. A period
 before whitespace may end a sentence or an abbreviation, so it is no plain
 edge. A quotation is stored as proposed when it already meets the statement
 rule; when the widened sentence does not qualify; when the words widening
-would add hold a `.`, `!`, or `?` that a letter or digit does not directly
-follow, or a sentence terminator of another script (`。`, `｡`, `．`, `！`,
-`？`, `؟`, `।`, `॥`, `۔`, `…`);
-when the quotation ends in a terminator and its sentence goes on; when the
+would add hold a `.`, `!`, or `?` that an ASCII letter or digit does not
+directly follow, or a sentence terminator of another script (`。`, `｡`, `．`,
+`！`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`, `﹗`, `‼`, `﹒`, `․`, `।`, `॥`, `۔`,
+`։`, `።`, `၊`, `။`, `។`, `…`; the list is finite, and a terminator outside it
+reads as part of a sentence);
+when the quotation ends in a terminator, alone or behind closing brackets or
+emphasis marks, and its sentence goes on; when the
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
 names `replaces`, `also_replaces`, or `contests`, and one whose replacement
@@ -1133,22 +1136,25 @@ in any other place, and a mark after a number or a letter that is a number,
 which may be an inch or seconds sign, leave the paragraph's quotations
 unknown. A paragraph that holds a carriage return inside a line, a vertical
 tab, a form feed, or a Unicode next-line, line, or paragraph separator is
-left out, since its lines cannot be told apart. A quotation that
+left out with every paragraph after it, since its lines cannot be told apart
+and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
 later paragraph. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
-after `s` or a number, which may be a plural possessive or a feet mark, a
-mark after a bracket, and a word-final mark inside a quotation of several
-words, which may be an elision, close nothing, so such a quotation stays open.
+after `s`, a number, or a letter that is a number, which may be a plural
+possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
+word-final mark inside a quotation of several words, which may be an elision,
+close nothing, so such a quotation stays open.
 The rule reads marks by their place and cannot tell every arrangement of
 symmetric marks apart; where it cannot, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
 follows it past any punctuation; the paragraph's indentation and trailing
-spaces border its sentences as its edges do; neither boundary falls
+spaces border its sentences as its edges do; neither boundary falls, at a
+period,
 at a dotted abbreviation, a word of two or more one- or two-letter segments
 such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 `Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
@@ -1161,7 +1167,8 @@ a single quotation. The rule reads sentence ends in `.` and `!` only, so text
 in a script that ends sentences otherwise is judged a paragraph at a time. Capture records each such fact with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
-automatic surfaces. The statement record's source is the user message it
+automatic surfaces. Capture alone writes the `user-statements` domain: a
+`kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
 quotes: source kind `user`, source id `memory_capture_statement:` followed by
 the first 32 hexadecimal digits of the capture source's identity, revision 1.
 The Kernel bounds the authority-bearing accepted decisions of one source
@@ -1196,8 +1203,9 @@ positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
-however many of them are newer, they take no place from another session's
-facts. The extractor's reference memories are ranked from two bounded reads
+they take no place from another session's facts. The read passes over at
+most eight pages of that size, 64 MiB of a session's own newer facts, and
+reports a cut past that. The extractor's reference memories are ranked from two bounded reads
 at one snapshot: the newest facts on `explicit_search`, and the facts served
 on `auto_inject` in the plain newest window and in the delivery of each
 session whose messages the batch holds; a fact older than every window is
@@ -1231,7 +1239,8 @@ ranking. A reference memory carries `contested: true` when an observation
 contests it. A proposal from any
 role may name `contests`: at most four reference memories whose value its observation
 contradicts without the user changing the fact, each sharing at least one
-content word with the quotation. A `contests` or `also_replaces` array given
+content word with the quotation. Proposals that capture stores as one fact
+contest the first four targets they name between them. A `contests` or `also_replaces` array given
 as `null` names no target. A user quotation that does not meet the
 statement rule replaces no fact served on `auto_inject` and takes no
 replacement claim: each such target
@@ -1284,8 +1293,12 @@ with `memory` (the contesting fact's id),
 (the session whose message recorded the contest). The record names the
 contesting fact and holds none of its text. The statement record stays
 live, and the new fact cites again, in order, each piece of evidence the fact
-it supersedes cites that is still live; when none is, its `citation` reads
-`descriptor_not_found`. A fact the Kernel does not serve as approved
+it supersedes cites that is still live; when it cited evidence and none is
+live, its `citation` reads `descriptor_not_found`, and a fact recorded with
+no citation keeps the reason it was recorded with. When one commit contests
+a statement and also contests the fact that contests it, the first names the
+row that superseded the second; contests that name each other in a ring are
+left unrecorded. A fact the Kernel does not serve as approved
 is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
 by the fact already named writes nothing. The `<project-memory>` block renders
@@ -1293,8 +1306,10 @@ a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
 the dates being the UTC days on which the statement's first commit and the
 newest contest's commit were recorded, `unknown date` when the commit log
-holds none. The excerpt is the contesting text with whitespace runs folded to
-single spaces, cut to 240 characters with an ellipsis, as a JSON string, so
+holds none. The excerpt is the contesting text with runs of Unicode
+whitespace (the `White_Space` property) folded to
+single spaces, cut to 240 characters with an ellipsis, and to fewer when the
+quoted form would pass 1,024 bytes, as a JSON string, so
 text an assistant wrote stays inside its quotation marks; 240 characters hold
 the observed value and where it was seen, and the fact id leads to the full
 text through `eidnara_search`. A reader takes the contesting text from the
@@ -1305,11 +1320,13 @@ A labeled fact, such as an assistant's report, is served there; a fact a
 disposition hides, a retired fact, and a fact of another project contest
 nothing a reader is shown. The block shows the stored statement alone in
 those cases, and a pass whose contest read fails is withheld as any failed
-read of the pass is. Every session is shown the contest, the one whose
-message recorded it included: the excerpt is the one text from a session's
-own messages that its block carries, because that session's observation of
-the newer value can leave its conversation at a fold while the statement,
-which came from another session, stays in its block.
+read of the pass is. Every session whose block holds the statement is shown
+the contest, the one whose message recorded it included: the excerpt is the
+one text from a session's own messages that its block carries, because that
+session's observation of the newer value can leave its conversation at a
+fold while the statement, which came from another session, stays in its
+block. The session whose message made the statement is delivered neither the
+statement nor its contest, as with every fact captured from its own messages.
 `eidnara_search` renders a contested statement with a line
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
 contesting fact's own result id and the excerpt the same 240-character form

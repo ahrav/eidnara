@@ -390,6 +390,151 @@ async fn a_user_quotation_that_is_no_statement_contests_the_statement_it_names()
     );
 }
 
+/// A fragment of a long user message has edges the user did not write, so
+/// its quotation is not known to be whole. The same question that contests
+/// a statement from a message held whole contests nothing from a fragment,
+/// named as a contest or as a replacement: the question is stored labeled
+/// and the statement is delivered without a contest.
+#[tokio::test]
+async fn a_fragment_of_a_long_user_message_contests_no_statement() {
+    let question = "Did we move the release cut from Thursday to Tuesday?";
+    for replaces in [false, true] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY)],
+            |_, _| vec![fact(THURSDAY)],
+        )
+        .await;
+        let fragment = format!("{}:0", "b".repeat(64));
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[(fragment.as_str(), "user", question)],
+            |_, existing| {
+                let named = ids_containing(existing, "Thursday");
+                assert_eq!(named.len(), 1, "{existing:?}");
+                vec![Extracted {
+                    quote: question.to_string(),
+                    replaces: if replaces { named.clone() } else { Vec::new() },
+                    contests: if replaces { Vec::new() } else { named },
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!((status.pending, status.failed), (0, 0), "{replaces}");
+        let rows = memory_rows(&handler, &project);
+        assert!(
+            rows.iter().all(|row| row.3.get("contested_by").is_none()),
+            "{replaces}: {rows:?}"
+        );
+        let mut found = explicit_search(&handler, (SECOND, "s2"), &project).await;
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                (stated(question), "labeled".to_string()),
+                (stated(THURSDAY), "visible".to_string()),
+            ],
+            "{replaces}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+        assert!(
+            block.contains(&stated(THURSDAY)) && !block.contains("contested"),
+            "{replaces}: {block}"
+        );
+    }
+}
+
+/// One assistant message repeats an approved statement against an older one
+/// and reports a newer value against the statement it repeats. The repeated
+/// statement is rewritten by its own contest in the same commit, and the
+/// older statement's contest names the rewritten row in either proposal
+/// order, so the block shows both contests.
+#[tokio::test]
+async fn a_contest_names_the_row_that_superseded_its_observation_in_the_same_commit() {
+    let repeat =
+        "The gateway admits 500 clients now, so the 300 clients stated earlier are out of date.";
+    let newer = "The deploy config caps the gateway at 800 clients, above the 500 clients stated.";
+    for repeat_first in [true, false] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", LIMIT_300), ("m2", "user", LIMIT_500)],
+            |text, _| vec![fact(text)],
+        )
+        .await;
+        let both = format!("{repeat} {newer}");
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m3", "assistant", &both)],
+            |_, existing| {
+                let older = ids_containing(existing, &stated(LIMIT_300));
+                let repeated = ids_containing(existing, &stated(LIMIT_500));
+                assert_eq!((older.len(), repeated.len()), (1, 1), "{existing:?}");
+                let mut proposals = vec![
+                    Extracted {
+                        quote: repeat.to_string(),
+                        duplicate_of: repeated.first().cloned(),
+                        contests: older,
+                        ..Extracted::default()
+                    },
+                    Extracted {
+                        quote: newer.to_string(),
+                        contests: repeated,
+                        ..Extracted::default()
+                    },
+                ];
+                if !repeat_first {
+                    proposals.reverse();
+                }
+                proposals
+            },
+        )
+        .await;
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!((status.pending, status.failed), (0, 0), "{repeat_first}");
+        let rows = memory_rows(&handler, &project);
+        let row = |summary: String| {
+            rows.iter()
+                .find(|row| row.1 == summary)
+                .unwrap_or_else(|| panic!("{summary}: {rows:?}"))
+        };
+        let (older, repeated, observed) = (
+            row(stated(LIMIT_300)),
+            row(stated(LIMIT_500)),
+            row(format!("Assistant reported: {newer}")),
+        );
+        assert_eq!(
+            repeated.3["contested_by"]["memory"], observed.0,
+            "{repeat_first}"
+        );
+        assert_eq!(
+            older.3["contested_by"]["memory"], repeated.0,
+            "{repeat_first}: the contest names the live row of the repeated statement"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+        assert!(
+            block.contains(&format!("by {}: \"{}", repeated.0, stated(LIMIT_500)))
+                && block.contains(&format!("by {}: \"Assistant reported: {newer}", observed.0)),
+            "{repeat_first}: {block}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_correction_retires_every_named_restatement_of_the_old_value() {
     let echo = "Noted: release branches are cut from main every Thursday.";
@@ -2304,7 +2449,7 @@ async fn every_statement_of_one_message_fits_the_message_lineage() {
 /// cap or byte cap.
 #[tokio::test]
 async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
         FIRST,
@@ -2323,6 +2468,26 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     })
     .await;
 
+    // A plan the submission's allowance did not reach on a slow host is
+    // committed by a later drain.
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    for _ in 0..40 {
+        if store.memory_capture_status(&digest).unwrap().pending == 0 {
+            break;
+        }
+        store
+            .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+            .unwrap();
+        handler.native_capture.lock().unwrap().expire_all_for_test();
+        let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+        body(
+            handler
+                .handle_native_capture_next(test_route(SECOND), &next)
+                .await,
+        );
+    }
     let kernel = handler.kernel.kernel_store().unwrap();
     let binding = kernel_routes::ProjectBinding::new(&project);
     let tip = kernel.tip().unwrap();
@@ -2397,11 +2562,20 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         sizes.values().sum::<u64>() - thursday > 5 * thursday,
         "the newer own rows hold more than five times the byte cap"
     );
-    let exact = usize::try_from(thursday).unwrap();
+    // A byte cap of three such statements: the twelve own rows are passed
+    // over in pages of that size.
+    let exact = 3 * usize::try_from(thursday).unwrap();
     assert_eq!(
         read("s2", (ROWS, exact)),
         (vec![stated(THURSDAY)], false),
         "the byte cap is spent on rows of other sessions"
+    );
+    // The walk loads eight pages at most. With one row to a page the
+    // twelve own rows end it, and the response reports the cut.
+    assert_eq!(
+        read("s2", (1, BYTES)),
+        (Vec::new(), true),
+        "a walk past its page limit reports the rows it did not judge"
     );
     let (other_session, truncated) = read("s3", (ROWS, exact));
     assert!(truncated);
@@ -3171,9 +3345,10 @@ fn memory_rows(handler: &Handler, project: &Path) -> Vec<(String, String, i64, V
 /// One assistant message makes two observations that both contradict a
 /// statement. The publication commits: the statement is contested once, by
 /// the first observation, and both observations are stored. The record
-/// keeps the commit that first recorded the statement. Every session is
-/// shown the contest, the one whose message recorded it included, and once
-/// the observation is retired no session is.
+/// keeps the commit that first recorded the statement. Every session whose
+/// block holds the statement is shown the contest, the one whose message
+/// recorded it included; the session that made the statement is delivered
+/// neither. Once the observation is retired no session is shown it.
 #[tokio::test]
 async fn a_statement_is_contested_once_per_message_and_shown_while_its_observation_is_live() {
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
@@ -3249,6 +3424,11 @@ async fn a_statement_is_contested_once_per_message_and_shown_while_its_observati
     assert_eq!(
         own, other,
         "the session whose message recorded the contest is shown it too"
+    );
+    let stating = project_memory_block(&serve(&handler, FIRST, "s1").await).unwrap_or_default();
+    assert!(
+        !stating.contains(LIMIT_300) && !stating.contains("contested"),
+        "the session that made the statement is delivered neither it nor its contest: {stating}"
     );
 
     let retired = body(
@@ -3655,7 +3835,11 @@ async fn a_restated_note_is_retired_after_the_plans_targets_are_checked_and_only
             },
         )
         .await;
-        let both = format!("{TUESDAY} Keep the changelog current.");
+        // The second quotation shares the note's words, so its contest of
+        // the note survives preparation and publication checks the note
+        // as a target after the first proposal's replacement.
+        let question = "Are release branches still cut from main on Thursday morning?";
+        let both = format!("{TUESDAY} {question}");
         capture(
             &handler,
             SECOND,
@@ -3669,7 +3853,7 @@ async fn a_restated_note_is_retired_after_the_plans_targets_are_checked_and_only
                         ..Extracted::default()
                     },
                     Extracted {
-                        quote: "Keep the changelog current.".to_string(),
+                        quote: question.to_string(),
                         contests: vec!["mem-agent".to_string()],
                         ..Extracted::default()
                     },
