@@ -132,94 +132,130 @@ fn intent(key: &str) -> CommitIntent {
     }
 }
 
-/// Publishes descriptors `first..first + count` in one kernel commit, alternating message and tool-output occurrences, each over its own evidence artifact, as a harness transcript publication does.
-fn publish(kernel: &KernelStore, scope: &str, first: u64, count: u64) {
-    let mut staged = Vec::new();
-    for index in first..first + count {
-        let key = format!("d{index}");
-        let text = prose(index, SIZES[(index % SIZES.len() as u64) as usize]);
-        let handle = kernel
-            .ingest_exact_artifact(ArtifactIngestRequest {
-                intent: intent(&format!("artifact-{key}")),
-                payload: text.as_bytes().to_vec(),
-                evidence_id: format!("evidence-{key}"),
-                object_id: format!("evidence-object-{key}"),
-                object_kind: "evidence".to_owned(),
-                domain_id: DOMAIN.to_owned(),
-                source_kind: "tool_output".to_owned(),
-                source_id: format!("native/{key}"),
-                source_revision: 1,
-                media_type: "text/plain".to_owned(),
-                retention_class: "canonical".to_owned(),
-                retain_until: None,
-                asserted_sensitivity: Sensitivity::Normal,
-                provider_egress: ProviderEgress::RemoteAllowed,
-                provenance: None,
-            })
-            .unwrap();
-        staged.push((index, key, text, handle));
+fn staged(first: u64, count: u64) -> Vec<(u64, String, String)> {
+    (first..first + count)
+        .map(|index| {
+            let text = prose(index, SIZES[(index % SIZES.len() as u64) as usize]);
+            (index, format!("d{index}"), text)
+        })
+        .collect()
+}
+
+fn evidence(key: &str, text: &str) -> ArtifactIngestRequest {
+    ArtifactIngestRequest {
+        intent: intent(&format!("artifact-{key}")),
+        payload: text.as_bytes().to_vec(),
+        evidence_id: format!("evidence-{key}"),
+        object_id: format!("evidence-object-{key}"),
+        object_kind: "evidence".to_owned(),
+        domain_id: DOMAIN.to_owned(),
+        source_kind: "tool_output".to_owned(),
+        source_id: format!("native/{key}"),
+        source_revision: 1,
+        media_type: "text/plain".to_owned(),
+        retention_class: "canonical".to_owned(),
+        retain_until: None,
+        asserted_sensitivity: Sensitivity::Normal,
+        provider_egress: ProviderEgress::RemoteAllowed,
+        provenance: None,
     }
+}
+
+/// `publish` commits each descriptor's evidence artifact separately, then commits descriptors `first..first + count` together, alternating message and tool-output occurrences.
+fn publish(kernel: &KernelStore, scope: &str, first: u64, count: u64) {
+    let staged = staged(first, count);
+    let handles: Vec<_> = staged
+        .iter()
+        .map(|(_, key, text)| kernel.ingest_exact_artifact(evidence(key, text)).unwrap())
+        .collect();
     kernel
         .commit(intent(&format!("publish-{first}")), |envelope| {
-            for (index, key, text, handle) in &staged {
-                let tool = !index.is_multiple_of(2);
-                let identity: Vec<(&str, &str)> = if tool {
-                    vec![
-                        ("project_id", "soak"),
-                        ("harness", "pi"),
-                        ("session_id", "soak-session"),
-                        ("parent_message_id", "message"),
-                        ("tool_call_id", key),
-                        ("result_revision", "1"),
-                        ("block_index", "0"),
-                    ]
-                } else {
-                    vec![
-                        ("project_id", "soak"),
-                        ("harness", "pi"),
-                        ("session_id", "soak-session"),
-                        ("message_id", key),
-                        ("block_index", "0"),
-                    ]
-                };
-                let outcome = envelope
-                    .publish_source_descriptor(&SourceDescriptorRequest {
-                        source_policy: kernel::SourceDescriptorPolicy::Native,
-                        occurrence: Occurrence {
-                            class: if tool { "raw_tool_spans" } else { "messages" },
-                            identity: &identity,
-                            revision: "1",
-                            representation: if tool { "tool_output" } else { "text" },
-                            span: None,
-                        },
-                        domain_id: DOMAIN,
-                        scope_id: Some(scope),
-                        evidence_id: &handle.evidence_id,
-                        artifact_digest: &handle.digest,
-                        buffer: text,
-                        sensitivity: Sensitivity::Normal,
-                        observed_at: 1,
-                        expected_head: None,
-                        outcome: None,
-                    })
-                    .unwrap();
-                envelope.record_admission(AdmissionRequest {
-                    candidate_id: None,
-                    subject_object_id: Some(outcome.object_id),
-                    source_class: Some(SourceClass::ExplicitUser),
-                    taint_class: Some(TaintClass::UserExplicit),
-                    event: AdmissionEvent {
-                        kind: EventKind::Other,
-                        trigger_object_id: None,
-                        approval_object_id: None,
-                        evidence_id: None,
-                        reason: "soak".to_owned(),
-                    },
-                })?;
-            }
-            Ok(String::new())
+            describe(envelope, scope, &staged, &handles)
         })
         .unwrap();
+}
+
+/// `publish_in_one_commit` commits the descriptors [`publish`] commits together with their evidence artifacts in one kernel commit.
+fn publish_in_one_commit(kernel: &KernelStore, scope: &str, first: u64, count: u64) {
+    let staged = staged(first, count);
+    let requests = staged
+        .iter()
+        .map(|(_, key, text)| evidence(key, text))
+        .collect();
+    kernel
+        .ingest_exact_artifacts_with(
+            intent(&format!("publish-{first}")),
+            requests,
+            None,
+            |envelope, handles| describe(envelope, scope, &staged, handles),
+        )
+        .unwrap();
+}
+
+fn describe(
+    envelope: &mut kernel::Envelope<'_>,
+    scope: &str,
+    staged: &[(u64, String, String)],
+    handles: &[kernel::ArtifactHandle],
+) -> Result<String, kernel::KernelError> {
+    assert_eq!(staged.len(), handles.len());
+    for ((index, key, text), handle) in staged.iter().zip(handles) {
+        let tool = !index.is_multiple_of(2);
+        let identity: Vec<(&str, &str)> = if tool {
+            vec![
+                ("project_id", "soak"),
+                ("harness", "pi"),
+                ("session_id", "soak-session"),
+                ("parent_message_id", "message"),
+                ("tool_call_id", key),
+                ("result_revision", "1"),
+                ("block_index", "0"),
+            ]
+        } else {
+            vec![
+                ("project_id", "soak"),
+                ("harness", "pi"),
+                ("session_id", "soak-session"),
+                ("message_id", key),
+                ("block_index", "0"),
+            ]
+        };
+        let outcome = envelope
+            .publish_source_descriptor(&SourceDescriptorRequest {
+                source_policy: kernel::SourceDescriptorPolicy::Native,
+                occurrence: Occurrence {
+                    class: if tool { "raw_tool_spans" } else { "messages" },
+                    identity: &identity,
+                    revision: "1",
+                    representation: if tool { "tool_output" } else { "text" },
+                    span: None,
+                },
+                domain_id: DOMAIN,
+                scope_id: Some(scope),
+                evidence_id: &handle.evidence_id,
+                artifact_digest: &handle.digest,
+                buffer: text,
+                sensitivity: Sensitivity::Normal,
+                observed_at: 1,
+                expected_head: None,
+                outcome: None,
+            })
+            .unwrap();
+        envelope.record_admission(AdmissionRequest {
+            candidate_id: None,
+            subject_object_id: Some(outcome.object_id),
+            source_class: Some(SourceClass::ExplicitUser),
+            taint_class: Some(TaintClass::UserExplicit),
+            event: AdmissionEvent {
+                kind: EventKind::Other,
+                trigger_object_id: None,
+                approval_object_id: None,
+                evidence_id: None,
+                reason: "soak".to_owned(),
+            },
+        })?;
+    }
+    Ok(String::new())
 }
 
 /// The unique word memory `index` carries, which only that memory matches.
@@ -427,14 +463,14 @@ async fn a_grown_store_stays_caught_up_through_commits_clock_steps_and_searches(
     let hold_ms = i64::try_from(records::HOLD_MS).unwrap();
     let mut clock = ClockSteps::default();
 
-    // Growth: descriptors arrive four to a commit while the slice loop catches up behind them.
+    // Growth: each batch commits its descriptors and their evidence together.
     let growth_started = Instant::now();
     let grower = {
         let kernel = Arc::clone(&kernel);
         let scope = scope.clone();
         tokio::task::spawn_blocking(move || {
             for first in (0..descriptors).step_by(4) {
-                publish(&kernel, &scope, first, 4.min(descriptors - first));
+                publish_in_one_commit(&kernel, &scope, first, 4.min(descriptors - first));
             }
         })
     };
