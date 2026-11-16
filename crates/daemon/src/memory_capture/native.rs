@@ -885,29 +885,6 @@ impl CaptureWork {
                     memory.duplicate_of = None;
                 }
             }
-            // A user quotation that is not a whole statement cannot retire the
-            // user's approved statement. Its targets among those become
-            // contests: the statement stays and is shown beside the quotation.
-            for memory in &mut memories {
-                if user_attributed(states_whole, prose, memory) {
-                    continue;
-                }
-                let automatic = |target: &String| {
-                    plan.existing
-                        .iter()
-                        .any(|previous| previous.id == *target && previous.automatic)
-                };
-                if memory.replaces.as_ref().is_some_and(automatic) {
-                    memory.contests.extend(memory.replaces.take());
-                    memory.contests.append(&mut memory.also_replaces);
-                } else {
-                    let (contested, retired) = std::mem::take(&mut memory.also_replaces)
-                        .into_iter()
-                        .partition(|target| automatic(target));
-                    memory.also_replaces = retired;
-                    memory.contests.extend::<Vec<String>>(contested);
-                }
-            }
             // A user's contest shows the user's own words beside the
             // statement, so it is kept for a quotation that is whole
             // sentences, such as a question. A clause cut out of a sentence

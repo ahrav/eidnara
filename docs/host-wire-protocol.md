@@ -1316,7 +1316,8 @@ the fact it duplicates as the contesting fact, so an observation the store
 already holds, such as a note the agent wrote in the same turn, contests what
 the message contradicts. The contests of a commit are recorded after its
 other writes, and a target the commit replaced, retired, or settled is passed
-over. When the contested fact is a capture-owned fact that the Kernel serves as
+over. A contest recorded through a duplicated fact that the commit retires as
+a restated memory is dropped, and its target keeps its row. When the contested fact is a capture-owned fact that the Kernel serves as
 approved, the commit supersedes it with a fact of the same
 text, category, and approval whose rationale holds `contested_by`, an object
 with `memory` (the contesting fact's id),
@@ -1341,7 +1342,10 @@ a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
 the dates being the UTC days on which the statement's first commit and the
 newest contest's commit were recorded, `unknown date` when the commit log
-holds none. The excerpt is the contesting text with runs of Unicode
+holds none. The fact id is shown as written when it is 1 to 128 characters of
+ASCII letters, digits, `_`, `-`, `.`, and `:`, which the ids capture and the
+host memory tool derive are; an object id is text its writer chose, so any
+other id is shown in the excerpt's bounded, quoted form. The excerpt is the contesting text with runs of Unicode
 whitespace (the `White_Space` property) folded to
 single spaces, cut to 240 characters with an ellipsis, and to fewer when the
 quoted form would pass 1,024 bytes, as a JSON string, so
@@ -1364,7 +1368,7 @@ block. The session whose message made the statement is delivered neither the
 statement nor its contest, as with every fact captured from its own messages.
 `eidnara_search` renders a contested statement with a line
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
-contesting fact's own result id and the excerpt the same 240-character form
+contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
 of that fact's served text; when the contesting fact cannot be read, the line
 is `Contested by <fact id>` and a note says so. A later statement of the user
 settles a contest: a user statement that replaces the contested fact ends it,

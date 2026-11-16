@@ -3784,6 +3784,7 @@ fn write_captured_memories(
     }
     for (statement, note) in restated {
         if !removed.contains(&note) && retire_restated(envelope, plan, statement, &note)? {
+            pending.retain(|contest| contest.observation != note);
             removed.insert(note);
         }
     }

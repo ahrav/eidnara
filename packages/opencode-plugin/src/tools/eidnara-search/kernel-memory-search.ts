@@ -229,6 +229,16 @@ export function contestExcerpt(text: string): string {
     }
 }
 
+/** Host wire protocol section 7.9 limits verbatim contesting IDs to 128 characters. */
+export const CONTEST_ID_CHARS = 128;
+
+const PLAIN_CONTEST_ID = new RegExp(`^[A-Za-z0-9_.:-]{1,${CONTEST_ID_CHARS}}$`);
+
+/** IDs outside `PLAIN_CONTEST_ID` use `contestExcerpt`'s bounded quoting to contain writer-controlled text (host wire protocol, section 7.9). */
+export function contestMemoryId(id: string): string {
+    return PLAIN_CONTEST_ID.test(id) ? id : contestExcerpt(id);
+}
+
 /** The id of the memory a capture recorded as contradicting a user's statement. The record names the memory and holds none of its text. `undefined` for a row capture did not write and for a rationale that names no contesting memory. */
 function contestingMemoryOf(row: ReadRow, decision: ReadDecision): string | undefined {
     const { rationale } = decision.payload;
