@@ -251,10 +251,10 @@ Fault/timing angle: none; single snapshot.
 Required faults and enabling state: decisions in two domains at one snapshot;
 a corrupt or oversize payload in the other domain.
 Confidence: high - [evidence](evidence/p5dep-domain-decision-read-matches-domain-and-kind-in-sql.md).
-Read `admission.rs:3575-3580` (`ids_predicate`) and `:3178-3231`.
+Read `admission.rs:3595-3600` (`ids_predicate`) and `:3196-3249`.
 Existing check: `the_domain_selection_equals_the_filtered_full_read`,
 `the_domain_selection_reads_no_row_of_another_domains_payload_pressure`,
-in-module `admission.rs:6264-6281`. Status unaudited.
+in-module `admission.rs:6296-6313`. Status unaudited.
 Impact: the P5 candidate set would include non-memory decisions or fail on
 another domain's corruption.
 Open questions: None.
@@ -283,11 +283,11 @@ the filtered read; equivalently the filtered set is a superset of the
 algebra's match set. `always` because a dropped matching row is a silent
 cross-project omission on every read.
 Fault/timing angle: redaction placeholders decode to `Uncertain`; the filter
-must keep them (`admission.rs:3567-3574`).
+must keep them (`admission.rs:3587-3594`).
 Required faults and enabling state: scopes with no term, with a non-exact
 operator, with a redacted value; a redacted filter value; a NULL scope row.
 Confidence: high - [evidence](evidence/p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict.md).
-Read `admission.rs:3650-3664` (the `WHERE` tail) and `project.rs:207-220`.
+Read `admission.rs:3673-3687` (the `WHERE` tail) and `project.rs:207-220`.
 Existing check: `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain`.
 Status unaudited.
 Re-exercised by #1167: the pass applies the SQL prefilter and then
@@ -301,7 +301,7 @@ and rows with no scope (D5); a prefilter that dropped uncertain rows would
 hide same-project decisions from the candidate set.
 Open questions:
 - D5: the daemon `ScopeFilter::matches` returns `false` for a `None` scope
-  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3664`). Is a
+  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3687`). Is a
   decision with no scope ever written in the `memory` domain at HEAD?
   (partial: `ProjectBinding::scope_spec` always attaches a scope for
   route-written rows; other writers not audited)
@@ -310,13 +310,13 @@ Open questions:
 
 Type: safety
 Reachability: default-production - `read_visible_page` (`read.rs:193`) is the
-only path behind `kernel.read` (`read.rs:482`) and, through `read_visible`
+only path behind `kernel.read` (`read.rs:490`) and, through `read_visible`
 (`read.rs:182`), the in-process `DomainDecisions` callers.
 Status: active
 Exercised: yes - `crates/daemon/tests/kernel_routes.rs:1958`, `:2080`,
 `:2112` construct over-cap row counts and over-budget payloads.
 Guarantee: after the Kernel read, the optional `before` cursor of
-`kernel.read`, and the daemon `ScopeFilter` (`read.rs:224-226`),
+`kernel.read`, and the daemon `ScopeFilter` (`read.rs:232-234`),
 `read_visible_page` keeps at most `MAX_READ_ROWS` (8192) newest rows by
 `(created_commit_seq desc, object_id)`, sets `truncated` when any row was dropped, reads
 `decision_payload_sizes_as_of` for the kept decision ids before loading any
@@ -332,13 +332,13 @@ set; and `sum(payload_sizes[retained]) <= MAX_READ_ROW_BYTES` or the retained
 set is exactly the prefix the cut allows. `always` because every read must
 hold these bounds.
 Fault/timing angle: the row bound cannot be a SQL `LIMIT` because the filter
-runs after SQL (`read.rs:221`); a bound applied before the filter would
+runs after SQL (`read.rs:229`); a bound applied before the filter would
 under-serve.
 Required faults and enabling state: more than 8192 same-project visible rows;
 decisions whose payload sizes sum past `MAX_WIRE_BODY_BYTES / 8`; a decision
 row deleted out of band to force `CorruptCanonicalRow`.
 Confidence: high - [evidence](evidence/p5dep-daemon-bounds-rows-after-the-scope-filter.md).
-Read `read.rs:219-284`.
+Read `read.rs:227-292`.
 Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`,
 `bounded_selection_matches_a_full_sort_and_truncate`,
 `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`, and, for the
@@ -350,7 +350,7 @@ after the scope filter; the test at
 `crates/daemon/src/candidate_pass_tests.rs:665` cuts the two oldest at a
 reduced cap.
 Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow",
-cited there as line 185 and now at `read.rs:216`) inherits a bound that is applied after full materialization of
+cited there as line 185 and now at `read.rs:224`) inherits a bound that is applied after full materialization of
 the Kernel rows; see the next record.
 Open questions: None.
 
@@ -366,12 +366,12 @@ materialization before the daemon heap.
 Guarantee: the situation "the Kernel returned more rows than the daemon
 keeps" is reachable at HEAD: `visible_domain_decisions_as_of_in_scope` has
 no `max_rows`, `max_bytes`, or `EvalBudget` parameter and materializes every
-matching row (`admission.rs:3207-3220`); the only bounds are the daemon's,
+matching row (`admission.rs:3225-3238`); the only bounds are the daemon's,
 applied afterwards.
 Check: `sometimes` - a campaign must produce at least one history in which
 `rows.len() > MAX_READ_ROWS` is observed on the Kernel API's return value
 inside the over-cap fixture (`kernel_routes.rs:1958`), calling the Kernel
-API directly rather than probing `read.rs:223`, so that the daemon-side
+API directly rather than probing `read.rs:231`, so that the daemon-side
 bound and the plan's OQ5-1 concern are exercised rather than vacuously
 satisfied. `sometimes` because this is situation coverage of the state
 "Kernel returned more rows than the daemon will keep"; it is not a code
@@ -380,7 +380,7 @@ Fault/timing angle: none; a large project is the enabling state.
 Required faults and enabling state: at least 8193 visible same-project
 `memory` decisions at one snapshot.
 Confidence: high - [evidence](evidence/p5dep-kernel-domain-read-has-no-row-bound.md).
-Read the signature at `admission.rs:3165-3176` and `visible_selected_as_of`.
+Read the signature at `admission.rs:3183-3194` and `visible_selected_as_of`.
 Existing check: none for the Kernel-side count; the daemon-side cap test
 (`kernel_routes.rs:1958`) constructs over-cap rows and so would witness this
 state if instrumented. Status unaudited.

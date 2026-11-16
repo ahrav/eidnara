@@ -13,19 +13,19 @@ resource boundaries, vacuity.
 
 ## Evidence trail
 
-- `crates/kernel/src/admission.rs:3165-3176`: signature `(surface,
+- `crates/kernel/src/admission.rs:3183-3194`: signature `(surface,
   requested: i64, domain_id: &str, scope: Option<ScopeTermFilter>) ->
   Result<VisibleAsOf, KernelError>`. No `max_rows`, no `max_bytes`, no
   `EvalBudget`.
-- `admission.rs:3178-3231` `visible_selected_as_of`: `served_rows(..)?
+- `admission.rs:3196-3249` `visible_selected_as_of`: `served_rows(..)?
   .into_iter().filter_map(..).collect()` into `Vec<VisibleRow>`, then
   `sort_unstable_by`. Every matching row is materialized.
-- `admission.rs:3482-3499` `served_rows`: `served_classes_selected(..)?
+- `admission.rs:3500-3517` `served_rows`: `served_classes_selected(..)?
   .into_iter().map(..).collect()`; also a full `Vec`.
 - `crates/kernel/src/open.rs:595-607` `lock_reader`: the plain reader lock
   used by `read_snapshot` has no deadline.
-- Daemon: `read.rs:222-223` applies `NewestRows` after the full `Vec` is
-  returned; `visible.rows` is consumed by the `for` loop at `:223` with no
+- Daemon: `read.rs:230-231` applies `NewestRows` after the full `Vec` is
+  returned; `visible.rows` is consumed by the `for` loop at `:231` with no
   intermediate binding, so the observable is the Kernel API's return value.
 - The daemon cap test `kernel_routes.rs:1958` constructs over-cap rows but
   observes only the wire response; the Kernel-side count is not asserted.

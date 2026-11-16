@@ -4,7 +4,7 @@ HEAD `3a3b916b7`. Surface S2.
 
 ## Discovery trigger
 
-Plan U1 "Patterns to follow: `crates/daemon/src/kernel_routes/read.rs:216`
+Plan U1 "Patterns to follow: `crates/daemon/src/kernel_routes/read.rs:224`
 for the scope-filtered decision read." (the plan cited line 185; the call is
 at line 216 now). The daemon read is the only bounded
 consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
@@ -21,25 +21,25 @@ consumer of the unbounded Kernel API. Lens: resource boundaries; C6.
   heap's max is the row a sort-then-truncate drops first.
 - `read.rs:146-180` `NewestRows`: `push` pops when `len > cap` and sets
   `dropped`; `finish` returns `into_sorted_vec` and `dropped`.
-- `read.rs:182-292` `read_visible`, which delegates to `read_visible_page`:
-  - `:201-218` Kernel read with `project.scope_term()`.
-  - `:219-230` builds `ScopeFilter` and `NewestRows::new(MAX_READ_ROWS)`, then
+- `read.rs:182-300` `read_visible`, which delegates to `read_visible_page`:
+  - `:201-226` Kernel read with `project.scope_term()`.
+  - `:227-238` builds `ScopeFilter` and `NewestRows::new(MAX_READ_ROWS)`, then
     pushes each row that passes `selection.keeps`, the `before` cursor
     (`ReadCursor::precedes`, `:78-82`; set by `kernel.read` alone), and
     `ScopeFilter::matches`, in that order; the comment explains the bound
     cannot be a SQL `LIMIT`.
-  - `:232-241` payload sizes read via `decision_payload_sizes_as_of` for the
+  - `:240-249` payload sizes read via `decision_payload_sizes_as_of` for the
     kept decision ids before any payload; comment: "a project can retain
     `MAX_READ_ROWS` decisions of ~1 MiB each, and materializing them all
     would allocate gigabytes".
-  - `:242-251` a kept decision without a size entry is
+  - `:250-259` a kept decision without a size entry is
     `CorruptCanonicalRow`.
-  - `:252-268` cumulative cut where payload bytes pass
+  - `:260-276` cumulative cut where payload bytes pass
     `MAX_READ_ROW_BYTES`; `truncated = true` on cut.
-  - `:269-284` `decisions_for_objects_as_of` for the retained ids; a missing
+  - `:277-292` `decisions_for_objects_as_of` for the retained ids; a missing
     row is `CorruptCanonicalRow`.
 - `read.rs:85-95` `ReadResponse.truncated` doc: byte-budget truncation also
-  happens at serialization (`:490-514`), so the wire flag can be `true` while
+  happens at serialization (`:498-522`), so the wire flag can be `true` while
   this one is `false`.
 - Tests: `crates/daemon/tests/kernel_routes.rs:1958`
   `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`;

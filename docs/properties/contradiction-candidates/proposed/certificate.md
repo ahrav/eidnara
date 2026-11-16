@@ -50,7 +50,7 @@ Actors and decision authority:
   snapshot like `/source_capture/enabled`, `config.rs:102,154,993`).
 
 Crossings: daemon -> Kernel reads (`visible_domain_decisions_as_of_in_scope`,
-`admission.rs:3165-3176`; `decisions_for_objects_as_of_within_budget`,
+`admission.rs:3183-3194`; `decisions_for_objects_as_of_within_budget`,
 `slice/read.rs:236-241`; `decision_payload_sizes_as_of`, `slice/read.rs:330`);
 daemon -> memory-store writes (`PreparedWrite` family, precedent
 `memory_capture.rs:484-491`); daemon -> plugin wire (routed read, tool action);
@@ -160,7 +160,7 @@ and counted, never queued without bound. Kind: state predicate on runtime
 R-C1 Candidate set bounded. The id read uses the project scope term prefilter
 (`admission.rs:3138-3144`, `project.rs:106-111`) and the `ScopeFilter` judge,
 then keeps at most N decisions by a deterministic newest-first order
-(`read.rs:201-231` pattern), counting a truncation when more were eligible;
+(`read.rs:201-239` pattern), counting a truncation when more were eligible;
 summary bytes are bounded by `decision_payload_sizes_as_of` before any payload
 is loaded, or by `decision_page_within_budget`'s `max_payload_bytes`
 (`slice/read.rs:126-133`). Kind: state predicate on the pass's read set
@@ -190,7 +190,7 @@ text-source obligation added.
 
 R-E1 Sweep drops only dead targets. A row is dropped when, at the sweep's
 Kernel snapshot, its decision object is invalidated, or its current disposition
-is `Superseded` or `Contradicted` (`admission.rs:4248-4249, 4157`), or its
+is `Superseded` or `Contradicted` (`admission.rs:4280-4281, 4157`), or its
 descriptor object or evidence row is invalidated; every other row is kept.
 Kind: transition safety (what a sweep step may remove). Observation: derived
 observation of the Kernel at a snapshot. Validity: sweep commit. Settled (R4)
@@ -614,7 +614,7 @@ HANDOFF
    (`admission.rs:209-216`) for eligibility; the plan's `TooManyClaims` bound
    then does not bound the summary read and R-C1 must bound it another way.
 2. Unbounded id read. `visible_domain_decisions_as_of_in_scope` has no budget
-   and no row limit (`admission.rs:3165-3176`). The plan's "bounded work per
+   and no row limit (`admission.rs:3183-3194`). The plan's "bounded work per
    pass regardless of project size" is satisfiable only by a caller-side heap
    (memory) plus either a budgeted Kernel variant or acceptance that the SQL
    walk scales with the project's `memory` decisions (OQ5-1, OQ-D).

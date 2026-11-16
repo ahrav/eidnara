@@ -458,7 +458,7 @@ Production guards go to
 above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
-[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L182-L292
+[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L182-L300
 [injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L282
 [revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L315
 [dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L373
@@ -516,7 +516,7 @@ that no related check exists anywhere in the repository.
 [identity-test]: ../../../crates/memory-store/src/lib.rs#L16042
 [json-identity-test]: ../../../crates/memory-store/src/lib.rs#L15899
 [trace-identity-test]: ../../../crates/memory-store/src/lib.rs#L16109
-[served-columns]: ../../../crates/kernel/src/admission.rs#L4049
+[served-columns]: ../../../crates/kernel/src/admission.rs#L4081
 [cross-project]: ../../../crates/daemon/tests/kernel_routes.rs#L1354
 [project-scope]: ../../../crates/daemon/tests/kernel_routes.rs#L1847
 [historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1919
