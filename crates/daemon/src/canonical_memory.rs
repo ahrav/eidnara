@@ -241,6 +241,13 @@ pub(crate) fn read_project_memory(
     }
 }
 
+/// The most payload pages one delivery walk loads. A page holds at most the
+/// read caps, 8,192 rows and 8 MiB, so the walk passes over up to 64 MiB
+/// of a session's own newer rows before it stops; a project's memory is
+/// orders of magnitude smaller, and the bound keeps one transform pass from
+/// reading a store of any size.
+const MAX_DELIVERY_PAGES: usize = 8;
+
 /// The project's injectable memory rows at `tip` that a pass delivers to each
 /// of `sessions`: for one session, the newest rows under the row and byte
 /// caps among the rows whose capture rationale names another session or
@@ -253,8 +260,10 @@ pub(crate) fn read_project_memory(
 /// serving order and their payloads are loaded one page at a time, each page
 /// within the caps, so a session's own rows spend neither cap however many
 /// of them are newer than the rows it is served, and the payloads held at
-/// once stay within three times the byte cap. `truncated` reports that some
-/// session's delivery left out a row it was eligible for.
+/// once stay within three times the byte cap. The walk loads at most
+/// [`MAX_DELIVERY_PAGES`] pages. `truncated` reports that some session's
+/// delivery left out a row it was eligible for, or that the page limit
+/// ended the walk.
 pub(crate) fn read_other_sessions(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
@@ -293,7 +302,15 @@ pub(crate) fn read_other_sessions(
         decisions: std::collections::HashMap::new(),
     };
     let mut pending = std::collections::VecDeque::from(candidates);
+    let mut pages = 0;
     while !pending.is_empty() && deliveries.iter().any(|delivery| !delivery.full) {
+        // The walk's work is bounded: past the page limit the rows not yet
+        // judged are left out and the response reports the cut.
+        if pages == MAX_DELIVERY_PAGES {
+            response.truncated = true;
+            break;
+        }
+        pages += 1;
         let ids: Vec<String> = pending
             .iter()
             .take(max_rows.max(1))

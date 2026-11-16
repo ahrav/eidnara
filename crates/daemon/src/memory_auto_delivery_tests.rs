@@ -1729,7 +1729,7 @@ async fn every_statement_of_one_message_fits_the_message_lineage() {
 /// cap or byte cap.
 #[tokio::test]
 async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
         FIRST,
@@ -1748,6 +1748,26 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
     })
     .await;
 
+    // A plan the submission's allowance did not reach on a slow host is
+    // committed by a later drain.
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    for _ in 0..40 {
+        if store.memory_capture_status(&digest).unwrap().pending == 0 {
+            break;
+        }
+        store
+            .execute_tag_sql_for_test("UPDATE memory_capture_jobs SET retry_at_ms=0")
+            .unwrap();
+        handler.native_capture.lock().unwrap().expire_all_for_test();
+        let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+        body(
+            handler
+                .handle_native_capture_next(test_route(SECOND), &next)
+                .await,
+        );
+    }
     let kernel = handler.kernel.kernel_store().unwrap();
     let binding = kernel_routes::ProjectBinding::new(&project);
     let tip = kernel.tip().unwrap();
@@ -1822,11 +1842,20 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         sizes.values().sum::<u64>() - thursday > 5 * thursday,
         "the newer own rows hold more than five times the byte cap"
     );
-    let exact = usize::try_from(thursday).unwrap();
+    // A byte cap of three such statements: the twelve own rows are passed
+    // over in pages of that size.
+    let exact = 3 * usize::try_from(thursday).unwrap();
     assert_eq!(
         read("s2", (ROWS, exact)),
         (vec![stated(THURSDAY)], false),
         "the byte cap is spent on rows of other sessions"
+    );
+    // The walk loads eight pages at most. With one row to a page the
+    // twelve own rows end it, and the response reports the cut.
+    assert_eq!(
+        read("s2", (1, BYTES)),
+        (Vec::new(), true),
+        "a walk past its page limit reports the rows it did not judge"
     );
     let (other_session, truncated) = read("s3", (ROWS, exact));
     assert!(truncated);
