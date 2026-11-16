@@ -997,7 +997,9 @@ completion. Other submission states include `stale`, `pending`, `disabled`,
 and `store_failed`; mismatched models and malformed envelopes are errors.
 
 Before freezing, each memory's text begins with its exact supporting quotation,
-prefixed with `User stated:` or `Assistant reported:` from the native role.
+prefixed with `User stated:` for a user source and `Assistant reported:` for
+any other; a Pi row under the reserved `eidnara:` id space is an assistant
+source whatever role it carries.
 The model's paraphrase is not published. A cut quotation of a user source that
 reaches capture under its own message id and lies inside one plain-prose
 paragraph is first widened to the whole sentence of that paragraph that
@@ -1013,13 +1015,16 @@ to the paragraph's end or the next exclamation or question mark. A period
 before whitespace may end a sentence or an abbreviation, so it is no plain
 edge. A quotation is stored as proposed when it already meets the statement
 rule; when the widened sentence does not qualify; when the words widening
-would add hold a `.`, `!`, or `?` that an ASCII letter or digit does not
-directly follow, or a sentence terminator of another script (`。`, `｡`, `．`,
-`！`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`, `﹗`, `‼`, `﹒`, `․`, `।`, `॥`, `۔`,
-`։`, `።`, `၊`, `။`, `។`, `…`; the list is finite, and a terminator outside it
-reads as part of a sentence);
-when the quotation ends in a terminator, alone or behind closing brackets or
-emphasis marks, and its sentence goes on; when the
+would add hold a character other than a letter or digit of any script, an
+ASCII space or tab, ASCII punctuation, the apostrophe `’` between two
+letters, and the dashes `–` and `—`, where a `.`, `!`, or `?` counts as
+ASCII punctuation only between two ASCII letters or digits, as in `v1.2`
+(so a line break, a terminator or closing mark of another script, a symbol,
+and a period after a letter of another script each keep the quotation as
+proposed; the statement's own closing marks are not counted);
+when the quotation ends in a terminator, alone or behind marks that are no
+letter or digit, or in a mark outside ASCII that is no letter or digit, and
+its sentence goes on; when the
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
 names `replaces` or `also_replaces` is stored as proposed, so only a
@@ -1157,8 +1162,9 @@ such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 `Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
 or `Approx` in any letter case before a number; these lists are a heuristic
 for an edge the extractor chose, and the words widening adds hold no period
-except inside a token; and its trimmed text contains
-no ASCII, fullwidth, or Arabic question mark, contains no double
+except between two ASCII letters or digits; and its trimmed text contains
+no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
+finite), contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes
 a single quotation. The rule reads sentence ends in `.` and `!` only, so text
 in a script that ends sentences otherwise is judged a paragraph at a time. Capture records each such fact with a statement record in the
@@ -1195,9 +1201,10 @@ positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
-they take no place from another session's facts. The read passes over at
-most eight pages of that size, 64 MiB of a session's own newer facts, and
-reports a cut past that. The extractor's reference memories are ranked from two bounded reads
+they take no place from another session's facts. The read loads at most
+eight pages of that size, the payloads of up to 64 MiB of a session's own
+newer facts; past that it stops, keeps the facts it had selected, and
+leaves the older facts out of the block. The extractor's reference memories are ranked from two bounded reads
 at one snapshot: the newest facts on `explicit_search`, and the facts served
 on `auto_inject` in the plain newest window and in the delivery of each
 session whose messages the batch holds; a fact older than every window is

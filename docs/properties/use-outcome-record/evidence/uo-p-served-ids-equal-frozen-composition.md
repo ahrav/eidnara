@@ -14,10 +14,10 @@ revision.
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
   (`served_ids` (`crates/daemon/src/canonical_memory.rs:72`)).
 - Freeze marker: every freeze site calls `freeze_project_memory`
-  (`freeze_project_memory` (`crates/daemon/src/transform.rs:613`)), which
+  (`freeze_project_memory` (`crates/daemon/src/transform.rs:630`)), which
   assigns the composition and reports the freeze
-  (`crates/daemon/src/transform.rs:3122`, `crates/daemon/src/transform.rs:4743`,
-  `crates/daemon/src/transform.rs:4898`).
+  (`crates/daemon/src/transform.rs:3143`, `crates/daemon/src/transform.rs:4768`,
+  `crates/daemon/src/transform.rs:4923`).
 
 - Guarantee under test: The stored decision set equals, as a set, the object ids
   of the snapshot rows whose composition the same fold persisted.
@@ -27,9 +27,9 @@ revision.
   `a_dispute_between_folds_records_the_next_served_set_without_it`
   (`crates/daemon/src/use_outcome_writer_tests.rs:528`);
   `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-  (`crates/daemon/src/canonical_memory.rs:710`);
+  (`crates/daemon/src/canonical_memory.rs:860`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:845`);
+  (`crates/daemon/src/canonical_memory.rs:995`);
   `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
   (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`

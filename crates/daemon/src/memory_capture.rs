@@ -1696,16 +1696,25 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         } else {
             plain_sentence_start(&paragraph[..start])
         };
-        let rest = &paragraph[end..];
+        // Spaces that trail the paragraph are no part of a sentence.
+        let rest = match &paragraph[end..] {
+            rest if rest.trim().is_empty() => "",
+            rest => rest,
+        };
         let to = if sentence_ends_at(&paragraph[start..end], rest) {
             let closes = !trimmed.ends_with(['.', '!']) && rest.starts_with(['.', '!']);
             end + usize::from(closes)
         } else if trimmed
-            .trim_end_matches([')', ']', '}', '*', '_', '`', '~'])
+            .trim_end_matches(|ch: char| !ch.is_alphanumeric() && !is_terminator(ch))
             .ends_with(is_terminator)
+            || trimmed
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_ascii() && !ch.is_alphanumeric())
         {
-            // The quotation ends in a terminator, alone or behind closing
-            // brackets or emphasis marks, and its sentence goes on.
+            // The quotation ends in a terminator, alone or behind marks of
+            // any kind, or in a mark outside ASCII whose role is unknown,
+            // and its sentence goes on.
             return None;
         } else {
             end + plain_sentence_end(rest)
@@ -1722,7 +1731,14 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         }
         let (before, after) = (&paragraph[from..start], &paragraph[end..to]);
         // The statement's own closing marks end it and add no sentence.
-        if !adds_plain_words(before) || !adds_plain_words(after.trim_end_matches(is_terminator)) {
+        // The words after the quotation follow its last character.
+        if !adds_plain_words(None, before, paragraph[start..].chars().next())
+            || !adds_plain_words(
+                paragraph[..end].chars().next_back(),
+                after.trim_end_matches(is_terminator),
+                None,
+            )
+        {
             return None;
         }
         if statement.len() <= MAX_CAPTURE_MEMORY_BYTES
@@ -1798,32 +1814,41 @@ fn plain_sentence_end(after: &str) -> usize {
     after.len()
 }
 
-/// Whether the words widening adds on one side of a quotation are plainly
-/// part of the quotation's own line and sentence: they hold no line break,
-/// no `.`, `!`, or `?` except directly before an ASCII letter or digit, and
-/// no terminator of another script. An ASCII terminator inside a token,
-/// such as the dots of `v1.2` or `a.b.c`, is part of that token; one before
-/// whitespace, a closing bracket, an emphasis mark, or a letter of another
-/// script may end a sentence.
-fn adds_plain_words(added: &str) -> bool {
+/// Whether the words widening adds on one side of a quotation are plain
+/// words of the quotation's own line and sentence. `added` follows
+/// `before` and precedes `after` in the paragraph. Every character of it
+/// is one of:
+///
+/// - a letter or digit of any script;
+/// - an ASCII space or tab, or ASCII punctuation other than `.`, `!`, `?`;
+/// - a `.`, `!`, or `?` between two ASCII letters or digits, as in `v1.2`
+///   or `a.b.c`, which is part of that token;
+/// - the apostrophe U+2019 between two letters, or the dash U+2013 or
+///   U+2014.
+///
+/// Any other character, such as a line break, a terminator or closing mark
+/// of another script, a symbol, or a space outside ASCII, may end a
+/// sentence or hide one, so the quotation is kept as quoted.
+fn adds_plain_words(before: Option<char>, added: &str, after: Option<char>) -> bool {
+    let mut previous = before;
     let mut chars = added.chars().peekable();
     while let Some(ch) = chars.next() {
-        let ends = if ch.is_ascii() {
-            // An ASCII letter or digit after the mark keeps it inside a
-            // token, as in a version or a file name; a closing bracket, an
-            // emphasis mark, whitespace, or a letter of another script after
-            // it leaves it a sentence end.
-            is_terminator(ch)
-                && chars
-                    .peek()
-                    .is_none_or(|next| !next.is_ascii_alphanumeric())
-        } else {
-            // Scripts that write these marks often write no space after one.
-            is_terminator(ch)
+        let next = chars.peek().copied().or(after);
+        let between = |inside: fn(&char) -> bool| {
+            previous.as_ref().is_some_and(inside) && next.as_ref().is_some_and(inside)
         };
-        if is_line_break(ch) || ends {
+        let plain = match ch {
+            '.' | '!' | '?' => between(char::is_ascii_alphanumeric),
+            ' ' | '\t' => true,
+            '\u{2019}' => between(|ch| ch.is_alphabetic()),
+            '\u{2013}' | '\u{2014}' => true,
+            ch if ch.is_ascii() => ch.is_ascii_graphic(),
+            ch => ch.is_alphanumeric(),
+        };
+        if !plain {
             return false;
         }
+        previous = Some(ch);
     }
     true
 }
@@ -1955,7 +1980,9 @@ const QUOTATION_FAMILIES: [&[char]; 5] = [
     &[
         '\u{ab}', '\u{bb}', '\u{2039}', '\u{203a}', '\u{276e}', '\u{276f}',
     ],
-    &['\u{300c}', '\u{300d}', '\u{300e}', '\u{300f}'],
+    &[
+        '\u{300c}', '\u{300d}', '\u{300e}', '\u{300f}', '\u{ff62}', '\u{ff63}',
+    ],
     &['\u{275b}', '\u{275c}', '\u{3003}'],
 ];
 
@@ -1965,12 +1992,12 @@ fn is_quotation_mark(ch: char) -> bool {
 
 /// Marks every script that uses them writes at the start of a quotation:
 /// the corner brackets, the low-9 mark, and the heavy ornaments.
-const OPENING_ONLY: [char; 7] = [
-    '\u{300c}', '\u{300e}', '\u{201e}', '\u{301d}', '\u{275d}', '\u{276e}', '\u{275b}',
+const OPENING_ONLY: [char; 8] = [
+    '\u{300c}', '\u{300e}', '\u{201e}', '\u{301d}', '\u{275d}', '\u{276e}', '\u{275b}', '\u{ff62}',
 ];
 /// Marks every script that uses them writes at the end of a quotation.
-const CLOSING_ONLY: [char; 7] = [
-    '\u{300d}', '\u{300f}', '\u{301e}', '\u{301f}', '\u{275e}', '\u{276f}', '\u{275c}',
+const CLOSING_ONLY: [char; 8] = [
+    '\u{300d}', '\u{300f}', '\u{301e}', '\u{301f}', '\u{275e}', '\u{276f}', '\u{275c}', '\u{ff63}',
 ];
 
 /// Whether every quotation mark of one paragraph opens or closes a
@@ -2070,8 +2097,8 @@ fn leaves_single_quotation_open(block: &[(usize, &str)]) -> bool {
 }
 
 /// The single marks [`opens_single_quotation`] reads as a quotation's opening.
-const SINGLE_QUOTATION_MARKS: [char; 6] = [
-    '\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{2039}', '\u{203a}',
+const SINGLE_QUOTATION_MARKS: [char; 7] = [
+    '\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{2039}', '\u{203a}', '\u{ff07}',
 ];
 
 /// The run of backticks or tildes, three or more long, that opens a code fence.
@@ -2099,7 +2126,8 @@ fn is_list_item(line: &str) -> bool {
         .is_some_and(|(marker, _)| {
             matches!(marker, "-" | "*" | "+")
                 || marker.strip_suffix(['.', ')']).is_some_and(|digits| {
-                    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+                    // Digits and numeric letters of any script number a list.
+                    !digits.is_empty() && digits.chars().all(char::is_numeric)
                 })
         })
 }
@@ -3232,6 +3260,84 @@ mod tests {
                 "port 4321",
                 Some("Use port 4321 for staging."),
             ),
+            // An ASCII period after a letter of another script and before
+            // an ASCII word ends a sentence, before or after the quotation.
+            (
+                "\u{79c1}\u{306e}\u{4f4f}\u{6240}\u{306f}\u{6771}\u{4eac}.CI must deploy on Fridays",
+                "deploy on Fridays",
+                None,
+            ),
+            (
+                "Never deploy to \u{6771}\u{4eac}.CI runs there on Fridays",
+                "deploy to \u{6771}\u{4eac}",
+                None,
+            ),
+            // A quotation that ends in a terminator behind a closer of
+            // another script, a spaced closer, or a symbol, before more
+            // words.
+            (
+                "Never \u{ff08}deploy on Fridays\u{3002}\u{ff09} and never on Mondays",
+                "deploy on Fridays\u{3002}\u{ff09}",
+                None,
+            ),
+            (
+                "Never (deploy on Fridays. ) and never on Mondays",
+                "deploy on Fridays. )",
+                None,
+            ),
+            (
+                "Never deploy on Fridays.\u{1f600} and never on Mondays",
+                "deploy on Fridays.\u{1f600}",
+                None,
+            ),
+            // A quotation that ends in a mark outside ASCII before more
+            // words: the mark's role is unknown.
+            (
+                "Never deploy on Fridays\u{f0d} and never on Mondays",
+                "deploy on Fridays\u{f0d}",
+                None,
+            ),
+            // The added words hold a mark outside ASCII that is no letter
+            // or digit: a terminator no list holds, a closer, a symbol.
+            (
+                "Thanks\u{f0d} never deploy on Fridays",
+                "deploy on Fridays",
+                None,
+            ),
+            (
+                "\u{ff08}Thanks\u{ff09} never deploy on Fridays",
+                "deploy on Fridays",
+                None,
+            ),
+            (
+                "Never deploy on Fridays \u{2192} or on Mondays",
+                "deploy on Fridays",
+                None,
+            ),
+            // An apostrophe inside a word and a dash are plain.
+            (
+                "We don\u{2019}t deploy on Fridays \u{2014} ever",
+                "deploy on Fridays",
+                Some("We don\u{2019}t deploy on Fridays \u{2014} ever"),
+            ),
+            // A closing single mark after a word is no apostrophe.
+            (
+                "He said never\u{2019} so deploy on Fridays",
+                "deploy on Fridays",
+                None,
+            ),
+            // A quotation that reaches its sentence's closer at the
+            // paragraph's end widens the same with spaces after it.
+            (
+                "Never (deploy on Fridays.)",
+                "deploy on Fridays.)",
+                Some("Never (deploy on Fridays.)"),
+            ),
+            (
+                "Never (deploy on Fridays.)  ",
+                "deploy on Fridays.)",
+                Some("Never (deploy on Fridays.)"),
+            ),
         ] {
             let widened = enclosing_statement(&Prose::of(text), quote);
             if widened != statement {
@@ -3500,6 +3606,23 @@ mod tests {
                 "Use pnpm here.",
                 true,
             ),
+            // The halfwidth corner brackets and the fullwidth apostrophe
+            // open a quotation as their wide and ASCII forms do.
+            (
+                "Bob wrote \u{ff62}Hi team.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote \u{ff62}Hi team\u{ff63} today.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Bob wrote \u{ff07}Hi team.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
             // A measure mark after a fullwidth or Arabic-Indic number.
             (
                 "The \u{ff12}\u{ff17}\u{ff02} screen broke.\n\nBob wrote \u{ff02}Hi team.\n\nAlways skip the CI tests.",
@@ -3613,6 +3736,17 @@ mod tests {
             ),
             ("- Use pnpm.\n- Keep logs.", "Use pnpm.", false),
             ("1) Use pnpm.", "Use pnpm.", false),
+            // A list numbered in fullwidth or Arabic-Indic digits.
+            (
+                "\u{ff11}. Use pnpm.\n\u{ff12}. Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
+            (
+                "\u{661}. Use pnpm.\n\u{662}. Skip the tests.",
+                "Skip the tests.",
+                false,
+            ),
             (
                 "Avoid destructive commands, e.g. rm -rf the build dir.",
                 "rm -rf the build dir.",

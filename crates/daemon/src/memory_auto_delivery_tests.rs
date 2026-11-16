@@ -2295,6 +2295,11 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
                 .await,
         );
     }
+    assert_eq!(
+        store.memory_capture_status(&digest).unwrap().pending,
+        0,
+        "every plan committed before the reads"
+    );
     let kernel = handler.kernel.kernel_store().unwrap();
     let binding = kernel_routes::ProjectBinding::new(&project);
     let tip = kernel.tip().unwrap();
@@ -2384,6 +2389,63 @@ async fn a_sessions_own_statements_leave_the_read_caps_to_other_sessions() {
         (Vec::new(), true),
         "a walk past its page limit reports the rows it did not judge"
     );
+    // The limit is the eighth page: at the commit of the seventh own row
+    // the walk passes seven pages and delivers the older statement on the
+    // eighth, and at the commit of the eighth own row it stops first.
+    let mut own: Vec<i64> = {
+        let all = crate::canonical_memory::read_other_sessions(
+            &kernel,
+            &binding,
+            &[None],
+            tip,
+            unbounded,
+        )
+        .unwrap();
+        all.rows
+            .iter()
+            .filter(|row| all.decisions[&row.object.object_id].payload.summary != stated(THURSDAY))
+            .map(|row| row.object.created_commit_seq)
+            .collect()
+    };
+    own.sort_unstable();
+    assert_eq!(own.len(), 12);
+    let paged = |tip: i64, sessions: &[Option<&str>]| {
+        let response = crate::canonical_memory::read_other_sessions(
+            &kernel,
+            &binding,
+            sessions,
+            tip,
+            (1, BYTES),
+        )
+        .unwrap();
+        let summaries: Vec<String> = response
+            .rows
+            .iter()
+            .map(|row| {
+                response.decisions[&row.object.object_id]
+                    .payload
+                    .summary
+                    .clone()
+            })
+            .collect();
+        (summaries, response.truncated)
+    };
+    assert_eq!(
+        paged(own[6], &[Some("s2")]),
+        (vec![stated(THURSDAY)], false),
+        "seven own rows leave the eighth page to the older statement"
+    );
+    assert_eq!(
+        paged(own[7], &[Some("s2")]),
+        (Vec::new(), true),
+        "an eighth own row ends the walk before the older statement"
+    );
+    // A cut keeps what the walk delivered: the newest row, which the
+    // session that wrote none took on the first page.
+    let (kept, truncated) = paged(own[7], &[Some("s2"), Some("s3")]);
+    assert!(truncated);
+    assert_eq!(kept.len(), 1);
+    assert_ne!(kept[0], stated(THURSDAY));
     let (other_session, truncated) = read("s3", (ROWS, exact));
     assert!(truncated);
     assert!(!other_session.contains(&stated(THURSDAY)));
