@@ -634,13 +634,16 @@ fn unattributed(content: &str) -> &str {
 }
 
 /// The words two memories are compared by: runs of letters and digits of
-/// three or more characters, and shorter runs that hold a digit, so a
-/// version or a port such as the `22` of `1.22` counts while `is` and `to`
-/// do not.
+/// three or more characters, and runs of two that hold a digit, so the `22`
+/// of `1.22` and a port such as `80` count. A single character, such as the
+/// `1` many versions share, and a short word such as `is` or `Go` do not.
 fn content_words(content: &str) -> BTreeSet<String> {
     unattributed(content)
         .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| word.chars().count() >= 3 || word.chars().any(char::is_numeric))
+        .filter(|word| {
+            let length = word.chars().count();
+            length >= 3 || (length == 2 && word.chars().any(char::is_numeric))
+        })
         .map(str::to_lowercase)
         .filter(|word| !FUNCTION_WORDS.contains(&word.as_str()))
         .collect()
@@ -2671,12 +2674,16 @@ const NUMBERED: [&str; 8] = ["no", "nos", "fig", "vol", "ch", "sec", "eq", "appr
 fn is_abbreviation(word: &str, following: &str) -> bool {
     let word = word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
     let single = word.strip_suffix('.').unwrap_or(word);
-    // The word's own period, then whitespace, then a numeral: the scan
-    // reads one whitespace run, so occurrences share no bytes of it.
-    let number_follows = following
+    // The word's own period, a whitespace run, and a decimal point, then a
+    // numeral, as in `No. 2` or `approx. .5`: the scan reads one whitespace
+    // run, so occurrences share no bytes of it.
+    let spaced = following
         .strip_prefix('.')
         .unwrap_or(following)
-        .trim_start()
+        .trim_start();
+    let number_follows = spaced
+        .strip_prefix('.')
+        .unwrap_or(spaced)
         .starts_with(char::is_numeric);
     if TITLES.contains(&single)
         || (number_follows
@@ -3369,14 +3376,17 @@ pub(super) fn statement_text(text: &str) -> &str {
     unattributed(text).trim().trim_end_matches(['.', '!'])
 }
 
-/// Whether the Kernel serves live memory `target` on automatic surfaces: the
-/// state an approval, such as a user's statement record, gives it.
+/// Whether the Kernel serves live memory `target` as an approved fact, the
+/// state a user's statement record gives it: visible on explicit search,
+/// where an unapproved fact is labeled. A fact reclassified as sensitive
+/// stays approved there while automatic injection hides it, so a user's
+/// repeat of it writes no second copy with normal sensitivity.
 fn approved(envelope: &kernel::Envelope<'_>, target: &str) -> Result<bool, kernel::KernelError> {
     Ok(envelope
         .served_rows_for(&[target], None)?
         .get(target)
         .is_some_and(|row| {
-            row.visibility(kernel::Surface::AutoInject) == kernel::SurfaceVisibility::Visible
+            row.visibility(kernel::Surface::ExplicitSearch) == kernel::SurfaceVisibility::Visible
         }))
 }
 
@@ -5072,6 +5082,13 @@ mod tests {
             ),
             ("- Use pnpm.\n- Keep logs.", "Use pnpm.", false),
             ("1) Use pnpm.", "Use pnpm.", false),
+            // A numbered abbreviation before a decimal point keeps its
+            // period inside the sentence.
+            (
+                "Keep the ratio at approx. .5 for retries.",
+                "Keep the ratio at approx.",
+                false,
+            ),
             // Lists marked by a bullet glyph, a dash, a wrapped or lettered
             // ordinal, or an enclosed numeral.
             (
@@ -6215,8 +6232,12 @@ mod tests {
     #[test]
     fn content_words_keep_numerals_and_drop_short_words() {
         let words = |text: &str| -> Vec<String> { content_words(text).into_iter().collect() };
-        assert_eq!(words("User stated: Use Go 1.22."), ["1", "22"]);
-        assert_eq!(words("Use Go 1.23, not Go 1.22."), ["1", "22", "23"]);
+        assert_eq!(words("User stated: Use Go 1.22."), ["22"]);
+        assert_eq!(words("Use Go 1.23, not Go 1.22."), ["22", "23"]);
+        assert_eq!(
+            words("Keep 1 replica in zone 2."),
+            ["keep", "replica", "zone"]
+        );
         assert_eq!(words("It is up to us."), Vec::<String>::new());
         assert_eq!(words("Use port 80 for staging."), ["80", "port", "staging"]);
     }

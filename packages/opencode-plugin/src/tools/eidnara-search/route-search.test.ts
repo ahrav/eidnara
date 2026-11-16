@@ -444,6 +444,87 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).not.toContain(id(11));
     });
 
+    it("gives a ranked decision that left the store before the read no result place", async () => {
+        const { kernel, transport, run } = harness();
+        // A correction retired the first memory and its statement record after the ranking, so the read returns neither row.
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "NAMING",
+            summary: "User stated: fact 2.",
+        });
+        kernel.routeReply = () => fused([{ object: id(11) }, { object: id(1) }, { object: id(2) }]);
+        const tip = kernel.tip;
+        const execution = await run({ query: "fact", limit: 2 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(2)]);
+        expect(execution.text).toContain(
+            "Memory: 2 ranked memories changed or became unreadable after ranking and were not rendered.",
+        );
+        const reads = transport.calls.filter((call) => call.method === "kernel.read");
+        expect(reads.map((call) => (call.body as { as_of?: number | null }).as_of ?? null)).toEqual(
+            [null, tip],
+        );
+    });
+
+    it("gives a ranked memory whose row is present a place, whatever became of it", async () => {
+        const { kernel, transport, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Revised text.",
+            source_revision: 2,
+        });
+        for (const index of [2, 3]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `Fact ${index}.`,
+            });
+        }
+        kernel.routeReply = () =>
+            fused([{ object: id(1), revision: 1 }, { object: id(2) }, { object: id(3) }]);
+        const execution = await run({ query: "fact", limit: 2 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(2)]);
+        const named = transport.calls
+            .filter((call) => call.method === "kernel.read")
+            .flatMap((call) => (call.body as { object_ids?: string[] }).object_ids ?? []);
+        expect(named).toEqual([id(1), id(2)]);
+    });
+
+    it("gives a ranked id the read could not resolve a place and names it", async () => {
+        const { kernel, transport, run } = harness();
+        for (const index of [1, 2]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `Fact ${index}.`,
+            });
+        }
+        // Every filtered read answers truncated with no row, so a single named id stays unresolved.
+        kernel.filteredReadRowCap = 0;
+        kernel.routeReply = () => fused([{ object: id(1) }, { object: id(2) }]);
+        const execution = await run({ query: "fact", limit: 1 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack).toEqual([]);
+        expect(execution.text).toContain(`Memory: unresolved ranked memory ids: ${id(1)}`);
+        expect(execution.text).not.toContain("changed or became unreadable");
+        expect(transport.calls.filter((call) => call.method === "kernel.read")).toHaveLength(1);
+    });
+
+    it("ends a ranking of decisions that all left the store within one read per decision", async () => {
+        const { kernel, transport, run } = harness();
+        const ranked = Array.from({ length: 32 }, (_, index) => ({ object: id(index + 1) }));
+        kernel.routeReply = () => fused(ranked);
+        const execution = await run({ query: "fact", limit: 1 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack).toEqual([]);
+        expect(execution.text).toContain(
+            "Memory: 32 ranked memories changed or became unreadable after ranking and were not rendered.",
+        );
+        expect(transport.calls.filter((call) => call.method === "kernel.read")).toHaveLength(32);
+    });
+
     it("reads every refill at the first read's store state when a commit lands between them", async () => {
         class CommittingTransport extends FakeKernelTransport {
             reads = 0;

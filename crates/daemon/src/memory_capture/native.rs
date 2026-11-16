@@ -856,7 +856,9 @@ impl CaptureWork {
                     memory.duplicate_of = Some(approved.id.clone());
                 } else if widened.contains(&memory.quote)
                     && named.is_some_and(|previous| {
-                        previous.automatic && previous.content != memory.content
+                        previous.automatic
+                            && super::statement_text(&previous.content)
+                                != super::statement_text(&memory.content)
                     })
                 {
                     // The extractor matched the clause it quoted to an
@@ -873,7 +875,7 @@ impl CaptureWork {
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for
                 // word. Another text is the user's own new statement.
-                if named.is_some_and(|previous| {
+                else if named.is_some_and(|previous| {
                     previous.automatic
                         && previous.contested
                         && super::statement_text(&previous.content)
