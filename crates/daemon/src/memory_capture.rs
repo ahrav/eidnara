@@ -2511,10 +2511,13 @@ fn sentence_ends_at(
     after: &str,
     mut continues_lowercase: impl FnMut(usize) -> bool,
 ) -> bool {
-    // An abbreviation keeps a period inside its sentence: the quotation's
-    // own closing period, or the period that directly follows it.
+    // An abbreviation keeps a period inside its sentence while the paragraph
+    // goes on after the quotation: the quotation's own closing period, or
+    // the period that directly follows it. A quotation that ends its
+    // paragraph ends its last sentence there.
     let at_period = quote.ends_with('.') || (!quote.ends_with('!') && after.starts_with('.'));
     if at_period
+        && !after.is_empty()
         && is_abbreviation(
             quote.rsplit(char::is_whitespace).next().unwrap_or_default(),
             after,
@@ -2679,7 +2682,8 @@ fn checked_capture_target(
 /// state a user's statement record gives it: visible on explicit search,
 /// where an unapproved fact is labeled. A fact reclassified as sensitive
 /// stays approved there while automatic injection hides it, so a user's
-/// repeat of it writes no second copy with normal sensitivity.
+/// repeat of it writes nothing. A labeled fact is unapproved whatever its
+/// class, so a user's statement of it is recorded.
 fn approved(envelope: &kernel::Envelope<'_>, target: &str) -> Result<bool, kernel::KernelError> {
     Ok(envelope
         .served_rows_for(&[target], None)?
@@ -4187,6 +4191,19 @@ mod tests {
                 "Use pnpm here.",
                 true,
             ),
+            // A mark inside inline code still makes its paragraph the first
+            // that holds a quotation mark: a backtick of the user's can pair
+            // with one inside quoted text and hide the mark that opens it.
+            (
+                "The key ` is broken, so Bob wrote \"Use the `-key instead.\n\nAlways skip the CI tests.\n\nThanks.\"",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Use `\"x\"` in examples.\n\nUse pnpm here.\n\nHe said \"this is unclosed",
+                "Use pnpm here.",
+                false,
+            ),
             (
                 "He said \"no\" to that.\n\nUse pnpm here.\n\nRun `cargo test now.",
                 "Use pnpm here.",
@@ -4312,6 +4329,71 @@ mod tests {
                 "The answer is no. (Use tabs.)",
                 "The answer is no.",
                 true,
+                None,
+            ),
+        ] {
+            let prose = Prose::of(text);
+            let found = (
+                quotes_whole_statements(&prose, quote),
+                enclosing_statement(&prose, quote),
+            );
+            if found != (whole, widened) {
+                wrong.push(format!("{quote:?} in {text:?}: {found:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_period_that_ends_its_paragraph_ends_the_sentence_at_an_abbreviation() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole, widened) in [
+            (
+                "We now deploy in the U.S.",
+                "We now deploy in the U.S.",
+                true,
+                None,
+            ),
+            (
+                "Standup starts at 10 a.m.",
+                "Standup starts at 10 a.m.",
+                true,
+                None,
+            ),
+            ("Ask Dr.", "Ask Dr.", true, None),
+            // Spaces that trail the paragraph border the sentence as its
+            // end does.
+            (
+                "Ok.\n\nWe now deploy in the U.S.  \n\nThanks.",
+                "We now deploy in the U.S.",
+                true,
+                None,
+            ),
+            // A cut quotation widens to the sentence and keeps its negation.
+            (
+                "Never deploy in the U.S.",
+                "deploy in the U.S.",
+                false,
+                Some("Never deploy in the U.S."),
+            ),
+            (
+                "We now deploy in the U.S.  ",
+                "We now deploy in the U.S",
+                false,
+                Some("We now deploy in the U.S."),
+            ),
+            // Text after the period in its paragraph keeps the period
+            // inside the sentence.
+            (
+                "We deploy in the U.S.\nstaging region first.",
+                "We deploy in the U.S.",
+                false,
+                None,
+            ),
+            (
+                "We deploy in the U.S. Staging comes first.",
+                "We deploy in the U.S.",
+                false,
                 None,
             ),
         ] {
@@ -6099,6 +6181,177 @@ mod tests {
         let read: PreparedCapture = serde_json::from_str(&text).unwrap();
         assert_eq!(read.head, frozen.head);
         assert_eq!(read.version, CAPTURE_SCHEMA_VERSION);
+    }
+
+    /// Approval decides whether a user's statement of a stored fact is
+    /// written, whatever the fact's class. Beside a labeled memory served
+    /// as sensitive the statement is recorded as its own fact. A repeat of
+    /// an approved statement served as sensitive writes nothing, though
+    /// automatic injection hides that statement.
+    #[test]
+    fn a_user_statement_of_a_sensitive_memory_is_written_only_beside_a_labeled_one() {
+        let statement = "The staging cluster alias is harbor-east.".to_string();
+        let rows = |kernel: &kernel::KernelStore, project: &ProjectBinding, surface| {
+            let read = kernel_routes::read::read_visible(
+                kernel,
+                project,
+                surface,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap();
+            let mut rows: Vec<_> = read
+                .rows
+                .iter()
+                .map(|row| {
+                    let rationale = &read.decisions[&row.object.object_id].payload.rationale;
+                    let restates = serde_json::from_str::<Value>(rationale)
+                        .ok()
+                        .and_then(|rationale| rationale["restates"].as_str().map(str::to_owned));
+                    (
+                        row.object.object_id.clone(),
+                        row.visibility,
+                        row.object.sensitivity,
+                        restates,
+                    )
+                })
+                .collect();
+            rows.sort_by(|left, right| left.0.cmp(&right.0));
+            rows
+        };
+        for (approved, written) in [(false, "1"), (true, "0")] {
+            let dir = tempfile::tempdir().unwrap();
+            let project = ProjectBinding::new(dir.path());
+            let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+            let target = "mem_0earlier";
+            let (earlier, stored) = stated_job("job-earlier", std::slice::from_ref(&statement));
+            kernel
+                .commit_before(
+                    Instant::now() + COMMIT_WAIT,
+                    kernel::CommitIntent {
+                        producer: "test".into(),
+                        operation_key: project.operation_key("test", "earlier").unwrap(),
+                        request_digest: "0".repeat(64),
+                        actor: "test".into(),
+                        cause: "a memory served as sensitive".into(),
+                    },
+                    |envelope| {
+                        let (mut domains, mut ready, mut refusal) = (HashSet::new(), false, None);
+                        kernel_routes::commit::ensure_domain(envelope, "memory", &mut domains)?;
+                        kernel_routes::commit::ensure_scope(
+                            envelope,
+                            &project,
+                            &mut ready,
+                            &mut domains,
+                            &mut refusal,
+                        )?;
+                        envelope.insert_decision(kernel::DecisionSpec {
+                            decision_id: "dec_0earlier".into(),
+                            object_id: target.into(),
+                            domain_id: "memory".into(),
+                            proposition_id: None,
+                            scope_id: Some(project.scope_id()),
+                            anchor_id: None,
+                            evidence_id: None,
+                            decision_kind: "CONFIG_VALUES".into(),
+                            payload: kernel::DecisionPayload {
+                                summary: stored.memories[0].content.clone(),
+                                rationale: "{}".into(),
+                            },
+                            source_kind: CAPTURE_SOURCE_KIND.into(),
+                            source_id: CAPTURE_SOURCE_ID.into(),
+                            source_revision: 1,
+                            sensitivity: kernel::Sensitivity::Sensitive,
+                        })?;
+                        let record = approved
+                            .then(|| {
+                                record_statement(
+                                    envelope,
+                                    &project,
+                                    &earlier,
+                                    &stored.memories[0],
+                                    target,
+                                    &mut domains,
+                                )
+                            })
+                            .transpose()?;
+                        kernel_routes::commit::admit_capture(envelope, target, record.as_deref())?;
+                        Ok("1".into())
+                    },
+                )
+                .unwrap();
+            let served = if approved {
+                kernel::SurfaceVisibility::Visible
+            } else {
+                kernel::SurfaceVisibility::Labeled
+            };
+            let before = vec![(
+                target.to_string(),
+                served,
+                kernel::Sensitivity::Sensitive,
+                None,
+            )];
+            assert_eq!(
+                rows(&kernel, &project, kernel::Surface::ExplicitSearch),
+                before,
+                "approved {approved}"
+            );
+            assert!(
+                rows(&kernel, &project, kernel::Surface::AutoInject).is_empty(),
+                "approved {approved}: automatic injection hides a sensitive memory"
+            );
+            let read = kernel_routes::read::read_visible(
+                &kernel,
+                &project,
+                kernel::Surface::ExplicitSearch,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap();
+            let (source, mut output) = stated_job("job-repeat", std::slice::from_ref(&statement));
+            output.existing = vec![ExistingCaptureMemory {
+                id: target.into(),
+                category: "CONFIG_VALUES".into(),
+                content: stored.memories[0].content.clone(),
+                can_replace: true,
+                source_revision: read.rows[0].object.source_revision,
+                created_commit_seq: read.rows[0].object.created_commit_seq,
+                automatic: approved,
+            }];
+            output.memories[0].duplicate_of = Some(target.into());
+            let receipt = publish_now(
+                &kernel,
+                &project,
+                &source,
+                &output,
+                &serde_json::to_string(&output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(receipt.result, written, "approved {approved}");
+            let explicit = rows(&kernel, &project, kernel::Surface::ExplicitSearch);
+            let automatic = rows(&kernel, &project, kernel::Surface::AutoInject);
+            if approved {
+                assert_eq!(explicit, before, "a repeat of an approved statement");
+                assert!(automatic.is_empty(), "{automatic:?}");
+                continue;
+            }
+            let recorded: Vec<_> = explicit
+                .iter()
+                .filter(|row| row.0 != target)
+                .cloned()
+                .collect();
+            assert_eq!(recorded.len(), 1, "{explicit:?}");
+            assert_eq!(recorded[0].1, kernel::SurfaceVisibility::Visible);
+            assert_eq!(recorded[0].2, kernel::Sensitivity::Normal);
+            assert_eq!(recorded[0].3.as_deref(), Some(target));
+            assert_eq!(automatic, recorded, "the statement is delivered");
+            assert!(
+                explicit.contains(&before[0]),
+                "the labeled memory stays as it was: {explicit:?}"
+            );
+        }
     }
 
     #[test]
