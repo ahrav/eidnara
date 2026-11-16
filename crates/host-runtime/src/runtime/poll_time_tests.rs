@@ -92,6 +92,30 @@ fn config(data_root: &std::path::Path) -> HostConfig {
     }
 }
 
+async fn first_probe(host: &mut JoinHandle<Result<(), HostError>>, published: &AtomicBool) {
+    while !published.load(Ordering::SeqCst) {
+        if host.is_finished() {
+            panic!(
+                "the host stopped before its first health probe: {:?}",
+                host.await
+            );
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "the host stopped before its first health probe")]
+async fn a_host_that_stops_before_its_first_health_probe_fails_the_wait() {
+    let data_root = tempfile::tempdir().expect("temp data root");
+    let handler = SpinningHandler::default();
+    let published = Arc::clone(&handler.published);
+    let mut config = config(data_root.path());
+    config.limits.max_resident_bytes = 0;
+    let mut host = tokio::spawn(run(handler, config, CancellationToken::new()));
+    first_probe(&mut host, &published).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_initializer_whose_polls_spend_the_deadline_fails_startup() {
     test_cpu::spend(Duration::ZERO);
@@ -117,10 +141,8 @@ async fn a_shutdown_callback_whose_polls_spend_the_deadline_is_fatal() {
     };
     let published = Arc::clone(&handler.published);
     let shutdown = CancellationToken::new();
-    let host = tokio::spawn(run(handler, config(data_root.path()), shutdown.clone()));
-    while !published.load(Ordering::SeqCst) {
-        tokio::task::yield_now().await;
-    }
+    let mut host = tokio::spawn(run(handler, config(data_root.path()), shutdown.clone()));
+    first_probe(&mut host, &published).await;
     shutdown.cancel();
     let result = host.await.expect("run task");
     assert!(
