@@ -1,19 +1,19 @@
 /**
- * Ranks kernel memory rows for an explicit search. The daemon serves the
- * project's visible rows; matching them against the query is local because
- * the row set is already budget-sized and the match must not depend on a
- * second round trip.
+ * Memory search ranks kernel memory rows from the project's visible rows,
+ * which the daemon serves in bounded pages.
  */
 
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
-import type { Deadline } from "../../shared/host-client";
+import { Deadline } from "../../shared/host-client";
 import {
     isAvailable,
     isMemoryDecisionRow,
     type KernelClient,
     MAX_READ_OBJECT_IDS,
     type MemoryState,
+    type ReadCursor,
     type ReadRow,
     type RouteCausality,
     type Surface,
@@ -255,9 +255,7 @@ export function searchKernelMemoryRows(
     args: KernelMemorySearchArgs,
 ): KernelMemorySearchResult[] | null {
     const nowMs = args.nowMs ?? Date.now();
-    const decisionRows = args.rows.filter(
-        (row) => isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, nowMs),
-    );
+    const decisionRows = args.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
     const ids = parseObjectIdQuery(args.query);
     if (ids) {
         const byId = new Map(decisionRows.map((row) => [row.object.object_id, row]));
@@ -271,9 +269,20 @@ export function searchKernelMemoryRows(
     const candidates = decisionRows.filter(
         (row) => !args.excludeObjectIds?.has(row.object.object_id),
     );
-    const terms = queryTerms(args.query);
-    if (terms.length === 0) return null;
-    const scored = candidates
+    const scored = rankLexicalRows(candidates, queryTerms(args.query), args.limit).map((entry) =>
+        memoryResultFromRow(entry.row, entry.score, "lexical"),
+    );
+    return scored.length > 0 ? scored : null;
+}
+
+/** Ranks the rows that contain a query term: best score first, then newest, then object id. A row's rank depends on that row alone. */
+function rankLexicalRows(
+    rows: readonly ReadRow[],
+    terms: readonly string[],
+    limit: number,
+): { row: ReadRow; score: number }[] {
+    if (terms.length === 0) return [];
+    return rows
         .map((row) => {
             const text = rowText(row).toLowerCase();
             const matched = terms.filter((term) => text.includes(term)).length;
@@ -286,7 +295,142 @@ export function searchKernelMemoryRows(
                 right.row.object.created_commit_seq - left.row.object.created_commit_seq ||
                 left.row.object.object_id.localeCompare(right.row.object.object_id),
         )
-        .slice(0, args.limit)
-        .map((entry) => memoryResultFromRow(entry.row, entry.score, "lexical"));
-    return scored.length > 0 ? scored : null;
+        .slice(0, limit);
+}
+
+/** A later page's position: the first page's snapshot and the last row served so far, whose id is encoded once per page. */
+interface ScanPosition {
+    asOf: number;
+    before: ReadCursor;
+    beforeId: Buffer;
+}
+
+/** The daemon breaks commit ties by UTF-8 byte order, so ids compare as bytes here too. */
+function followsCursor(position: ScanPosition, row: ReadRow): boolean {
+    const seq = row.object.created_commit_seq;
+    return (
+        seq < position.before.createdCommitSeq ||
+        (seq === position.before.createdCommitSeq &&
+            Buffer.compare(Buffer.from(row.object.object_id, "utf8"), position.beforeId) > 0)
+    );
+}
+
+/**
+ * The default scan reads up to sixteen pages at the first page's snapshot. A page holds at most
+ * 8,192 rows and 8 MiB of row bytes, so sixteen pages cover 131,072 memories (a project that keeps
+ * 100 memories a day for more than three years) and transfer at most 128 MiB.
+ */
+const MAX_SNAPSHOT_SCAN_PAGES = 16;
+
+/** One scan spends at most the deadline one memory read had before the scan paged, so the fallback answers no later than it did; pages the deadline leaves unread are reported as truncation. */
+const SNAPSHOT_SCAN_DEADLINE_MS = 10_000;
+
+/** The rows a lexical search ranks: memory decisions, minus anti-memories past their expiry. */
+function isSearchableMemoryRow(row: ReadRow, nowMs: number): boolean {
+    return isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, nowMs);
+}
+
+/**
+ * The rows a scan carries from page to page, in rank order: the best `limit` rows that cannot
+ * expire, and the best `limit` anti-memories that carry an expiry. A row's rank and its kind
+ * depend on that row alone, so applying both caps to each page's merge keeps the best `limit` rows
+ * of each kind over every page read. The final ranking reads the clock after the scan, and the
+ * place of an anti-memory that expired meanwhile goes to the next row kept here, when one is left.
+ */
+function retainRankedRows(rows: readonly ReadRow[], terms: readonly string[], limit: number) {
+    let lasting = 0;
+    let expiring = 0;
+    const kept: ReadRow[] = [];
+    for (const { row } of rankLexicalRows(rows, terms, Number.POSITIVE_INFINITY)) {
+        const canExpire = antiMemoryPayloadOfRow(row)?.expiresAt != null;
+        if (canExpire ? expiring++ < limit : lasting++ < limit) kept.push(row);
+    }
+    return kept;
+}
+
+export type SnapshotScan =
+    | { ok: true; rows: ReadRow[]; truncated: boolean }
+    | { ok: false; state: MemoryState };
+
+/**
+ * Reads the surface page by page at the first page's snapshot. Among the rows of the pages read,
+ * the retained rows, at most twice `limit`, hold the top `limit` lexical results of the rows
+ * eligible at `nowMs`, the scan's start by default. When retained anti-memories expire before the
+ * final ranking, every row that cannot expire (a memory, or an anti-memory without an expiry) and
+ * ranks in the top `limit` of the rows still live then is among the retained rows. Of the
+ * anti-memories in the pages read that carry an expiry, the scan retains the best `limit` among
+ * those eligible at `nowMs`.
+ *
+ * Only the first page can be gated; later pages read the first page's snapshot. `truncated`
+ * reports rows left unread: after the first page for a query with no ranking term, after
+ * `maxPages` pages, past the deadline, or when the daemon refuses a later page or answers it from
+ * another snapshot, over another connection, or with a row at or before the cursor. A search the
+ * caller's signal cancels answers its state, as a refused first page does.
+ */
+export async function scanSnapshotForLexicalSearch(args: {
+    client: KernelClient;
+    surface: Surface;
+    gated: boolean;
+    query: string;
+    limit: number;
+    /** The instant that decides which anti-memories have expired; the scan's start by default. */
+    nowMs?: number;
+    signal?: AbortSignal;
+    /** Each page's read receives this deadline's remainder; the scan starts a `SNAPSHOT_SCAN_DEADLINE_MS` deadline by default. */
+    deadline?: Deadline;
+    maxPages?: number;
+}): Promise<SnapshotScan> {
+    const terms = queryTerms(args.query);
+    const nowMs = args.nowMs ?? Date.now();
+    const deadline = args.deadline ?? Deadline.start(SNAPSHOT_SCAN_DEADLINE_MS);
+    const maxPages = args.maxPages ?? MAX_SNAPSHOT_SCAN_PAGES;
+    const connection = args.client.connectionIdentity();
+    let kept: ReadRow[] = [];
+    let position: ScanPosition | null = null;
+    for (let page = 0; page < maxPages; page += 1) {
+        // `prior` is null on the first page alone.
+        const prior = position;
+        if (prior !== null && deadline.isExpired()) {
+            return { ok: true, rows: kept, truncated: true };
+        }
+        const read = await args.client.read({
+            surface: args.surface,
+            gated: prior === null && args.gated,
+            // The first page caches tokens as the single read did; later pages' rows mostly fall out of the ranking.
+            cacheTokens: prior === null,
+            ...(prior === null ? {} : { asOf: prior.asOf, before: prior.before }),
+            ...(args.signal ? { signal: args.signal } : {}),
+            deadlineMs: deadline.remainingMs(),
+        });
+        if (!isAvailable(read)) {
+            // The client reports an expired deadline as `cancelled` too, so only the caller's own signal marks a cancelled search.
+            const cancelled = args.signal?.aborted === true;
+            return prior === null || cancelled
+                ? { ok: false, state: read.state }
+                : { ok: true, rows: kept, truncated: true };
+        }
+        // A reply from another daemon connection can reuse the same `known_as_of` for a different store state.
+        const continuesSnapshot =
+            prior === null ||
+            (read.known_as_of === prior.asOf &&
+                args.client.connectionIdentity() === connection &&
+                read.rows.every((row) => followsCursor(prior, row)));
+        if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
+        const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
+        kept = retainRankedRows([...kept, ...candidates], terms, args.limit);
+        const last = read.rows.at(-1);
+        if (!read.truncated || last === undefined || terms.length === 0) {
+            return { ok: true, rows: kept, truncated: read.truncated };
+        }
+        const before = {
+            createdCommitSeq: last.object.created_commit_seq,
+            objectId: last.object.object_id,
+        };
+        position = {
+            asOf: read.known_as_of,
+            before,
+            beforeId: Buffer.from(before.objectId, "utf8"),
+        };
+    }
+    return { ok: true, rows: kept, truncated: true };
 }

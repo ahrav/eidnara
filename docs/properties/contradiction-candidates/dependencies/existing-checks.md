@@ -33,16 +33,17 @@ folding exists as a check; the goldens imply both (e.g. `HTTPServer` stays
 | `the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact` | `:286` | sensitivity folding for decision-kind rows | unaudited |
 | `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order` | `:420` | domain read sees rows the capped unfiltered read drops | unaudited |
 | `the_domain_selection_reads_no_row_of_another_domains_payload_pressure` | `:448` | another domain's payload volume does not cost the domain read | unaudited |
-| in-module test at `crates/kernel/src/admission.rs:6264-6281` | | domain read on `memory` returns the one visible decision after a reopen | unaudited |
+| in-module test at `crates/kernel/src/admission.rs:6296-6313` | | domain read on `memory` returns the one visible decision after a reopen | unaudited |
 | `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation` | `crates/daemon/tests/kernel_routes.rs:1958` | `MAX_READ_ROWS` newest rows, `truncated: true` | unaudited |
 | `bounded_selection_matches_a_full_sort_and_truncate` | `:2080` | `NewestRows` equals sort-then-truncate | unaudited |
 | `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit` | `:2112` | byte budget cut | unaudited |
+| `paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once` | `:6973` | a `before` cursor ahead of every row serves `MAX_READ_ROWS` rows with `truncated: true`; the page after the first holds the remaining rows with `truncated: false` | unaudited |
 | `rows_serve_only_to_the_project_their_scope_names` | `:1803` | cross-project rows absent | unaudited |
 | `recorded_cross_project_read_is_empty` | `:1366` | | unaudited |
 | `a_request_naming_another_project_root_is_refused_before_any_work` | `:1487` | project mismatch before work | unaudited |
 
 Production guards: `CorruptCanonicalRow` when a visible decision lacks its
-payload size or row (`read.rs:215-219`, `:239-243`).
+payload size or row (`read.rs:254-259`, `:287-292`).
 
 None found: no test asserts the Kernel API's lack of a row bound (it is an
 absence, not a check), and no test drives `visible_domain_decisions_as_of_in_scope`

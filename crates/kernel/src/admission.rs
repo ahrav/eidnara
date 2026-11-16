@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "097ed31de1a3f3a49b83de0cedf83e7a1b9850f1cfce8d33aa4fa777d7ca0d17";
+    "2672ed6969139e84c587e1d5d5703e3cb9b3e7504a6ff50f55bb509e7c6169c4";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -3162,6 +3162,24 @@ impl KernelStore {
         self.visible_selected_as_of(surface, requested, selection, scope, None)
     }
 
+    /// [`Self::visible_as_of_in_scope`] whose SQL bounds the candidate set to
+    /// `created_commit_seq <= created_at_or_before` before classification.
+    pub fn visible_created_at_or_before_as_of_in_scope(
+        &self,
+        surface: Surface,
+        requested: i64,
+        created_at_or_before: i64,
+        scope: Option<ScopeTermFilter<'_>>,
+    ) -> Result<VisibleAsOf, KernelError> {
+        self.visible_selected_as_of(
+            surface,
+            requested,
+            ServedSelection::CreatedAtOrBefore(created_at_or_before),
+            scope,
+            None,
+        )
+    }
+
     /// [`Self::visible_as_of_in_scope`] restricted to the decision objects of `domain_id`. The domain and kind are
     /// matched in SQL before any row is read, so rows of other domains are neither decoded nor counted against a
     /// caller's bounds, and a corrupt row outside the domain never fails this read.
@@ -3505,6 +3523,8 @@ fn served_rows(
 pub(crate) enum ServedSelection<'a> {
     /// Every object at the snapshot.
     All,
+    /// SQL bounds the candidate set before classification to `created_commit_seq <= :created_at_or_before`.
+    CreatedAtOrBefore(i64),
     /// The objects a JSON string array of identifiers names, bound as `:ids`.
     Named(&'a str),
     /// The decision objects of one domain, bound as `:domain_id`.
@@ -3578,6 +3598,7 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
     let ids_predicate = match selection {
         ServedSelection::Named(_) => "o.object_id IN (SELECT value FROM json_each(:ids)) AND",
         ServedSelection::All => "",
+        ServedSelection::CreatedAtOrBefore(_) => "o.created_commit_seq<=:created_at_or_before AND",
         ServedSelection::DomainDecisions(_) => {
             "o.domain_id=:domain_id AND o.object_kind='decision' AND"
         }
@@ -3588,7 +3609,9 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
             "dec.scope_id",
             "dec.evidence_id",
         ),
-        ServedSelection::Named(_) | ServedSelection::All => (
+        ServedSelection::Named(_)
+        | ServedSelection::All
+        | ServedSelection::CreatedAtOrBefore(_) => (
             "LEFT JOIN observations obs ON obs.object_id=o.object_id
              LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id",
             "COALESCE(dec.scope_id,obs.scope_id)",
@@ -3701,11 +3724,14 @@ pub(crate) fn served_classes_selected(
     static NAMED_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::Named("")));
     static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(ServedSelection::All));
+    static CREATED_SQL: LazyLock<String> =
+        LazyLock::new(|| served_classes_sql(ServedSelection::CreatedAtOrBefore(0)));
     static DOMAIN_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::DomainDecisions("")));
     let sql = match selection {
         ServedSelection::Named(_) => NAMED_SQL.as_str(),
         ServedSelection::All => ALL_SQL.as_str(),
+        ServedSelection::CreatedAtOrBefore(_) => CREATED_SQL.as_str(),
         ServedSelection::DomainDecisions(_) => DOMAIN_SQL.as_str(),
     };
     let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
@@ -3728,6 +3754,12 @@ pub(crate) fn served_classes_selected(
         ],
         ServedSelection::All => &[
             (":governing_as_of", &requested),
+            (":scope_dimension", &scope_dimension),
+            (":scope_value", &scope_value),
+        ],
+        ServedSelection::CreatedAtOrBefore(created_at_or_before) => &[
+            (":governing_as_of", &requested),
+            (":created_at_or_before", created_at_or_before),
             (":scope_dimension", &scope_dimension),
             (":scope_value", &scope_value),
         ],

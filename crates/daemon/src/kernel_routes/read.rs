@@ -41,6 +41,9 @@ pub(crate) struct ReadRequest {
     /// Filters the read to these objects before the row cap applies, so a targeted lookup addresses a row the bounded unfiltered read drops; `None` reads the whole surface.
     #[serde(default)]
     object_ids: Option<Vec<String>>,
+    /// Serves only the rows after this row in serving order; a caller sets it to the last row of the previous page to read the next page, and sets `as_of` to the first page's `known_as_of` so every page reads one snapshot.
+    #[serde(default)]
+    before: Option<ReadCursor>,
     /// Whether the serving policy judges freshness before rows are returned.
     #[serde(default)]
     gated: bool,
@@ -60,6 +63,22 @@ impl ReadRequest {
     #[cfg(not(feature = "test-support"))]
     fn clock_ms(&self) -> i64 {
         crate::now_ms()
+    }
+}
+
+/// A row's position in serving order (`created_commit_seq` descending, `object_id` ascending), as the row reports it in `object`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReadCursor {
+    created_commit_seq: i64,
+    object_id: String,
+}
+
+impl ReadCursor {
+    fn precedes(&self, row: &VisibleRow) -> bool {
+        row.object.created_commit_seq < self.created_commit_seq
+            || (row.object.created_commit_seq == self.created_commit_seq
+                && row.object.object_id.as_str() > self.object_id.as_str())
     }
 }
 
@@ -167,6 +186,18 @@ pub(crate) fn read_visible(
     as_of: Option<i64>,
     selection: RowSelection<'_>,
 ) -> Result<ReadResponse, KernelError> {
+    read_visible_page(store, project, surface, as_of, selection, None)
+}
+
+/// When `before` is set, `read_visible_page` applies the row cap to rows after `before` in serving order.
+pub(crate) fn read_visible_page(
+    store: &KernelStore,
+    project: &ProjectBinding,
+    surface: Surface,
+    as_of: Option<i64>,
+    selection: RowSelection<'_>,
+    before: Option<&ReadCursor>,
+) -> Result<ReadResponse, KernelError> {
     let requested = match as_of {
         Some(as_of) => as_of,
         None => store.tip()?,
@@ -177,7 +208,15 @@ pub(crate) fn read_visible(
     // domains are never decoded or judged.
     let scope = Some(project.scope_term());
     let visible = match selection {
-        RowSelection::All => store.visible_as_of_in_scope(surface, requested, None, scope)?,
+        RowSelection::All => match before {
+            Some(cursor) => store.visible_created_at_or_before_as_of_in_scope(
+                surface,
+                requested,
+                cursor.created_commit_seq,
+                scope,
+            )?,
+            None => store.visible_as_of_in_scope(surface, requested, None, scope)?,
+        },
         RowSelection::Objects(ids) => {
             store.visible_as_of_in_scope(surface, requested, Some(ids), scope)?
         }
@@ -190,7 +229,10 @@ pub(crate) fn read_visible(
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
     let mut newest = NewestRows::new(MAX_READ_ROWS);
     for row in visible.rows {
-        if selection.keeps(&row) && filter.matches(row.scope_id.as_deref(), &mut terms)? {
+        if selection.keeps(&row)
+            && before.is_none_or(|cursor| cursor.precedes(&row))
+            && filter.matches(row.scope_id.as_deref(), &mut terms)?
+        {
             newest.push(row);
         }
     }
@@ -440,11 +482,12 @@ impl HandlerCore {
         let store = scope.store.clone();
         let project = scope.project.clone();
         let object_ids = parsed.object_ids.clone();
+        let before = parsed.before.clone();
         let result = blocking(move || {
             let selection = object_ids
                 .as_deref()
                 .map_or(RowSelection::All, RowSelection::Objects);
-            read_visible(&store, &project, surface, as_of, selection)
+            read_visible_page(&store, &project, surface, as_of, selection, before.as_ref())
         })
         .await;
         let response = match result {
