@@ -661,6 +661,17 @@ fn a_chunk_after_a_position_serves_exactly_the_rows_that_follow_it() {
 fn a_chunk_carries_each_decision_object_with_its_decision() {
     let directory = tempfile::tempdir().unwrap();
     let store = store_with(directory.path(), 40, 300, 4);
+    // One payload holds every kind of character the stored encoding treats differently.
+    store
+        .commit(intent("escaped"), |envelope| {
+            let mut spec = decision("memory-escaped", MEMORY, "preference");
+            spec.payload.summary = "quote \" slash \\ tab \t bell \u{7} é \u{1F600}".to_string();
+            spec.payload.rationale = "line\nbreak \u{7f}".to_string();
+            envelope.insert_decision(spec)?;
+            envelope.record_admission(explicit("memory-escaped"))?;
+            Ok(String::new())
+        })
+        .unwrap();
     let tip = store.tip().unwrap();
     let chunk = store
         .visible_chunk_as_of_in_scope(
@@ -686,7 +697,7 @@ fn a_chunk_carries_each_decision_object_with_its_decision() {
         .map(|entry| entry.row.object.object_id.clone())
         .filter(|id| *id != undecodable)
         .collect();
-    assert_eq!(ids.len(), 340);
+    assert_eq!(ids.len(), 341);
     assert!(
         ids.len() + 1 < chunk.rows.len(),
         "the surface serves an object that is no decision"

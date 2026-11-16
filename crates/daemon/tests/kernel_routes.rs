@@ -7307,3 +7307,102 @@ async fn a_read_fails_closed_for_a_decision_object_without_a_live_decision_row()
     assert_eq!(first["decision"]["payload"]["summary"], "decision 1");
     daemon.handler.shutdown().await.unwrap();
 }
+
+/// A page serves a stored payload's text as stored only in the layout the kernel writes. A payload in any other
+/// layout is decoded by id: valid JSON for a decision payload serves the same summary and rationale a read of the
+/// named object serves, and text that is no decision payload fails the read closed.
+#[tokio::test]
+async fn a_page_decodes_a_payload_stored_in_another_layout_and_refuses_one_that_is_no_payload() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    // Text with a quote, a backslash, control bytes, and multi-byte characters takes the stored path.
+    let escaped = "quote \" slash \\ tab \t line \n bell \u{7} é \u{1F600}";
+    let seeded = daemon
+        .commit(
+            "seed",
+            vec![insert_decision(1), insert_decision_with_summary(2, escaped)],
+            vec![],
+        )
+        .await;
+    assert_state(&seeded, "available", None);
+    let connection = core_connection(&daemon);
+    let stored: Vec<u8> = connection
+        .query_row(
+            "SELECT decision_payload FROM decisions WHERE object_id='decision-object-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(stored).unwrap(),
+        r#"{"summary":"decision 1","rationale":"because 1"}"#
+    );
+    let store_payload = |payload: &[u8]| {
+        connection
+            .execute(
+                "UPDATE decisions SET decision_payload=?1 WHERE object_id='decision-object-1'",
+                [payload],
+            )
+            .unwrap();
+    };
+    let payloads = |read: &Value| -> Vec<Value> {
+        read["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["decision"]["payload"].clone())
+            .collect()
+    };
+    let named = || {
+        let mut named = read_request(&daemon.project, SESSION, "explicit_search", None);
+        named["object_ids"] = json!(["decision-object-1"]);
+        daemon.call(daemon.route, named)
+    };
+
+    let page = daemon.read("explicit_search", None).await;
+    assert_state(&page, "available", None);
+    assert_eq!(
+        payloads(&page),
+        [
+            json!({"summary": "decision 1", "rationale": "because 1"}),
+            json!({"summary": escaped, "rationale": "because 2"}),
+        ]
+    );
+
+    for (payload, summary, rationale) in [
+        (
+            &br#"{ "rationale": "r\u0041\/\n", "summary": "s \ud83d\ude00", "extra": [1] }"#[..],
+            "s \u{1F600}",
+            "rA/\n",
+        ),
+        (br#"{"rationale":"r","summary":"s"}"#, "s", "r"),
+        (br#"{"summary":"\u0073","rationale":"r"}"#, "s", "r"),
+        (br#"{"summary":"s","rationale":"r"} "#, "s", "r"),
+        (br#"{"summary":"s","rationale":"r","extra":1}"#, "s", "r"),
+    ] {
+        store_payload(payload);
+        let text = String::from_utf8_lossy(payload);
+        let page = daemon.read("explicit_search", None).await;
+        assert_state(&page, "available", None);
+        let decoded = json!({"summary": summary, "rationale": rationale});
+        assert_eq!(payloads(&page)[0], decoded, "{text}");
+        assert_eq!(page["rows"][0], named().await["rows"][0], "{text}");
+    }
+
+    for payload in [
+        &br#"{}"#[..],
+        br#"{"summarx":"s","rationale":"r"}"#,
+        br#"{"summary":"s","rationalx":"r"}"#,
+        br#"{"summary":"s","rationale":7}"#,
+        br#"{"summary":"s","rationale":"r""#,
+        b"{\"summary\":\"\xff\",\"rationale\":\"r\"}",
+    ] {
+        store_payload(payload);
+        let text = String::from_utf8_lossy(payload);
+        let page = daemon.read("explicit_search", None).await;
+        assert_state(&page, "unavailable", Some("store_unsupported"));
+        assert!(page.get("rows").is_none(), "{text}: {page}");
+        assert_state(&named().await, "unavailable", Some("store_unsupported"));
+    }
+    daemon.handler.shutdown().await.unwrap();
+}
