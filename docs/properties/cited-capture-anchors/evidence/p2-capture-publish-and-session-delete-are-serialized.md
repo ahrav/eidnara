@@ -24,7 +24,7 @@ Hold the gate from a test thread, issue the competing operation, assert it has n
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/lib.rs:25543`, `:25881`, `:26086`, `:26739`, `:25268`; `crates/daemon/src/source_capture_tests.rs:1062`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/lib.rs:25543`, `:25881`, `:26093`, `:26746`, `:25268`; `crates/daemon/src/source_capture_tests.rs:1062`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
