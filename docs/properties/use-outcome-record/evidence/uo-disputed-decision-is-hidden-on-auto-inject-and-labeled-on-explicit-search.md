@@ -15,7 +15,7 @@ this file; its parent is `d85de937b`) and are re-verified at the #1162 branch
 tip.
 
 - Disposition mapping: `crates/kernel/src/admission.rs:4237`.
-- Row and surface: `visibility_row` (`crates/kernel/src/admission.rs:4324`),
+- Row and surface: `visibility_row` (`crates/kernel/src/admission.rs:4348`),
   `crates/kernel/src/admission.rs:4197`.
 - Correction: both integration tests cited by the spec exercise `AutoSearch`;
   the `AutoInject` cell is proved by the unit matrix.
