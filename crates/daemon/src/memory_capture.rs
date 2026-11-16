@@ -1982,19 +1982,34 @@ fn bounds_sentences(
 ) -> bool {
     // A paragraph keeps its indentation and trailing spaces, which border
     // its first and last sentence as the paragraph's edges do.
-    let edge = |around: &'_ str| -> bool { around.trim().is_empty() };
-    let (before, statement, after) = (
-        Some(&paragraph[..start])
-            .filter(|before| !edge(before))
-            .unwrap_or(""),
-        &paragraph[start..end],
-        Some(&paragraph[end..])
-            .filter(|after| !edge(after))
-            .unwrap_or(""),
-    );
+    let statement = &paragraph[start..end];
     colon >= start
-        && sentence_starts_at(before, statement)
-        && sentence_ends_at(statement, after, continues_lowercase)
+        && sentence_starts_at(preceding_text(&paragraph[..start]), statement)
+        && sentence_ends_at(
+            statement,
+            following_text(&paragraph[end..]),
+            continues_lowercase,
+        )
+}
+
+/// The text of a paragraph before a quotation, or `""` when only the
+/// paragraph's indentation precedes the quotation. The scan runs backward
+/// from the quotation, so a call reads the whitespace run that borders it.
+fn preceding_text(before: &str) -> &str {
+    let text = before.trim_end();
+    #[cfg(test)]
+    EDGE_BYTES.with(|bytes| bytes.set(bytes.get() + (before.len() - text.len())));
+    if text.is_empty() { "" } else { before }
+}
+
+/// The text of a paragraph after a quotation, or `""` when only the
+/// paragraph's trailing spaces follow the quotation. The scan runs forward
+/// from the quotation, so a call reads the whitespace run that borders it.
+fn following_text(after: &str) -> &str {
+    let text = after.trim_start();
+    #[cfg(test)]
+    EDGE_BYTES.with(|bytes| bytes.set(bytes.get() + (after.len() - text.len())));
+    if text.is_empty() { "" } else { after }
 }
 
 /// The whole sentence of one plain-prose paragraph of the message that
@@ -2077,10 +2092,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
             plain_sentence_start(&paragraph[..start])
         };
         // Spaces that trail the paragraph are no part of a sentence.
-        let rest = match &paragraph[end..] {
-            rest if rest.trim().is_empty() => "",
-            rest => rest,
-        };
+        let rest = following_text(&paragraph[end..]);
         let to = if sentence_ends_at(&paragraph[start..end], rest, |skip| {
             letters
                 .at_or_after(first + end + skip)
@@ -2256,6 +2268,9 @@ thread_local! {
     /// How many bytes this thread read beside quotation occurrences to judge
     /// where their sentences start and end.
     static BOUNDARY_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `EDGE_BYTES` counts whitespace bytes scanned beside quotations on
+    /// this thread to detect paragraph boundaries.
+    static EDGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn prose_paragraphs(text: &str) -> ProseLayout {
@@ -2449,8 +2464,19 @@ const QUOTATION_FAMILIES: [&[char]; 5] = [
     &['\u{275b}', '\u{275c}', '\u{3003}'],
 ];
 
+/// `"` is the one ASCII character in [`QUOTATION_FAMILIES`], so one
+/// comparison classifies an ASCII character.
+fn quotation_family(ch: char) -> Option<usize> {
+    if ch.is_ascii() {
+        return (ch == '"').then_some(0);
+    }
+    QUOTATION_FAMILIES
+        .iter()
+        .position(|family| family.contains(&ch))
+}
+
 fn is_quotation_mark(ch: char) -> bool {
-    QUOTATION_FAMILIES.iter().any(|family| family.contains(&ch))
+    quotation_family(ch).is_some()
 }
 
 /// Marks every script that uses them writes at the start of a quotation:
@@ -2481,9 +2507,7 @@ fn quotations_close_in_turn(block: &[(usize, &str)]) -> bool {
         let mut previous_opened = false;
         let mut chars = line.chars().peekable();
         while let Some(ch) = chars.next() {
-            let family = QUOTATION_FAMILIES
-                .iter()
-                .position(|family| family.contains(&ch));
+            let family = quotation_family(ch);
             let mut opened = false;
             if let Some(family) = family {
                 let next = chars.peek().copied();
@@ -5047,6 +5071,19 @@ mod tests {
     }
 
     #[test]
+    fn every_character_has_the_quotation_family_that_lists_it() {
+        for ch in '\0'..=char::MAX {
+            assert_eq!(
+                quotation_family(ch),
+                QUOTATION_FAMILIES
+                    .iter()
+                    .position(|family| family.contains(&ch)),
+                "{ch:?}"
+            );
+        }
+    }
+
+    #[test]
     fn only_whole_sentences_of_plain_prose_count_as_whole_statements() {
         let text = "Use pnpm here. Never deploy on Fridays unless the lead agrees.\nKeep logs for 30 days\n\nShould we cache v1.2 builds? Ship on Tuesdays.";
         for (quote, whole) in [
@@ -6245,6 +6282,45 @@ mod tests {
             assert!(
                 read <= 2 * text.len(),
                 "{quote:?} read {read} bytes beside its occurrences in a {}-byte message",
+                text.len()
+            );
+        }
+    }
+
+    /// Each occurrence of a quotation reads the whitespace run that borders
+    /// it, so the checks read a paragraph's indentation and trailing spaces
+    /// a bounded number of times however often the quotation occurs.
+    #[test]
+    fn paragraph_edges_are_read_beside_each_occurrence_of_the_quote() {
+        let count = || EDGE_BYTES.with(std::cell::Cell::get);
+        let before = count();
+        assert!(quotes_whole_statements(
+            &Prose::of("  Use tabs.   "),
+            "Use tabs."
+        ));
+        assert_eq!(
+            count() - before,
+            5,
+            "two bytes of indentation and three after"
+        );
+
+        let indented = format!(" {}{}", "\t".repeat(8_191), "a".repeat(8_192));
+        let labeled = format!("x: y. {}{}", "A. ".repeat(2_700), " ".repeat(8_192));
+        let trailed = format!("{}{}", "A. a. ".repeat(2_000), " ".repeat(8_192));
+        for (text, quote) in [
+            (indented.as_str(), "a"),
+            (labeled.as_str(), "A."),
+            (trailed.as_str(), "A."),
+        ] {
+            let prose = Prose::of(text);
+            assert_eq!(prose.paragraphs(), [(0, text.len())]);
+            let before = count();
+            assert!(!quotes_whole_statements(&prose, quote));
+            assert_eq!(enclosing_statement(&prose, quote), None);
+            let read = count() - before;
+            assert!(
+                read <= 2 * text.len(),
+                "{quote:?} read {read} bytes of whitespace beside its occurrences in a {}-byte message",
                 text.len()
             );
         }
