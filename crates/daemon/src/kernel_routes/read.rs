@@ -6,9 +6,6 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use std::io::Write;
-use std::sync::Arc;
-
 use host_runtime::RouteHandle;
 use kernel::{
     ChunkRow, DecisionRow, KernelError, KernelStore, ScopeTermFilter, Sensitivity, ServingPosition,
@@ -21,7 +18,7 @@ use super::project::{ProjectBinding, ScopeFilter, ScopeTerms, stored_terms};
 use super::serving;
 use super::{InvalidReason, KernelOutcome, blocking, state_only};
 use crate::HandlerCore;
-use crate::dispatch::{Emit, PreparedOutcome, PreparedOutput, PreparedOutputError};
+use crate::dispatch::{PreparedOutcome, PreparedOutput, PreparedOutputError};
 
 const OPERATION: &str = "kernel.read";
 
@@ -483,61 +480,48 @@ fn row_out<'a>(
     }
 }
 
-/// The read's serialized body: rows are encoded straight from the store rows each time the body is emitted, so no `Value` tree exists between measurement and the reserved write.
-struct ReadBody {
-    response: ReadResponse,
-    gated: bool,
-    truncated: bool,
-    /// Rows past this index exceeded the byte budget.
-    served: usize,
-}
-
-#[derive(Serialize)]
-struct ReadBodyOut<'a> {
-    gated: bool,
-    known_as_of: i64,
-    rows: RowsOut<'a>,
-    state: &'a KernelOutcome,
-    tip: i64,
-    truncated: bool,
-}
-
-struct RowsOut<'a>(&'a ReadBody);
-
-impl Serialize for RowsOut<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeSeq;
-        let body = self.0;
-        let mut seq = serializer.serialize_seq(Some(body.served))?;
-        for row in &body.response.rows[..body.served] {
-            seq.serialize_element(&row_out(
-                row,
-                body.response.decisions.get(&row.object.object_id),
-                body.response.known_as_of,
-            ))?;
+/// Encodes the read's response body: the envelope and the longest prefix of `response.rows` whose encoding fits
+/// [`MAX_READ_ROW_BYTES`]. Each row is encoded once, straight into the body, and a row that passes the budget is
+/// taken back out. Rows are newest first, so the budget retains a contiguous prefix of the most recent rows.
+/// `truncated` reports rows the read or the budget left out; a row that fails to encode ends the rows as the
+/// budget does.
+fn encode_body(response: &ReadResponse, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
+    // A typical memory row encodes to about 1 KiB; the envelope is under 200 bytes.
+    let mut body =
+        Vec::with_capacity(MAX_READ_ROW_BYTES.min(response.rows.len().saturating_mul(1024)) + 256);
+    body.extend_from_slice(b"{\"gated\":");
+    serde_json::to_writer(&mut body, &gated)?;
+    body.extend_from_slice(b",\"known_as_of\":");
+    serde_json::to_writer(&mut body, &response.known_as_of)?;
+    body.extend_from_slice(b",\"rows\":[");
+    let rows_start = body.len();
+    let mut truncated = response.truncated;
+    for row in &response.rows {
+        let row_start = body.len();
+        if row_start > rows_start {
+            body.push(b',');
         }
-        seq.end()
+        let out = row_out(
+            row,
+            response.decisions.get(&row.object.object_id),
+            response.known_as_of,
+        );
+        let encoded = serde_json::to_writer(&mut body, &out).is_ok();
+        // The `+ 1` charges each row's array separator or bracket byte against the budget.
+        if !encoded || body.len() - rows_start + 1 > MAX_READ_ROW_BYTES {
+            body.truncate(row_start);
+            truncated = true;
+            break;
+        }
     }
-}
-
-impl Emit for ReadBody {
-    fn emit(&self, destination: &mut dyn Write) -> Result<(), PreparedOutputError> {
-        let out = ReadBodyOut {
-            gated: self.gated,
-            known_as_of: self.response.known_as_of,
-            rows: RowsOut(self),
-            state: &KernelOutcome::Available,
-            tip: self.response.tip,
-            truncated: self.truncated,
-        };
-        serde_json::to_writer(destination, &out).map_err(|error| {
-            if error.is_io() {
-                PreparedOutputError::Write(error.into())
-            } else {
-                PreparedOutputError::Serialize(error)
-            }
-        })
-    }
+    body.extend_from_slice(b"],\"state\":");
+    serde_json::to_writer(&mut body, &KernelOutcome::Available)?;
+    body.extend_from_slice(b",\"tip\":");
+    serde_json::to_writer(&mut body, &response.tip)?;
+    body.extend_from_slice(b",\"truncated\":");
+    serde_json::to_writer(&mut body, &truncated)?;
+    body.push(b'}');
+    Ok(body)
 }
 
 impl HandlerCore {
@@ -588,49 +572,26 @@ impl HandlerCore {
         let project = scope.project.clone();
         let object_ids = parsed.object_ids.clone();
         let before = parsed.before.clone();
+        let gated = parsed.gated;
         let result = blocking(move || {
             let selection = object_ids
                 .as_deref()
                 .map_or(RowSelection::All, RowSelection::Objects);
-            read_visible_page(&store, &project, surface, as_of, selection, before.as_ref())
+            let response =
+                read_visible_page(&store, &project, surface, as_of, selection, before.as_ref())?;
+            Ok::<_, KernelError>(encode_body(&response, gated))
         })
         .await;
-        let response = match result {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => return state_only(KernelOutcome::from(error)),
-            Err(outcome) => return state_only(outcome),
-        };
-        // Rows are newest first, so the budget retains a contiguous prefix of the most recent rows. A failed measurement stops collection and sets `truncated`.
-        let mut truncated = response.truncated;
-        let mut served = 0usize;
-        let mut row_bytes = 0usize;
-        for row in &response.rows {
-            let out = row_out(
-                row,
-                response.decisions.get(&row.object.object_id),
-                response.known_as_of,
-            );
-            // The `+ 1` charges each row's array separator or bracket byte against the budget.
-            let cost = crate::dispatch::measure_serialize(&out)
-                .ok()
-                .and_then(|len| len.checked_add(1));
-            match cost {
-                Some(cost) if row_bytes + cost <= MAX_READ_ROW_BYTES => {
-                    row_bytes += cost;
-                    served += 1;
-                }
-                _ => {
-                    truncated = true;
-                    break;
-                }
-            }
+        match result {
+            // The body's bytes are fixed here, so the transport writes them into the frame at publication.
+            Ok(Ok(Ok(body))) => PreparedOutcome::Response(PreparedOutput::cached_bytes(body)),
+            Ok(Ok(Err(error))) => PreparedOutcome::Error {
+                code: "encode_failed".to_owned(),
+                message: PreparedOutputError::Serialize(error).to_string(),
+            },
+            Ok(Err(error)) => state_only(KernelOutcome::from(error)),
+            Err(outcome) => state_only(outcome),
         }
-        PreparedOutcome::Response(PreparedOutput::emit(Arc::new(ReadBody {
-            response,
-            gated: parsed.gated,
-            truncated,
-            served,
-        })))
     }
 }
 
@@ -731,22 +692,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn read_body_bytes_match_the_value_tree_encoding() {
-        let populated = populated_row();
-        let bare = row("observation", "notes");
-        let unserved = row("decision", "other");
-        let decision = decision(&populated.object.object_id);
-        let mut decisions = HashMap::new();
-        decisions.insert(populated.object.object_id.clone(), decision);
-        let response = ReadResponse {
-            known_as_of: 41,
-            tip: 42,
-            rows: vec![populated, bare, unserved],
-            truncated: false,
-            decisions,
-        };
-        let expected_rows: Vec<Value> = response.rows[..2]
+    fn body_value(response: &ReadResponse, served: usize, gated: bool, truncated: bool) -> Value {
+        let rows: Vec<Value> = response.rows[..served]
             .iter()
             .map(|row| {
                 row_value(
@@ -756,32 +703,99 @@ mod tests {
                 )
             })
             .collect();
-        let expected = json!({
+        json!({
             "known_as_of": response.known_as_of,
             "tip": response.tip,
-            "gated": true,
-            "truncated": true,
-            "rows": expected_rows,
+            "gated": gated,
+            "truncated": truncated,
+            "rows": rows,
             "state": {"kind": "available"},
-        });
-        let expected = serde_json::to_vec(&expected).unwrap();
+        })
+    }
 
-        let body = Arc::new(ReadBody {
-            response,
-            gated: true,
+    #[test]
+    fn read_body_bytes_match_the_value_tree_encoding() {
+        let populated = populated_row();
+        let bare = row("observation", "notes");
+        let decision = decision(&populated.object.object_id);
+        let mut decisions = HashMap::new();
+        decisions.insert(populated.object.object_id.clone(), decision);
+        let mut response = ReadResponse {
+            known_as_of: 41,
+            tip: 42,
+            rows: vec![populated, bare],
             truncated: true,
-            served: 2,
-        });
-        let mut emitted = Vec::new();
-        body.emit(&mut emitted).unwrap();
+            decisions,
+        };
+        for (gated, truncated) in [(true, true), (false, false)] {
+            response.truncated = truncated;
+            let expected = serde_json::to_vec(&body_value(&response, 2, gated, truncated)).unwrap();
+            let encoded = encode_body(&response, gated).unwrap();
+            assert_eq!(
+                String::from_utf8(encoded.clone()).unwrap(),
+                String::from_utf8(expected).unwrap()
+            );
+            let output = PreparedOutput::cached_bytes(encoded.clone());
+            assert!(output.serializes_directly());
+            assert_eq!(output.measure().unwrap().len(), encoded.len());
+        }
+        response.rows.clear();
         assert_eq!(
-            String::from_utf8(emitted.clone()).unwrap(),
-            String::from_utf8(expected).unwrap()
+            encode_body(&response, false).unwrap(),
+            serde_json::to_vec(&body_value(&response, 0, false, false)).unwrap()
         );
+    }
 
-        let output = PreparedOutput::emit(body);
-        let measured = output.measure().unwrap();
-        assert_eq!(measured.len(), emitted.len());
+    /// The body keeps the longest prefix of rows whose encodings, each charged one separator byte, fit the
+    /// budget, and reports the rows it leaves out as truncation.
+    #[test]
+    fn the_byte_budget_keeps_the_longest_row_prefix_that_fits() {
+        let rationale = "r".repeat(MAX_READ_ROW_BYTES / 8);
+        let mut decisions = HashMap::new();
+        let rows: Vec<VisibleRow> = (0..9)
+            .map(|index| {
+                let mut row = row("decision", "memory");
+                row.object.object_id = format!("memory-decision-{index}");
+                let mut decision = decision(&row.object.object_id);
+                decision.payload.rationale = rationale.clone();
+                decisions.insert(row.object.object_id.clone(), decision);
+                row
+            })
+            .collect();
+        let response = ReadResponse {
+            known_as_of: 7,
+            tip: 7,
+            rows,
+            truncated: false,
+            decisions,
+        };
+        let mut charged = 0;
+        let fitting = response
+            .rows
+            .iter()
+            .take_while(|row| {
+                let decision = response.decisions.get(&row.object.object_id);
+                charged += serde_json::to_vec(&row_value(row, decision, 7))
+                    .unwrap()
+                    .len()
+                    + 1;
+                charged <= MAX_READ_ROW_BYTES
+            })
+            .count();
+        assert_eq!(
+            fitting, 7,
+            "eight rows of an eighth of the budget each pass it"
+        );
+        assert_eq!(
+            encode_body(&response, false).unwrap(),
+            serde_json::to_vec(&body_value(&response, fitting, false, true)).unwrap()
+        );
+        let mut within = response;
+        within.rows.truncate(fitting);
+        assert_eq!(
+            encode_body(&within, false).unwrap(),
+            serde_json::to_vec(&body_value(&within, fitting, false, false)).unwrap()
+        );
     }
 
     #[test]

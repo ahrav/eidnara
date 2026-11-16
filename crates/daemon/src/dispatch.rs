@@ -625,7 +625,7 @@ fn checked_body_len(
 }
 
 /// Measures a typed value's exact encoded length without retaining the bytes.
-pub(crate) fn measure_serialize<T: serde::Serialize + ?Sized>(
+fn measure_serialize<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> Result<usize, PreparedOutputError> {
     let mut writer = CountingWriter::default();
