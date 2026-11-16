@@ -1017,4 +1017,65 @@ mod tests {
         assert!(selection.keeps(&row("decision", "notes")));
         assert!(selection.keeps(&row("observation", "memory")));
     }
+
+    /// The in-process readers reach the row cap through `read_visible`: a domain selection over one decision
+    /// more than `MAX_READ_ROWS` keeps the newest rows in serving order, each with its decision, and reports the
+    /// row it leaves out as truncation.
+    #[test]
+    fn a_domain_selection_over_the_row_cap_keeps_the_newest_rows() {
+        use crate::kernel_route_fixtures::{
+            MEMORY_DOMAIN, admission, ensure_domain, ensure_route_scope, intent,
+            memory_decision_spec,
+        };
+        use kernel::{EventKind, SourceClass, TaintClass};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        let project = ProjectBinding::new(directory.path());
+        let ids: Vec<String> = (0..=MAX_READ_ROWS)
+            .map(|index| format!("memory-{index:05}"))
+            .collect();
+        for (batch, commit) in ids.chunks(256).enumerate() {
+            store
+                .commit(intent(&format!("bulk-{batch}")), |envelope| {
+                    ensure_domain(envelope, MEMORY_DOMAIN)?;
+                    let (_, scope_id) = ensure_route_scope(envelope, directory.path())?;
+                    for object_id in commit {
+                        envelope.insert_decision(memory_decision_spec(
+                            object_id,
+                            &scope_id,
+                            "PROJECT_RULES",
+                            object_id,
+                        ))?;
+                        envelope.record_admission(admission(
+                            object_id,
+                            EventKind::Other,
+                            None,
+                            (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                        ))?;
+                    }
+                    Ok(String::new())
+                })
+                .unwrap();
+        }
+
+        let read = read_visible(
+            &store,
+            &project,
+            Surface::ExplicitSearch,
+            None,
+            RowSelection::DomainDecisions(MEMORY_DOMAIN),
+        )
+        .unwrap();
+        assert!(read.truncated);
+        // Commits are served newest first and a commit's rows by id, so the oldest commit's last row is left out.
+        let mut expected: Vec<&String> = ids.chunks(256).rev().flatten().collect();
+        assert_eq!(expected.pop(), Some(&ids[255]));
+        let served: Vec<&String> = read.rows.iter().map(|row| &row.object.object_id).collect();
+        assert_eq!(served.len(), MAX_READ_ROWS);
+        assert_eq!(served, expected);
+        for id in served {
+            assert_eq!(&read.decisions[id].payload.summary, id);
+        }
+    }
 }

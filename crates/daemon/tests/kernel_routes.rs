@@ -7308,9 +7308,9 @@ async fn a_read_fails_closed_for_a_decision_object_without_a_live_decision_row()
     daemon.handler.shutdown().await.unwrap();
 }
 
-/// A page serves a stored payload's text as stored only in the layout the kernel writes. A payload in any other
-/// layout is decoded by id: valid JSON for a decision payload serves the same summary and rationale a read of the
-/// named object serves, and text that is no decision payload fails the read closed.
+/// A page serves the kernel's own payload text with its escapes and multi-byte characters intact. A payload stored
+/// in any other layout is decoded by id: valid JSON for a decision payload serves the same summary and rationale a
+/// read of the named object serves, and text that is no decision payload fails the read closed.
 #[tokio::test]
 async fn a_page_decodes_a_payload_stored_in_another_layout_and_refuses_one_that_is_no_payload() {
     let daemon = Daemon::start().await;
@@ -7404,5 +7404,63 @@ async fn a_page_decodes_a_payload_stored_in_another_layout_and_refuses_one_that_
         assert!(page.get("rows").is_none(), "{text}: {page}");
         assert_state(&named().await, "unavailable", Some("store_unsupported"));
     }
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A page that fills at the end of a chunk reads on to learn whether a row follows it. The rows after the full
+/// page are ones the scope filter drops, so only a later chunk holds the row that decides `truncated`: with that
+/// row the read reports truncation, and without it the same page reports none.
+#[tokio::test]
+async fn a_full_page_reads_later_chunks_to_decide_truncation() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    let oldest = daemon
+        .commit("oldest", vec![insert_decision(0)], vec![])
+        .await;
+    assert_state(&oldest, "available", None);
+    let scope_id = daemon.project_scope_id().await;
+    // Rows of no project sit between the oldest project row and the rest in two commits: the chunk that fills the
+    // page ends with the larger one, and the smaller one keeps that chunk short of the surface's end.
+    for (name, indexes) in [("unscoped-oldest", 0..50), ("unscoped-older", 100..1600)] {
+        let specs = indexes
+            .map(|index| sized_decision(index, None, 16))
+            .collect();
+        commit_admitted(&store, name, specs);
+    }
+    let next = daemon
+        .commit("next", vec![insert_decision(1)], vec![])
+        .await;
+    assert_state(&next, "available", None);
+    // The newest commit holds one project row fewer than the cap and rows of no project beside them, so the
+    // first chunk ends with the page one row short.
+    let newest = (10_000..10_000 + MAX_READ_ROWS as i64 - 1)
+        .map(|index| sized_decision(index, Some(&scope_id), 16))
+        .chain((20_000..20_010).map(|index| sized_decision(index, None, 16)))
+        .collect();
+    commit_admitted(&store, "newest", newest);
+
+    let over = daemon.read("explicit_search", None).await;
+    assert_state(&over, "available", None);
+    let served = served_order(&over);
+    assert_eq!(served.len(), MAX_READ_ROWS);
+    assert_eq!(served.last().map(String::as_str), Some("decision-object-1"));
+    assert_eq!(over["truncated"], true);
+
+    let snapshot = over["known_as_of"].as_i64().unwrap();
+    let retired = daemon
+        .commit(
+            "retire-oldest",
+            vec![json!({"op": "retire_decision", "object_id": "decision-object-0"})],
+            vec![token("decision-object-0", snapshot)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    let exact = daemon.read("explicit_search", None).await;
+    assert_state(&exact, "available", None);
+    assert_eq!(served_order(&exact), served);
+    assert_eq!(exact["truncated"], false);
     daemon.handler.shutdown().await.unwrap();
 }

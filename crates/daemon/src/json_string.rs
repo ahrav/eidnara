@@ -1,4 +1,5 @@
-//! The encoder writes `&str` values as JSON strings byte-identical to `serde_json` output.
+//! The encoder writes `&str` values as JSON strings byte-identical to `serde_json` output, and
+//! the token scan accepts exactly the string tokens that encoder writes.
 
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
@@ -350,7 +351,7 @@ mod tests {
             pieces in proptest::collection::vec(
                 proptest::prop_oneof![
                     proptest::sample::select(vec![
-                        "\\\\", "\\\"", "\\u", "\\u00", "\\u001", "\\u000", "\\n", "\\t", "\\/", "0", "1",
+                        "\\\\", "\\\"", "\\u", "\\u00", "\\u001", "\\u000", "\\u001f", "\\u0000", "\\n", "\\t", "\\/", "0", "1",
                         "a", "f", "A", "F", "b", "\u{7f}", "\u{1f}", "\n", "é", "\u{1F600}", "xxxxxxx",
                     ]).prop_map(str::to_string),
                     proptest::prelude::any::<char>().prop_map(String::from),
@@ -376,7 +377,7 @@ mod tests {
     #[test]
     fn an_escape_is_canonical_exactly_when_serde_json_writes_it() {
         let canonical = |escape: &[u8]| {
-            let mut verdict = None;
+            let mut verdict = false;
             for lead in 0..9 {
                 let mut token = vec![b'"'];
                 token.extend_from_slice(&b"abcdefgh"[..lead]);
@@ -386,9 +387,9 @@ mod tests {
                 let rewritten = serde_json::from_slice::<String>(&token)
                     .is_ok_and(|text| serde_json::to_vec(&text).unwrap() == token);
                 assert_eq!(accepted, rewritten, "{:?}", String::from_utf8_lossy(&token));
-                assert_eq!(*verdict.get_or_insert(accepted), accepted);
+                verdict = accepted;
             }
-            verdict == Some(true)
+            verdict
         };
         let mut short = 0;
         for byte in 0u8..=0x7f {
