@@ -360,6 +360,10 @@ const FUNCTION_WORDS: [&str; 24] = [
     "are", "was", "were", "from", "into", "our", "its", "but", "all", "any", "has", "have",
 ];
 
+/// The words two memories are compared by: runs of letters and digits of
+/// three or more characters, and shorter runs that hold a digit, so a
+/// version or a port such as the `22` of `1.22` counts while `is` and `to`
+/// do not.
 fn content_words(content: &str) -> BTreeSet<String> {
     let content = [USER_STATED, ASSISTANT_REPORTED]
         .iter()
@@ -367,7 +371,7 @@ fn content_words(content: &str) -> BTreeSet<String> {
         .unwrap_or(content);
     content
         .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| word.chars().count() >= 3)
+        .filter(|word| word.chars().count() >= 3 || word.chars().any(char::is_numeric))
         .map(str::to_lowercase)
         .filter(|word| !FUNCTION_WORDS.contains(&word.as_str()))
         .collect()
@@ -2100,36 +2104,48 @@ fn write_captured_memories(
             continue;
         }
         let attributed = attributed[index];
-        for target in memory.replaces.iter().chain(&memory.also_replaces) {
-            if !attributed
-                && envelope
-                    .served_rows_for(&[target.as_str()], None)?
-                    .get(target.as_str())
+        // Whether the Kernel serves live `target` as an approved fact.
+        let automatic =
+            |envelope: &kernel::Envelope<'_>, target: &str| -> Result<bool, kernel::KernelError> {
+                Ok(envelope
+                    .served_rows_for(&[target], None)?
+                    .get(target)
                     .is_some_and(|row| {
                         row.visibility(kernel::Surface::ExplicitSearch)
                             == kernel::SurfaceVisibility::Visible
-                    })
-            {
+                    }))
+            };
+        for target in memory.replaces.iter().chain(&memory.also_replaces) {
+            if !attributed && automatic(envelope, target)? {
                 return Err(kernel::KernelError::Conflict);
             }
         }
+        // A correction whose approval the Kernel refused is stored labeled.
+        // A labeled fact replaces no approved one, so each approved target
+        // stays live beside it.
+        let labeled = attributed && approval == Approval::Refused;
         let mut superseded = None;
         let mut retired = Vec::new();
         let mut source_revision = 1;
         if let Some(target) = &memory.replaces {
-            match checked_capture_target(envelope, project, output, target, true)? {
-                Some(revision) => {
-                    source_revision = revision
-                        .checked_add(1)
-                        .ok_or(kernel::KernelError::InvalidInput)?;
-                    superseded = Some(target);
+            let revision = checked_capture_target(envelope, project, output, target, true)?;
+            if !(labeled && automatic(envelope, target)?) {
+                match revision {
+                    Some(revision) => {
+                        source_revision = revision
+                            .checked_add(1)
+                            .ok_or(kernel::KernelError::InvalidInput)?;
+                        superseded = Some(target);
+                    }
+                    None => retired.push(target),
                 }
-                None => retired.push(target),
             }
         }
         for target in &memory.also_replaces {
             checked_capture_target(envelope, project, output, target, true)?;
-            retired.push(target);
+            if !(labeled && automatic(envelope, target)?) {
+                retired.push(target);
+            }
         }
         // The job's first written decision inserts the anchor every
         // decision of the job names and reads the message's descriptors.
@@ -3121,6 +3137,17 @@ mod tests {
                 text.len()
             );
         }
+    }
+
+    /// A correction of a short identifier shares its numerals with the
+    /// fact it corrects; short words without a digit are not compared.
+    #[test]
+    fn content_words_keep_numerals_and_drop_short_words() {
+        let words = |text: &str| -> Vec<String> { content_words(text).into_iter().collect() };
+        assert_eq!(words("User stated: Use Go 1.22."), ["1", "22"]);
+        assert_eq!(words("Use Go 1.23, not Go 1.22."), ["1", "22", "23"]);
+        assert_eq!(words("It is up to us."), Vec::<String>::new());
+        assert_eq!(words("Use port 80 for staging."), ["80", "port", "staging"]);
     }
 
     #[test]
