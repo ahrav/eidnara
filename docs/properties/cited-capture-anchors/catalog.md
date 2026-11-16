@@ -265,11 +265,11 @@ Type: safety
 Reachability: default-production - every enqueue and every publish
 Status: active
 Exercised: yes - store and daemon tests enqueue the same source twice, hash out-of-grammar ids, and publish batches
-Guarantee: A capture job id is the SHA-256 of `(project, harness, session_id, message_id, role, redacted text)` with length prefixes, and each written decision's object id is derived from `(job_id, memory index)`, so a retried job writes the same ids.
-Check: `always` - for every capture job, `job_id == job_id(source, redacted_text)`, and for every capture decision it writes, `object_id == "mem_" + sha256(job_id + ":" + index)[..32]`
+Guarantee: A capture job id is the SHA-256 of `(project, harness, session_id, message_id, role, redacted text)` with length prefixes, and the object id of each decision a job's extraction writes is derived from `(job_id, memory index)`, so a retried job writes the same ids. A contested or settled statement's revision takes its id from the statement it supersedes and the contesting fact or the settling job (`crates/daemon/src/memory_capture.rs:3201`), so a retried commit writes the same revision.
+Check: `always` - for every capture job, `job_id == job_id(source, redacted_text)`, and for every capture decision its extraction writes, `object_id == "mem_" + sha256(job_id + ":" + index)[..32]`
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
-Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:136`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:662`, and the object id at `:3629`
+Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:136`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:662`, and the object id at `:3652`
 Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:6371`, `:6420`, `:7084`, `:7106`, `:7202`; `crates/daemon/src/lib.rs:24963`, `:26423` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
@@ -526,7 +526,7 @@ Guarantee: A capture decision's admission record carries `ModelInference` and `A
 Check: `always` - capture decisions with one `user_attributed` outcome and one approval outcome that differ only in citation or anchor presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`, and equal visibility on every surface
 Fault/timing angle: none
 Required faults and enabling state: one cited and one uncited job in one session
-Confidence: high - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission is `admit_capture` (`crates/daemon/src/kernel_routes/commit.rs:601`), called at `crates/daemon/src/memory_capture.rs:3728` with the statement record `user_attributed` (`crates/daemon/src/memory_capture.rs:1743`) selects; neither the anchor nor the citation event is an input to either
+Confidence: high - [evidence](evidence/p2-new-anchor-and-citation-add-no-authority.md). Admission is `admit_capture` (`crates/daemon/src/kernel_routes/commit.rs:601`), called at `crates/daemon/src/memory_capture.rs:3744` with the statement record `user_attributed` (`crates/daemon/src/memory_capture.rs:1743`) selects; neither the anchor nor the citation event is an input to either
 Existing check: `crates/daemon/src/source_capture_tests.rs:3501` (unaudited)
 Impact: a model could raise its own authority by quoting a captured message
 Open questions: None.
