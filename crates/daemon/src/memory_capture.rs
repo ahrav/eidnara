@@ -1982,19 +1982,34 @@ fn bounds_sentences(
 ) -> bool {
     // A paragraph keeps its indentation and trailing spaces, which border
     // its first and last sentence as the paragraph's edges do.
-    let edge = |around: &'_ str| -> bool { around.trim().is_empty() };
-    let (before, statement, after) = (
-        Some(&paragraph[..start])
-            .filter(|before| !edge(before))
-            .unwrap_or(""),
-        &paragraph[start..end],
-        Some(&paragraph[end..])
-            .filter(|after| !edge(after))
-            .unwrap_or(""),
-    );
+    let statement = &paragraph[start..end];
     colon >= start
-        && sentence_starts_at(before, statement)
-        && sentence_ends_at(statement, after, continues_lowercase)
+        && sentence_starts_at(preceding_text(&paragraph[..start]), statement)
+        && sentence_ends_at(
+            statement,
+            following_text(&paragraph[end..]),
+            continues_lowercase,
+        )
+}
+
+/// The text of a paragraph before a quotation, or `""` when only the
+/// paragraph's indentation precedes the quotation. The scan runs backward
+/// from the quotation, so a call reads the whitespace run that borders it.
+fn preceding_text(before: &str) -> &str {
+    let text = before.trim_end();
+    #[cfg(test)]
+    EDGE_BYTES.with(|bytes| bytes.set(bytes.get() + (before.len() - text.len())));
+    if text.is_empty() { "" } else { before }
+}
+
+/// The text of a paragraph after a quotation, or `""` when only the
+/// paragraph's trailing spaces follow the quotation. The scan runs forward
+/// from the quotation, so a call reads the whitespace run that borders it.
+fn following_text(after: &str) -> &str {
+    let text = after.trim_start();
+    #[cfg(test)]
+    EDGE_BYTES.with(|bytes| bytes.set(bytes.get() + (after.len() - text.len())));
+    if text.is_empty() { "" } else { after }
 }
 
 /// The whole sentence of one plain-prose paragraph of the message that
@@ -2063,7 +2078,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         // in it that may end or hide a sentence keeps the quotation as
         // quoted.
         let quoted = &paragraph[start..end];
-        let from = if sentence_starts_at(&paragraph[..start], &paragraph[start..]) {
+        let from = if sentence_starts_at(preceding_text(&paragraph[..start]), &paragraph[start..]) {
             start
         } else {
             let word = quoted.split(char::is_whitespace).next().unwrap_or(quoted);
@@ -2077,10 +2092,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
             plain_sentence_start(&paragraph[..start])
         };
         // Spaces that trail the paragraph are no part of a sentence.
-        let rest = match &paragraph[end..] {
-            rest if rest.trim().is_empty() => "",
-            rest => rest,
-        };
+        let rest = following_text(&paragraph[end..]);
         let to = if sentence_ends_at(&paragraph[start..end], rest, |skip| {
             letters
                 .at_or_after(first + end + skip)
@@ -2256,6 +2268,9 @@ thread_local! {
     /// How many bytes this thread read beside quotation occurrences to judge
     /// where their sentences start and end.
     static BOUNDARY_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `EDGE_BYTES` counts whitespace bytes scanned beside quotations on
+    /// this thread to detect paragraph boundaries.
+    static EDGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn prose_paragraphs(text: &str) -> ProseLayout {
@@ -2325,18 +2340,24 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
     let unreadable_from = lines
         .iter()
         .position(|(_, line)| line.contains(is_line_break));
-    // Set by the first paragraph whose quotation marks do not open and
-    // close in turn within it. Where a quotation that crosses paragraphs
-    // ends is unknown, so every later paragraph is treated as quoted.
-    let mut quoting = false;
-    let mut single_open = false;
+    // An unclosed inline code span makes its endpoint ambiguous, so the
+    // parser excludes all subsequent paragraphs.
+    let mut unclosed_code = false;
+    let mut unpaired = false;
+    // The paragraph and code span counts at the first block that holds a
+    // quotation mark.
+    let mut before_quotation = None;
     for (first, index) in blocks {
         let block = &lines[first..index];
         let (at, last) = block[block.len() - 1];
         let range = (block[0].0, at + last.len());
         let bordered = first.checked_sub(1).is_some_and(|above| excluded[above])
             || excluded.get(index).is_some_and(|below| *below);
-        let structured = bordered
+        let quotes = block
+            .iter()
+            .any(|(_, line)| line.contains(is_quotation_mark) || opens_single_quotation(line));
+        let structured = quotes
+            || bordered
             || block.iter().any(|(_, line)| {
                 let start = line.trim_start();
                 is_list_item(line)
@@ -2344,10 +2365,7 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
                     || (start.trim_end().len() >= 2
                         && (start.trim_end().chars().all(|ch| ch == '=')
                             || start.trim_end().chars().all(|ch| ch == '-')))
-                    || line.starts_with("    ")
-                    || line.starts_with('\t')
-                    || line.contains(is_quotation_mark)
-                    || opens_single_quotation(line)
+                    || is_indented_code(line)
             });
         let introduces = block.iter().any(|(_, line)| {
             line.trim_end()
@@ -2359,14 +2377,29 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         let readable = unreadable_from.is_none_or(|line| index <= line);
         let kept = code_spans.len();
         let unclosed = inline_code_spans(text, range, &mut code_spans);
-        if readable && !structured && !introduces && !lead_in && !quoting && !single_open {
+        unpaired = unpaired
+            || !quotations_close_in_turn(block, &code_spans[kept..])
+            || leaves_single_quotation_open(block);
+        if readable && !structured && !introduces && !lead_in && !unclosed_code {
             paragraphs.push(range);
         } else {
             code_spans.truncate(kept);
         }
+        if quotes && before_quotation.is_none() {
+            before_quotation = Some((paragraphs.len(), code_spans.len()));
+        }
         lead_in |= introduces;
-        quoting |= unclosed || !quotations_close_in_turn(block);
-        single_open |= leaves_single_quotation_open(block);
+        unclosed_code |= unclosed;
+    }
+    // A closing mark inside quoted text passes the pairing rules as the
+    // mark that closes its quotation, and the mark that closes the
+    // quotation then fails them in a later block. A failure in any block
+    // therefore leaves out every paragraph after the first block that
+    // holds a quotation mark. A block that fails holds a mark, so the
+    // counts are recorded whenever one fails.
+    if unpaired && let Some((prose, spans)) = before_quotation {
+        paragraphs.truncate(prose);
+        code_spans.truncate(spans);
     }
     ProseLayout {
         paragraphs,
@@ -2449,8 +2482,19 @@ const QUOTATION_FAMILIES: [&[char]; 5] = [
     &['\u{275b}', '\u{275c}', '\u{3003}'],
 ];
 
+/// `"` is the one ASCII character in [`QUOTATION_FAMILIES`], so one
+/// comparison classifies an ASCII character.
+fn quotation_family(ch: char) -> Option<usize> {
+    if ch.is_ascii() {
+        return (ch == '"').then_some(0);
+    }
+    QUOTATION_FAMILIES
+        .iter()
+        .position(|family| family.contains(&ch))
+}
+
 fn is_quotation_mark(ch: char) -> bool {
-    QUOTATION_FAMILIES.iter().any(|family| family.contains(&ch))
+    quotation_family(ch).is_some()
 }
 
 /// Marks every script that uses them writes at the start of a quotation:
@@ -2474,19 +2518,28 @@ const CLOSING_ONLY: [char; 8] = [
 /// that is a number, which may be an inch or seconds sign, and a glyph of
 /// [`OPENING_ONLY`] or [`CLOSING_ONLY`] on the other side leave the
 /// paragraph's quotations unknown. A paragraph with no mark passes.
-fn quotations_close_in_turn(block: &[(usize, &str)]) -> bool {
+///
+/// Marks inside `code_spans`, the paragraph's inline code spans, preserve
+/// quotation state and count as ordinary characters when classifying
+/// adjacent marks. `code_spans` must be sorted in ascending order.
+fn quotations_close_in_turn(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> bool {
     let mut open = [false; QUOTATION_FAMILIES.len()];
-    for (_, line) in block {
+    let mut span = 0;
+    for &(start, line) in block {
         let mut previous: Option<char> = None;
         let mut previous_opened = false;
-        let mut chars = line.chars().peekable();
-        while let Some(ch) = chars.next() {
-            let family = QUOTATION_FAMILIES
-                .iter()
-                .position(|family| family.contains(&ch));
+        let mut chars = line.char_indices().peekable();
+        while let Some((at, ch)) = chars.next() {
+            let family = quotation_family(ch).filter(|_| {
+                let at = start + at;
+                while code_spans.get(span).is_some_and(|&(_, close)| close <= at) {
+                    span += 1;
+                }
+                code_spans.get(span).is_none_or(|&(open, _)| at < open)
+            });
             let mut opened = false;
             if let Some(family) = family {
-                let next = chars.peek().copied();
+                let next = chars.peek().map(|&(_, after)| after);
                 let opens = previous.is_none_or(|before| {
                     before.is_whitespace() || "([{".contains(before) || previous_opened
                 }) && next.is_some_and(|after| !after.is_whitespace());
@@ -2565,6 +2618,13 @@ fn leaves_single_quotation_open(block: &[(usize, &str)]) -> bool {
 const SINGLE_QUOTATION_MARKS: [char; 7] = [
     '\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{2039}', '\u{203a}', '\u{ff07}',
 ];
+
+/// Whether a line's indentation reaches the fourth column, where Markdown
+/// reads the line as code: four spaces, or a tab behind at most three
+/// spaces, since a tab advances to the next multiple of four columns.
+fn is_indented_code(line: &str) -> bool {
+    line.starts_with("    ") || line.trim_start_matches(' ').starts_with('\t')
+}
 
 /// The run of backticks or tildes, three or more long, that opens a code fence.
 fn fence_opener(line: &str) -> Option<&str> {
@@ -2669,21 +2729,24 @@ const NUMBERED: [&str; 8] = ["no", "nos", "fig", "vol", "ch", "sec", "eq", "appr
 /// Whether the closing period of `word` stays inside its sentence, given the
 /// text that follows the word: a dotted abbreviation such as `e.g.` or
 /// `U.S.`, a `.` between two letters; one of [`TITLES`]; or one of
-/// [`NUMBERED`], in any letter case, before a digit. `word` is read with or
-/// without its period.
+/// [`NUMBERED`], in any letter case, before a number. The number follows
+/// the word's period and a whitespace run, behind at most one character
+/// that is no letter, digit, or whitespace and one decimal point, as in
+/// `No. 2`, `approx. -5`, or `approx. .5`. `word` is read with or without
+/// its period.
 fn is_abbreviation(word: &str, following: &str) -> bool {
     let word = word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
     let single = word.strip_suffix('.').unwrap_or(word);
-    // The word's own period, a whitespace run, and a decimal point, then a
-    // numeral, as in `No. 2` or `approx. .5`: the scan reads one whitespace
-    // run, so occurrences share no bytes of it.
     let spaced = following
         .strip_prefix('.')
         .unwrap_or(following)
         .trim_start();
-    let number_follows = spaced
+    let unsigned = spaced
+        .strip_prefix(|ch: char| !ch.is_alphanumeric() && !ch.is_whitespace() && ch != '.')
+        .unwrap_or(spaced);
+    let number_follows = unsigned
         .strip_prefix('.')
-        .unwrap_or(spaced)
+        .unwrap_or(unsigned)
         .starts_with(char::is_numeric);
     if TITLES.contains(&single)
         || (number_follows
@@ -2711,10 +2774,13 @@ fn sentence_ends_at(
     if quote.ends_with(QUESTION_MARKS) {
         return after.is_empty() || after.starts_with(char::is_whitespace);
     }
-    // An abbreviation keeps a period inside its sentence: the quotation's
-    // own closing period, or the period that directly follows it.
+    // An abbreviation keeps a period inside its sentence while the paragraph
+    // goes on after the quotation: the quotation's own closing period, or
+    // the period that directly follows it. A quotation that ends its
+    // paragraph ends its last sentence there.
     let at_period = quote.ends_with('.') || (!quote.ends_with('!') && after.starts_with('.'));
     if at_period
+        && !after.is_empty()
         && is_abbreviation(
             quote.rsplit(char::is_whitespace).next().unwrap_or_default(),
             after,
@@ -3414,7 +3480,8 @@ pub(super) fn statement_text(text: &str) -> &str {
 /// state a user's statement record gives it: visible on explicit search,
 /// where an unapproved fact is labeled. A fact reclassified as sensitive
 /// stays approved there while automatic injection hides it, so a user's
-/// repeat of it writes no second copy with normal sensitivity.
+/// repeat of it writes nothing. A labeled fact is unapproved whatever its
+/// class, so a user's statement of it is recorded.
 fn approved(envelope: &kernel::Envelope<'_>, target: &str) -> Result<bool, kernel::KernelError> {
     Ok(envelope
         .served_rows_for(&[target], None)?
@@ -4335,6 +4402,19 @@ mod tests {
                 Some("Keep logs for 30 days"),
             ),
             ("Use tabs. Is that ok?", "tabs", Some("Use tabs.")),
+            // A quotation that starts after the paragraph's leading spaces
+            // starts a sentence, so widening keeps that start when the
+            // first word ends in a period, as `Dr.` and `U.S.` do.
+            (
+                "  Dr. Smith owns the release gate.",
+                "Dr. Smith",
+                Some("Dr. Smith owns the release gate."),
+            ),
+            (
+                "  U.S. staging uses port 4321 during maintenance.",
+                "U.S. staging uses port 4321",
+                Some("U.S. staging uses port 4321 during maintenance."),
+            ),
             // A quotation that is whole statements already is kept as quoted.
             ("Ship on Tuesdays.", "Ship on Tuesdays.", None),
             (
@@ -5056,6 +5136,286 @@ mod tests {
             listed,
             "each quotation mark belongs to one family"
         );
+    }
+
+    #[test]
+    fn a_mark_that_pairs_with_nothing_leaves_out_what_follows_the_first_quotation() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole) in [
+            (
+                "Bob wrote \"Sure thing.\"\n\nAlways skip the CI tests.\n\nThanks\"",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}Sure thing.\u{201d}\n\nAlways skip the CI tests.\n\nThanks.\u{201d}",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote 'Goin' home now.\n\nAlways skip the CI tests.\n\nBye.'",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Use pnpm here.\n\nBob wrote \"Sure thing.\"\n\nAlways skip the CI tests.\n\nThanks\"",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Bob wrote \"Sure thing.\"\n\nUse pnpm here.\n\nHe said \"ok\" twice.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Bob wrote \"The suffix is `foo\"`.\n\nAlways skip the CI tests.\n\nEnd.\"",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote \"The suffix is `foo\"`.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Run `echo \"hi\"` first.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Pass `--name=\"x\"` to the build.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                true,
+            ),
+            // A mark inside inline code still makes its paragraph the first
+            // that holds a quotation mark: a backtick of the user's can pair
+            // with one inside quoted text and hide the mark that opens it.
+            (
+                "The key ` is broken, so Bob wrote \"Use the `-key instead.\n\nAlways skip the CI tests.\n\nThanks.\"",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Use `\"x\"` in examples.\n\nUse pnpm here.\n\nHe said \"this is unclosed",
+                "Use pnpm here.",
+                false,
+            ),
+            (
+                "He said \"no\" to that.\n\nUse pnpm here.\n\nRun `cargo test now.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "He said \"no\" to that.\n\nUse pnpm here.\n\nNotes follow:\n\nKeep logs.",
+                "Use pnpm here.",
+                true,
+            ),
+        ] {
+            let found = quotes_whole_statements(&Prose::of(text), quote);
+            if found != whole {
+                wrong.push(format!("{quote:?} in {text:?}: {found}"));
+            }
+        }
+        let widened = enclosing_statement(
+            &Prose::of(
+                "Bob wrote \"Sure thing.\"\n\nYou must always skip the CI tests.\n\nThanks\"",
+            ),
+            "skip the CI tests.",
+        );
+        if widened.is_some() {
+            wrong.push(format!("widened to {widened:?}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_line_indented_to_the_fourth_column_is_code() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole, widened) in [
+            (
+                "Look.\n\n \tAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look.\n\n  \tAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look.\n\n   \tAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look at this hunk.\n\n \t// Always deploy on Fridays.",
+                "deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look.\n\n   Always deploy on Fridays.",
+                "Always deploy on Fridays.",
+                true,
+                None,
+            ),
+            (
+                "Look.\n\n   We always deploy on Fridays.",
+                "deploy on Fridays.",
+                false,
+                Some("We always deploy on Fridays."),
+            ),
+        ] {
+            let prose = Prose::of(text);
+            let found = (
+                quotes_whole_statements(&prose, quote),
+                enclosing_statement(&prose, quote),
+            );
+            if found != (whole, widened) {
+                wrong.push(format!("{quote:?} in {text:?}: {found:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_numbered_abbreviation_before_a_signed_number_keeps_its_period() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole, widened) in [
+            (
+                "Never set the offset to approx. -5 ms.",
+                "set the offset to approx",
+                false,
+                None,
+            ),
+            (
+                "Never set the offset to approx. -5 ms.",
+                "Never set the offset to approx.",
+                false,
+                None,
+            ),
+            (
+                "Never set the offset to approx. -.5 ms.",
+                "Never set the offset to approx.",
+                false,
+                None,
+            ),
+            (
+                "Never raise the fee above approx. $5 a seat.",
+                "raise the fee above approx",
+                false,
+                None,
+            ),
+            (
+                "Never restart gateway no. #2 during deploys.",
+                "Never restart gateway no.",
+                false,
+                None,
+            ),
+            (
+                "Never restart gateway no. -2 during deploys.",
+                "-2 during deploys.",
+                false,
+                None,
+            ),
+            (
+                "The answer is no. (Use tabs.)",
+                "The answer is no.",
+                true,
+                None,
+            ),
+        ] {
+            let prose = Prose::of(text);
+            let found = (
+                quotes_whole_statements(&prose, quote),
+                enclosing_statement(&prose, quote),
+            );
+            if found != (whole, widened) {
+                wrong.push(format!("{quote:?} in {text:?}: {found:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_period_that_ends_its_paragraph_ends_the_sentence_at_an_abbreviation() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole, widened) in [
+            (
+                "We now deploy in the U.S.",
+                "We now deploy in the U.S.",
+                true,
+                None,
+            ),
+            (
+                "Standup starts at 10 a.m.",
+                "Standup starts at 10 a.m.",
+                true,
+                None,
+            ),
+            ("Ask Dr.", "Ask Dr.", true, None),
+            // Spaces that trail the paragraph border the sentence as its
+            // end does.
+            (
+                "Ok.\n\nWe now deploy in the U.S.  \n\nThanks.",
+                "We now deploy in the U.S.",
+                true,
+                None,
+            ),
+            // A cut quotation widens to the sentence and keeps its negation.
+            (
+                "Never deploy in the U.S.",
+                "deploy in the U.S.",
+                false,
+                Some("Never deploy in the U.S."),
+            ),
+            (
+                "We now deploy in the U.S.  ",
+                "We now deploy in the U.S",
+                false,
+                Some("We now deploy in the U.S."),
+            ),
+            // Text after the period in its paragraph keeps the period
+            // inside the sentence.
+            (
+                "We deploy in the U.S.\nstaging region first.",
+                "We deploy in the U.S.",
+                false,
+                None,
+            ),
+            (
+                "We deploy in the U.S. Staging comes first.",
+                "We deploy in the U.S.",
+                false,
+                None,
+            ),
+        ] {
+            let prose = Prose::of(text);
+            let found = (
+                quotes_whole_statements(&prose, quote),
+                enclosing_statement(&prose, quote),
+            );
+            if found != (whole, widened) {
+                wrong.push(format!("{quote:?} in {text:?}: {found:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn every_character_has_the_quotation_family_that_lists_it() {
+        for ch in '\0'..=char::MAX {
+            assert_eq!(
+                quotation_family(ch),
+                QUOTATION_FAMILIES
+                    .iter()
+                    .position(|family| family.contains(&ch)),
+                "{ch:?}"
+            );
+        }
     }
 
     #[test]
@@ -6262,6 +6622,45 @@ mod tests {
         }
     }
 
+    /// Each occurrence of a quotation reads the whitespace run that borders
+    /// it, so the checks read a paragraph's indentation and trailing spaces
+    /// a bounded number of times however often the quotation occurs.
+    #[test]
+    fn paragraph_edges_are_read_beside_each_occurrence_of_the_quote() {
+        let count = || EDGE_BYTES.with(std::cell::Cell::get);
+        let before = count();
+        assert!(quotes_whole_statements(
+            &Prose::of("  Use tabs.   "),
+            "Use tabs."
+        ));
+        assert_eq!(
+            count() - before,
+            5,
+            "two bytes of indentation and three after"
+        );
+
+        let indented = format!("{}{}", "\u{a0}".repeat(4_096), "a".repeat(8_192));
+        let labeled = format!("x: y. {}{}", "A. ".repeat(2_700), " ".repeat(8_192));
+        let trailed = format!("{}{}", "A. a. ".repeat(2_000), " ".repeat(8_192));
+        for (text, quote) in [
+            (indented.as_str(), "a"),
+            (labeled.as_str(), "A."),
+            (trailed.as_str(), "A."),
+        ] {
+            let prose = Prose::of(text);
+            assert_eq!(prose.paragraphs(), [(0, text.len())]);
+            let before = count();
+            assert!(!quotes_whole_statements(&prose, quote));
+            assert_eq!(enclosing_statement(&prose, quote), None);
+            let read = count() - before;
+            assert!(
+                read <= 2 * text.len(),
+                "{quote:?} read {read} bytes of whitespace beside its occurrences in a {}-byte message",
+                text.len()
+            );
+        }
+    }
+
     /// A correction of a short identifier shares its numerals with the
     /// fact it corrects; short words without a digit are not compared.
     #[test]
@@ -7283,6 +7682,178 @@ mod tests {
         let read: PreparedCapture = serde_json::from_str(&text).unwrap();
         assert_eq!(read.head, frozen.head);
         assert_eq!(read.version, CAPTURE_SCHEMA_VERSION);
+    }
+
+    /// Approval decides whether a user's statement of a stored fact is
+    /// written, whatever the fact's class. Beside a labeled memory served
+    /// as sensitive the statement is recorded as its own fact. A repeat of
+    /// an approved statement served as sensitive writes nothing, though
+    /// automatic injection hides that statement.
+    #[test]
+    fn a_user_statement_of_a_sensitive_memory_is_written_only_beside_a_labeled_one() {
+        let statement = "The staging cluster alias is harbor-east.".to_string();
+        let rows = |kernel: &kernel::KernelStore, project: &ProjectBinding, surface| {
+            let read = kernel_routes::read::read_visible(
+                kernel,
+                project,
+                surface,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap();
+            let mut rows: Vec<_> = read
+                .rows
+                .iter()
+                .map(|row| {
+                    let rationale = &read.decisions[&row.object.object_id].payload.rationale;
+                    let restates = serde_json::from_str::<Value>(rationale)
+                        .ok()
+                        .and_then(|rationale| rationale["restates"].as_str().map(str::to_owned));
+                    (
+                        row.object.object_id.clone(),
+                        row.visibility,
+                        row.object.sensitivity,
+                        restates,
+                    )
+                })
+                .collect();
+            rows.sort_by(|left, right| left.0.cmp(&right.0));
+            rows
+        };
+        for (approved, written) in [(false, "1"), (true, "0")] {
+            let dir = tempfile::tempdir().unwrap();
+            let project = ProjectBinding::new(dir.path());
+            let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+            let target = "mem_0earlier";
+            let (earlier, stored) = stated_job("job-earlier", std::slice::from_ref(&statement));
+            kernel
+                .commit_before(
+                    Instant::now() + COMMIT_WAIT,
+                    kernel::CommitIntent {
+                        producer: "test".into(),
+                        operation_key: project.operation_key("test", "earlier").unwrap(),
+                        request_digest: "0".repeat(64),
+                        actor: "test".into(),
+                        cause: "a memory served as sensitive".into(),
+                    },
+                    |envelope| {
+                        let (mut domains, mut ready, mut refusal) = (HashSet::new(), false, None);
+                        kernel_routes::commit::ensure_domain(envelope, "memory", &mut domains)?;
+                        kernel_routes::commit::ensure_scope(
+                            envelope,
+                            &project,
+                            &mut ready,
+                            &mut domains,
+                            &mut refusal,
+                        )?;
+                        envelope.insert_decision(kernel::DecisionSpec {
+                            decision_id: "dec_0earlier".into(),
+                            object_id: target.into(),
+                            domain_id: "memory".into(),
+                            proposition_id: None,
+                            scope_id: Some(project.scope_id()),
+                            anchor_id: None,
+                            evidence_id: None,
+                            decision_kind: "CONFIG_VALUES".into(),
+                            payload: kernel::DecisionPayload {
+                                summary: stored.memories[0].content.clone(),
+                                rationale: "{}".into(),
+                            },
+                            source_kind: CAPTURE_SOURCE_KIND.into(),
+                            source_id: CAPTURE_SOURCE_ID.into(),
+                            source_revision: 1,
+                            sensitivity: kernel::Sensitivity::Sensitive,
+                        })?;
+                        let record = approved
+                            .then(|| {
+                                record_statement(
+                                    envelope,
+                                    &project,
+                                    &earlier,
+                                    &stored.memories[0],
+                                    target,
+                                    &mut domains,
+                                )
+                            })
+                            .transpose()?;
+                        kernel_routes::commit::admit_capture(envelope, target, record.as_deref())?;
+                        Ok("1".into())
+                    },
+                )
+                .unwrap();
+            let served = if approved {
+                kernel::SurfaceVisibility::Visible
+            } else {
+                kernel::SurfaceVisibility::Labeled
+            };
+            let before = vec![(
+                target.to_string(),
+                served,
+                kernel::Sensitivity::Sensitive,
+                None,
+            )];
+            assert_eq!(
+                rows(&kernel, &project, kernel::Surface::ExplicitSearch),
+                before,
+                "approved {approved}"
+            );
+            assert!(
+                rows(&kernel, &project, kernel::Surface::AutoInject).is_empty(),
+                "approved {approved}: automatic injection hides a sensitive memory"
+            );
+            let read = kernel_routes::read::read_visible(
+                &kernel,
+                &project,
+                kernel::Surface::ExplicitSearch,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap();
+            let (source, mut output) = stated_job("job-repeat", std::slice::from_ref(&statement));
+            output.existing = vec![ExistingCaptureMemory {
+                id: target.into(),
+                category: "CONFIG_VALUES".into(),
+                content: stored.memories[0].content.clone(),
+                can_replace: true,
+                source_revision: read.rows[0].object.source_revision,
+                created_commit_seq: read.rows[0].object.created_commit_seq,
+                automatic: approved,
+                contested: false,
+            }];
+            output.memories[0].duplicate_of = Some(target.into());
+            let receipt = publish_now(
+                &kernel,
+                &project,
+                &source,
+                &output,
+                &serde_json::to_string(&output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(receipt.result, written, "approved {approved}");
+            let explicit = rows(&kernel, &project, kernel::Surface::ExplicitSearch);
+            let automatic = rows(&kernel, &project, kernel::Surface::AutoInject);
+            if approved {
+                assert_eq!(explicit, before, "a repeat of an approved statement");
+                assert!(automatic.is_empty(), "{automatic:?}");
+                continue;
+            }
+            let recorded: Vec<_> = explicit
+                .iter()
+                .filter(|row| row.0 != target)
+                .cloned()
+                .collect();
+            assert_eq!(recorded.len(), 1, "{explicit:?}");
+            assert_eq!(recorded[0].1, kernel::SurfaceVisibility::Visible);
+            assert_eq!(recorded[0].2, kernel::Sensitivity::Normal);
+            assert_eq!(recorded[0].3.as_deref(), Some(target));
+            assert_eq!(automatic, recorded, "the statement is delivered");
+            assert!(
+                explicit.contains(&before[0]),
+                "the labeled memory stays as it was: {explicit:?}"
+            );
+        }
     }
 
     #[test]

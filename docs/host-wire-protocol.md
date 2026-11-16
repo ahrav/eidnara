@@ -1135,17 +1135,17 @@ line holding only a markup tag opens through the last line closing that tag
 item (a line whose first word is a bullet, one character that is no letter
 or digit such as `-`, `*`, `+`, `•`, or a dash; an ordinal, digits or numeric
 letters of any script closed by `.` or `)` or wrapped in parentheses, or one
-letter closed by `)` or wrapped; or an enclosed numeral such as `①`), a heading, a blockquote, an indented code line, a double quotation mark
+letter closed by `)` or wrapped; or an enclosed numeral such as `①`), a heading, a blockquote, an indented code line (one that begins with four spaces, or with a tab after at most three spaces), a double quotation mark
 of any script, a single opening quotation mark that starts a word, or a line
 ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
 after such a line, every paragraph after one whose quotations do not close
-in it or that holds an unclosed inline code span, and
+in it or that holds an unclosed inline code span, every paragraph after the first one that holds a double quotation mark or a single opening mark when the quotations of any paragraph of the message do not close in it, and
 every paragraph that a fence or tag line borders without a blank
 line. An inline code span runs from a run of backticks through the next run
 of the same length in its paragraph; an odd number of backslashes directly
 before an opening run makes its first backtick literal text, and an opening
 run that no later run of its paragraph closes is unclosed and spans to the
-paragraph's end. A paragraph's double quotations close in it when every mark of each
+paragraph's end. A double quotation mark inside an inline code span is code to the pairing rules that follow: it opens and closes no quotation, and a mark beside it reads it as any other character. Its paragraph still holds a double quotation mark, so the paragraph is left out and can be the first such paragraph of the message. A paragraph's double quotations close in it when every mark of each
 style (straight, curly, angle, corner, or ornamental), read in order, takes
 its turn and none is left open: a mark after the line start, whitespace, an
 opening bracket, or a mark that opened, and before a character that is not
@@ -1169,7 +1169,7 @@ word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
 after `s`, a number, or a letter that is a number, which may be a plural
 possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
 word-final mark inside a quotation of several words, which may be an elision,
-close nothing, so such a quotation stays open.
+close nothing, so such a quotation stays open. A closing mark inside quoted text passes these rules as the mark that closes its quotation, and the mark that closes the quotation then fails them in a later paragraph. So when any paragraph of the message leaves a double or single quotation open or unknown, every paragraph after the first one that holds a double quotation mark or a single opening mark is left out.
 The rule reads marks by their place and cannot tell every arrangement of
 symmetric marks apart; where it cannot, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
@@ -1181,7 +1181,7 @@ period,
 at a dotted abbreviation, a word of two or more one- or two-letter segments
 such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 `Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
-or `Approx` in any letter case before a number; these lists are a heuristic
+or `Approx` in any letter case before a number, which may follow one character that is no letter, digit, whitespace, or period and then a decimal point, as in `No. 2`, `approx. -5`, or `approx. .5`; a quotation's closing period that ends its paragraph ends the sentence at any of these words; these lists are a heuristic
 for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
 an inline code span, so a quotation may hold a whole span; and its trimmed text contains
@@ -1222,7 +1222,7 @@ new fact's rationale names it under `restates`; the name records which memory
 the extractor matched and carries no Kernel dependency. A memory is served as
 approved when it is visible, not labeled, on `explicit_search`; a fact
 reclassified as sensitive stays approved there while `auto_inject` hides it,
-so a repeat of it writes nothing. A stored plan of a user source that
+so a repeat of it writes nothing; a labeled memory is unapproved whatever its class, so a user's statement of one served as sensitive is recorded. A stored plan of a user source that
 names `duplicate_of` beside `replaces` or `also_replaces`, or `also_replaces`
 beside no `replaces`, is refused as invalid input; a stored plan of another
 source that names a replacement meets a conflict and is planned again. The

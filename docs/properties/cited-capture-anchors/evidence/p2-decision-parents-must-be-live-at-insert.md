@@ -8,7 +8,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 `insert_decision` (`crates/kernel/src/slice/write.rs:920`) calls `require_parents` (`:1095`), which runs `require_live` for the domain and `require_optional_live` for proposition, scope, anchor, and evidence. Each query requires `invalidated_commit_seq IS NULL` inside the envelope's transaction and returns `NotFound` otherwise. The parent check runs before the registry insert, so a refusal leaves no registry row.
 
-At U1 and U2 memory capture passed `anchor_id: None`, so no production decision reached the anchor clause. Since U3, `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:3440`) inserts the job's anchor before the job's first decision and names it on every memory decision of the job (`:3678`, `:3714`); the statement record of an approved user statement is a `user-statements` decision with `anchor_id: None` (`:1836`). So every publish of a job with a readable frozen HEAD that writes a decision reaches the clause in production order. A job whose plan froze no HEAD has no anchor (`crates/daemon/src/memory_capture/cite.rs:403`) and writes its decisions with `anchor_id: None`, and a job whose memories are all `duplicate_of` inserts no capture decision and no anchor (`crates/daemon/src/memory_capture.rs:3607`); neither reaches the clause. A contest such a job records supersedes the contested statement under that statement's own anchor (`crates/daemon/src/memory_capture.rs:3235`). `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
+At U1 and U2 memory capture passed `anchor_id: None`, so no production decision reached the anchor clause. Since U3, `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:3507`) inserts the job's anchor before the job's first decision and names it on every memory decision of the job (`:3745`, `:3781`); the statement record of an approved user statement is a `user-statements` decision with `anchor_id: None` (`:1836`). So every publish of a job with a readable frozen HEAD that writes a decision reaches the clause in production order. A job whose plan froze no HEAD has no anchor (`crates/daemon/src/memory_capture/cite.rs:403`) and writes its decisions with `anchor_id: None`, and a job whose memories publication all skips as duplicates inserts no capture decision and no anchor (`crates/daemon/src/memory_capture.rs:3674`); neither reaches the clause. Publication skips a memory that names `duplicate_of` unless it is the user's statement of a memory the Kernel does not serve as approved (`:3680`); that statement is written as a decision that restates the memory, so with a readable frozen HEAD its job inserts the anchor and reaches the clause as any job that writes a decision does. A contest a job of skipped duplicates records supersedes the contested statement under that statement's own anchor (`crates/daemon/src/memory_capture.rs:3301`). `crates/kernel/tests/kernel_anchor_write.rs:404` inserts a decision naming an anchor before the anchor in one envelope and gets `NotFound`, and the commit stores neither row.
 
 ## Failure scenario
 
@@ -37,13 +37,18 @@ A decision naming a missing domain; a decision naming an anchor inserted after i
 - Findings: at U1 and U2 every production `DecisionSpec` set `anchor_id: None`.
   At U3 the capture publish inserts the job's anchor before the job's first
   decision and names it on every memory decision of the job
-  (`crates/daemon/src/memory_capture.rs:3678`); a statement record names no
+  (`crates/daemon/src/memory_capture.rs:3745`); a statement record names no
   anchor (`crates/daemon/src/memory_capture.rs:1836`). So the clause is reached on
   every publish of a job with a readable frozen HEAD that writes a decision
   (`crates/daemon/src/source_capture_tests.rs:3528`); a job whose plan froze
   no HEAD writes its decisions with `anchor_id: None`, and a job whose memories
-  are all `duplicate_of` writes no decision and no anchor
-  (`crates/daemon/src/memory_capture.rs:3607`).
+  publication all skips as duplicates inserts no capture decision and no anchor
+  (`crates/daemon/src/memory_capture.rs:3674`); a contest it records supersedes
+  the contested statement under that statement's own anchor
+  (`crates/daemon/src/memory_capture.rs:3301`). A user's statement that names
+  a memory the Kernel does not serve as approved under `duplicate_of` is
+  written as a decision (`crates/daemon/src/memory_capture.rs:3680`), so its
+  job reaches the clause when its plan froze a readable HEAD.
 - Missing evidence: none.
 - Conclusion: resolved with answer: R1's `always-or-unreached` label is
   reversed to `always` at U3, because production reaches the clause on every
