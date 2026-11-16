@@ -10,7 +10,9 @@ use super::envelope::{
 use super::object_write;
 use super::redaction::{identity, record, redact};
 use super::scope::Dimension;
-use super::slice::{APPROVAL_REVOKE_KIND, DecisionSpec, DecisionWriteOutcome};
+use super::slice::{
+    APPROVAL_REVOKE_KIND, DecisionPayload, DecisionRow, DecisionSpec, DecisionWriteOutcome,
+};
 use super::{KernelError, KernelStore, Sensitivity, map_sqlite};
 use crate::CachedSql;
 use crate::current_time_ms;
@@ -20,7 +22,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "5a32b215365ad6fbcb40c0bcec0508bd53b2934e604a6fa07239905042ea68b1";
+    "46497c0c333c44ed120c1f7558024ae51775da6a0343a4579a37c79d0f4eeee8";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -235,9 +237,27 @@ pub struct VisibleChunk {
     pub known_as_of: i64,
     pub tip: i64,
     /// Every visible row of each commit the chunk reaches, newest commit first.
-    pub rows: Vec<VisibleRow>,
+    pub rows: Vec<ChunkRow>,
     /// The snapshot holds no visible row after the last of `rows`.
     pub exhausted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkRow {
+    pub row: VisibleRow,
+    /// The decision of a decision object as the snapshot holds it; `None` for any other object and for a decision
+    /// object whose decision row the snapshot lacks.
+    pub decision: Option<ChunkDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkDecision {
+    /// `length(decision_payload)` in bytes.
+    pub payload_bytes: u64,
+    /// The decision row, decoded while the payload bytes the chunk has read stay within the caller's budget.
+    /// `None` past the budget and for a payload that does not decode, so a caller reads that row by id when it
+    /// serves it.
+    pub row: Option<DecisionRow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2949,11 +2969,28 @@ const SUPPORT_EVIDENCE_SENSITIVITY_COLUMN: usize = 34;
 /// what they read today.
 const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [35, 36, 37, 38];
 const OWN_ADMISSION_DECISION_ID_COLUMN: usize = 39;
-/// `o.created_commit_seq`, the column `object_row_from` reads the object's commit from.
+/// `o.object_kind` and `o.created_commit_seq`, at the positions `object_row_from` reads them from.
+const OBJECT_KIND_COLUMN: usize = 1;
 const CREATED_COMMIT_SEQ_COLUMN: usize = 6;
 /// Groups the history rows of one object without reading its identifier text.
 const OBJECT_ROWID_COLUMN: usize = 40;
 const LAST_SERVED_COLUMN: usize = OBJECT_ROWID_COLUMN;
+/// The first of the decision columns the page statement selects after the served columns, and their aliases in
+/// column order.
+const PAGE_DECISION_COLUMN: usize = LAST_SERVED_COLUMN + 1;
+const PAGE_DECISION_ALIASES: [&str; 11] = [
+    "dec_decision_id",
+    "dec_proposition_id",
+    "dec_scope_id",
+    "dec_anchor_id",
+    "dec_evidence_id",
+    "dec_decision_payload",
+    "dec_created_commit_seq",
+    "dec_invalidated_commit_seq",
+    "dec_decision_kind",
+    "dec_payload_bytes",
+    "dec_sensitivity_class",
+];
 
 /// A text column's bytes borrowed from the row, `None` for SQL NULL.
 fn bytes_column<'r>(
@@ -3182,19 +3219,28 @@ impl KernelStore {
         self.visible_selected_as_of(surface, requested, selection, scope, None)
     }
 
-    /// The rows [`Self::visible_as_of_in_scope`] serves that follow `after` in serving order, newest first. The
-    /// read walks commits from the newest and stops at the end of the commit that brings the chunk to `min_rows`
-    /// rows, so its cost follows the rows it returns and the rows it judges hidden on the way.
+    /// The rows [`Self::visible_as_of_in_scope`] serves that follow `after` in serving order, newest first, each
+    /// decision object with its decision. The read walks commits from the newest and stops at the end of the
+    /// commit that brings the chunk to `min_rows` rows or its decision payloads past `payload_budget` bytes, so
+    /// its cost follows the rows it returns and the rows it judges hidden on the way.
     pub fn visible_chunk_as_of_in_scope(
         &self,
         surface: Surface,
         requested: i64,
         after: Option<ServingPosition<'_>>,
         min_rows: usize,
+        payload_budget: u64,
         scope: Option<ScopeTermFilter<'_>>,
     ) -> Result<VisibleChunk, KernelError> {
         let (tip, (rows, exhausted)) = self.read_snapshot(requested, |tx, _| {
-            served_chunk(tx, surface, requested, after, min_rows, scope)
+            served_chunk(
+                tx,
+                surface,
+                requested,
+                after,
+                (min_rows, payload_budget),
+                scope,
+            )
         })?;
         Ok(VisibleChunk {
             known_as_of: requested,
@@ -3551,42 +3597,58 @@ fn visible_row(
 /// The visible rows of `surface` that follow `after` in serving order, and whether the snapshot holds none after
 /// them. Commits are read whole from the newest one at or before `after`: the statement orders objects by commit
 /// alone, so the rows of each commit are sorted by `object_id` here. Reading stops at the first commit boundary
-/// with `min_rows` rows gathered.
+/// with `min_rows` rows gathered or with their decision payloads past `payload_budget` bytes.
 fn served_chunk(
     tx: &Transaction<'_>,
     surface: Surface,
     requested: i64,
     after: Option<ServingPosition<'_>>,
-    min_rows: usize,
+    (min_rows, payload_budget): (usize, u64),
     scope: Option<ScopeTermFilter<'_>>,
-) -> Result<(Vec<VisibleRow>, bool), KernelError> {
+) -> Result<(Vec<ChunkRow>, bool), KernelError> {
     let newest = after.map_or(requested, |after| after.created_commit_seq);
-    // Drafts are finished in batches so that one approval lookup covers every commit of a batch.
-    let finish = |drafts: &mut Vec<Draft>, visible: &mut Vec<VisibleRow>| {
+    // Drafts are finished in batches so that one approval lookup covers every commit of a batch. Returns the
+    // payload bytes of the rows the batch adds.
+    let finish = |drafts: &mut Vec<Draft>,
+                  decisions: &mut Vec<Option<ChunkDecision>>,
+                  visible: &mut Vec<ChunkRow>| {
+        let approvals = draft_approvals(tx, requested, drafts)?;
         let finished = visible.len();
         visible.extend(
-            finish_drafts(tx, requested, std::mem::take(drafts))?
+            std::mem::take(drafts)
                 .into_iter()
-                .filter_map(|row| {
+                .zip(std::mem::take(decisions))
+                .filter_map(|(draft, decision)| {
+                    let row = draft.finish(&approvals)?;
                     let visibility = row.visibility(surface);
-                    visible_row((row.object, visibility, row.scope_id))
+                    let row = visible_row((row.object, visibility, row.scope_id))?;
+                    Some(ChunkRow { row, decision })
                 })
-                .filter(|row| {
+                .filter(|entry| {
+                    let object = &entry.row.object;
                     after.is_none_or(|after| {
-                        row.object.created_commit_seq < after.created_commit_seq
-                            || (row.object.created_commit_seq == after.created_commit_seq
-                                && row.object.object_id.as_str() > after.object_id)
+                        object.created_commit_seq < after.created_commit_seq
+                            || (object.created_commit_seq == after.created_commit_seq
+                                && object.object_id.as_str() > after.object_id)
                     })
                 }),
         );
         visible[finished..].sort_unstable_by(|left, right| {
             right
+                .row
                 .object
                 .created_commit_seq
-                .cmp(&left.object.created_commit_seq)
-                .then_with(|| left.object.object_id.cmp(&right.object.object_id))
+                .cmp(&left.row.object.created_commit_seq)
+                .then_with(|| left.row.object.object_id.cmp(&right.row.object.object_id))
         });
-        Ok::<(), KernelError>(())
+        Ok::<u64, KernelError>(
+            visible[finished..]
+                .iter()
+                .filter_map(|entry| entry.decision.as_ref())
+                .fold(0, |bytes, decision| {
+                    bytes.saturating_add(decision.payload_bytes)
+                }),
+        )
     };
     served_query(
         tx,
@@ -3594,26 +3656,97 @@ fn served_chunk(
         ServedSelection::CreatedAtOrBefore(newest),
         scope,
         |rows| {
-            let mut visible: Vec<VisibleRow> = Vec::new();
+            let mut visible: Vec<ChunkRow> = Vec::new();
+            let mut visible_bytes: u64 = 0;
             let mut drafts: Vec<Draft> = Vec::new();
+            // One entry per draft: the decision read with the object once a history row makes it servable.
+            let mut decisions: Vec<Option<ChunkDecision>> = Vec::new();
+            let mut draft_bytes: u64 = 0;
+            let mut read_bytes: u64 = 0;
             let mut commit = None;
             while let Some(row) = rows.next().map_err(map_sqlite)? {
                 let created: i64 = row.get(CREATED_COMMIT_SEQ_COLUMN).map_err(map_sqlite)?;
                 if commit != Some(created) {
-                    if visible.len() + drafts.len() >= min_rows {
-                        finish(&mut drafts, &mut visible)?;
-                        if visible.len() >= min_rows {
+                    if visible.len() + drafts.len() >= min_rows
+                        || visible_bytes.saturating_add(draft_bytes) > payload_budget
+                    {
+                        let added = finish(&mut drafts, &mut decisions, &mut visible)?;
+                        visible_bytes = visible_bytes.saturating_add(added);
+                        draft_bytes = 0;
+                        if visible.len() >= min_rows || visible_bytes > payload_budget {
                             return Ok((visible, false));
                         }
                     }
                     commit = Some(created);
                 }
                 fold_history_row(&mut drafts, row, Some(surface))?;
+                if decisions.len() < drafts.len() {
+                    decisions.push(None);
+                }
+                if let (Some(draft), Some(decision @ None)) = (drafts.last(), decisions.last_mut())
+                    && draft.latest.object.is_some()
+                {
+                    *decision = chunk_decision(row, requested, &mut read_bytes, payload_budget)
+                        .map_err(map_sqlite)?;
+                    if let Some(decision) = decision {
+                        draft_bytes = draft_bytes.saturating_add(decision.payload_bytes);
+                    }
+                }
             }
-            finish(&mut drafts, &mut visible)?;
+            finish(&mut drafts, &mut decisions, &mut visible)?;
             Ok((visible, true))
         },
     )
+}
+
+/// The decision the page statement joined to a decision object, when the snapshot holds one. `read_bytes` counts
+/// the payload bytes of every decision read so far; the row is decoded while that count stays within
+/// `payload_budget`, which bounds the payloads a chunk holds to the budget.
+fn chunk_decision(
+    row: &rusqlite::Row<'_>,
+    requested: i64,
+    read_bytes: &mut u64,
+    payload_budget: u64,
+) -> rusqlite::Result<Option<ChunkDecision>> {
+    if text_column(row, OBJECT_KIND_COLUMN)? != Some("decision") {
+        return Ok(None);
+    }
+    let first = PAGE_DECISION_COLUMN;
+    let Some(created_commit_seq) = row.get::<_, Option<i64>>(first + 6)? else {
+        return Ok(None);
+    };
+    let invalidated: Option<i64> = row.get(first + 7)?;
+    if created_commit_seq > requested || invalidated.is_some_and(|at| at <= requested) {
+        return Ok(None);
+    }
+    let payload_bytes = row.get::<_, i64>(first + 9)?.max(0) as u64;
+    *read_bytes = read_bytes.saturating_add(payload_bytes);
+    let payload = (*read_bytes <= payload_budget)
+        .then(|| bytes_column(row, first + 5))
+        .transpose()?
+        .flatten()
+        .and_then(|payload| serde_json::from_slice::<DecisionPayload>(payload).ok());
+    let decision = match payload {
+        Some(payload) => Some(DecisionRow {
+            decision_id: row.get(first)?,
+            object_id: row.get(0)?,
+            proposition_id: row.get(first + 1)?,
+            scope_id: row.get(first + 2)?,
+            anchor_id: row.get(first + 3)?,
+            evidence_id: row.get(first + 4)?,
+            decision_kind: row.get(first + 8)?,
+            payload,
+            created_commit_seq,
+            sensitivity: Sensitivity::from_stored_bytes(
+                bytes_column(row, first + 10)?.unwrap_or_default(),
+            ),
+        }),
+        None => None,
+    };
+    Ok(Some(ChunkDecision {
+        payload_bytes,
+        row: decision,
+    }))
 }
 
 /// The objects a served-class read returns, with the value its statement binds. Each variant is its own
@@ -3710,6 +3843,21 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
             ""
         }
     };
+    let decision_columns = match selection {
+        ServedSelection::CreatedAtOrBefore(_) => {
+            ",dec.decision_id AS dec_decision_id,dec.proposition_id AS dec_proposition_id,
+                    dec.scope_id AS dec_scope_id,dec.anchor_id AS dec_anchor_id,
+                    dec.evidence_id AS dec_evidence_id,dec.decision_payload AS dec_decision_payload,
+                    dec.created_commit_seq AS dec_created_commit_seq,
+                    dec.invalidated_commit_seq AS dec_invalidated_commit_seq,
+                    dec.decision_kind AS dec_decision_kind,
+                    length(dec.decision_payload) AS dec_payload_bytes,
+                    dec.sensitivity_class AS dec_sensitivity_class"
+        }
+        ServedSelection::Named(_) | ServedSelection::All | ServedSelection::DomainDecisions(_) => {
+            ""
+        }
+    };
     let (object_joins, scope_expr, cited_expr) = match selection {
         ServedSelection::DomainDecisions(_) => (
             "LEFT JOIN evidence_meta ev ON ev.object_id=o.object_id",
@@ -3764,7 +3912,7 @@ fn served_classes_sql(selection: ServedSelection<'_>) -> String {
                     {s_trigger} AS s_trigger_sensitivity_class,
                     {s_trigger_evidence} AS s_trigger_evidence_sensitivity_class,
                     d.admission_decision_id AS d_admission_decision_id,
-                    o.rowid AS o_rowid
+                    o.rowid AS o_rowid{decision_columns}
              FROM object_registry o
              LEFT JOIN decisions dec ON dec.object_id=o.object_id
              {object_joins}
@@ -3835,7 +3983,11 @@ pub(crate) fn served_classes_selected(
         }
         Ok(drafts)
     })?;
-    finish_drafts(tx, requested, drafts)
+    let approvals = draft_approvals(tx, requested, &drafts)?;
+    Ok(drafts
+        .into_iter()
+        .filter_map(|draft| draft.finish(&approvals))
+        .collect())
 }
 
 /// Runs the served-class statement of `selection` and hands its rows to `read`.
@@ -3861,7 +4013,13 @@ fn served_query<T>(
         ServedSelection::DomainDecisions(_) => DOMAIN_SQL.as_str(),
     };
     let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
-    assert_served_columns(&statement);
+    let decision_aliases: &[&str] = match selection {
+        ServedSelection::CreatedAtOrBefore(_) => &PAGE_DECISION_ALIASES,
+        ServedSelection::Named(_) | ServedSelection::All | ServedSelection::DomainDecisions(_) => {
+            &[]
+        }
+    };
+    assert_served_columns(&statement, decision_aliases);
     let scope_dimension = scope.map(|scope| scope.dimension.as_str());
     let scope_value = scope.map(|scope| scope.value);
     // Binding a name the statement lacks is an error, so each shape binds only its own selector.
@@ -3912,13 +4070,13 @@ fn fold_history_row(
     Ok(())
 }
 
-/// Resolves the approvals `drafts` name at `requested` and returns the rows that can serve.
-fn finish_drafts(
+/// Whether each approval `drafts` name is valid at `requested`.
+fn draft_approvals(
     tx: &Transaction<'_>,
     requested: i64,
-    drafts: Vec<Draft>,
-) -> Result<Vec<ServedRow>, KernelError> {
-    let approvals = approval_validity(
+    drafts: &[Draft],
+) -> Result<HashMap<String, bool>, KernelError> {
+    approval_validity(
         tx,
         requested,
         drafts.iter().flat_map(|draft| {
@@ -3936,11 +4094,7 @@ fn finish_drafts(
                         .filter_map(|lineage| lineage.approval_object_id.as_deref()),
                 )
         }),
-    )?;
-    Ok(drafts
-        .into_iter()
-        .filter_map(|draft| draft.finish(&approvals))
-        .collect())
+    )
 }
 
 /// Whether a stored class differs from `first` as SQL `<>` judges them: a NULL on either side is no difference.
@@ -4243,7 +4397,7 @@ fn approval_validity<'a>(
 /// desynced constant reads a type-compatible wrong value and misgates
 /// visibility instead of erroring. A few string compares per call is
 /// negligible next to the multi-join query this guards.
-fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
+fn assert_served_columns(statement: &rusqlite::Statement<'_>, decision_aliases: &[&str]) {
     // Per-field checks catch swapped interior aliases that count and
     // block-anchor checks miss.
     let expected = [
@@ -4320,11 +4474,15 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
     ];
     assert_eq!(
         statement.column_count(),
-        LAST_SERVED_COLUMN + 1,
+        PAGE_DECISION_COLUMN + decision_aliases.len(),
         "served_rows must select exactly {} columns",
-        LAST_SERVED_COLUMN + 1
+        PAGE_DECISION_COLUMN + decision_aliases.len()
     );
-    for (index, alias) in expected {
+    let decisions = decision_aliases
+        .iter()
+        .enumerate()
+        .map(|(offset, alias)| (PAGE_DECISION_COLUMN + offset, *alias));
+    for (index, alias) in expected.into_iter().chain(decisions) {
         assert_eq!(
             statement.column_name(index).ok(),
             Some(alias),

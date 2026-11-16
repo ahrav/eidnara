@@ -43,9 +43,9 @@ mod use_outcome;
 pub mod write_observer;
 
 pub use admission::{
-    AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, Disposition,
-    DisputeReporter, EffectiveMaturity, EgressCandidate, EgressSnapshot, Evaluation,
-    EvaluationInputs, EventKind, Maturity, Outcome, POLICY_REVISION, PriorDecision,
+    AdmissionDecision, AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ChunkDecision,
+    ChunkRow, Disposition, DisputeReporter, EffectiveMaturity, EgressCandidate, EgressSnapshot,
+    Evaluation, EvaluationInputs, EventKind, Maturity, Outcome, POLICY_REVISION, PriorDecision,
     ScopeTermFilter, ServedClass, ServedRow, ServingPosition, SourceClass, Surface,
     SurfaceVisibility, TaintClass, VisibilityRow, VisibleAsOf, VisibleChunk, VisibleRow,
     evaluate_admission, served_visibility_row, surface_visibility,

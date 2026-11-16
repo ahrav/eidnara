@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use host_runtime::RouteHandle;
 use kernel::{
-    DecisionRow, KernelError, KernelStore, ScopeTermFilter, Sensitivity, ServingPosition, Surface,
-    VisibleRow,
+    ChunkRow, DecisionRow, KernelError, KernelStore, ScopeTermFilter, Sensitivity, ServingPosition,
+    Surface, VisibleRow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -182,14 +182,9 @@ impl NewestRows {
     }
 }
 
-/// The snapshot a read served and the store tip it observed.
-struct Snapshot {
-    known_as_of: i64,
-    tip: i64,
-}
-
-/// The first [`MAX_READ_ROWS`] rows of the project's surface after `before` in serving order, and whether more
-/// follow. The kernel serves the surface in chunks of whole commits, newest first, so the read stops once the page
+/// The first rows of the project's surface after `before` in serving order, within [`MAX_READ_ROWS`] and with
+/// decision payloads within [`MAX_READ_ROW_BYTES`], and whether more follow. The kernel serves the surface in
+/// chunks of whole commits, newest first, each decision object with its decision, so the read stops once the page
 /// and one further row are in hand; a chunk the scope filter thins is followed by the next.
 fn newest_page(
     store: &KernelStore,
@@ -199,12 +194,15 @@ fn newest_page(
     scope: ScopeTermFilter<'_>,
     filter: &mut ScopeFilter,
     terms: &mut ScopeTerms<'_>,
-) -> Result<(Snapshot, Vec<VisibleRow>, bool), KernelError> {
+) -> Result<ReadResponse, KernelError> {
     let mut rows: Vec<VisibleRow> = Vec::new();
-    let mut tip = None;
+    let mut decisions: HashMap<String, DecisionRow> = HashMap::new();
+    // Decision objects of the page whose chunk carried no decoded decision row.
+    let mut unread: Vec<String> = Vec::new();
+    let mut payload_bytes: u64 = 0;
     let mut position = before.map(|cursor| (cursor.created_commit_seq, cursor.object_id.clone()));
-    loop {
-        let chunk = store.visible_chunk_as_of_in_scope(
+    let read_chunk = |position: &Option<(i64, String)>, rows: usize, payload_bytes: u64| {
+        store.visible_chunk_as_of_in_scope(
             surface,
             requested,
             position
@@ -213,31 +211,68 @@ fn newest_page(
                     created_commit_seq: *created_commit_seq,
                     object_id,
                 }),
-            MAX_READ_ROWS + 1 - rows.len(),
+            MAX_READ_ROWS + 1 - rows,
+            MAX_READ_ROW_BYTES as u64 - payload_bytes,
             Some(scope),
-        )?;
-        let snapshot = Snapshot {
-            known_as_of: chunk.known_as_of,
-            tip: *tip.get_or_insert(chunk.tip),
-        };
-        let last = chunk
-            .rows
-            .last()
-            .map(|row| (row.object.created_commit_seq, row.object.object_id.clone()));
-        for row in chunk.rows {
-            if filter.matches(row.scope_id.as_deref(), terms)? {
-                rows.push(row);
+        )
+    };
+    let mut chunk = read_chunk(&position, 0, 0)?;
+    let tip = chunk.tip;
+    let truncated = 'page: loop {
+        let last = chunk.rows.last().map(|entry| {
+            (
+                entry.row.object.created_commit_seq,
+                entry.row.object.object_id.clone(),
+            )
+        });
+        for ChunkRow { row, decision } in chunk.rows {
+            if !filter.matches(row.scope_id.as_deref(), terms)? {
+                continue;
             }
-        }
-        if rows.len() > MAX_READ_ROWS {
-            rows.truncate(MAX_READ_ROWS);
-            return Ok((snapshot, rows, true));
+            if rows.len() == MAX_READ_ROWS {
+                break 'page true;
+            }
+            if row.object.object_kind == "decision" {
+                // A visible decision-kind row without its typed decision row at the same snapshot is a canonical-integrity break. Serving it with `decision: null` would be indistinguishable from a non-decision row and silently drop it from memory surfaces, so the read fails closed instead.
+                let decision = decision.ok_or(KernelError::CorruptCanonicalRow)?;
+                // A serialized row is at least its payload bytes, so cutting where cumulative payload size passes the budget keeps every row the serializer could keep.
+                payload_bytes = payload_bytes.saturating_add(decision.payload_bytes);
+                if payload_bytes > MAX_READ_ROW_BYTES as u64 {
+                    break 'page true;
+                }
+                match decision.row {
+                    Some(decision) => {
+                        decisions.insert(row.object.object_id.clone(), decision);
+                    }
+                    None => unread.push(row.object.object_id.clone()),
+                }
+            }
+            rows.push(row);
         }
         match last {
             Some(last) if !chunk.exhausted => position = Some(last),
-            _ => return Ok((snapshot, rows, false)),
+            _ => break false,
+        }
+        chunk = read_chunk(&position, rows.len(), payload_bytes)?;
+    };
+    if !unread.is_empty() {
+        decisions.extend(
+            store
+                .decisions_for_objects_as_of(&unread, requested)?
+                .into_iter()
+                .map(|decision| (decision.object_id.clone(), decision)),
+        );
+        if unread.iter().any(|id| !decisions.contains_key(id)) {
+            return Err(KernelError::CorruptCanonicalRow);
         }
     }
+    Ok(ReadResponse {
+        known_as_of: requested,
+        tip,
+        rows,
+        truncated,
+        decisions,
+    })
 }
 
 pub(crate) fn read_visible(
@@ -285,9 +320,8 @@ pub(crate) fn read_visible_page(
             )?)
         }
     };
-    // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
-    let (snapshot, mut rows, mut truncated) = match selected {
-        None => newest_page(
+    let Some(visible) = selected else {
+        return newest_page(
             store,
             surface,
             requested,
@@ -295,28 +329,19 @@ pub(crate) fn read_visible_page(
             scope,
             &mut filter,
             &mut terms,
-        )?,
-        Some(visible) => {
-            let mut newest = NewestRows::new(MAX_READ_ROWS);
-            for row in visible.rows {
-                if selection.keeps(&row)
-                    && before.is_none_or(|cursor| cursor.precedes(&row))
-                    && filter.matches(row.scope_id.as_deref(), &mut terms)?
-                {
-                    newest.push(row);
-                }
-            }
-            let (rows, truncated) = newest.finish();
-            (
-                Snapshot {
-                    known_as_of: visible.known_as_of,
-                    tip: visible.tip,
-                },
-                rows,
-                truncated,
-            )
-        }
+        );
     };
+    // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
+    let mut newest = NewestRows::new(MAX_READ_ROWS);
+    for row in visible.rows {
+        if selection.keeps(&row)
+            && before.is_none_or(|cursor| cursor.precedes(&row))
+            && filter.matches(row.scope_id.as_deref(), &mut terms)?
+        {
+            newest.push(row);
+        }
+    }
+    let (mut rows, mut truncated) = newest.finish();
     // Payload sizes are read before any payload: a project can retain [`MAX_READ_ROWS`] decisions of ~1 MiB each, and materializing them all would allocate gigabytes for rows the serialization budget can never carry. A serialized row is at least its payload bytes, so cutting where cumulative payload size passes the budget keeps every row the serializer could keep.
     let decision_ids: Vec<String> = rows
         .iter()
@@ -324,7 +349,7 @@ pub(crate) fn read_visible_page(
         .map(|row| row.object.object_id.clone())
         .collect();
     let payload_sizes: HashMap<String, u64> = store
-        .decision_payload_sizes_as_of(&decision_ids, snapshot.known_as_of)?
+        .decision_payload_sizes_as_of(&decision_ids, visible.known_as_of)?
         .into_iter()
         .collect();
     // A visible decision-kind row without its typed decision row at the same snapshot is a
@@ -360,7 +385,7 @@ pub(crate) fn read_visible_page(
         .map(|row| row.object.object_id.clone())
         .collect();
     let decisions: HashMap<String, DecisionRow> = store
-        .decisions_for_objects_as_of(&retained_decision_ids, snapshot.known_as_of)?
+        .decisions_for_objects_as_of(&retained_decision_ids, visible.known_as_of)?
         .into_iter()
         .map(|decision| (decision.object_id.clone(), decision))
         .collect();
@@ -371,8 +396,8 @@ pub(crate) fn read_visible_page(
         return Err(KernelError::CorruptCanonicalRow);
     }
     Ok(ReadResponse {
-        known_as_of: snapshot.known_as_of,
-        tip: snapshot.tip,
+        known_as_of: visible.known_as_of,
+        tip: visible.tip,
         rows,
         truncated,
         decisions,

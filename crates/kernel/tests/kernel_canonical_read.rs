@@ -1,13 +1,14 @@
 #![cfg(feature = "test-support")]
 //! Memory-domain reads over a store whose other domains and approved dependents outnumber its memory decisions.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use kernel::{
-    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, CommitIntent,
-    DecisionPayload, DecisionSpec, DomainSpec, EventKind, KernelStore, ProviderEgress,
-    RepositoryProvenance, Sensitivity, ServingPosition, SourceClass, StagingCandidateSpec, Surface,
-    TaintClass, VisibleAsOf, VisibleRow,
+    AdmissionDomainSpec, AdmissionEvent, AdmissionRequest, ArtifactIngestRequest, ChunkRow,
+    CommitIntent, DecisionPayload, DecisionRow, DecisionSpec, DomainSpec, EventKind, KernelError,
+    KernelStore, ProviderEgress, RepositoryProvenance, Sensitivity, ServingPosition, SourceClass,
+    StagingCandidateSpec, Surface, TaintClass, VisibleAsOf, VisibleRow,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -490,11 +491,22 @@ fn serving_order(visible: &VisibleAsOf) -> Vec<VisibleRow> {
     rows
 }
 
+fn visible_rows(rows: &[ChunkRow]) -> Vec<VisibleRow> {
+    rows.iter().map(|entry| entry.row.clone()).collect()
+}
+
 fn position(row: &VisibleRow) -> ServingPosition<'_> {
     ServingPosition {
         created_commit_seq: row.object.created_commit_seq,
         object_id: &row.object.object_id,
     }
+}
+
+fn payload_bytes(rows: &[ChunkRow]) -> u64 {
+    rows.iter()
+        .filter_map(|entry| entry.decision.as_ref())
+        .map(|decision| decision.payload_bytes)
+        .sum()
 }
 
 /// Chunks read back to back serve the full read's rows in serving order at every chunk size. A chunk that leaves
@@ -529,6 +541,7 @@ fn chunks_serve_the_full_read_in_serving_order_and_stop_at_a_commit_boundary() {
                         requested,
                         served.last().map(position),
                         min_rows,
+                        u64::MAX,
                         None,
                     )
                     .unwrap();
@@ -538,16 +551,15 @@ fn chunks_serve_the_full_read_in_serving_order_and_stop_at_a_commit_boundary() {
                     "{surface:?} min_rows {min_rows}"
                 );
                 chunks += 1;
-                let last_commit = chunk.rows.last().map(|row| row.object.created_commit_seq);
-                let exhausted = chunk.exhausted;
-                let before_last_commit = chunk
-                    .rows
+                let rows = visible_rows(&chunk.rows);
+                let last_commit = rows.last().map(|row| row.object.created_commit_seq);
+                let before_last_commit = rows
                     .iter()
                     .filter(|row| Some(row.object.created_commit_seq) != last_commit)
                     .count();
-                let len = chunk.rows.len();
-                served.extend(chunk.rows);
-                if exhausted {
+                let len = rows.len();
+                served.extend(rows);
+                if chunk.exhausted {
                     break;
                 }
                 assert!(len >= min_rows, "{surface:?} min_rows {min_rows}: {len}");
@@ -586,6 +598,20 @@ fn a_chunk_after_a_position_serves_exactly_the_rows_that_follow_it() {
             .visible_as_of_in_scope(surface, tip, None, None)
             .unwrap();
         let expected = serving_order(&all);
+        let after = |position: ServingPosition<'_>| {
+            let chunk = store
+                .visible_chunk_as_of_in_scope(
+                    surface,
+                    tip,
+                    Some(position),
+                    usize::MAX,
+                    u64::MAX,
+                    None,
+                )
+                .unwrap();
+            assert!(chunk.exhausted);
+            visible_rows(&chunk.rows)
+        };
         let inside_a_commit = expected
             .windows(2)
             .position(|pair| pair[0].object.created_commit_seq == pair[1].object.created_commit_seq)
@@ -598,50 +624,180 @@ fn a_chunk_after_a_position_serves_exactly_the_rows_that_follow_it() {
             );
         }
         for index in [inside_a_commit, expected.len() / 2, expected.len() - 1] {
-            let chunk = store
-                .visible_chunk_as_of_in_scope(
-                    surface,
-                    tip,
-                    Some(position(&expected[index])),
-                    usize::MAX,
-                    None,
-                )
-                .unwrap();
             assert_eq!(
-                chunk.rows,
+                after(position(&expected[index])),
                 expected[index + 1..],
                 "{surface:?} after {index}"
             );
-            assert!(chunk.exhausted);
         }
-        let ahead = store
-            .visible_chunk_as_of_in_scope(
-                surface,
-                tip,
-                Some(ServingPosition {
-                    created_commit_seq: tip + 1,
-                    object_id: "",
-                }),
-                usize::MAX,
-                None,
-            )
-            .unwrap();
-        assert_eq!(ahead.rows, expected, "{surface:?}");
+        let ahead = ServingPosition {
+            created_commit_seq: tip + 1,
+            object_id: "",
+        };
+        assert_eq!(after(ahead), expected, "{surface:?}");
         // A position names a row by commit and id, so an id no row carries still splits its commit.
         let first = &expected[inside_a_commit];
         let between = format!("{}\u{0}", first.object.object_id);
-        let chunk = store
+        let unnamed = ServingPosition {
+            created_commit_seq: first.object.created_commit_seq,
+            object_id: &between,
+        };
+        assert_eq!(
+            after(unnamed),
+            expected[inside_a_commit + 1..],
+            "{surface:?}"
+        );
+    }
+}
+
+/// A chunk carries the decision of each decision object: its payload size as stored and, inside the payload
+/// budget, the row a read by id returns. An object that is no decision carries none, and a decision whose stored
+/// payload does not decode carries its size alone, so the read by id reports it.
+#[test]
+fn a_chunk_carries_each_decision_object_with_its_decision() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 40, 300, 4);
+    let tip = store.tip().unwrap();
+    let chunk = store
+        .visible_chunk_as_of_in_scope(
+            Surface::ExplicitSearch,
+            tip,
+            None,
+            usize::MAX,
+            u64::MAX,
+            None,
+        )
+        .unwrap();
+    assert!(chunk.exhausted);
+    // The fixture's approval decision stores `{}`, which is no decision payload.
+    let undecodable = "approval".to_string();
+    assert_eq!(
+        store.decisions_for_objects_as_of(std::slice::from_ref(&undecodable), tip),
+        Err(KernelError::CorruptCanonicalRow)
+    );
+    let ids: Vec<String> = chunk
+        .rows
+        .iter()
+        .filter(|entry| entry.row.object.object_kind == "decision")
+        .map(|entry| entry.row.object.object_id.clone())
+        .filter(|id| *id != undecodable)
+        .collect();
+    assert_eq!(ids.len(), 340);
+    assert!(
+        ids.len() + 1 < chunk.rows.len(),
+        "the surface serves an object that is no decision"
+    );
+    let stored: HashMap<String, DecisionRow> = store
+        .decisions_for_objects_as_of(&ids, tip)
+        .unwrap()
+        .into_iter()
+        .map(|decision| (decision.object_id.clone(), decision))
+        .collect();
+    let sizes: HashMap<String, u64> = store
+        .decision_payload_sizes_as_of(&ids, tip)
+        .unwrap()
+        .into_iter()
+        .collect();
+    for entry in &chunk.rows {
+        let id = &entry.row.object.object_id;
+        if entry.row.object.object_kind != "decision" {
+            assert_eq!(entry.decision, None, "{id}");
+            continue;
+        }
+        let decision = entry.decision.as_ref().expect(id);
+        if *id == undecodable {
+            assert_eq!((decision.payload_bytes, decision.row.as_ref()), (2, None));
+            continue;
+        }
+        assert_eq!(decision.payload_bytes, sizes[id], "{id}");
+        assert_eq!(decision.row.as_ref(), Some(&stored[id]), "{id}");
+    }
+}
+
+/// A payload budget ends the chunk at the first commit boundary where the rows' payload bytes pass it. The
+/// decision rows the chunk decodes stay within the budget, and every decision keeps its payload size.
+#[test]
+fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 40, 300, 4);
+    let tip = store.tip().unwrap();
+    let read = |after: Option<ServingPosition<'_>>, budget: u64| {
+        store
             .visible_chunk_as_of_in_scope(
-                surface,
+                Surface::ExplicitSearch,
                 tip,
-                Some(ServingPosition {
-                    created_commit_seq: first.object.created_commit_seq,
-                    object_id: &between,
-                }),
+                after,
                 usize::MAX,
+                budget,
                 None,
             )
-            .unwrap();
-        assert_eq!(chunk.rows, expected[inside_a_commit + 1..], "{surface:?}");
+            .unwrap()
+    };
+    let all = read(None, u64::MAX);
+    let total = payload_bytes(&all.rows);
+    let commit_of = |entry: &ChunkRow| entry.row.object.created_commit_seq;
+    for budget in [0, 1, total / 7, total / 2] {
+        let chunk = read(None, budget);
+        assert!(!chunk.exhausted, "budget {budget}");
+        assert_eq!(
+            visible_rows(&chunk.rows),
+            visible_rows(&all.rows[..chunk.rows.len()]),
+            "budget {budget}"
+        );
+        let last_commit = commit_of(chunk.rows.last().unwrap());
+        assert!(payload_bytes(&chunk.rows) > budget, "budget {budget}");
+        let before_last_commit: Vec<ChunkRow> = chunk
+            .rows
+            .iter()
+            .filter(|entry| commit_of(entry) != last_commit)
+            .cloned()
+            .collect();
+        assert!(
+            payload_bytes(&before_last_commit) <= budget,
+            "budget {budget}: the chunk read past the commit that passed the budget"
+        );
+        assert!(
+            commit_of(&all.rows[chunk.rows.len()]) < last_commit,
+            "budget {budget}: the chunk split a commit"
+        );
+        let decoded: u64 = chunk
+            .rows
+            .iter()
+            .filter_map(|entry| entry.decision.as_ref())
+            .filter(|decision| decision.row.is_some())
+            .map(|decision| decision.payload_bytes)
+            .sum();
+        assert!(decoded <= budget, "budget {budget}: decoded {decoded}");
+        for (entry, full) in chunk.rows.iter().zip(&all.rows) {
+            let (decision, stored) = (entry.decision.as_ref(), full.decision.as_ref());
+            assert_eq!(
+                decision.map(|decision| decision.payload_bytes),
+                stored.map(|decision| decision.payload_bytes)
+            );
+            if let Some(row) = decision.and_then(|decision| decision.row.as_ref()) {
+                assert_eq!(Some(row), stored.and_then(|decision| decision.row.as_ref()));
+            }
+        }
+        let rest = read(
+            chunk.rows.last().map(|entry| position(&entry.row)),
+            u64::MAX,
+        );
+        assert!(rest.exhausted);
+        assert_eq!(
+            visible_rows(&rest.rows),
+            visible_rows(&all.rows[chunk.rows.len()..]),
+            "budget {budget}"
+        );
     }
+    // A budget only the oldest commit passes leaves no commit boundary to stop at.
+    for budget in [total - 1, total] {
+        let chunk = read(None, budget);
+        assert!(chunk.exhausted, "budget {budget}");
+        assert_eq!(
+            visible_rows(&chunk.rows),
+            visible_rows(&all.rows),
+            "budget {budget}"
+        );
+    }
+    assert_eq!(read(None, total).rows, all.rows);
 }
