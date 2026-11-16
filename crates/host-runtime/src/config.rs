@@ -241,8 +241,8 @@ pub struct HostTiming {
     pub frame_deadline: Duration,
     /// The budget covers the bind, route-gone, initialization, and health callbacks and the shutdown
     /// of an incarnation that recorded `running`; expiry is host-fatal.
-    /// A suspension that delays a wait step's wake by more than 1 s leaves the callback's remaining
-    /// budget unchanged (protocol §9.3).
+    /// A wait step that a suspension wakes more than 1 s late charges the callback's poll CPU time,
+    /// and at least its scheduled length when the step before it was that late too (protocol §9.3).
     pub lifecycle_callback_deadline: Duration,
     /// The route-close budget settles or cancels one route's admitted work.
     pub route_close_budget: Duration,
