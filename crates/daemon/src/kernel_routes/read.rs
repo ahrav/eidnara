@@ -203,7 +203,7 @@ fn newest_page(
         Some(as_of) => as_of,
         None => store.tip()?,
     };
-    // The kernel keeps rows whose scope names another project out of the snapshot, so the read costs the project's rows and the registry entries it skips, and not the other projects' decisions.
+    // The kernel keeps rows whose scope names another project out of each chunk, so the page decodes and judges the project's rows alone.
     let scope = project.scope_term();
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.
     let mut filter = ScopeFilter::new(project);

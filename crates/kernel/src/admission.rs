@@ -240,6 +240,7 @@ pub struct VisibleChunk {
     pub exhausted: bool,
 }
 
+/// One row of a [`VisibleChunk`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkRow {
     pub row: VisibleRow,
@@ -248,6 +249,7 @@ pub struct ChunkRow {
     pub decision: Option<ChunkDecision>,
 }
 
+/// The decision of one [`ChunkRow`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkDecision {
     /// `length(decision_payload)` in bytes.
@@ -6887,6 +6889,183 @@ mod tests {
         assert!(
             long <= 2 * short,
             "200 support citations cost {short} VM steps beside one own row and {long} beside 41"
+        );
+    }
+
+    /// VM steps and rows of one chunk read over a store whose newest commit holds one decision and whose first
+    /// commit holds the seed decision and `older` admitted objects.
+    fn chunk_read_steps(older: usize, min_rows: usize) -> (usize, usize) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, first_commit) = store_with_one_decision(directory.path());
+        let newest_commit = store
+            .commit(
+                crate::CommitIntent {
+                    producer: "served-fold-test".to_string(),
+                    operation_key: "newest".to_string(),
+                    request_digest: "b".repeat(64),
+                    actor: "test".to_string(),
+                    cause: "proof".to_string(),
+                },
+                |envelope| {
+                    envelope.insert_decision(crate::DecisionSpec {
+                        decision_id: "decision-two".to_string(),
+                        object_id: "two".to_string(),
+                        domain_id: "memory".to_string(),
+                        proposition_id: None,
+                        scope_id: None,
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "adr_accepted".to_string(),
+                        payload: crate::DecisionPayload {
+                            summary: "two".to_string(),
+                            rationale: "two".to_string(),
+                        },
+                        source_kind: "fixture".to_string(),
+                        source_id: "src/two".to_string(),
+                        source_revision: 1,
+                        sensitivity: Sensitivity::Normal,
+                    })?;
+                    envelope.record_admission(AdmissionRequest {
+                        candidate_id: None,
+                        subject_object_id: Some("two".to_string()),
+                        source_class: Some(SourceClass::ExplicitUser),
+                        taint_class: Some(TaintClass::UserExplicit),
+                        event: AdmissionEvent {
+                            kind: EventKind::AcceptedAdr,
+                            trigger_object_id: None,
+                            approval_object_id: None,
+                            evidence_id: None,
+                            reason: "fixture".to_string(),
+                        },
+                    })?;
+                    Ok(String::new())
+                },
+            )
+            .unwrap()
+            .commit_seq;
+        drop(store);
+        let connection =
+            rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
+        connection
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 WHERE {older}>0 UNION ALL SELECT i+1 FROM n WHERE i<{older})
+                 INSERT INTO object_registry(
+                     object_id,object_kind,domain_id,source_kind,source_id,source_revision,
+                     created_commit_seq,sensitivity_class
+                 )
+                 SELECT 'older-'||i,'evidence','memory','fixture','src/older-'||i,1,{first_commit},'normal'
+                 FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 1 WHERE {older}>0 UNION ALL SELECT i+1 FROM n WHERE i<{older})
+                 INSERT INTO admission_decisions(
+                     admission_decision_id,subject_object_id,source_kind,source_id,source_revision,
+                     source_class,taint_class,event_kind,maturity,effective_maturity,disposition,visibility,
+                     outcome,sensitivity_class,policy_revision,reason,commit_seq,decided_at
+                 )
+                 SELECT 'older-admission-'||i,'older-'||i,'fixture','src/older-'||i,1,'explicit_user',
+                        'user_explicit','other','verified','verified','active','automatic','admit','normal',1,
+                        'fixture',{first_commit},1
+                 FROM n;"
+            ))
+            .unwrap();
+        drop(connection);
+        let store = KernelStore::open(directory.path()).unwrap();
+        let read = |tx: &Transaction<'_>| {
+            served_chunk(
+                tx,
+                Surface::ExplicitSearch,
+                newest_commit,
+                None,
+                (min_rows, u64::MAX),
+                None,
+            )
+        };
+        let (_, measured) = store
+            .read_snapshot(newest_commit, |tx, _| {
+                // The first read warms the query path before VM-step counting begins.
+                read(tx)?;
+                let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let counter = std::sync::Arc::clone(&steps);
+                tx.progress_handler(
+                    1,
+                    Some(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .map_err(map_sqlite)?;
+                let chunk = read(tx);
+                tx.progress_handler(0, None::<fn() -> bool>)
+                    .map_err(map_sqlite)?;
+                let (rows, _) = chunk?;
+                Ok((steps.load(Ordering::Relaxed), rows.len()))
+            })
+            .unwrap();
+        measured
+    }
+
+    /// A chunk that its newest commit fills stops at that commit's end: the objects of older commits add no work
+    /// to it, while a chunk that asks for every row reads them all.
+    #[test]
+    fn a_chunk_the_newest_commit_fills_does_not_read_the_older_commits() {
+        let (alone, alone_rows) = chunk_read_steps(0, 1);
+        let (beside_older, rows) = chunk_read_steps(400, 1);
+        assert_eq!((alone_rows, rows), (1, 1));
+        assert!(
+            beside_older <= 2 * alone,
+            "one row cost {alone} VM steps alone and {beside_older} beside 400 older objects"
+        );
+        let (every_row, rows) = chunk_read_steps(400, usize::MAX);
+        assert_eq!(rows, 402);
+        assert!(
+            every_row >= 20 * beside_older,
+            "402 rows cost {every_row} VM steps and the first row alone {beside_older}"
+        );
+    }
+
+    /// The page statement takes its commit order from the registry's commit index: the outer loop searches
+    /// `idx_objects_known_as_of`, and the statement's own `ORDER BY` adds no sorter, so a reader that stops
+    /// early leaves the older commits unread.
+    #[test]
+    fn the_page_statement_reads_the_commit_index_in_commit_order() {
+        let directory = tempfile::tempdir().unwrap();
+        KernelStore::open(directory.path()).unwrap();
+        let connection = rusqlite::Connection::open_with_flags(
+            directory.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                served_classes_sql(ServedSelection::CreatedAtOrBefore(0))
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::named_params! {
+                    ":governing_as_of": 1_i64,
+                    ":created_at_or_before": 1_i64,
+                    ":scope_dimension": Option::<&str>::None,
+                    ":scope_value": Option::<&str>::None,
+                },
+                |row| Ok((row.get::<_, i64>(1)?, row.get::<_, String>(3)?)),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let outer: Vec<&str> = plan
+            .iter()
+            .filter(|(parent, _)| *parent == 0)
+            .map(|(_, step)| step.as_str())
+            .collect();
+        assert!(
+            outer[0]
+                .starts_with("SEARCH o USING INDEX idx_objects_known_as_of (created_commit_seq<?)"),
+            "expected the commit index as the outer loop, planner chose: {outer:?}"
+        );
+        assert!(
+            !outer.iter().any(|step| step.contains("ORDER BY")),
+            "the statement's order must come from the index: {outer:?}"
         );
     }
 
