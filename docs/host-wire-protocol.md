@@ -1074,7 +1074,9 @@ A captured fact is the user's statement when its source message has the user
 role and reaches capture under its own message id (a source id of the form
 `<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
 and hashed ids, never qualifies, and neither does a `pi` source whose id is
-in the `eidnara:` space Pi reserves for the rows it derives); its stored text is `User stated: ` followed
+in the `eidnara:` space Pi reserves for the rows it derives or whose text has
+the form Pi gives a bash execution: `Ran`, the command between backticks, and
+on the next line a fence of three backticks or `(no output)`); its stored text is `User stated: ` followed
 by a verbatim quotation of that message; and the quotation is one or more
 whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
 (closed by a run of the opener's character at least as long), each block a
@@ -1083,15 +1085,21 @@ line holding only a markup tag opens through the last line closing that tag
 item, a heading, a blockquote, an indented code line, a double quotation mark
 of any script, a single opening quotation mark that starts a word, or a line
 ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
-after such a line, every paragraph after one holding a quotation mark, and
+after such a line, every paragraph after one holding a quotation mark or an
+unclosed inline code span, and
 every paragraph that a fence or tag line borders without a blank
-line. The quotation starts the
+line. An inline code span runs from a run of backticks through the next run
+of the same length in its paragraph; an odd number of backslashes directly
+before an opening run makes its first backtick literal text, and an opening
+run that no later run of its paragraph closes is unclosed and spans to the
+paragraph's end. The quotation starts the
 paragraph, or follows a `.`, `!`, or `?` and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
 follows it past any punctuation; neither boundary falls
 at a dotted abbreviation, a word of two or more one- or two-letter segments
-such as `e.g.` or `U.S.`; and it contains no `?`, contains no double
+such as `e.g.` or `U.S.`; neither boundary falls inside an inline code span,
+so a quotation may hold a whole span; and it contains no `?`, contains no double
 quotation mark, and neither starts nor closes a single quotation. Capture records each such fact with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on

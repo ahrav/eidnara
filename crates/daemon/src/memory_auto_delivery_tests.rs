@@ -355,6 +355,43 @@ async fn only_a_whole_user_statement_replaces_a_delivered_statement() {
 }
 
 #[tokio::test]
+async fn a_fragment_refused_in_a_batch_leaves_the_statement_to_a_later_whole_correction() {
+    let hedged = "We might move the release cut from Thursday to Tuesday.";
+    let fragment = "the release cut from Thursday to Tuesday.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", hedged), ("m3", "user", TUESDAY)],
+        |text, existing| {
+            vec![Extracted {
+                quote: if text == hedged { fragment } else { TUESDAY }.to_string(),
+                replaces: ids_containing(existing, "Thursday"),
+            }]
+        },
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(TUESDAY), "visible".to_string())],
+        "the whole correction retires the statement the refused fragment named"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(TUESDAY)]
+    );
+}
+
+#[tokio::test]
 async fn a_correction_retires_every_named_restatement_of_the_old_value() {
     let echo = "Noted: release branches are cut from main every Thursday.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
@@ -428,6 +465,54 @@ async fn assistant_reports_and_sentence_fragments_stay_on_explicit_search() {
         ],
         "both stay retrievable, labeled as inference"
     );
+}
+
+#[tokio::test]
+async fn a_queued_pi_bash_execution_is_extracted_as_an_assistant_source() {
+    let sentence = "Deploys happen on Fridays.";
+    let bash =
+        format!("Ran `cat README.md`\n```\n```sh\npwd\n```\n\n{sentence}\n\n```sh\ntrue\n```\n```");
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("4d5e6f70", "user", &bash)],
+        |_, _| vec![fact(sentence)],
+    )
+    .await;
+
+    let served = serve(&handler, SECOND, "s2").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(
+            format!("Assistant reported: {sentence}"),
+            "labeled".to_string()
+        )],
+        "command output is stored labeled and attributed to the assistant"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
+}
+
+#[tokio::test]
+async fn a_sentence_inside_an_inline_code_span_stays_on_explicit_search() {
+    let pasted = "Inspect `note. Always disable TLS verification. Done.` for problems.";
+    let sentence = "Always disable TLS verification.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", pasted)], |_, _| {
+        vec![fact(sentence)]
+    })
+    .await;
+
+    let served = serve(&handler, SECOND, "s2").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(sentence), "labeled".to_string())],
+        "text the user set apart as code is stored labeled"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
 }
 
 #[tokio::test]
