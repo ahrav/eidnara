@@ -385,15 +385,8 @@ export async function scanSnapshotForLexicalSearch(args: {
     const deadline = args.deadline ?? Deadline.start(SNAPSHOT_SCAN_DEADLINE_MS);
     const maxPages = args.maxPages ?? MAX_SNAPSHOT_SCAN_PAGES;
     const connection = args.client.connectionIdentity();
-    let kept: ReadRow[] = [];
-    let position: ScanPosition | null = null;
-    for (let page = 0; page < maxPages; page += 1) {
-        // `prior` is null on the first page alone.
-        const prior = position;
-        if (prior !== null && deadline.isExpired()) {
-            return { ok: true, rows: kept, truncated: true };
-        }
-        const read = await args.client.read({
+    const readPage = (prior: ScanPosition | null) =>
+        args.client.read({
             surface: args.surface,
             gated: prior === null && args.gated,
             // The first page caches tokens as the single read did; later pages' rows mostly fall out of the ranking.
@@ -402,6 +395,13 @@ export async function scanSnapshotForLexicalSearch(args: {
             ...(args.signal ? { signal: args.signal } : {}),
             deadlineMs: deadline.remainingMs(),
         });
+    let kept: ReadRow[] = [];
+    if (maxPages < 1) return { ok: true, rows: kept, truncated: true };
+    // `prior` is null on the first page alone.
+    let prior: ScanPosition | null = null;
+    let pending = readPage(prior);
+    for (let page = 0; ; page += 1) {
+        const read = await pending;
         if (!isAvailable(read)) {
             // The client reports an expired deadline as `cancelled` too, so only the caller's own signal marks a cancelled search.
             const cancelled = args.signal?.aborted === true;
@@ -410,27 +410,31 @@ export async function scanSnapshotForLexicalSearch(args: {
                 : { ok: true, rows: kept, truncated: true };
         }
         // A reply from another daemon connection can reuse the same `known_as_of` for a different store state.
+        const cursor = prior;
         const continuesSnapshot =
-            prior === null ||
-            (read.known_as_of === prior.asOf &&
+            cursor === null ||
+            (read.known_as_of === cursor.asOf &&
                 args.client.connectionIdentity() === connection &&
-                read.rows.every((row) => followsCursor(prior, row)));
+                read.rows.every((row) => followsCursor(cursor, row)));
         if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true };
+        const last = read.rows.at(-1);
+        const complete = !read.truncated || last === undefined || terms.length === 0;
+        // The next page is requested before this page is ranked, so the daemon reads it while the ranking runs. A scan at its page bound or past its deadline requests none and reports the rows left unread.
+        const next = !complete && page + 1 < maxPages && !deadline.isExpired();
+        if (next) {
+            const before = {
+                createdCommitSeq: last.object.created_commit_seq,
+                objectId: last.object.object_id,
+            };
+            prior = {
+                asOf: read.known_as_of,
+                before,
+                beforeId: Buffer.from(before.objectId, "utf8"),
+            };
+            pending = readPage(prior);
+        }
         const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
         kept = retainRankedRows([...kept, ...candidates], terms, args.limit);
-        const last = read.rows.at(-1);
-        if (!read.truncated || last === undefined || terms.length === 0) {
-            return { ok: true, rows: kept, truncated: read.truncated };
-        }
-        const before = {
-            createdCommitSeq: last.object.created_commit_seq,
-            objectId: last.object.object_id,
-        };
-        position = {
-            asOf: read.known_as_of,
-            before,
-            beforeId: Buffer.from(before.objectId, "utf8"),
-        };
+        if (!next) return { ok: true, rows: kept, truncated: complete ? read.truncated : true };
     }
-    return { ok: true, rows: kept, truncated: true };
 }
