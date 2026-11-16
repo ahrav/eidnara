@@ -8,10 +8,10 @@ use std::collections::{BinaryHeap, HashMap};
 
 use host_runtime::RouteHandle;
 use kernel::{
-    ChunkRow, DecisionRow, KernelError, KernelStore, ScopeTermFilter, Sensitivity, ServingPosition,
-    Surface, VisibleRow,
+    ChunkRow, DecisionRow, KernelError, KernelStore, ScopeTermFilter, ServingPosition, Surface,
+    VisibleRow,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::project::{ProjectBinding, ScopeFilter, ScopeTerms, stored_terms};
@@ -401,90 +401,153 @@ pub(crate) fn read_visible_page(
     })
 }
 
-/// Wire shape of one row. Fields are declared in the sorted key order a `serde_json::Map` emits, so the encoding is byte-identical to the `json!` tree it replaces.
-#[derive(Serialize)]
-struct RowOut<'a> {
-    decision: Option<DecisionOut<'a>>,
-    labeled: bool,
-    object: ObjectOut<'a>,
-    scope_id: Option<&'a str>,
-    token: TokenOut<'a>,
-    visibility: &'static str,
-}
-
-#[derive(Serialize)]
-struct ObjectOut<'a> {
-    created_commit_seq: i64,
-    domain_id: &'a str,
-    invalidated_commit_seq: Option<i64>,
-    object_id: &'a str,
-    object_kind: &'a str,
-    sensitivity: Sensitivity,
-    source_id: &'a str,
-    source_kind: &'a str,
-    source_revision: i64,
-    superseded_by: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct PayloadOut<'a> {
-    rationale: &'a str,
-    summary: &'a str,
-}
-
-#[derive(Serialize)]
-struct DecisionOut<'a> {
-    decision_kind: &'a str,
-    payload: PayloadOut<'a>,
-}
-
-#[derive(Serialize)]
-struct TokenOut<'a> {
-    known_as_of: i64,
-    object_id: &'a str,
-}
-
-fn row_out<'a>(
-    row: &'a VisibleRow,
-    decision: Option<&'a DecisionRow>,
-    known_as_of: i64,
-) -> RowOut<'a> {
-    let object = &row.object;
-    RowOut {
-        decision: decision.map(|decision| DecisionOut {
-            decision_kind: &decision.decision_kind,
-            payload: PayloadOut {
-                rationale: &decision.payload.rationale,
-                summary: &decision.payload.summary,
-            },
-        }),
-        labeled: row.labeled,
-        object: ObjectOut {
-            created_commit_seq: object.created_commit_seq,
-            domain_id: &object.domain_id,
-            invalidated_commit_seq: object.invalidated_commit_seq,
-            object_id: &object.object_id,
-            object_kind: &object.object_kind,
-            sensitivity: object.sensitivity,
-            source_id: &object.source_id,
-            source_kind: &object.source_kind,
-            source_revision: object.source_revision,
-            superseded_by: object.superseded_by.as_deref(),
-        },
-        scope_id: row.scope_id.as_deref(),
-        token: TokenOut {
-            known_as_of,
-            object_id: &object.object_id,
-        },
-        visibility: row.visibility.as_str(),
+/// The escape `serde_json` writes after a backslash for `byte`: the byte's short form, or `u` for a control byte
+/// with none, which is written as `\u00` and two lowercase hex digits. `None` for a byte written as it is.
+fn json_escape(byte: u8) -> Option<u8> {
+    match byte {
+        b'"' => Some(b'"'),
+        b'\\' => Some(b'\\'),
+        0x08 => Some(b'b'),
+        0x09 => Some(b't'),
+        0x0a => Some(b'n'),
+        0x0c => Some(b'f'),
+        0x0d => Some(b'r'),
+        0x00..=0x1f => Some(b'u'),
+        _ => None,
     }
+}
+
+/// Whether any of the eight bytes of `word` is below 0x20, a quote, or a backslash.
+fn word_needs_escape(word: u64) -> bool {
+    const LOW: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let has_zero = |bytes: u64| bytes.wrapping_sub(LOW) & !bytes & HIGH;
+    let control = word.wrapping_sub(LOW * 0x20) & !word & HIGH;
+    (control | has_zero(word ^ (LOW * 0x22)) | has_zero(word ^ (LOW * 0x5c))) != 0
+}
+
+/// Appends `value` as a JSON string, byte for byte as `serde_json` encodes it. Text is copied in runs between
+/// escapes, and a run is scanned eight bytes at a time.
+fn write_str(body: &mut Vec<u8>, value: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = value.as_bytes();
+    body.push(b'"');
+    let mut run = 0;
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        if let Some(word) = bytes[at..].first_chunk::<8>()
+            && !word_needs_escape(u64::from_le_bytes(*word))
+        {
+            at += 8;
+            continue;
+        }
+        if let Some(escape) = json_escape(byte) {
+            body.extend_from_slice(&bytes[run..at]);
+            body.push(b'\\');
+            body.push(escape);
+            if escape == b'u' {
+                body.extend_from_slice(&[
+                    b'0',
+                    b'0',
+                    HEX[usize::from(byte >> 4)],
+                    HEX[usize::from(byte & 0xf)],
+                ]);
+            }
+            run = at + 1;
+        }
+        at += 1;
+    }
+    body.extend_from_slice(&bytes[run..]);
+    body.push(b'"');
+}
+
+fn write_optional_str(body: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => write_str(body, value),
+        None => body.extend_from_slice(b"null"),
+    }
+}
+
+fn write_int(body: &mut Vec<u8>, value: i64) {
+    let mut digits = [0u8; 20];
+    let mut first = digits.len();
+    let mut rest = value.unsigned_abs();
+    loop {
+        first -= 1;
+        digits[first] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    if value < 0 {
+        body.push(b'-');
+    }
+    body.extend_from_slice(&digits[first..]);
+}
+
+/// Appends one row in its wire shape. Keys are written in the sorted order a `serde_json::Map` emits and values as
+/// `serde_json` encodes them, so the bytes equal the encoding of the row's `json!` tree.
+fn write_row(
+    body: &mut Vec<u8>,
+    row: &VisibleRow,
+    decision: Option<&DecisionRow>,
+    known_as_of: i64,
+) {
+    let object = &row.object;
+    body.extend_from_slice(b"{\"decision\":");
+    match decision {
+        Some(decision) => {
+            body.extend_from_slice(b"{\"decision_kind\":");
+            write_str(body, &decision.decision_kind);
+            body.extend_from_slice(b",\"payload\":{\"rationale\":");
+            write_str(body, &decision.payload.rationale);
+            body.extend_from_slice(b",\"summary\":");
+            write_str(body, &decision.payload.summary);
+            body.extend_from_slice(b"}}");
+        }
+        None => body.extend_from_slice(b"null"),
+    }
+    body.extend_from_slice(b",\"labeled\":");
+    body.extend_from_slice(if row.labeled { b"true" } else { b"false" });
+    body.extend_from_slice(b",\"object\":{\"created_commit_seq\":");
+    write_int(body, object.created_commit_seq);
+    body.extend_from_slice(b",\"domain_id\":");
+    write_str(body, &object.domain_id);
+    body.extend_from_slice(b",\"invalidated_commit_seq\":");
+    match object.invalidated_commit_seq {
+        Some(invalidated) => write_int(body, invalidated),
+        None => body.extend_from_slice(b"null"),
+    }
+    body.extend_from_slice(b",\"object_id\":");
+    write_str(body, &object.object_id);
+    body.extend_from_slice(b",\"object_kind\":");
+    write_str(body, &object.object_kind);
+    body.extend_from_slice(b",\"sensitivity\":");
+    write_str(body, object.sensitivity.as_str());
+    body.extend_from_slice(b",\"source_id\":");
+    write_str(body, &object.source_id);
+    body.extend_from_slice(b",\"source_kind\":");
+    write_str(body, &object.source_kind);
+    body.extend_from_slice(b",\"source_revision\":");
+    write_int(body, object.source_revision);
+    body.extend_from_slice(b",\"superseded_by\":");
+    write_optional_str(body, object.superseded_by.as_deref());
+    body.extend_from_slice(b"},\"scope_id\":");
+    write_optional_str(body, row.scope_id.as_deref());
+    body.extend_from_slice(b",\"token\":{\"known_as_of\":");
+    write_int(body, known_as_of);
+    body.extend_from_slice(b",\"object_id\":");
+    write_str(body, &object.object_id);
+    body.extend_from_slice(b"},\"visibility\":");
+    write_str(body, row.visibility.as_str());
+    body.push(b'}');
 }
 
 /// Encodes the read's response body: the envelope and the longest prefix of `response.rows` whose encoding fits
 /// [`MAX_READ_ROW_BYTES`]. Each row is encoded once, straight into the body, and a row that passes the budget is
 /// taken back out. Rows are newest first, so the budget retains a contiguous prefix of the most recent rows.
-/// `truncated` reports rows the read or the budget left out; a row that fails to encode ends the rows as the
-/// budget does.
+/// `truncated` reports rows the read or the budget left out.
 fn encode_body(response: &ReadResponse, gated: bool) -> Result<Vec<u8>, serde_json::Error> {
     // A typical memory row encodes to about 1 KiB; the envelope is under 200 bytes.
     let mut body =
@@ -501,14 +564,14 @@ fn encode_body(response: &ReadResponse, gated: bool) -> Result<Vec<u8>, serde_js
         if row_start > rows_start {
             body.push(b',');
         }
-        let out = row_out(
+        write_row(
+            &mut body,
             row,
             response.decisions.get(&row.object.object_id),
             response.known_as_of,
         );
-        let encoded = serde_json::to_writer(&mut body, &out).is_ok();
         // The `+ 1` charges each row's array separator or bracket byte against the budget.
-        if !encoded || body.len() - rows_start + 1 > MAX_READ_ROW_BYTES {
+        if body.len() - rows_start + 1 > MAX_READ_ROW_BYTES {
             body.truncate(row_start);
             truncated = true;
             break;
@@ -672,24 +735,83 @@ mod tests {
     fn object_and_payload_mirrors_match_the_kernel_structs() {
         let row = populated_row();
         let decision = decision(&row.object.object_id);
-        let out = row_out(&row, Some(&decision), 7);
+        let mut encoded = Vec::new();
+        write_row(&mut encoded, &row, Some(&decision), 7);
+        let written: Value = serde_json::from_slice(&encoded).unwrap();
 
-        let object_via_row = serde_json::to_value(&row.object).unwrap();
-        assert_eq!(serde_json::to_value(&out.object).unwrap(), object_via_row);
         assert_eq!(
-            serde_json::to_string(&out.object).unwrap(),
-            serde_json::to_string(&object_via_row).unwrap(),
-            "ObjectOut must declare its fields in the sorted order a Value map emits"
+            written["object"],
+            serde_json::to_value(&row.object).unwrap()
         );
+        assert_eq!(
+            written["decision"]["payload"],
+            serde_json::to_value(&decision.payload).unwrap()
+        );
+        assert_eq!(
+            String::from_utf8(encoded).unwrap(),
+            serde_json::to_string(&row_value(&row, Some(&decision), 7)).unwrap(),
+            "a row must write its keys in the sorted order a Value map emits"
+        );
+    }
 
-        let payload = &out.decision.as_ref().unwrap().payload;
-        let payload_via_row = serde_json::to_value(&decision.payload).unwrap();
-        assert_eq!(serde_json::to_value(payload).unwrap(), payload_via_row);
-        assert_eq!(
-            serde_json::to_string(payload).unwrap(),
-            serde_json::to_string(&payload_via_row).unwrap(),
-            "PayloadOut must declare its fields in the sorted order a Value map emits"
-        );
+    fn written(value: &str) -> String {
+        let mut encoded = Vec::new();
+        write_str(&mut encoded, value);
+        String::from_utf8(encoded).unwrap()
+    }
+
+    /// Every ASCII byte, at every offset of an eight-byte word and beside multi-byte text, is written as
+    /// `serde_json` writes it.
+    #[test]
+    fn strings_are_written_as_serde_json_writes_them() {
+        for byte in 0..=0x7fu8 {
+            let special = char::from(byte);
+            for padding in 0..=17 {
+                for filler in ["a", "\u{e9}", "\u{1f600}"] {
+                    let value = format!("{}{special}{}", filler.repeat(padding), filler.repeat(9));
+                    assert_eq!(
+                        written(&value),
+                        serde_json::to_string(&value).unwrap(),
+                        "byte {byte:#x} after {padding} of {filler:?}"
+                    );
+                }
+            }
+        }
+        for value in [
+            "",
+            "plain",
+            "\"\\\u{0}\u{1f}\u{7f}",
+            "tab\tend\n",
+            "\u{2028}\u{2029}",
+        ] {
+            assert_eq!(written(value), serde_json::to_string(value).unwrap());
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_string_is_written_as_serde_json_writes_it(value in proptest::prelude::any::<String>()) {
+            proptest::prop_assert_eq!(written(&value), serde_json::to_string(&value).unwrap());
+        }
+
+        #[test]
+        fn any_integer_is_written_as_serde_json_writes_it(value in proptest::prelude::any::<i64>()) {
+            let mut encoded = Vec::new();
+            write_int(&mut encoded, value);
+            proptest::prop_assert_eq!(String::from_utf8(encoded).unwrap(), serde_json::to_string(&value).unwrap());
+        }
+    }
+
+    #[test]
+    fn integer_extremes_are_written_as_serde_json_writes_them() {
+        for value in [0, 1, -1, 9, 10, -10, i64::MAX, i64::MIN] {
+            let mut encoded = Vec::new();
+            write_int(&mut encoded, value);
+            assert_eq!(
+                String::from_utf8(encoded).unwrap(),
+                serde_json::to_string(&value).unwrap()
+            );
+        }
     }
 
     fn body_value(response: &ReadResponse, served: usize, gated: bool, truncated: bool) -> Value {
