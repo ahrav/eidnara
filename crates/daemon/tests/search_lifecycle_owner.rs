@@ -4968,6 +4968,82 @@ async fn a_disabled_record_reports_no_checkpoint() {
     let _ = owner.shutdown().await;
 }
 
+/// A slice that finds a disable reconciling clears the status checkpoint before that disable completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_slice_that_finds_a_disable_reconciling_reports_no_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = Arc::new(current_owner(home, &corpus));
+    let (progress, _) = owner.progress(&slice_budget());
+    assert!(progress.checkpoint.is_some(), "{progress:?}");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    let probe = {
+        let owner = Arc::clone(&owner);
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv().unwrap();
+            let slice = owner.run_slice(&slice_budget());
+            let (progress, _) = owner.progress(&slice_budget());
+            exit_tx.send(()).unwrap();
+            (slice, progress)
+        })
+    };
+    let mut notified = false;
+    owner
+        .disable(&slice_budget(), &mut move |event| {
+            if matches!(event, DisableEvent::IntentPersisted) && !notified {
+                notified = true;
+                entered_tx.send(()).unwrap();
+                exit_rx.recv().unwrap();
+            }
+        })
+        .await
+        .expect("the disable reconciles");
+    let (slice, progress) = probe.await.unwrap();
+    assert!(matches!(slice, SliceOutcome::Disabled), "{slice:?}");
+    assert_eq!(progress.checkpoint, None, "{progress:?}");
+    let _ = owner.shutdown().await;
+}
+
+/// A slice that finds the record disabled clears the status checkpoint when it cannot read the kernel tip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_slice_over_a_disabled_record_with_the_kernel_unread_reports_no_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    owner
+        .disable(&slice_budget(), &mut |_| {})
+        .await
+        .expect("the disable reconciles");
+    assert!(matches!(control(home), ControlState::Disabled(_)));
+    let (progress, _) = owner.progress(&slice_budget());
+    assert!(
+        progress.checkpoint.is_some(),
+        "no slice has run since the disable: {progress:?}"
+    );
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(20)),
+        Arc::clone(&cancel),
+    );
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared { .. }) {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let outcome = owner.run_slice(&budget);
+    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+    let (progress, _) = owner.progress(&slice_budget());
+    assert_eq!(progress.checkpoint, None, "{progress:?}");
+    let _ = owner.shutdown().await;
+}
+
 /// A request made after a reload that changes the identity while the old family's supervisor still runs does not open admission under the new identity over that supervisor: it closes admission, refuses, and leaves the rotation to the next slice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_request_over_running_foreign_maintenance_closes_admission_until_rotation() {

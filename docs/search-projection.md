@@ -94,9 +94,11 @@ The effect on a family past the limit:
 
 A build is one slice, and the slice holds the owner's manager for its whole
 work. A reader takes the manager to pin, so a search that arrives during a
-build slice waits for its own deadline and answers `deadline`; the previous
-family serves again between slices and until the replacement is selected.
-The window is the build's duration, bounded by `supervisor_slice_ms`.
+build slice waits for its own deadline and answers `deadline`. Between slices
+and until the replacement is selected, a previous family inside the freshness
+limit serves again, and one past the limit stays refused as stale, as the list
+above states. The window is the build's duration, bounded by
+`supervisor_slice_ms`.
 
 ## Rebuilds of a Current family
 
@@ -403,7 +405,7 @@ and its rebuild outcomes without parsing the log:
 | `rebuilds.recorded` | First builds and rebuilds the slice loop recorded since the daemon started. |
 | `rebuilds.completed` | Builds that reached Current since the daemon started, whoever recorded them. |
 | `rebuilds.renewed` | Renewals of a lapsed rebuild since the daemon started. |
-| `blocked` | The reason the last slice gave for leaving the record or its Current family where it was: a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild, with `; coverage: <reason>` appended when the last observation of the selected family failed, or the refusal of the recording that slice asked for. It is the text the log line `search lifecycle <reason>` carries, bounded to 512 characters. It is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends; a slice that hands a supervisor back for joining leaves the earlier value, whatever its catch-up episode found. |
+| `blocked` | The reason the last slice gave for leaving the record or its Current family where it was: a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild, with `; coverage: <reason>` appended when the last observation of the selected family failed, or the refusal of the recording that slice asked for. The text before `; coverage:` is the text the log line `search lifecycle <reason>` carries, and the status value is bounded to 512 characters. It is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that hands a supervisor back for joining leaves the earlier value when that supervisor drains, whatever its catch-up episode found, and reports `did not advance: maintenance did not drain: <reason>` when it does not. |
 
 The counters and the observation live in the daemon process and start from
 zero at each start. The slice loop logs `search lifecycle rebuild completed:

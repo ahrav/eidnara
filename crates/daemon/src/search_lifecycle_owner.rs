@@ -220,9 +220,9 @@ pub struct ProjectionProgress {
     pub rebuilds_completed: u64,
     /// Renewals of a rebuild whose deadline lapsed.
     pub rebuilds_renewed: u64,
-    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that hands a supervisor back for joining leaves the earlier value, whatever its catch-up episode found.
+    /// The reason the last slice gave for leaving the record or its Current family where it was, followed by the reason the last observation of the selected family failed when it did, or the refusal of the recording that slice asked for; `None` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends. A slice that hands a supervisor back for joining leaves the earlier value when that supervisor drains, whatever its catch-up episode found, and reports the failed drain when it does not.
     pub blocked: Option<String>,
-    /// Why the last observation of the selected family failed; `None` after one that succeeded, and when no selected family was expected.
+    /// Why the last observation of the selected family failed; `None` after an observation that succeeded or expected no selected family, and after a slice that found the record disabled. Any other slice that ends before its observation keeps the value, as it keeps `checkpoint`.
     unobserved: Option<String>,
     /// The attempt this process's slice loop last recorded or renewed, and when, on the monotonic clock.
     building: Option<(String, Instant)>,
@@ -913,11 +913,6 @@ impl SearchLifecycleOwner {
         let completed = matches!(outcome, SliceOutcome::Advanced(RecoveryProgress::Current));
         let building = {
             let mut progress = self.lock_progress();
-            if matches!(outcome, SliceOutcome::Disabled) {
-                // A disabled record serves no family, so the last observation describes nothing a reader can use.
-                progress.checkpoint = None;
-                progress.unobserved = None;
-            }
             progress.blocked = stalled(outcome).map(|(_, detail)| match &progress.unobserved {
                 Some(reason) => format!("{detail}; coverage: {reason}"),
                 None => detail,
@@ -1188,6 +1183,7 @@ impl SearchLifecycleOwner {
         // The admissions this call makes are judged as lifecycle work: a family that trails the kernel past the freshness limit is still caught up, rebuilt, and completed, while readers and maintenance on other threads stay refused.
         let _work = self.admission.gate().lifecycle_work();
         if matches!(*managed, Managed::Disabling | Managed::ShutDown(_)) {
+            self.unobserved_by_design();
             return SliceOutcome::Disabled;
         }
         let (inputs, identity, budget) = match self.prepare(&mut managed, &wait, slice_started) {
@@ -1203,6 +1199,7 @@ impl SearchLifecycleOwner {
             deadline: budget.deadline(),
         });
         let Managed::Selection(selection) = &mut *managed else {
+            self.unobserved_by_design();
             return SliceOutcome::Disabled;
         };
         // `ProjectionLifecycle::open` syncs and locks the lifecycle directory; a probe that decides only whether to write must not.
@@ -1216,7 +1213,10 @@ impl SearchLifecycleOwner {
                 };
             }
             ControlState::Disabled(_) => {
-                return match self.refresh(&inputs, Some(selection), &identity, &budget) {
+                let refreshed = self.refresh(&inputs, Some(selection), &identity, &budget);
+                // A disabled record serves no family, so the status reports no checkpoint whether or not the refresh read the kernel.
+                self.unobserved_by_design();
+                return match refreshed {
                     Refresh::Installed(_) => SliceOutcome::Disabled,
                     Refresh::Closed(closed) => blocked(closed),
                 };
