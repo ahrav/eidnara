@@ -14,10 +14,10 @@ revision.
 - Ids: the rendered rows of `CanonicalMemorySnapshot::new`, ascending
   (`served_ids` (`crates/daemon/src/canonical_memory.rs:72`)).
 - Freeze marker: every freeze site calls `freeze_project_memory`
-  (`freeze_project_memory` (`crates/daemon/src/transform.rs:613`)), which
+  (`freeze_project_memory` (`crates/daemon/src/transform.rs:630`)), which
   assigns the composition and reports the freeze
-  (`crates/daemon/src/transform.rs:3122`, `crates/daemon/src/transform.rs:4743`,
-  `crates/daemon/src/transform.rs:4898`).
+  (`crates/daemon/src/transform.rs:3143`, `crates/daemon/src/transform.rs:4768`,
+  `crates/daemon/src/transform.rs:4923`).
 
 - Guarantee under test: The stored decision set equals, as a set, the object ids
   of the snapshot rows whose composition the same fold persisted.

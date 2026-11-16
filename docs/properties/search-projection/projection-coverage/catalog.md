@@ -188,7 +188,7 @@ Source obligations and the reader at
 `crates/daemon/src/canonical_memory.rs:141-212` were inspected; the test at
 `:282-312` checks its positive-category filtering, not a full projection oracle.
 Existing check: codec golden tests and
-`crates/daemon/src/canonical_memory.rs:432-462`,
+`crates/daemon/src/canonical_memory.rs:282-312`,
 `injectable_rows_are_visible_decisions_in_a_positive_category`, are adjacent
 checks, status unaudited; none declares five-class durable coverage complete.
 Impact: A retrieval lane can appear healthy while an entire class or current
