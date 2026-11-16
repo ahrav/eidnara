@@ -1019,8 +1019,8 @@ mod tests {
     }
 
     /// The in-process readers reach the row cap through `read_visible`: a domain selection over one decision
-    /// more than `MAX_READ_ROWS` keeps the newest rows in serving order, each with its decision, and reports the
-    /// row it leaves out as truncation.
+    /// more than `MAX_READ_ROWS` in the project's scope keeps the newest of them in serving order, each with its
+    /// decision, and reports the row it leaves out as truncation. Rows the scope filter drops take no place.
     #[test]
     fn a_domain_selection_over_the_row_cap_keeps_the_newest_rows() {
         use crate::kernel_route_fixtures::{
@@ -1058,6 +1058,27 @@ mod tests {
                 })
                 .unwrap();
         }
+
+        // The newest rows carry no scope: the kernel keeps them for every project and the scope filter drops
+        // them, so a cap applied ahead of the filter would spend three places on them.
+        store
+            .commit(intent("unscoped"), |envelope| {
+                for index in 0..3 {
+                    let object_id = format!("unscoped-{index}");
+                    let mut spec =
+                        memory_decision_spec(&object_id, "", "PROJECT_RULES", "unscoped");
+                    spec.scope_id = None;
+                    envelope.insert_decision(spec)?;
+                    envelope.record_admission(admission(
+                        &object_id,
+                        EventKind::Other,
+                        None,
+                        (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                    ))?;
+                }
+                Ok(String::new())
+            })
+            .unwrap();
 
         let read = read_visible(
             &store,

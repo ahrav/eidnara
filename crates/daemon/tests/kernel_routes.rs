@@ -7422,9 +7422,12 @@ async fn a_full_page_reads_later_chunks_to_decide_truncation() {
         .await;
     assert_state(&oldest, "available", None);
     let scope_id = daemon.project_scope_id().await;
-    // Rows of no project sit between the oldest project row and the rest in two commits: the chunk that fills the
-    // page ends with the larger one, and the smaller one keeps that chunk short of the surface's end.
-    for (name, indexes) in [("unscoped-oldest", 0..50), ("unscoped-older", 100..1600)] {
+    // Rows of no project sit between the oldest project row and the rest in two commits. The larger one holds more
+    // rows than a chunk asks for, so the chunk that fills the page ends with it, short of the surface's end.
+    for (name, indexes) in [
+        ("unscoped-oldest", 0..50),
+        ("unscoped-older", 100..100 + MAX_READ_ROWS as i64),
+    ] {
         let specs = indexes
             .map(|index| sized_decision(index, None, 16))
             .collect();
