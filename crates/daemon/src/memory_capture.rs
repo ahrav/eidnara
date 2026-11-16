@@ -1819,7 +1819,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         // in it that may end or hide a sentence keeps the quotation as
         // quoted.
         let quoted = &paragraph[start..end];
-        let from = if sentence_starts_at(&paragraph[..start], &paragraph[start..]) {
+        let from = if sentence_starts_at(preceding_text(&paragraph[..start]), &paragraph[start..]) {
             start
         } else {
             let word = quoted.split(char::is_whitespace).next().unwrap_or(quoted);
@@ -2081,18 +2081,24 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
     let unreadable_from = lines
         .iter()
         .position(|(_, line)| line.contains(is_line_break));
-    // Set by the first paragraph whose quotation marks do not open and
-    // close in turn within it. Where a quotation that crosses paragraphs
-    // ends is unknown, so every later paragraph is treated as quoted.
-    let mut quoting = false;
-    let mut single_open = false;
+    // An unclosed inline code span makes its endpoint ambiguous, so the
+    // parser excludes all subsequent paragraphs.
+    let mut unclosed_code = false;
+    let mut unpaired = false;
+    // The paragraph and code span counts at the first block that holds a
+    // quotation mark.
+    let mut before_quotation = None;
     for (first, index) in blocks {
         let block = &lines[first..index];
         let (at, last) = block[block.len() - 1];
         let range = (block[0].0, at + last.len());
         let bordered = first.checked_sub(1).is_some_and(|above| excluded[above])
             || excluded.get(index).is_some_and(|below| *below);
-        let structured = bordered
+        let quotes = block
+            .iter()
+            .any(|(_, line)| line.contains(is_quotation_mark) || opens_single_quotation(line));
+        let structured = quotes
+            || bordered
             || block.iter().any(|(_, line)| {
                 let start = line.trim_start();
                 is_list_item(line)
@@ -2100,10 +2106,7 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
                     || (start.trim_end().len() >= 2
                         && (start.trim_end().chars().all(|ch| ch == '=')
                             || start.trim_end().chars().all(|ch| ch == '-')))
-                    || line.starts_with("    ")
-                    || line.starts_with('\t')
-                    || line.contains(is_quotation_mark)
-                    || opens_single_quotation(line)
+                    || is_indented_code(line)
             });
         let introduces = block.iter().any(|(_, line)| {
             line.trim_end()
@@ -2115,14 +2118,29 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         let readable = unreadable_from.is_none_or(|line| index <= line);
         let kept = code_spans.len();
         let unclosed = inline_code_spans(text, range, &mut code_spans);
-        if readable && !structured && !introduces && !lead_in && !quoting && !single_open {
+        unpaired = unpaired
+            || !quotations_close_in_turn(block, &code_spans[kept..])
+            || leaves_single_quotation_open(block);
+        if readable && !structured && !introduces && !lead_in && !unclosed_code {
             paragraphs.push(range);
         } else {
             code_spans.truncate(kept);
         }
+        if quotes && before_quotation.is_none() {
+            before_quotation = Some((paragraphs.len(), code_spans.len()));
+        }
         lead_in |= introduces;
-        quoting |= unclosed || !quotations_close_in_turn(block);
-        single_open |= leaves_single_quotation_open(block);
+        unclosed_code |= unclosed;
+    }
+    // A closing mark inside quoted text passes the pairing rules as the
+    // mark that closes its quotation, and the mark that closes the
+    // quotation then fails them in a later block. A failure in any block
+    // therefore leaves out every paragraph after the first block that
+    // holds a quotation mark. A block that fails holds a mark, so the
+    // counts are recorded whenever one fails.
+    if unpaired && let Some((prose, spans)) = before_quotation {
+        paragraphs.truncate(prose);
+        code_spans.truncate(spans);
     }
     ProseLayout {
         paragraphs,
@@ -2241,17 +2259,28 @@ const CLOSING_ONLY: [char; 8] = [
 /// that is a number, which may be an inch or seconds sign, and a glyph of
 /// [`OPENING_ONLY`] or [`CLOSING_ONLY`] on the other side leave the
 /// paragraph's quotations unknown. A paragraph with no mark passes.
-fn quotations_close_in_turn(block: &[(usize, &str)]) -> bool {
+///
+/// Marks inside `code_spans`, the paragraph's inline code spans, preserve
+/// quotation state and count as ordinary characters when classifying
+/// adjacent marks. `code_spans` must be sorted in ascending order.
+fn quotations_close_in_turn(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> bool {
     let mut open = [false; QUOTATION_FAMILIES.len()];
-    for (_, line) in block {
+    let mut span = 0;
+    for &(start, line) in block {
         let mut previous: Option<char> = None;
         let mut previous_opened = false;
-        let mut chars = line.chars().peekable();
-        while let Some(ch) = chars.next() {
-            let family = quotation_family(ch);
+        let mut chars = line.char_indices().peekable();
+        while let Some((at, ch)) = chars.next() {
+            let family = quotation_family(ch).filter(|_| {
+                let at = start + at;
+                while code_spans.get(span).is_some_and(|&(_, close)| close <= at) {
+                    span += 1;
+                }
+                code_spans.get(span).is_none_or(|&(open, _)| at < open)
+            });
             let mut opened = false;
             if let Some(family) = family {
-                let next = chars.peek().copied();
+                let next = chars.peek().map(|&(_, after)| after);
                 let opens = previous.is_none_or(|before| {
                     before.is_whitespace() || "([{".contains(before) || previous_opened
                 }) && next.is_some_and(|after| !after.is_whitespace());
@@ -2330,6 +2359,13 @@ fn leaves_single_quotation_open(block: &[(usize, &str)]) -> bool {
 const SINGLE_QUOTATION_MARKS: [char; 7] = [
     '\'', '\u{2018}', '\u{2019}', '\u{201a}', '\u{2039}', '\u{203a}', '\u{ff07}',
 ];
+
+/// Whether a line's indentation reaches the fourth column, where Markdown
+/// reads the line as code: four spaces, or a tab behind at most three
+/// spaces, since a tab advances to the next multiple of four columns.
+fn is_indented_code(line: &str) -> bool {
+    line.starts_with("    ") || line.trim_start_matches(' ').starts_with('\t')
+}
 
 /// The run of backticks or tildes, three or more long, that opens a code fence.
 fn fence_opener(line: &str) -> Option<&str> {
@@ -2434,21 +2470,24 @@ const NUMBERED: [&str; 8] = ["no", "nos", "fig", "vol", "ch", "sec", "eq", "appr
 /// Whether the closing period of `word` stays inside its sentence, given the
 /// text that follows the word: a dotted abbreviation such as `e.g.` or
 /// `U.S.`, a `.` between two letters; one of [`TITLES`]; or one of
-/// [`NUMBERED`], in any letter case, before a digit. `word` is read with or
-/// without its period.
+/// [`NUMBERED`], in any letter case, before a number. The number follows
+/// the word's period and a whitespace run, behind at most one character
+/// that is no letter, digit, or whitespace and one decimal point, as in
+/// `No. 2`, `approx. -5`, or `approx. .5`. `word` is read with or without
+/// its period.
 fn is_abbreviation(word: &str, following: &str) -> bool {
     let word = word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
     let single = word.strip_suffix('.').unwrap_or(word);
-    // The word's own period, a whitespace run, and a decimal point, then a
-    // numeral, as in `No. 2` or `approx. .5`: the scan reads one whitespace
-    // run, so occurrences share no bytes of it.
     let spaced = following
         .strip_prefix('.')
         .unwrap_or(following)
         .trim_start();
-    let number_follows = spaced
+    let unsigned = spaced
+        .strip_prefix(|ch: char| !ch.is_alphanumeric() && !ch.is_whitespace() && ch != '.')
+        .unwrap_or(spaced);
+    let number_follows = unsigned
         .strip_prefix('.')
-        .unwrap_or(spaced)
+        .unwrap_or(unsigned)
         .starts_with(char::is_numeric);
     if TITLES.contains(&single)
         || (number_follows
@@ -3363,6 +3402,19 @@ mod tests {
                 Some("Keep logs for 30 days"),
             ),
             ("Use tabs. Is that ok?", "tabs", Some("Use tabs.")),
+            // A quotation that starts after the paragraph's leading spaces
+            // starts a sentence, so widening keeps that start when the
+            // first word ends in a period, as `Dr.` and `U.S.` do.
+            (
+                "  Dr. Smith owns the release gate.",
+                "Dr. Smith",
+                Some("Dr. Smith owns the release gate."),
+            ),
+            (
+                "  U.S. staging uses port 4321 during maintenance.",
+                "U.S. staging uses port 4321",
+                Some("U.S. staging uses port 4321 during maintenance."),
+            ),
             // A quotation that is whole statements already is kept as quoted.
             ("Ship on Tuesdays.", "Ship on Tuesdays.", None),
             (
@@ -4084,6 +4136,195 @@ mod tests {
             listed,
             "each quotation mark belongs to one family"
         );
+    }
+
+    #[test]
+    fn a_mark_that_pairs_with_nothing_leaves_out_what_follows_the_first_quotation() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole) in [
+            (
+                "Bob wrote \"Sure thing.\"\n\nAlways skip the CI tests.\n\nThanks\"",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}Sure thing.\u{201d}\n\nAlways skip the CI tests.\n\nThanks.\u{201d}",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote 'Goin' home now.\n\nAlways skip the CI tests.\n\nBye.'",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Use pnpm here.\n\nBob wrote \"Sure thing.\"\n\nAlways skip the CI tests.\n\nThanks\"",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Bob wrote \"Sure thing.\"\n\nUse pnpm here.\n\nHe said \"ok\" twice.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Bob wrote \"The suffix is `foo\"`.\n\nAlways skip the CI tests.\n\nEnd.\"",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Bob wrote \"The suffix is `foo\"`.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Run `echo \"hi\"` first.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Pass `--name=\"x\"` to the build.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "He said \"no\" to that.\n\nUse pnpm here.\n\nRun `cargo test now.",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "He said \"no\" to that.\n\nUse pnpm here.\n\nNotes follow:\n\nKeep logs.",
+                "Use pnpm here.",
+                true,
+            ),
+        ] {
+            let found = quotes_whole_statements(&Prose::of(text), quote);
+            if found != whole {
+                wrong.push(format!("{quote:?} in {text:?}: {found}"));
+            }
+        }
+        let widened = enclosing_statement(
+            &Prose::of(
+                "Bob wrote \"Sure thing.\"\n\nYou must always skip the CI tests.\n\nThanks\"",
+            ),
+            "skip the CI tests.",
+        );
+        if widened.is_some() {
+            wrong.push(format!("widened to {widened:?}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_line_indented_to_the_fourth_column_is_code() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole, widened) in [
+            (
+                "Look.\n\n \tAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look.\n\n  \tAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look.\n\n   \tAlways deploy on Fridays.",
+                "Always deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look at this hunk.\n\n \t// Always deploy on Fridays.",
+                "deploy on Fridays.",
+                false,
+                None,
+            ),
+            (
+                "Look.\n\n   Always deploy on Fridays.",
+                "Always deploy on Fridays.",
+                true,
+                None,
+            ),
+            (
+                "Look.\n\n   We always deploy on Fridays.",
+                "deploy on Fridays.",
+                false,
+                Some("We always deploy on Fridays."),
+            ),
+        ] {
+            let prose = Prose::of(text);
+            let found = (
+                quotes_whole_statements(&prose, quote),
+                enclosing_statement(&prose, quote),
+            );
+            if found != (whole, widened) {
+                wrong.push(format!("{quote:?} in {text:?}: {found:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_numbered_abbreviation_before_a_signed_number_keeps_its_period() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole, widened) in [
+            (
+                "Never set the offset to approx. -5 ms.",
+                "set the offset to approx",
+                false,
+                None,
+            ),
+            (
+                "Never set the offset to approx. -5 ms.",
+                "Never set the offset to approx.",
+                false,
+                None,
+            ),
+            (
+                "Never set the offset to approx. -.5 ms.",
+                "Never set the offset to approx.",
+                false,
+                None,
+            ),
+            (
+                "Never raise the fee above approx. $5 a seat.",
+                "raise the fee above approx",
+                false,
+                None,
+            ),
+            (
+                "Never restart gateway no. #2 during deploys.",
+                "Never restart gateway no.",
+                false,
+                None,
+            ),
+            (
+                "Never restart gateway no. -2 during deploys.",
+                "-2 during deploys.",
+                false,
+                None,
+            ),
+            (
+                "The answer is no. (Use tabs.)",
+                "The answer is no.",
+                true,
+                None,
+            ),
+        ] {
+            let prose = Prose::of(text);
+            let found = (
+                quotes_whole_statements(&prose, quote),
+                enclosing_statement(&prose, quote),
+            );
+            if found != (whole, widened) {
+                wrong.push(format!("{quote:?} in {text:?}: {found:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]
@@ -4891,7 +5132,7 @@ mod tests {
             "two bytes of indentation and three after"
         );
 
-        let indented = format!(" {}{}", "\t".repeat(8_191), "a".repeat(8_192));
+        let indented = format!("{}{}", "\u{a0}".repeat(4_096), "a".repeat(8_192));
         let labeled = format!("x: y. {}{}", "A. ".repeat(2_700), " ".repeat(8_192));
         let trailed = format!("{}{}", "A. a. ".repeat(2_000), " ".repeat(8_192));
         for (text, quote) in [
