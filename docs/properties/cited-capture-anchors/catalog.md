@@ -285,7 +285,7 @@ Check: `always` - no capture or source publish commit for a session has a `commi
 Fault/timing angle: a checkpoint or publish admitted before a delete that runs after it
 Required faults and enabling state: a session delete issued while a checkpoint or publish waits on the gate
 Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1135`, the delete path at `crates/daemon/src/lib.rs:7047`, and `capture_after_response` at `crates/daemon/src/lib.rs:9301`
-Existing check: `crates/daemon/src/lib.rs:25543`, `:25881`, `:26086`, `:26739`; `crates/daemon/src/lib.rs:25268`; `crates/daemon/src/source_capture_tests.rs:1037` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:25543`, `:25881`, `:26086`, `:26739`; `crates/daemon/src/lib.rs:25268`; `crates/daemon/src/source_capture_tests.rs:1062` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 
