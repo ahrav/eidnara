@@ -270,7 +270,7 @@ Check: `always` - for every capture job, `job_id == job_id(source, redacted_text
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
 Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:136`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:648`, and the object id at `:3422`
-Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:5856`, `:5905`, `:6568`, `:6590`, `:6686`; `crates/daemon/src/lib.rs:24963`, `:26416` (unaudited)
+Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:5856`, `:5905`, `:6568`, `:6590`, `:6686`; `crates/daemon/src/lib.rs:24963`, `:26423` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -285,7 +285,7 @@ Check: `always` - no capture or source publish commit for a session has a `commi
 Fault/timing angle: a checkpoint or publish admitted before a delete that runs after it
 Required faults and enabling state: a session delete issued while a checkpoint or publish waits on the gate
 Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1387`, the delete path at `crates/daemon/src/lib.rs:7047`, and `capture_after_response` at `crates/daemon/src/lib.rs:9301`
-Existing check: `crates/daemon/src/lib.rs:25543`, `:25881`, `:26086`, `:26739`; `crates/daemon/src/lib.rs:25268`; `crates/daemon/src/source_capture_tests.rs:1062` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:25543`, `:25881`, `:26093`, `:26746`; `crates/daemon/src/lib.rs:25268`; `crates/daemon/src/source_capture_tests.rs:1062` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 

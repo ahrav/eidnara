@@ -71,8 +71,8 @@ part.
 | `crates/daemon/src/memory_capture.rs:3830`, `:3863`, `:3895`, `:3938`, `:5837` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
 | `crates/daemon/src/lib.rs:25371` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
 | `crates/memory-store/src/memory_capture.rs:882` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
-| `crates/daemon/src/memory_capture.rs:5856`, `:5905`, `:6568`, `:6590`; `crates/daemon/src/lib.rs:26416` | same | unaudited |
-| `crates/daemon/src/lib.rs:25543`, `:25881`, `:26086`, `:26739`, `:25268`; `crates/daemon/src/source_capture_tests.rs:1062` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
+| `crates/daemon/src/memory_capture.rs:5856`, `:5905`, `:6568`, `:6590`; `crates/daemon/src/lib.rs:26423` | same | unaudited |
+| `crates/daemon/src/lib.rs:25543`, `:25881`, `:26093`, `:26746`, `:25268`; `crates/daemon/src/source_capture_tests.rs:1062` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:867`, `:1259`; `crates/kernel/tests/kernel_source_descriptors.rs:494`, `:2484`, `:2593`, `:2717`, `:2795`, `:2871`; `crates/daemon/tests/harness_sources.rs:1724` | `p2-messages-descriptor-identity-is-per-block-and-evidence-id-is-the-receipt-key` | unaudited |
 | `crates/daemon/src/source_capture_tests.rs:181`, `:429`, `:465`, `:1073`, `:1234` | `p2-deferred-source-units-publish-on-a-later-pass` | unaudited |
 | `crates/daemon/tests/git_sources.rs:549` `refused_selections_publish_nothing_and_encodings_are_dispositions` | `p2-git-open-is-isolated-and-allocation-bounded` | unaudited |
