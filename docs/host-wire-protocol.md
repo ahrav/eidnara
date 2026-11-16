@@ -1235,8 +1235,10 @@ the user's statement may replace a fact served on `auto_inject`: its fact
 supersedes the captured fact it `replaces` (which must share its category
 and at least one content word), retires each further fact it names
 in `also_replaces` (each must share the replaced fact's category and at
-least half of its distinct words of three or more characters other than
-common English function words, of which it must have at least one) and a replaced
+least half of its distinct content words, of which it must have at least
+one; a content word is a run of letters and digits of three or more
+characters, or of two that hold a digit, other than common English function
+words) and a replaced
 memory the host memory tool wrote, and
 retires the statement record of each fact it removes; no surface serves a
 superseded or retired fact. A host `kernel.commit` that supersedes or retires a
