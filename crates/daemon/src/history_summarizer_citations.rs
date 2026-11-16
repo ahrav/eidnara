@@ -38,6 +38,9 @@ pub struct FrozenAlias {
     pub presented: String,
     /// Whether the presented text is a transformation of the native text (compaction, truncation, tool summary, marker escaping) rather than a verbatim copy.
     pub transformed: bool,
+    /// Whether the part renders the text of a user message; a part that holds only tool calls and results reads false, as does a table frozen before this field existed. The mark covers the whole part, so the tool-result digests that follow the text in a user message's part share it.
+    #[serde(default)]
+    pub user: bool,
 }
 
 /// The chunk's alias table, in issue order.
@@ -204,7 +207,7 @@ pub enum ClaimsOutcome {
 }
 
 /// The D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within the byte bound.
-fn is_claim_key(key: &str) -> bool {
+pub(crate) fn is_claim_key(key: &str) -> bool {
     let part = |part: &str| {
         !part.is_empty()
             && part
@@ -219,7 +222,10 @@ fn is_claim_key(key: &str) -> bool {
 /// through the frozen alias table to a span of presented bytes whose message
 /// lies inside an accepted segment's range, with the value inside that span;
 /// an anchor within its bound that the segment's trimmed `p1` contains (else
-/// no anchor). A claim failing a rule before the anchor is dropped. Each
+/// no anchor), where an anchor that reads as a `Lifted` status line also has
+/// to be a whole `Lifted` line of that `p1`, with or without its bullet, on a
+/// claim whose value is words it cites from the text of a user message. A
+/// claim failing a rule before the anchor is dropped. Each
 /// segment then keeps the last claim per key and the first
 /// [`CLAIMS_PER_SEGMENT`] of those, in emitted order; a claim's position is
 /// its index. Returns the claims per segment, aligned with `segments`, and the
@@ -265,6 +271,15 @@ pub fn check_claim_set(
         let p1 = segments[index].1.trim();
         let anchor = candidate.anchor.clone().filter(|anchor| {
             !anchor.is_empty() && anchor.len() <= CLAIM_ANCHOR_MAX_BYTES && p1.contains(anchor)
+        });
+        // A `Lifted` line's anchor retires a constraint line at render, so it stays only as a
+        // whole `Lifted` line of `p1`, with or without its bullet, on a claim whose value is words
+        // of a user message.
+        let anchor = anchor.filter(|anchor| {
+            !crate::history_open_items::is_lifted_line(anchor)
+                || (frozen.user
+                    && !value.is_empty()
+                    && crate::history_open_items::is_lifted_line_of(p1, anchor))
         });
         let claims = &mut per_segment[index];
         // The last claim for a key wins: an earlier one leaves the order.

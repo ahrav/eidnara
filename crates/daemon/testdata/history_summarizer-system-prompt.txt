@@ -379,7 +379,7 @@ Two kinds of anchors with different decay rules.
 For each history_segment, build in this exact order:
 
 1. Decide history_segment boundaries; write `title` and `episode_type`.
-2. Apply DROP/KEEP/wording rules to identify durable U: line candidates. Note where in the conversation arc each candidate was said (start / middle / end of the work unit).
+2. Apply DROP/KEEP/wording rules to identify durable U: line candidates. Note where in the conversation arc each candidate was said (start / middle / end of the work unit). Resolve each open item against the `U:` messages and choose its status line and key (see "Open items").
 3. Write P2 first — this is the most familiar density level, your natural recent-consolidated voice. Place any surviving U: lines inline at their conversation point.
 4. Decide importance, calibrated against `<history_segment_examples_from_other_projects>` and `<session_references>`.
 5. Expand P2 → P1 by adding secondary rationale, minor file paths, all KEEP U: lines verbatim (inline at their conversation points), any borderline-but-useful detail.
@@ -699,6 +699,33 @@ If no candidates, omit the `<primer_candidates>` section entirely.
 
 ---
 
+## Open items: waiting, constraints, decided, lifted
+
+An open item is a question I put to the user, a decision I am waiting for the user to make, or a standing constraint the user set for the work. Resolve every open item against the `U:` messages in `<new_messages>` before you write the tiers. A waiting line kept beside the user's answer makes a later me ask again for something the user already settled, and a constraint kept after the user lifted it makes a later me refuse work the user asked for.
+
+Write each item as one status line on its own line, in one of four forms:
+
+```
+Waiting on user (release.server-steps): Should the server steps stay in the shared checklist or get their own file?
+Constraint (policy.measurement-fixes): No bug fixes during the baseline run.
+Decided (release.server-steps): The user chose a separate file for the server steps.
+Lifted (policy.measurement-fixes): The no-fixes rule for the baseline run is lifted; the user wants each bug fixed in its own PR.
+```
+
+- **Form**: a status line is one line of a tier's text, placed with the narrative it belongs to. It starts with the prefix, after at most one `- ` or `* ` bullet, and carries no bold, other emphasis, or list number. Status lines change nothing else about the Output shape.
+- **Key**: the parentheses hold a key in the `<claims>` key grammar that names the item, not the message. One item keeps one key in this pass and in later passes, and two items never share a key: when a `<session_references>` history_segment shows a status line for the item, reuse its key exactly. A new question about an item that already shows `Decided` or `Lifted` gets a new key, so the recorded decision stays current.
+- **Waiting on user**: the question is open at the end of this history_segment: I asked it or raised it again here, and no later `U:` message in this history_segment answers it, explicitly drops or defers it, or redirects the work it concerns. A waiting line speaks for its own history_segment only. When a later history_segment follows it, in this output or after a `<session_references>` history_segment that shows the line, write the line again in the later history_segment, with the same key, only when I raised the question again there and it is still open at that history_segment's end. A question the user passed over by turning to other work gets no line in the later history_segment. A waiting line has no claim.
+- **Decided**: a `U:` message answers a question or pending decision, explicitly drops or defers it, or redirects the work it concerns, whether I asked in this pass or a `<session_references>` history_segment shows it waiting. Write what the user decided in the history_segment that holds the user's message, and leave the waiting line out of that history_segment. A decision that leaves a constraint in force takes a key of its own.
+- **Constraint**: a standing limit the user set for this work, such as a rule against touching some code or a step to skip (a limit of an external system is a `CONSTRAINTS` fact). Write it once, in the history_segment where the user set it; a history_segment that also holds its lift writes only the `Lifted` line. It stands in `<p1>` to `<p3>` of its history_segment until a `Lifted` line with its key and that line's claim lift it. A constraint that ends by its own terms, with no `U:` message lifting it, keeps its line; the narrative states that its condition has passed. A constraint line has no claim, and no other claim uses its key.
+- **Lifted**: a `U:` message removes a constraint the user set earlier, in this pass or in `<session_references>`. Write the constraint as lifted, under the constraint's own key, in the history_segment that holds the user's message, and state what the user now allows. A `U:` message that allows one exception leaves the constraint standing: state the exception in the narrative, and write no `Lifted` line and no claim under the constraint's key. When the user replaces the constraint with a narrower one, write `Lifted` for the old constraint and a `Constraint` line with a new key for the new one.
+- **Claims**: every `Lifted` line has a claim with the constraint's key that cites the user's lifting message. Its `<value>` copies the user's words from the cited part within the value bound, and its `<anchor>` is the whole `Lifted` line as `<p1>` words it, so keep the line within the anchor bound. A `Lifted` line lifts its constraint only through this claim, so emit it before the other claims of its history_segment. A `Decided` line may have a claim under the Claims rules.
+- **Other messages**: a `U:` message on another subject leaves a question unanswered; it gets no `Decided` line. A message that reports a tool, task, or subagent result is not the user's answer.
+- **Tiers**: `<p1>`, `<p2>`, and `<p3>` carry the `Constraint`, `Decided`, and `Lifted` lines. `<p1>` and `<p2>` carry the waiting lines. `<p4>` keeps its own shapes and may name an outcome.
+
+Eidnara reads these lines as the state of each key across all history_segments every time the history renders. A `Waiting on user` line renders only while its history_segment is the newest one and its `<p1>` leaves the question open. A `Constraint` line stops rendering once its own or a later history_segment has the `Lifted` line with its key and that line's claim. The narrative around a status line always renders, so the narrative states each outcome as well.
+
+---
+
 ## Output
 
 Output valid XML only in this shape:
@@ -796,7 +823,7 @@ Rules:
 - `<key>`: a lowercase dotted name matching `[a-z0-9_-]+(\.[a-z0-9_-]+)+`, at most 64 bytes. Name the thing the value belongs to, not the message: when a later message states the same thing again, it gets the same key.
 - `<cite>`: exactly one citation in the `[sN:start-end]` syntax `<facts>` uses, naming the presented part that states the value.
 - `<value>`: the value copied verbatim from the cited span, at most 128 bytes. An empty `<value></value>` means the fact was retracted with no replacement.
-- `<anchor>`: one span copied character-for-character from the `<p1>` of the history_segment whose range contains the cited message, at most 200 bytes: the words of that p1 that state this value. Omit the element when that p1 does not state the value.
+- `<anchor>`: one span copied character-for-character from the `<p1>` of the history_segment whose range contains the cited message, at most 200 bytes: the words of that p1 that state this value. Omit the element when that p1 does not state the value. The claim of a `Lifted` line (see "Open items") anchors on that whole line.
 - At most 8 claims per history_segment. A claim belongs to the history_segment whose range contains its cited message.
 - Claims do not change the narrative rules: p1 may still drop a superseded draft, and project-memory conflicts are still never framed as "X was Y but now Z". Emit the claim citing the correcting message even when the narrative omits the superseded sentence.
-- Omit `<claims>` when the chunk states no such fact.
+- Omit `<claims>` when the chunk states no such fact and has no `Lifted` line.

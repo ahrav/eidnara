@@ -95,13 +95,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production - `check_claim_set` runs on every chunk whose claims block parses
 Status: active
-Exercised: yes - `each_claim_rule_drops_only_its_own_claim` and `a_segment_keeps_the_last_claim_per_key_then_the_first_eight` drive each rule directly; `claims_attach_to_the_accepted_segment_their_cite_names`, `the_value_bound_counts_unescaped_bytes`, and `the_provisional_last_segment_carries_its_claims` drive them through the validator
-Guarantee: Every kept claim has a key matching `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within 64 bytes, a value within 128 bytes after unescaping, exactly one citation that resolves through the frozen alias table to a presented span containing the value, and a cited message inside a persisted segment; each segment keeps the last claim per key and then the first 8, and a claim's index is its position; the store drops a claim whose key the secret scanner rewrites, so no stored key is a redacted placeholder.
+Exercised: yes - `each_claim_rule_drops_only_its_own_claim` and `a_segment_keeps_the_last_claim_per_key_then_the_first_eight` drive each rule directly; `claims_attach_to_the_accepted_segment_their_cite_names`, `the_value_bound_counts_unescaped_bytes`, and `the_provisional_last_segment_carries_its_claims` drive them through the validator; `a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message` drives the `Lifted` anchor rule through the validator, and `a_part_is_marked_user_only_when_it_renders_a_user_messages_text` drives the part marking it reads through the chunk builder
+Guarantee: Every kept claim has a key matching `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within 64 bytes, a value within 128 bytes after unescaping, exactly one citation that resolves through the frozen alias table to a presented span containing the value, and a cited message inside a persisted segment; a kept anchor that reads as a `Lifted` status line is a whole `Lifted` line of the segment's `p1`, with or without its bullet, on a claim with a non-empty value whose cited part renders the text of a user message, and any other such anchor is dropped with the claim kept; each segment keeps the last claim per key and then the first 8, and a claim's index is its position; the store drops a claim whose key the secret scanner rewrites, so no stored key is a redacted placeholder.
 Check: `always` - a violating claim is absent from the validated segment, not repaired; the property test asserts cite acceptance equals `presented.get(start..end).is_some_and(|s| s.contains(value))`
 Fault/timing angle: none
-Required faults and enabling state: an uppercase key; a dotless key; a 129-byte value after unescaping; two citations; an unknown alias; a value outside its cited span; a cite into a discarded provisional segment; duplicate keys; nine claims
+Required faults and enabling state: an uppercase key; a dotless key; a 129-byte value after unescaping; two citations; an unknown alias; a value outside its cited span; a cite into a discarded provisional segment; duplicate keys; nine claims; a `Lifted` anchor on a claim that cites an assistant message; a `Lifted` anchor on a claim with an empty value; a `Lifted` form inside a sentence of `p1`; part of a `Lifted` line
 Confidence: high - [evidence](evidence/accepted-claim-satisfies-contract-grammar.md). Verified the D-4 order in `check_claim_set` and that the value bound counts unescaped bytes; a mutation run replacing the span check with a whole-message check made the property test fail
-Existing check: `crates/daemon/src/history_summarizer_citations.rs::tests::{each_claim_rule_drops_only_its_own_claim, a_segment_keeps_the_last_claim_per_key_then_the_first_eight, cite_acceptance_is_value_inside_the_cited_span}`; `crates/daemon/src/history_summarizer_citations_golden.rs::claims_attach_to_the_accepted_segment_their_cite_names`; `crates/daemon/src/history_summarizer_validate.rs::tests::{the_value_bound_counts_unescaped_bytes, the_provisional_last_segment_carries_its_claims}`; the rewritten-key case in `crates/memory-store/tests/production_redaction.rs::history_segment_content_redacts_and_new_message_identities_reject`
+Existing check: `crates/daemon/src/history_summarizer_citations.rs::tests::{each_claim_rule_drops_only_its_own_claim, a_segment_keeps_the_last_claim_per_key_then_the_first_eight, cite_acceptance_is_value_inside_the_cited_span}`; `crates/daemon/src/history_summarizer_citations_golden.rs::claims_attach_to_the_accepted_segment_their_cite_names`; `crates/daemon/src/history_summarizer_validate.rs::tests::{the_value_bound_counts_unescaped_bytes, the_provisional_last_segment_carries_its_claims}`; the rewritten-key case in `crates/memory-store/tests/production_redaction.rs::history_segment_content_redacts_and_new_message_identities_reject`; `crates/daemon/src/history_open_items_tests.rs::a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message` and `crates/daemon/src/history_summarizer_chunk.rs::digest_chunk_tests::a_part_is_marked_user_only_when_it_renders_a_user_messages_text` for the `Lifted` anchor rule
 Impact: A claim with a bad key or a value the cited message never stated would correct history with an invented value
 Open questions:
 - D-2 writes the key as an attribute, `<claim key="...">`; the prompt and `parse_claims` use a `<key>` child element, and no recorded decision amends D-2. The two sides agree with each other, so the grammar and bound checks above are unaffected. Needs the spec text updated or the difference recorded as intended (needs human input)
@@ -199,15 +199,15 @@ Open questions: None.
 ### zero-claims-render-identical
 
 Type: safety
-Reachability: default-production - every compose over rows without superseded claims
+Reachability: default-production - every compose over rows without superseded claims and without retired open-item lines
 Status: active
-Exercised: yes - `rows_without_claims_render_the_bytes_they_rendered_before` composes m0 and m1 with no claims and with claims that nothing supersedes; the pre-existing render, tight-render, transform, and differential goldens run unchanged
-Guarantee: When no loaded claim is superseded, m0 and m1 history bytes equal the renderer's bytes before corrections existed, and `apply_corrections` returns its input borrowed.
-Check: `always` - golden equality over every pre-existing golden, byte equality between the claims and no-claims stores, and pointer equality for the empty case
+Exercised: yes - `rows_without_claims_render_the_bytes_they_rendered_before` composes m0 and m1 with no claims and with claims that nothing supersedes; `rows_that_retire_no_line_keep_their_tiers_byte_for_byte` projects rows whose open-item lines all stay and compares every tier with the stored text; the pre-existing render, tight-render, transform, and differential goldens run unchanged
+Guarantee: When no loaded claim is superseded and no loaded row retires an open-item line, m0 and m1 history bytes equal the renderer's bytes before corrections existed, and `apply_corrections` returns its input borrowed.
+Check: `always` - golden equality over every pre-existing golden, byte equality between the claims and no-claims stores, pointer equality for the empty case, and equality of `content` and every tier with the stored text for rows whose status lines all stay
 Fault/timing angle: none
-Required faults and enabling state: claims present but none superseded; rows with no claims
+Required faults and enabling state: claims present but none superseded; rows with no claims; rows whose status lines all stay open
 Confidence: high - [evidence](evidence/zero-claims-render-identical.md). Verified that `render-golden.json` only gained cases, that no other render or transform golden changed, and that the m1 block is empty when the new rows carry no claims (decision A7 narrows the m1 clause to that condition)
-Existing check: `crates/daemon/src/m0_compose.rs::correction_compose_tests::rows_without_claims_render_the_bytes_they_rendered_before`; `crates/daemon/src/decay_render.rs::tests::{render_golden_matches_reference, render_tight_golden_matches_reference_with_real_estimator, apply_corrections_splices_disjoint_first_hits_and_footers_the_rest}`
+Existing check: `crates/daemon/src/m0_compose.rs::correction_compose_tests::rows_without_claims_render_the_bytes_they_rendered_before`; `crates/daemon/src/decay_render.rs::tests::{render_golden_matches_reference, render_tight_golden_matches_reference_with_real_estimator, apply_corrections_splices_disjoint_first_hits_and_footers_the_rest}`; `crates/daemon/src/history_open_items.rs::tests::rows_that_retire_no_line_keep_their_tiers_byte_for_byte`
 Impact: Every session without corrections would change its served bytes and lose its prompt cache on upgrade
 Open questions: None.
 
@@ -233,10 +233,10 @@ Reachability: default-production - every rendered row
 Status: active
 Exercised: partial - `corrections_render_to_fixed_bytes` pins literal bytes for a fixed input in every test process, each of which seeds its own hasher; no test compares two hasher seeds in one run
 Guarantee: Rendered bytes are a function of the loaded rows and their claims alone; no map iteration order, clock, or allocator state reaches the output.
-Check: `always` - the fixed input renders the pinned literal bytes; every collection on the path is a `Vec` or a `BTreeMap`
+Check: `always` - the fixed input renders the pinned literal bytes; every collection on the path is a `Vec`, a `BTreeMap`, or a `BTreeSet`
 Fault/timing angle: none
 Required faults and enabling state: two processes with different hasher seeds
-Confidence: high - [evidence](evidence/apply-corrections-is-a-pure-function-of-body-and-corrections.md). Verified by reading `live_claims`, `corrections_for`, `apply_corrections`, and `render_memory_updates`: none reads a clock or iterates a hash map
+Confidence: high - [evidence](evidence/apply-corrections-is-a-pure-function-of-body-and-corrections.md). Verified by reading `live_claims`, `corrections_for`, `apply_corrections`, `render_memory_updates`, and `crates/daemon/src/history_open_items.rs` (`retirements`, `retire_lines`, `beside_open_lines`): none reads a clock or iterates a hash map
 Existing check: `crates/daemon/src/decay_render.rs::tests::corrections_render_to_fixed_bytes`; the render golden cases carrying corrections
 Impact: Two passes over the same state would serve different bytes and miss the prompt cache
 Open questions: None.
@@ -324,8 +324,8 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every m0 and m1 compose
 Status: active
-Exercised: partial - the committed bound test covers store work, measured claim visits, and measured anchor searches up to H = 50,000 and N = 10^6 under both correction regimes; `guard_rerenders_search_each_anchor_again_at_every_demoted_tier` measures the searches of one guard walk and `eight_maximal_corrections_add_at_most_the_escaped_marker_bound` measures the bytes eight corrections at the claim bounds add; the per-segment marker count and the m1-entry clause hold by source reading and are not measured; render time was measured with an uncommitted driver
-Guarantee: Per compose, each liveness scan visits each claim of R once, at most 8 x |R|, and the pass adds no store statement, row, or VM step beyond the segment load; each render of a row below tier 5 runs one anchor search per anchored correction, the guard renders a row again at each tier it demotes it to, and a compose renders at most four times, so at most 16 searches per anchored correction and 128 x |R|; at most 8 markers or footer entries per rendered segment, adding at most 8 x (82 + 5 x 128 + d) bytes before the guard, where d is the ordinal's digit count (5,928 bytes at 19 digits); at most 8 x |R| entries in the m1 block; nothing grows with H or N beyond the claims stored on rows in R.
+Exercised: partial - the committed bound test covers store work, measured claim visits, and measured anchor searches up to H = 50,000 and N = 10^6 under both correction regimes; `guard_rerenders_search_each_anchor_again_at_every_demoted_tier` measures the searches of one guard walk and `eight_maximal_corrections_add_at_most_the_escaped_marker_bound` measures the bytes eight corrections at the claim bounds add; the per-segment marker count, the m1-entry clause, and the open-item retirement clause (`crates/daemon/src/history_open_items.rs`) hold by source reading and are not measured; render time was measured with an uncommitted driver
+Guarantee: Per compose, each liveness scan visits each claim of R once, at most 8 x |R|, and the pass adds no store statement, row, or VM step beyond the segment load; each render of a row below tier 5 runs one anchor search per anchored correction, the guard renders a row again at each tier it demotes it to, and a compose renders at most four times, so at most 16 searches per anchored correction and 128 x |R|; at most 8 markers or footer entries per rendered segment, adding at most 8 x (82 + 5 x 128 + d) bytes before the guard, where d is the ordinal's digit count (5,928 bytes at 19 digits); at most 8 x |R| entries in the m1 block; nothing grows with H or N beyond the claims stored on rows in R; open-item retirement reads the claims and tier lines of each row of R at most twice per compose, searches each anchored correction's anchor once in each tier of its row, adds no store work, and only removes lines from the tiers.
 Check: `always` - store statements, rows, and VM steps per compose are equal with and without claims; an m0 compose's `CLAIMS_VISITED` count equals the claims held by R and is at most 8 x |R|, and its `ANCHOR_SEARCHES` count is at most 16 x the anchored corrections of R; an m1 compose visits twice the claims on its rows (corrections, then the block); one guard walk searches each anchored correction once per tier below 5 it renders the row at; eight corrections at the key, value, and ordinal bounds with all-`&` values add at most the escaped bound; timing is not a committed check
 Fault/timing angle: footers raise rendered bytes above the curve's target, so the budget guard demotes rows one tier per iteration and re-estimates the whole body each time
 Required faults and enabling state: a session of 10^6 messages; one correction per three messages; one per two hundred; no claims
@@ -378,7 +378,11 @@ Within this part:
   store-wide meaning of a rendered correction.
 - `anchor-is-substring-of-stored-p1` is the precondition under which
   `apply-corrections-splice-is-disjoint-and-total` splices rather than
-  footers at tier 1.
+  footers at tier 1, for an anchor whose line open-item retirement leaves in
+  the rendered tier. An anchor that stood only in a retired line footers, and so
+  does an anchor whose first occurrence in one of the row's stored tiers
+  touches an open status line, which `history_open_items::beside_open_lines`
+  clears for every tier of the row before it renders.
 - `claims-column-is-set-once-at-insert` and `revert-restores-earlier-value`
   make deletion the only way a claim leaves the loaded set.
 - `m0-bytes-change-only-at-hard` and `correction-visible-before-next-hard`

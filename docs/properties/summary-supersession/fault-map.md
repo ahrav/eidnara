@@ -36,7 +36,7 @@
 | `claims-column-is-set-once-at-insert` | overwrite, revert, recomp, descent | `a_state_sync_overwrite_replaces_the_row_and_its_claims_whole`, `no_production_statement_updates_a_history_segment_row` |
 | `live-claim-is-max-seq-per-key-in-rendered-set` | two claims of one key in a row, three rows, one key once, retries | `corrections_match_the_naive_argmax`, `corrections_for_keeps_the_latest_claim_live_per_key` |
 | `superseding-claim-is-rendered-whenever-stale-claim-is` | R strictly smaller than the store, recurring keys | `every_loaded_claim_has_its_store_wide_live_claim_in_the_loaded_set` |
-| `zero-claims-render-identical` | claims none superseded, no claims | `rows_without_claims_render_the_bytes_they_rendered_before`, the pre-existing goldens |
+| `zero-claims-render-identical` | claims none superseded, no claims, status lines that all stay open | `rows_without_claims_render_the_bytes_they_rendered_before`, `rows_that_retire_no_line_keep_their_tiers_byte_for_byte`, the pre-existing goldens |
 | `apply-corrections-splice-is-disjoint-and-total` | miss, overlap, identical, nested, repeated, three-way, empty body | the example table and property in `decay_render.rs` |
 | `apply-corrections-is-a-pure-function-of-body-and-corrections` | different hasher seeds | `corrections_render_to_fixed_bytes` (partial: separate processes, not two in one test) |
 | `marker-cannot-forge-markup-or-heading` | hostile values in m0 and m1 | the two hostile-value tests and the render golden case |

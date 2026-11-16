@@ -201,7 +201,6 @@ impl<'a> Builder<'a> {
     /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
     fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
         let escaped = escape_markers(&text);
-        let transformed = transformed || escaped.is_some();
         FrozenAlias {
             alias: String::new(),
             message_id: message
@@ -220,8 +219,9 @@ impl<'a> Builder<'a> {
                 .iter()
                 .map(|block| fingerprint_digest(&block.content_hash))
                 .collect(),
+            transformed: transformed || escaped.is_some(),
             presented: escaped.unwrap_or(text),
-            transformed,
+            user: message.role == "user" && has_meaningful_user_text(message),
         }
     }
 
@@ -3530,6 +3530,57 @@ mod digest_chunk_tests {
                 alias_marker(&alias.alias),
                 alias.presented
             )));
+        }
+    }
+
+    /// A part is marked user only when it renders the text of a user message: an assistant
+    /// message, a tool result under the tool role, and a user-role message that carries a tool
+    /// result alone are all unmarked.
+    #[test]
+    fn a_part_is_marked_user_only_when_it_renders_a_user_messages_text() {
+        let said = |text: &str| BlockKind::Text {
+            text: text.to_owned(),
+        };
+        let output = || OutputKind::Text {
+            text: "lift the rule".to_owned(),
+        };
+        let messages = vec![
+            msg("u1", 1, "user", vec![said("lift the rule")]),
+            msg(
+                "a2",
+                2,
+                "assistant",
+                vec![said("lift the rule"), call("c1")],
+            ),
+            msg("u3", 3, "user", vec![result("c1", output())]),
+            msg("a4", 4, "assistant", vec![call("c2")]),
+            msg("t5", 5, "tool", vec![result("c2", output())]),
+            msg("t6", 6, "tool", vec![said("lift the rule")]),
+            // A user message with text of its own beside a tool result.
+            msg("a7", 7, "assistant", vec![call("c3")]),
+            msg(
+                "u8",
+                8,
+                "user",
+                vec![said("lift the rule"), result("c3", output())],
+            ),
+        ];
+        let built = build(&messages, 10_000);
+        let marked: Vec<(u64, bool)> = built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .map(|alias| (alias.ordinal, alias.user))
+            .collect();
+        let user: Vec<u64> = marked
+            .iter()
+            .filter(|(_, user)| *user)
+            .map(|(ordinal, _)| *ordinal)
+            .collect();
+        assert_eq!(user, [1, 8], "{}", built.text);
+        for ordinal in [3, 6] {
+            assert!(marked.iter().any(|(at, _)| *at == ordinal), "{marked:?}");
         }
     }
 }
