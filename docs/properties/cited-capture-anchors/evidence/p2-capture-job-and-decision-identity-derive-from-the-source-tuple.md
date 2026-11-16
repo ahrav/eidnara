@@ -24,7 +24,7 @@ The same source enqueued twice; a secret-bearing source; an out-of-grammar id; a
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:3123`, `:3172`, `:3728`, `:3750`, `:3845`; `crates/daemon/src/lib.rs:24528`, `:25876`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:3123`, `:3172`, `:3728`, `:3750`, `:3845`; `crates/daemon/src/lib.rs:24957`, `:25875`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
