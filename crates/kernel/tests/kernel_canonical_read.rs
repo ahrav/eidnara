@@ -532,7 +532,9 @@ fn chunks_serve_the_full_read_in_serving_order_and_stop_at_a_commit_boundary() {
             .collect();
         commits.dedup();
         assert!(commits.len() > 2, "{surface:?}: {commits:?}");
-        for min_rows in [1, 2, 41, 257, 10_000] {
+        // A request for no rows reads as a request for one.
+        for min_rows in [0, 1, 2, 41, 257, 10_000] {
+            let filled = min_rows.max(1);
             let mut served: Vec<VisibleRow> = Vec::new();
             let mut chunks = 0;
             loop {
@@ -563,9 +565,9 @@ fn chunks_serve_the_full_read_in_serving_order_and_stop_at_a_commit_boundary() {
                 if chunk.exhausted {
                     break;
                 }
-                assert!(len >= min_rows, "{surface:?} min_rows {min_rows}: {len}");
+                assert!(len >= filled, "{surface:?} min_rows {min_rows}: {len}");
                 assert!(
-                    before_last_commit < min_rows,
+                    before_last_commit < filled,
                     "{surface:?} min_rows {min_rows}: the chunk read past the commit that filled it"
                 );
                 if let Some(next) = expected.get(served.len()) {
@@ -576,7 +578,7 @@ fn chunks_serve_the_full_read_in_serving_order_and_stop_at_a_commit_boundary() {
                 }
             }
             assert_eq!(served, expected, "{surface:?} min_rows {min_rows}");
-            if min_rows == 1 {
+            if filled == 1 {
                 assert!(
                     chunks >= commits.len(),
                     "{surface:?}: {chunks} chunks over {} commits",
@@ -881,4 +883,98 @@ fn a_payload_budget_ends_the_chunk_at_a_commit_boundary_and_bounds_the_decoded_r
         );
     }
     assert_eq!(read(None, total).rows, all.rows);
+}
+
+/// A chunk after a position inside a commit spends its payload budget on the rows it returns: with a budget of
+/// exactly their payload bytes it holds every one of their decisions decoded, as the unbounded read does.
+#[test]
+fn a_chunk_after_a_position_spends_its_payload_budget_on_the_rows_it_returns() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 40, 300, 4);
+    let tip = store.tip().unwrap();
+    let read = |after: Option<ServingPosition<'_>>, budget: u64| {
+        store
+            .visible_chunk_as_of_in_scope(
+                Surface::ExplicitSearch,
+                tip,
+                after,
+                usize::MAX,
+                budget,
+                None,
+            )
+            .unwrap()
+    };
+    let all = read(None, u64::MAX).rows;
+    let inside_a_commit = all
+        .windows(2)
+        .position(|pair| {
+            pair[0].row.object.created_commit_seq == pair[1].row.object.created_commit_seq
+                && pair[0].decision.is_some()
+        })
+        .expect("a commit holds a decision ahead of another row");
+    let rest = &all[inside_a_commit + 1..];
+    let budget = payload_bytes(rest);
+    assert!(budget > 0);
+    let chunk = read(Some(position(&all[inside_a_commit].row)), budget);
+    assert!(chunk.exhausted);
+    assert_eq!(chunk.rows, rest);
+}
+
+/// The page statement returns a payload with its row up to 64 KiB. A chunk carries a larger decision by its
+/// size alone under any budget, and holds the decisions at or under the limit against the budget.
+#[test]
+fn a_chunk_holds_a_payload_up_to_the_inline_size() {
+    const INLINE_BYTES: u64 = 64 * 1024;
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 0, 0, 0);
+    // The larger payload has the greater object id, so the chunk reads it first.
+    let sized = [("sized-a", INLINE_BYTES), ("sized-b", INLINE_BYTES + 1)];
+    store
+        .commit(intent("sized"), |envelope| {
+            for (object, bytes) in sized {
+                let mut spec = decision(object, MEMORY, "preference");
+                spec.payload.rationale = "r".to_string();
+                let framing = serde_json::to_vec(&DecisionPayload {
+                    summary: String::new(),
+                    rationale: spec.payload.rationale.clone(),
+                })
+                .unwrap()
+                .len();
+                spec.payload.summary = "s".repeat(bytes as usize - framing);
+                envelope.insert_decision(spec)?;
+                envelope.record_admission(explicit(object))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    for budget in [u64::MAX, INLINE_BYTES] {
+        let chunk = store
+            .visible_chunk_as_of_in_scope(
+                Surface::ExplicitSearch,
+                tip,
+                None,
+                usize::MAX,
+                budget,
+                None,
+            )
+            .unwrap();
+        let held: Vec<(u64, bool)> = sized
+            .iter()
+            .map(|(object, _)| {
+                let entry = chunk
+                    .rows
+                    .iter()
+                    .find(|entry| entry.row.object.object_id == *object)
+                    .unwrap_or_else(|| panic!("{object} is visible"));
+                let decision = entry.decision.as_ref().expect(object);
+                (decision.payload_bytes, decision.content.is_some())
+            })
+            .collect();
+        assert_eq!(
+            held,
+            [(INLINE_BYTES, true), (INLINE_BYTES + 1, false)],
+            "budget {budget}"
+        );
+    }
 }

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "4d2e5a5dff80c3ed74f049f5bdb3744376c02f03d8f44c0c19b3c73e931a6601";
+    "bba35122b2695c40db2ee13ced369e5ce3d4a720e62b6b1fb601f7878e389e04";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -264,9 +264,9 @@ pub struct ChunkRow {
 pub struct ChunkDecision {
     /// `length(decision_payload)` in bytes.
     pub payload_bytes: u64,
-    /// The decision's kind and payload, decoded while the payload bytes the chunk has read stay within the
-    /// caller's budget. `None` past the budget and for a payload that does not decode, so a caller reads that
-    /// decision by id when it serves it.
+    /// The decision's kind and payload, decoded while the payload bytes the chunk holds decoded stay within the
+    /// caller's budget. `None` past the budget, for a payload over [`PAGE_PAYLOAD_INLINE_BYTES`], and for a
+    /// payload that does not decode, so a caller reads that decision by id when it serves it.
     pub content: Option<DecisionContent>,
 }
 
@@ -4007,14 +4007,14 @@ fn served_query<T>(
     static NAMED_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::Named("")));
     static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(ServedSelection::All));
-    static CREATED_SQL: LazyLock<String> =
+    static PAGE_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::Page(0)));
     static DOMAIN_SQL: LazyLock<String> =
         LazyLock::new(|| served_classes_sql(ServedSelection::DomainDecisions("")));
     let sql = match selection {
         ServedSelection::Named(_) => NAMED_SQL.as_str(),
         ServedSelection::All => ALL_SQL.as_str(),
-        ServedSelection::Page(_) => CREATED_SQL.as_str(),
+        ServedSelection::Page(_) => PAGE_SQL.as_str(),
         ServedSelection::DomainDecisions(_) => DOMAIN_SQL.as_str(),
     };
     let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
@@ -6911,13 +6911,20 @@ mod tests {
         );
     }
 
+    /// One of the two commits of the chunk cost store.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Commit {
+        First,
+        Newest,
+    }
+
     /// VM steps and rows of one chunk read over a store of two commits: the first holds the seed decision, the
-    /// newest holds one decision, and `extra` admitted objects sit in the newest commit when `extra_in_newest` is
-    /// set and in the first otherwise. With `from_first_commit`, the chunk follows the start of the first commit.
+    /// newest holds one decision, and `extra` admitted objects sit in the commit `extra_in` names. The chunk
+    /// follows the start of the commit `after` names, or starts at the newest row.
     fn chunk_read_steps(
-        (extra, extra_in_newest): (usize, bool),
+        (extra, extra_in): (usize, Commit),
         min_rows: usize,
-        from_first_commit: bool,
+        after: Option<Commit>,
     ) -> (usize, usize) {
         let directory = tempfile::tempdir().unwrap();
         let (store, first_commit) = store_with_one_decision(directory.path());
@@ -6968,11 +6975,11 @@ mod tests {
             .unwrap()
             .commit_seq;
         drop(store);
-        let extra_commit = if extra_in_newest {
-            newest_commit
-        } else {
-            first_commit
+        let seq = |commit: Commit| match commit {
+            Commit::First => first_commit,
+            Commit::Newest => newest_commit,
         };
+        let extra_commit = seq(extra_in);
         let connection =
             rusqlite::Connection::open(directory.path().join("kernel.sqlite")).unwrap();
         connection
@@ -6998,8 +7005,8 @@ mod tests {
             .unwrap();
         drop(connection);
         let store = KernelStore::open(directory.path()).unwrap();
-        let after = from_first_commit.then_some(ServingPosition {
-            created_commit_seq: first_commit,
+        let after = after.map(|commit| ServingPosition {
+            created_commit_seq: seq(commit),
             object_id: "",
         });
         let read = |tx: &Transaction<'_>| {
@@ -7041,14 +7048,14 @@ mod tests {
     /// to it, while a chunk that asks for every row reads them all.
     #[test]
     fn a_chunk_the_newest_commit_fills_does_not_read_the_older_commits() {
-        let (alone, alone_rows) = chunk_read_steps((0, false), 1, false);
-        let (beside_older, rows) = chunk_read_steps((400, false), 1, false);
+        let (alone, alone_rows) = chunk_read_steps((0, Commit::First), 1, None);
+        let (beside_older, rows) = chunk_read_steps((400, Commit::First), 1, None);
         assert_eq!((alone_rows, rows), (1, 1));
         assert!(
             beside_older <= 2 * alone,
             "one row cost {alone} VM steps alone and {beside_older} beside 400 older objects"
         );
-        let (every_row, rows) = chunk_read_steps((400, false), usize::MAX, false);
+        let (every_row, rows) = chunk_read_steps((400, Commit::First), usize::MAX, None);
         assert_eq!(rows, 402);
         assert!(
             every_row >= 20 * beside_older,
@@ -7060,15 +7067,16 @@ mod tests {
     /// work to it, while a chunk from the start reads them.
     #[test]
     fn a_chunk_after_a_position_does_not_read_the_newer_commits() {
-        let (alone, alone_rows) = chunk_read_steps((0, true), usize::MAX, true);
-        let (below_newer, rows) = chunk_read_steps((400, true), usize::MAX, true);
+        let first = Some(Commit::First);
+        let (alone, alone_rows) = chunk_read_steps((0, Commit::Newest), usize::MAX, first);
+        let (below_newer, rows) = chunk_read_steps((400, Commit::Newest), usize::MAX, first);
         assert_eq!(alone_rows, rows);
         assert!(rows >= 1, "the first commit serves its seed decision");
         assert!(
             below_newer <= 2 * alone,
             "the first commit cost {alone} VM steps alone and {below_newer} below 400 newer objects"
         );
-        let (from_start, all) = chunk_read_steps((400, true), usize::MAX, false);
+        let (from_start, all) = chunk_read_steps((400, Commit::Newest), usize::MAX, None);
         assert_eq!(all, rows + 401);
         assert!(
             from_start >= 20 * below_newer,

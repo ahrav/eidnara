@@ -82,10 +82,6 @@ impl ReadCursor {
             object_id: &self.object_id,
         }
     }
-
-    fn precedes(&self, row: &VisibleRow) -> bool {
-        self.position().precedes(&row.object)
-    }
 }
 
 pub(crate) struct ReadResponse {
@@ -372,7 +368,7 @@ pub(crate) fn read_visible_page(
     let mut newest = NewestRows::new(MAX_READ_ROWS);
     for row in visible.rows {
         if selection.keeps(&row)
-            && before.is_none_or(|cursor| cursor.precedes(&row))
+            && before.is_none_or(|cursor| cursor.position().precedes(&row.object))
             && filter.matches(row.scope_id.as_deref(), &mut terms)?
         {
             newest.push(row);

@@ -7156,6 +7156,13 @@ async fn a_read_continues_past_the_rows_its_scope_filter_drops() {
         ["decision-object-1", "decision-object-2"]
     );
     assert_eq!(page["truncated"], false);
+
+    // A read of named ids serves each row as the page serves it, decision included.
+    let mut named = read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+    named["object_ids"] = json!(["decision-object-2", "decision-object-3"]);
+    let named = daemon.call(daemon.route, named).await;
+    assert_state(&named, "available", None);
+    assert_eq!(named["rows"], json!([read["rows"][0], read["rows"][2]]));
     daemon.handler.shutdown().await.unwrap();
 }
 
