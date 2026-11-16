@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:662`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:690`). Each written decision's object id is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:3652`).
+`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:662`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:690`). Each written decision's object id is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:3673`).
 
 ## Failure scenario
 

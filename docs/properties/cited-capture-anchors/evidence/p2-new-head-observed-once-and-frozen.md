@@ -97,6 +97,6 @@ aliased branch loose and in `packed-refs`.
   and the publish closure at the U3 branch.
 - Findings: the anchor's oid is the plan's `FrozenHead::Commit`; the U3
   tests compare each anchor row's oid with the fixture HEAD at submit
-  (`crates/daemon/src/source_capture_tests.rs:3501`, `:3667`).
+  (`crates/daemon/src/source_capture_tests.rs:3528`, `:3700`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.

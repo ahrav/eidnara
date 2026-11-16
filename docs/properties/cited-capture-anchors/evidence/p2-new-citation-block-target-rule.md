@@ -18,7 +18,7 @@ None.
 
 ## What a test must construct
 
-The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3501`: one block; the third of four items; a quote across two items; a quote starting at a separator; a message whose first block holds a secret, which source capture refuses, so that block has no descriptor. Unit tests at `crates/daemon/src/memory_capture/cite.rs:472` and `:502` cover inner newlines, an empty block, a stopped walk, and a partial located prefix; the property tests at `:918` and `:932` locate every block of random joins and check that a random quote of a fully located message cites blocks whose join holds it.
+The end-to-end fixtures at `crates/daemon/src/source_capture_tests.rs:3528`: one block; the third of four items; a quote across two items; a quote starting at a separator; a message whose first block holds a secret, which source capture refuses, so that block has no descriptor. Unit tests at `crates/daemon/src/memory_capture/cite.rs:472` and `:502` cover inner newlines, an empty block, a stopped walk, and a partial located prefix; the property tests at `:918` and `:932` locate every block of random joins and check that a random quote of a fully located message cites blocks whose join holds it.
 
 ## Investigation log
 
