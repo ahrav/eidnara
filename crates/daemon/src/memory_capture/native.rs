@@ -453,7 +453,10 @@ impl HandlerCore {
 /// Memories of one source sharing a category and quotation freeze as one.
 /// A replacement target survives the collapse so the correction it carries
 /// is not lost; one quotation superseding two memories keeps one entry per
-/// target, since a decision supersedes exactly one predecessor.
+/// target, since a decision supersedes exactly one predecessor. The
+/// collapsed memory is a duplicate only when every memory it joins names
+/// the same duplicate target: a memory that names none carries a fact the
+/// store does not hold, and that fact is written.
 pub(super) fn collapse_quotations(
     attribution: &str,
     proposed: Vec<CapturedMemory>,
@@ -469,18 +472,58 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                if kept.replaces.is_none()
-                    && (kept.duplicate_of.is_none() || memory.replaces.is_some())
-                {
+                if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
-                    kept.duplicate_of = memory.duplicate_of;
+                    kept.duplicate_of = None;
+                } else if kept.duplicate_of != memory.duplicate_of {
+                    kept.duplicate_of = None;
                 }
             }
             None => memories.push(memory),
         }
     }
     memories
+}
+
+/// Widens each cut quotation of a user message to the whole sentence that
+/// holds it, so the stored statement keeps a lead-in, a negation, or a
+/// condition the extractor left out.
+///
+/// A proposal that replaces or retires memories keeps its quotation: the
+/// extractor judged the replacement from the clause it quoted, and only a
+/// correction quoted whole replaces a memory served automatically. Two
+/// proposals of different categories that name one sentence keep their own
+/// quotations, so one sentence is stored once per category at most and each
+/// clause stays its own memory.
+///
+/// Returns the widened quotations.
+fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) -> Vec<String> {
+    let widened: Vec<Option<&str>> = proposed
+        .iter()
+        .map(|memory| {
+            if memory.replaces.is_some() || !memory.also_replaces.is_empty() {
+                None
+            } else {
+                enclosing_statement(prose, &memory.quote)
+            }
+        })
+        .collect();
+    let mut quotations = Vec::new();
+    for index in 0..proposed.len() {
+        let Some(statement) = widened[index] else {
+            continue;
+        };
+        let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
+            other.category != proposed[index].category
+                && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
+        });
+        if !shared {
+            proposed[index].quote = statement.to_owned();
+            quotations.push(statement.to_owned());
+        }
+    }
+    quotations
 }
 
 impl CaptureWork {
@@ -666,11 +709,44 @@ impl CaptureWork {
             } else {
                 super::ASSISTANT_REPORTED
             };
+            let prose = super::Prose::of(&job.text);
+            let mut proposed = decision.memories;
+            let widened = if super::is_user_source(&job)
+                && !super::cite::is_hashed_source_id(&job.message_id)
+            {
+                widen_cut_quotations(&prose, &mut proposed)
+            } else {
+                Vec::new()
+            };
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
-            let quoted = collapse_quotations(attribution, decision.memories);
-            let prose = super::Prose::of(&job.text);
+            let mut quoted = collapse_quotations(attribution, proposed);
+            // A user's statement that repeats an approved memory word for
+            // word duplicates that memory, whichever copy the extractor named.
+            for memory in &mut quoted {
+                let Some(target) = &memory.duplicate_of else {
+                    continue;
+                };
+                if let Some(approved) = plan
+                    .existing
+                    .iter()
+                    .find(|previous| previous.automatic && previous.content == memory.content)
+                {
+                    memory.duplicate_of = Some(approved.id.clone());
+                } else if widened.contains(&memory.quote)
+                    && plan
+                        .existing
+                        .iter()
+                        .any(|previous| previous.id == *target && previous.automatic)
+                {
+                    // The extractor matched the clause it quoted to an
+                    // approved statement. The widened sentence is another
+                    // text, such as that clause negated, so it is written
+                    // as the user's own statement.
+                    memory.duplicate_of = None;
+                }
+            }
             let mut memories = quoted.clone();
             failure_evidence::attach(&job.text, &mut memories);
             let attached = keep_statement_text(&job, &prose, &quoted, &mut memories);

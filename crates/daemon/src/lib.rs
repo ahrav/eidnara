@@ -26011,11 +26011,18 @@ mod tests {
         .await;
         assert!(dropped.is_err(), "the request is dropped mid-claim");
         holder.join().unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(
-            handler.native_capture.lock().unwrap().reserved_for_test(),
-            0
-        );
+        // The detached claim finishes its publication and its candidate
+        // ranking after the gate is free; a slow host needs more than one
+        // fixed pause for that, so the reservation is polled.
+        let mut reserved = usize::MAX;
+        for _ in 0..200 {
+            reserved = handler.native_capture.lock().unwrap().reserved_for_test();
+            if reserved == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(reserved, 0);
         let unprepared = store
             .pending_memory_captures(project_key, "pi", now_ms() + 1_000_000)
             .unwrap()
