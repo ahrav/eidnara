@@ -6508,16 +6508,21 @@ async fn operator_daemon_with(
         .as_str()
         .expect("a Current record names its consumer")
         .to_owned();
+    reaches_the_tip(&daemon, &consumer).await;
+    (daemon, route, home)
+}
+
+/// Polls until `consumer`'s checkpoint is the kernel tip. A disable deregisters its consumer only at the tip, and a rebuild's retirement commit lands after the record turns Current.
+async fn reaches_the_tip(daemon: &KernelDaemon, consumer: &str) {
     let store = daemon.store();
     let started = Instant::now();
-    while store.outbox_consumer_checkpoint(&consumer).unwrap() != Some(store.tip().unwrap()) {
+    while store.outbox_consumer_checkpoint(consumer).unwrap() != Some(store.tip().unwrap()) {
         assert!(
             started.elapsed() < Duration::from_secs(60),
             "the Current family's consumer never reached the kernel tip, so a disable would answer that the consumer has not reached the commit-log tip"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    (daemon, route, home)
 }
 
 async fn operator_call(
@@ -6579,6 +6584,7 @@ async fn the_operator_surface_rebuilds_disables_and_recovers_the_projection() {
     assert_eq!(rebuilt["attempt_id"], "rebuild-search-projection-1");
     let current = current_under(&daemon, route, "search-projection-1").await;
     assert_eq!(current["record"]["cause"], "OperatorRequest");
+    reaches_the_tip(&daemon, "search-projection-1").await;
     assert_eq!(
         operator_call(
             &daemon,
