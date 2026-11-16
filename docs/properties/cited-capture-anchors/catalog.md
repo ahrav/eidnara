@@ -239,7 +239,7 @@ Guarantee: The capture commit's operation key is the project's `memory_capture` 
 Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. Production reaches the digest conflict when a committed source's queue row is pruned and the same message is queued and planned again with another extraction: the plan is released, the source waits out the dispatch backoff, and the ninth dispatch abandons it (`a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap`, `crates/daemon/src/memory_auto_delivery_tests.rs:2799`). Refinement R7 marked the conflict test-only before that path was handled
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
-Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:3200` and the frozen-plan read in `publish` at `:1374`
+Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:3200` and the frozen-plan read in `publish` at `:1401`
 Existing check: `crates/daemon/src/memory_capture.rs:6686`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24963` (unaudited)
 Impact: a non-replaying retry would duplicate memories; a digest that omitted plan fields would let a changed plan replay the old receipt
 Open questions: None.
