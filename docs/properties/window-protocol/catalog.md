@@ -763,7 +763,7 @@ supplied it is the whole array or the wire's newest half-cap suffix, whose
 head `windowStart` moves later past a tool result whose call is outside the
 suffix, or, when every newer slot is such a result, back to the message
 carrying the calls, which can carry the suffix past half the cap
-(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:1025`;
+(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:1502`;
 `packages/pi-plugin/src/transform/pi-transform.test.ts:488`). The
 implementation's folding cold window is `host[:lead] + host[head:]`, the
 cold lead slots (`coldLead`, one for a leading Pi compaction summary)
