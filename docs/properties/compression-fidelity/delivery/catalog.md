@@ -211,7 +211,7 @@ Confidence: high - [evidence](evidence/cf-memory-credit-requires-admitted-visibl
 Pinned reads, visibility filtering, scope filtering, and budget trimming are
 verified; semantic credit remains a claim under test.
 Existing check: `crates/daemon/tests/transform_canonical_memory.rs:48-217,243-449` and
-`canonical_memory.rs:282-311,412-454`; status unaudited. They do not join memory
+`canonical_memory.rs:282-311,414-456`; status unaudited. They do not join memory
 to compression-fidelity obligations at the provider boundary.
 Impact: A test can falsely claim retention by reading private candidates or
 can change admission policy to make a lost constraint appear retained.
