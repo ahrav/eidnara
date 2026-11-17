@@ -1060,16 +1060,17 @@ inline code span, is stored as proposed. A run starts at a
 quotation that is a whole statement as proposed, or at one that the widening
 rule above stores as its whole sentence when it is applied to the links and
 categories as proposed, before any link is released, counted from that
-sentence's first word; proposals that quote one text start a run only when
-that rule widens each of them, so a cut quotation that names `replaces`,
+sentence's first word; proposals that quote one stretch of the message,
+whatever edge whitespace or closing mark each adds, take a place in a run
+only when each of them has one, so a cut quotation that names `replaces`,
 `also_replaces`, or `contests` starts no run and keeps a copy of it that
 names none from starting one. Only quoted sentences are joined, proposals that
 quote one span share its place in the run, a quotation with a second copy in
 the message, overlapping or apart, joins nothing, and a source under a
-hashed id is left as proposed. A joined statement supersedes one fact: the run carries
-the first `replaces` target its memories name, and a memory that names
-another target keeps its own quotation, so its replacement is judged as that
-of a sentence after a colon (below). Once the links of the source are judged,
+hashed id is left as proposed. A joined statement supersedes one fact: a run whose
+memories name two `replaces` targets is left as proposed, so each later
+sentence's replacement is judged as that of a sentence after a colon
+(below). Once the links of the source are judged,
 the joined memories take the category of the first of them whose `replaces`
 passed its checks, or else of the run's first sentence; two memories of one
 source that share a category and `content` as proposed refuse the source,
@@ -1206,7 +1207,8 @@ and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
-later paragraph. Two ASCII apostrophes with nothing between them inside an
+later paragraph. Two ASCII apostrophes with nothing between them and no
+letter or digit directly before or after them inside an
 inline code span are an empty string literal, as in `` `''` `` or
 `` `.get('', 0)` ``, and are code to this rule; every other single mark
 inside a span is read as a mark of the prose, since a backtick of the user's
