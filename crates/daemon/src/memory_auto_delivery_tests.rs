@@ -3060,15 +3060,6 @@ async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_
         "`''`Thanks.",
     ] {
         let (opening, closing) = closing.split_at(closing.find('T').unwrap());
-        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-        capture(
-            &handler,
-            FIRST,
-            "s1",
-            &[("m1", "user", THURSDAY)],
-            |_, _| vec![fact(THURSDAY)],
-        )
-        .await;
         let message = if opening.starts_with('`') {
             format!("The note ``Bob wrote {opening}Use the key`` is old.\n\n{TUESDAY}\n\n{closing}")
         } else {
@@ -3076,47 +3067,65 @@ async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_
                 "The key ` is broken, so Bob wrote {opening}Use the `-key instead.\n\n{TUESDAY}\n\n{closing}"
             )
         };
-        capture(
-            &handler,
-            SECOND,
-            "s2",
-            &[("m2", "user", &message)],
-            |_, existing| {
-                vec![Extracted {
-                    quote: TUESDAY.to_string(),
-                    replaces: ids_containing(existing, "Thursday"),
-                    ..Extracted::default()
-                }]
-            },
-        )
-        .await;
-
-        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
-        rows.sort();
-        assert_eq!(
-            rows,
-            [
-                (stated(THURSDAY), "visible".to_string()),
-                (stated(TUESDAY), "labeled".to_string()),
-            ],
-            "{opening}{closing:?}"
-        );
-        assert_eq!(
-            live_statement_records(&handler, &project),
-            [stated(THURSDAY)],
-            "{opening}{closing:?}"
-        );
-        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
-            .expect("the user's statement is delivered");
-        assert!(
-            block.contains(&stated(THURSDAY)),
-            "{opening}{closing:?}: {block}"
-        );
-        assert!(
-            !block.contains("Tuesday") && !block.contains("contested"),
-            "{opening}{closing:?}: the quoted sentence stays out of the block: {block}"
-        );
+        assert_quoted_sentence_is_no_statement(&message).await;
     }
+}
+
+#[tokio::test]
+async fn a_paragraph_inside_a_quotation_that_opens_directly_after_a_code_span_is_no_statement() {
+    for mark in ['\'', '\u{2019}'] {
+        let message = format!("Bob copied `README`{mark}Hi team.\n\n{TUESDAY}\n\nThanks.{mark}");
+        assert_quoted_sentence_is_no_statement(&message).await;
+    }
+}
+
+async fn assert_quoted_sentence_is_no_statement(message: &str) {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", message)],
+        |_, existing| {
+            vec![Extracted {
+                quote: TUESDAY.to_string(),
+                replaces: ids_containing(existing, "Thursday"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(THURSDAY), "visible".to_string()),
+            (stated(TUESDAY), "labeled".to_string()),
+        ],
+        "{message:?}"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(THURSDAY)],
+        "{message:?}"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the user's statement is delivered");
+    assert!(block.contains(&stated(THURSDAY)), "{message:?}: {block}");
+    assert!(
+        !block.contains("Tuesday") && !block.contains("contested"),
+        "{message:?}: the quoted sentence stays out of the block: {block}"
+    );
 }
 
 /// The agent notes the user's fact with the host memory tool during the

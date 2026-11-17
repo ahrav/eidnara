@@ -1050,7 +1050,8 @@ and is stored whole with that clause. Quotations of one user message that
 follow one another in a paragraph are joined into one quotation before any
 link of the proposals is judged, when the later one is whole statements under
 the statement rule below but for a colon earlier in its paragraph, starts
-where the statement before it ends with only whitespace between, and the
+where the statement before it ends with only whitespace between or inside
+that statement, and the
 joined text is whole statements under that rule and fits 2,048 bytes. A quotation that stops directly before its
 sentence's closing `.` or `!` ends after that mark for this rule. Of
 `Correction: two tasks are open. One is the retry counter. The other is the
@@ -1067,7 +1068,11 @@ whatever edge whitespace or closing mark each adds, take a place in a run
 only when each of them has one, so a cut quotation that names `replaces`,
 `also_replaces`, or `contests` starts no run and keeps a copy of it that
 names none from starting one. Only quoted sentences are joined, proposals that
-quote one span share its place in the run, a quotation with a second copy in
+quote one span share its place in the run, a quotation of sentences the run
+already holds shares the run, and one that starts inside the run and ends
+past it extends the run through its last sentence, so quotations that
+overlap are stored as the one statement their sentences make, in either
+proposal order; a quotation with a second copy in
 the message, overlapping or apart, joins nothing, and a source under a
 hashed id is left as proposed. A joined statement supersedes one fact: a run whose
 memories name two `replaces` targets is left as proposed, so each later
@@ -1220,9 +1225,13 @@ a character other than a letter or digit precedes them, as in
 `` `.get('', 0)` ``, and are code to this rule; every other single mark
 inside a span is read as a mark of the prose, since a backtick of the user's
 can pair with one inside quoted text and the span can then hold the mark
-that opens or closes a quotation. An apostrophe, `'` or `’`, between a span's
-closing run and a letter joins a suffix to the span, as in
-`` `Parser`'s ``. An empty literal and a suffix apostrophe open and close
+that opens or closes a quotation. An apostrophe, `'` or `’`, directly after
+a span's closing run joins a suffix to the span when `s`, `d`, `ll`, or `ve`
+follows it and that suffix ends at the line's end or before a character
+other than a letter or digit, as in `` `Parser`'s ``; before any other text,
+as in `` `README`'Hi team. ``, the mark is read as a mark of the prose, since
+a quotation can open directly after a span. An empty literal and a suffix
+apostrophe open and close
 no quotation, and the suffix apostrophe starts no word, so it leaves its
 paragraph free of a single opening mark. A single mark inside a span that
 follows a character other than a letter or digit, the first mark of an

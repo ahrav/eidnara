@@ -396,6 +396,9 @@ fn parse_capture_batch(
 /// message get one decision: they take a place in a run only when each of
 /// them has one, as a whole statement, a widened one, or a sentence after a
 /// colon. Proposals that quote one span share its place in the run. A
+/// quotation whose first sentence the run already holds joins the run and
+/// extends it through the quotation's last sentence, so overlapping
+/// quotations form one run. A
 /// quotation with a second copy in the message, overlapping or apart, has
 /// no one place and joins nothing.
 ///
@@ -477,15 +480,18 @@ fn join_sentence_runs(
     let mut runs: Vec<SentenceRun> = Vec::new();
     for ((start, end), (alone, quoting)) in places {
         let quoting = quoting.into_iter().map(|(index, _)| index);
+        // Merging a proposal whose sentences start inside the run preserves
+        // an overlapping longer quotation's extent and its links when the
+        // extractor also proposes one of those sentences alone.
         let joins = !alone
             && runs.last().is_some_and(|run| {
-                run.to < start
-                    && text[run.to..start].chars().all(char::is_whitespace)
+                (start < run.to
+                    || (run.to < start && text[run.to..start].chars().all(char::is_whitespace)))
                     && end - run.from <= MAX_CAPTURE_MEMORY_BYTES
                     && quotes_whole_statements(&prose, &text[run.from..end])
             });
         if joins && let Some(run) = runs.last_mut() {
-            run.to = end;
+            run.to = run.to.max(end);
             run.members.extend(quoting);
             run.joined = true;
         } else if alone {
@@ -2901,15 +2907,18 @@ impl<'a> CodeSpanCursor<'a> {
 }
 
 /// Whether `ch` at `place` is the apostrophe that joins a suffix to an
-/// inline code span, as in `` `Parser`'s ``: an apostrophe glyph directly
-/// after the span's closing run and before a letter. The span is the word
-/// the suffix belongs to, so the mark starts no word and opens no
-/// quotation. A glyph that only ever opens a quotation, such as U+2018 or
-/// U+201A, keeps its reading beside code.
-fn joins_suffix_to_code(place: CodePlace, ch: char, next: Option<char>) -> bool {
+/// inline code span, as in `` `Parser`'s ``. The inline code span serves as
+/// a word, making the apostrophe word-internal. The suffix list is closed
+/// because the same glyph directly after a span opens a quotation when the
+/// first word of quoted text follows it, as in `` `README`'Hi team. ``.
+/// `rest` is the line's text after the glyph.
+fn joins_suffix_to_code(place: CodePlace, ch: char, rest: &str) -> bool {
     place == CodePlace::AfterCode
         && matches!(ch, '\'' | '\u{2019}')
-        && next.is_some_and(char::is_alphabetic)
+        && ["s", "d", "ll", "ve"].iter().any(|suffix| {
+            rest.strip_prefix(suffix)
+                .is_some_and(|after| !after.starts_with(char::is_alphanumeric))
+        })
 }
 
 /// Whether a paragraph opens a single quotation it does not close. A mark
@@ -2956,7 +2965,7 @@ fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, u
                     previous = Some(ch);
                     continue;
                 }
-                if joins_suffix_to_code(place, ch, next) {
+                if joins_suffix_to_code(place, ch, &line[at + ch.len_utf8()..]) {
                     previous = Some(ch);
                     continue;
                 }
@@ -3030,15 +3039,12 @@ fn fence_opener(line: &str) -> Option<&str> {
 /// mark as one with a double mark in a span does.
 fn opens_single_quotation(start: usize, line: &str, spans: &mut CodeSpanCursor<'_>) -> bool {
     let mut previous = None;
-    let mut chars = line.char_indices().peekable();
-    while let Some((at, ch)) = chars.next() {
+    for (at, ch) in line.char_indices() {
         if SINGLE_QUOTATION_MARKS.contains(&ch)
             && previous.is_none_or(|before: char| !before.is_alphanumeric())
+            && !joins_suffix_to_code(spans.place(start + at), ch, &line[at + ch.len_utf8()..])
         {
-            let next = chars.peek().map(|&(_, after)| after);
-            if !joins_suffix_to_code(spans.place(start + at), ch, next) {
-                return true;
-            }
+            return true;
         }
         previous = Some(ch);
     }
@@ -7116,6 +7122,33 @@ mod tests {
                 release,
                 true,
             ),
+            // An apostrophe after a span joins each of the suffixes `s`,
+            // `d`, `ll`, and `ve` when the suffix ends at a word boundary.
+            (
+                "The `parser`'s output is `grep`'d, `main`'ll follow, and the `tests`'ve passed.\n\nWe deploy from the release branch.",
+                release,
+                true,
+            ),
+            // An ASCII or typographic apostrophe after a span opens a
+            // quotation when the following word is not a suffix, excluding
+            // subsequent paragraphs.
+            (
+                "Bob copied `README`'Hi team.\n\nWe deploy from the release branch.\n\nThanks.'",
+                release,
+                false,
+            ),
+            (
+                "Bob copied `README`\u{2019}Hi team.\n\nWe deploy from the release branch.\n\nThanks.\u{2019}",
+                release,
+                false,
+            ),
+            // The apostrophe before `so` opens a quotation because suffix
+            // matching requires a word boundary after `s`.
+            (
+                "Bob copied `README`'so far so good.\n\nWe deploy from the release branch.\n\nThanks.'",
+                release,
+                false,
+            ),
         ] {
             let found = quotes_whole_statements(&Prose::of(text), quote);
             if found != whole {
@@ -7278,6 +7311,52 @@ mod tests {
         assert_eq!(
             plain(&[OPEN_TASKS, OPEN_TASKS, RETRY_COUNTER, DRY_RUN]),
             [paragraph.as_str(); 4]
+        );
+        // Overlapping quotations expand to the whole paragraph in either
+        // proposal order.
+        let last_two = format!("{RETRY_COUNTER} {DRY_RUN}");
+        for later in [
+            [RETRY_COUNTER, last_two.as_str()],
+            [last_two.as_str(), RETRY_COUNTER],
+            [last_two.as_str(), DRY_RUN],
+        ] {
+            assert_eq!(
+                plain(&[OPEN_TASKS, later[0], later[1]]),
+                [paragraph.as_str(); 3],
+                "{later:?}"
+            );
+        }
+        assert_eq!(
+            own(&[
+                (OPEN_TASKS, "ARCHITECTURE", None),
+                (RETRY_COUNTER, "ARCHITECTURE", None),
+                (last_two.as_str(), "ARCHITECTURE", Some("mem_flag")),
+            ]),
+            [
+                (paragraph.clone(), "ARCHITECTURE".to_string(), None),
+                (paragraph.clone(), "ARCHITECTURE".to_string(), None),
+                (
+                    paragraph.clone(),
+                    "ARCHITECTURE".to_string(),
+                    Some("mem_flag".to_string())
+                ),
+            ],
+            "a two-sentence correction beside a proposal of its first sentence"
+        );
+        assert_eq!(
+            own(&[
+                (paragraph.as_str(), "CONSTRAINTS", None),
+                (RETRY_COUNTER, "CONSTRAINTS", Some("mem_tasks")),
+            ]),
+            [
+                (paragraph.clone(), "CONSTRAINTS".to_string(), None),
+                (
+                    paragraph.clone(),
+                    "CONSTRAINTS".to_string(),
+                    Some("mem_tasks".to_string())
+                ),
+            ],
+            "a correcting middle sentence beside a quotation of the whole paragraph"
         );
         // A sentence the extractor left out stays out: the last sentence
         // does not follow the first.
