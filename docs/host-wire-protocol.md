@@ -1057,8 +1057,13 @@ statement and each later one follows the colon, so the three are stored as
 the one statement from `Correction` through `flag.`. A later sentence the
 statement rule refuses for another reason, such as one that starts with an
 inline code span, is stored as proposed. A run starts at a
-quotation that is a whole statement as proposed, or at one that widening
-above stores as its whole sentence, counted from that sentence's first word. Only quoted sentences are joined, proposals that
+quotation that is a whole statement as proposed, or at one that the widening
+rule above stores as its whole sentence when it is applied to the links and
+categories as proposed, before any link is released, counted from that
+sentence's first word; proposals that quote one text start a run only when
+that rule widens each of them, so a cut quotation that names `replaces`,
+`also_replaces`, or `contests` starts no run and keeps a copy of it that
+names none from starting one. Only quoted sentences are joined, proposals that
 quote one span share its place in the run, a quotation with a second copy in
 the message, overlapping or apart, joins nothing, and a source under a
 hashed id is left as proposed. A joined statement supersedes one fact: the run carries
@@ -1402,8 +1407,9 @@ whitespace (the `White_Space` property) folded to
 single spaces, cut to 240 characters with an ellipsis, and to fewer when the
 quoted form would pass 1,024 bytes, as a JSON string, so
 text an assistant wrote stays inside its quotation marks; 240 characters hold
-the observed value and where it was seen, and the fact id leads to the full
-text through `eidnara_search`. A reader takes the contesting text from the
+the observed value and where it was seen for a short observation, a longer
+one, such as a long correcting sentence, can be cut before its value, and the
+fact id leads to the full text through `eidnara_search`. A reader takes the contesting text from the
 contesting fact's own row, read by id on `explicit_search` in the project at
 the store state of the statements it renders, and shows the contest only
 while that read serves the fact: live, not hidden, and of normal sensitivity.

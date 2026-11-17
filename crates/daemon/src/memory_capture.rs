@@ -389,7 +389,11 @@ fn parse_capture_batch(
 /// Only sentences the extractor quoted are joined, so the stored statement
 /// holds exactly the sentences it chose. A run starts at a quotation that is
 /// a whole statement as quoted, or at one that widens to one under
-/// [`widened_statements`], as publication widens it. Proposals that quote one span share its place in the run. A
+/// [`widened_statements`]. That rule is applied here to the links and
+/// categories as proposed, before any link is released, so a cut quotation
+/// that names a replacement or a contest starts no run, whatever
+/// publication later widens. Proposals that quote one text get one
+/// decision: they start a run only when the rule widens each of them. Proposals that quote one span share its place in the run. A
 /// quotation with a second copy in the message, overlapping or apart, has
 /// no one place and joins nothing.
 ///
@@ -416,6 +420,8 @@ fn join_sentence_runs(
     // Each place a quotation holds in the message, in message order: whether
     // it is a statement on its own, and the proposals that quote it.
     let mut places: BTreeMap<(usize, usize), (bool, Vec<usize>)> = BTreeMap::new();
+    // The quotations with no place: a copy of one with a place takes none.
+    let mut unplaced: HashSet<&str> = HashSet::new();
     for (index, memory) in memories.iter().enumerate() {
         let quote = memory.quote.as_str();
         let trimmed = quote.trim();
@@ -447,14 +453,22 @@ fn join_sentence_runs(
             (reads_as_statement(trimmed) && whole_sentences(&prose, quote, true))
                 .then_some((start, end, false))
         };
-        if let Some((start, end, alone)) = place {
-            places
+        match place {
+            Some((start, end, alone)) => places
                 .entry((start, end))
                 .or_insert((alone, Vec::new()))
                 .1
-                .push(index);
+                .push(index),
+            // Proposals that quote one text share one decision.
+            None => {
+                unplaced.insert(quote);
+            }
         }
     }
+    for (_, quoting) in places.values_mut() {
+        quoting.retain(|&index| !unplaced.contains(memories[index].quote.as_str()));
+    }
+    places.retain(|_, (_, quoting)| !quoting.is_empty());
     let mut runs: Vec<SentenceRun> = Vec::new();
     for ((start, end), (alone, quoting)) in places {
         let joins = !alone
@@ -538,7 +552,8 @@ fn unify_run_categories(memories: &mut [CapturedMemory], runs: &[Vec<usize>]) {
 
 /// For each proposal of one user message, the whole sentence its cut
 /// quotation widens to under [`enclosing_statement`], or `None` where the
-/// quotation is stored as proposed.
+/// quotation is stored as proposed. Publication applies it to the links
+/// left after release, and [`join_sentence_runs`] to the links as proposed.
 ///
 /// A proposal that replaces, retires, or contests memories is left as it
 /// is (see [`keeps_quotation`]); a replacement the parser released as a
@@ -7321,6 +7336,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             clauses.map(|(quote, _, _)| quote)
         );
+        // Two proposals quote one cut first sentence, and one of them
+        // names a replacement. Widening leaves that one as proposed, so
+        // neither starts a run, in either order, and the cut correction
+        // replaces nothing.
+        let cut = "two tasks are open and their order is undecided.";
+        for linked in [0, 1] {
+            let mut proposals = [
+                (cut, "CONSTRAINTS", None),
+                (cut, "CONSTRAINTS", None),
+                (RETRY_COUNTER, "CONSTRAINTS", None),
+            ];
+            proposals[linked].2 = Some("mem_tasks");
+            assert_eq!(
+                own(&proposals),
+                [
+                    (cut.to_string(), "CONSTRAINTS".to_string(), None),
+                    (cut.to_string(), "CONSTRAINTS".to_string(), None),
+                    (RETRY_COUNTER.to_string(), "CONSTRAINTS".to_string(), None),
+                ],
+                "the proposal at {linked} names the replacement"
+            );
+        }
         // A first sentence that names a replacement and is cut is kept as
         // quoted, so no run starts at it.
         let cut = "two tasks are open and their order is undecided.";

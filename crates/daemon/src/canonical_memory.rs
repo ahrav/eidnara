@@ -406,8 +406,10 @@ fn capture_session(rationale: &str) -> Option<std::borrow::Cow<'_, str>> {
 }
 
 /// The longest contest text a block line shows, in characters: room for the
-/// observed value and where it was seen. The contesting memory's id leads to
-/// its full text through explicit search.
+/// observed value and where it was seen in a short observation. A longer
+/// text, such as a long correcting sentence, can be cut before its value;
+/// the contesting memory's id leads to its full text through explicit
+/// search.
 pub(crate) const CONTEST_EXCERPT_CHARS: usize = 240;
 
 /// The most bytes a quoted contest excerpt holds: the size explicit search
