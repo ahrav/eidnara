@@ -501,12 +501,13 @@ fn join_sentence_runs(
         // an overlapping longer quotation's extent and its links when the
         // extractor also proposes one of those sentences alone.
         let joins = runs.last().is_some_and(|run| {
+            let to = run.to.max(end);
             (start < run.to
                 || (!alone
                     && run.to < start
                     && text[run.to..start].chars().all(char::is_whitespace)))
-                && end - run.from <= MAX_CAPTURE_MEMORY_BYTES
-                && quotes_whole_statements(&prose, &text[run.from..end])
+                && to - run.from <= MAX_CAPTURE_MEMORY_BYTES
+                && quotes_whole_statements(&prose, &text[run.from..to])
         });
         if joins && let Some(run) = runs.last_mut() {
             run.to = run.to.max(end);
@@ -8078,6 +8079,29 @@ mod tests {
             assert_eq!(
                 quotes(&plain, CaptureRole::User, true, &[head, rest]),
                 expected
+            );
+        }
+        // A quotation that fits one memory and stops before its sentence's
+        // closing mark makes a statement one byte past the limit, so a
+        // sentence inside it joins nothing and both stay as proposed, after
+        // a colon and with none.
+        for lead in ["Note: start slowly.", "We start slowly."] {
+            let open = format!("{lead} One waits. The other is ");
+            let unmarked = format!(
+                "{open}{}",
+                "x".repeat(MAX_CAPTURE_MEMORY_BYTES - open.len())
+            );
+            assert_eq!(unmarked.len(), MAX_CAPTURE_MEMORY_BYTES);
+            let marked = format!("{unmarked}.");
+            assert_eq!(
+                quotes(
+                    &marked,
+                    CaptureRole::User,
+                    true,
+                    &[unmarked.as_str(), "One waits."]
+                ),
+                [unmarked.as_str(), "One waits."],
+                "{lead}"
             );
         }
     }
