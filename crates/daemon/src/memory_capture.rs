@@ -2066,8 +2066,23 @@ fn quotes_whole_statements(prose: &Prose<'_>, quote: &str) -> bool {
 }
 
 /// Whether `quote` is one or more whole sentences of a plain-prose paragraph
-/// of the message, statements or questions.
+/// of the message, statements or questions, with no colon earlier in the
+/// paragraph.
 pub(super) fn quotes_whole_sentences(prose: &Prose<'_>, quote: &str) -> bool {
+    whole_sentences(prose, quote, Some(prose.colons()))
+}
+
+/// Whether `quote` is one or more whole sentences of a plain-prose paragraph
+/// of the message, wherever a colon stands before them. The sentences are
+/// the user's or text a colon of the user's introduces, so they are shown
+/// beside a statement they contest and are approved as no statement.
+pub(super) fn quotes_sentences_of_prose(prose: &Prose<'_>, quote: &str) -> bool {
+    whole_sentences(prose, quote, None)
+}
+
+/// `colons` holds each paragraph's first colon when a colon before the
+/// quotation refuses it (see [`Prose::colons`]).
+fn whole_sentences(prose: &Prose<'_>, quote: &str, colons: Option<&[usize]>) -> bool {
     let text = prose.text;
     let trimmed = quote.trim();
     if trimmed.is_empty() {
@@ -2075,7 +2090,6 @@ pub(super) fn quotes_whole_sentences(prose: &Prose<'_>, quote: &str) -> bool {
     }
     let lead = quote.len() - quote.trim_start().len();
     let paragraphs = prose.paragraphs();
-    let colons = prose.colons();
     let code_spans = prose.code_spans();
     let mut letters = NextAlphanumeric { text, scan: None };
     text.match_indices(quote).any(|(at, _)| {
@@ -2095,7 +2109,7 @@ pub(super) fn quotes_whole_sentences(prose: &Prose<'_>, quote: &str) -> bool {
                         &text[first..last],
                         start - first,
                         end - first,
-                        colons[index] - first,
+                        colons.map_or(last, |colons| colons[index]) - first,
                         |skip| {
                             letters
                                 .at_or_after(end + skip)

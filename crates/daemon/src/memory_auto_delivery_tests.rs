@@ -2611,6 +2611,128 @@ async fn a_correction_given_over_several_sentences_is_delivered_whole_in_place_o
     }
 }
 
+/// The extractor quotes only the correcting sentence, which follows a colon
+/// in its paragraph, and leaves out the sentence that holds the colon. The
+/// correcting sentence alone is approved as no statement, so it replaces
+/// nothing. It is a whole sentence of the user's message, so it contests
+/// the statement it names: the block shows the earlier statement with the
+/// correction beside it, and explicit search holds the correction.
+#[tokio::test]
+async fn a_correction_quoted_alone_after_a_colon_contests_the_statement_it_names() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let message = format!("Correction on the release schedule: the plan changed. {TUESDAY}");
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", &message)],
+        |_, existing| {
+            vec![Extracted {
+                quote: TUESDAY.to_string(),
+                replaces: ids_containing(existing, "Thursday"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(THURSDAY), "visible".to_string()),
+            (stated(TUESDAY), "labeled".to_string()),
+        ],
+        "the correcting sentence is stored for search and the statement stays live"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the contested statement is delivered");
+    let (stated_day, contested_day) = contest_days(&handler, &project, &stated(THURSDAY));
+    assert!(
+        block.contains(&format!(
+            "{} (stated {stated_day}; contested {contested_day} by mem_",
+            stated(THURSDAY)
+        )),
+        "{block}"
+    );
+    assert!(
+        block.contains(&format!(": \"{}\")", stated(TUESDAY))),
+        "the correction is shown beside the statement: {block}"
+    );
+}
+
+/// A joined statement is one memory. A later correction that replaces it
+/// replaces every sentence of it, the sentence the correction leaves as it
+/// was included.
+#[tokio::test]
+async fn a_later_correction_of_a_joined_statement_replaces_every_sentence_of_it() {
+    let port = "The staging gateway listens on port 5432.";
+    let sentences = [
+        "Correction for staging: the gateway listens on port 6432 now.",
+        "Releases freeze on the last Thursday of the month.",
+    ];
+    let joined = sentences.join(" ");
+    let newer = "The staging gateway listens on port 7000 now.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", port)], |_, _| {
+        vec![fact(port)]
+    })
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", &joined)],
+        |_, existing| {
+            let mut memories: Vec<Extracted> = sentences.iter().map(|quote| fact(quote)).collect();
+            memories[0].replaces = ids_containing(existing, "5432");
+            memories
+        },
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (FIRST, "s1"), &project).await,
+        [(stated(&joined), "visible".to_string())]
+    );
+    capture(
+        &handler,
+        THIRD,
+        "s3",
+        &[("m3", "user", newer)],
+        |_, existing| {
+            vec![Extracted {
+                quote: newer.to_string(),
+                replaces: ids_containing(existing, "6432"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+
+    assert_eq!(
+        explicit_search(&handler, (FIRST, "s1"), &project).await,
+        [(stated(newer), "visible".to_string())],
+        "the joined statement leaves with both of its sentences"
+    );
+    let block = project_memory_block(&serve(&handler, FIRST, "s1").await)
+        .expect("the newer correction is delivered");
+    assert!(block.contains(&stated(newer)), "{block}");
+    assert!(!block.contains("6432"), "{block}");
+    assert!(
+        !block.contains("Releases freeze"),
+        "the sentence beside the corrected one leaves with it: {block}"
+    );
+}
+
 /// A user message often refers to code before it states a fact: a string
 /// literal inside an inline code span, or a possessive after one. The
 /// statement in the next paragraph is the user's own, so a correction there
