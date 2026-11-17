@@ -14,7 +14,7 @@ that each anchor's oid equals its plan's frozen head.
 parses the submission's output, then calls `observe_head` once (`:901`)
 on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
-same `head` value (`crates/daemon/src/memory_capture.rs:1522`), serialized
+same `head` value (`crates/daemon/src/memory_capture.rs:1526`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
 (`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:32`)
 resolves HEAD once through `head_id` (`:62`), which follows a branch that
@@ -87,7 +87,7 @@ aliased branch loose and in `packed-refs`.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:8615`).
+  (`crates/daemon/src/memory_capture.rs:8639`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
