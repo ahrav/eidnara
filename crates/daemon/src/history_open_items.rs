@@ -23,7 +23,8 @@
 //!   segment, settles it, or passes over it; in each case the older line leaves. In the newest
 //!   segment a waiting line leaves when the segment itself answers it: the key's last status line
 //!   in `p1`, the segment's full statement, settles it, or a settling line with its key follows
-//!   it in its own tier.
+//!   it in its own tier. A waiting line in a newer segment opens its key again after an older
+//!   segment settled it.
 //! - **Constraints** stand in every tier until a lift with evidence. The evidence is a stored claim
 //!   with the constraint's key whose anchor reads as the `Lifted` line of that key. Claim
 //!   validation stores a claim only when its one citation resolves to a message inside the

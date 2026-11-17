@@ -370,6 +370,66 @@ fn a_question_raised_again_in_a_later_segment_renders_once_there() {
     assert_eq!(open_lines(&history[1][0]), [case.waiting_line()]);
 }
 
+#[test]
+fn a_question_raised_again_after_its_key_was_settled_stays_open_until_its_next_answer() {
+    let case = &ANSWERED[2];
+    let mut messages = case.asking();
+    messages.extend([
+        user(3, "Before I pick, show me the current poller logs."),
+        assistant(4, "Here are the poller logs for the last hour."),
+        user(5, "Also add a debug flag to the poller."),
+        assistant(
+            6,
+            &format!("The flag is in. I still need your call: {}", case.question),
+        ),
+        user(7, "Run the poller tests."),
+        assistant(
+            8,
+            &format!("The tests pass. Still open on your side: {}", case.question),
+        ),
+        user(9, &format!("{}.", case.answer)),
+        assistant(10, "Done as you said; the change is in place."),
+    ]);
+    let waiting = case.waiting_line();
+    let put_off = format!(
+        "Decided ({}): The user put the choice off until the poller logs are shown.",
+        case.key
+    );
+    let status_of_each_exchange = [&waiting, &put_off, &waiting, &waiting, &case.decided_line()];
+    let mut stored = Vec::new();
+    for (at, status) in status_of_each_exchange.into_iter().enumerate() {
+        let start = 2 * at as u64 + 1;
+        let p1 = format!("I worked on the poller.\n{status}");
+        fold(
+            &mut stored,
+            &output(
+                &[segment_xml(start, start + 1, [&p1, &p1, &p1, ""])],
+                &[],
+                start + 2,
+            ),
+            &chunk_of(&messages, start, start + 2),
+        );
+        // The newest segment determines the key's open status, even after an earlier settlement.
+        let history = rendered_tiers(&stored);
+        for (row, tiers) in history.iter().enumerate() {
+            let open = if row == at && *status == waiting {
+                vec![waiting.as_str()]
+            } else {
+                vec![]
+            };
+            assert_eq!(open_lines(&tiers[0]), open, "fold {at} row {row}");
+            assert_eq!(open_lines(&tiers[1]), open, "fold {at} row {row}");
+        }
+    }
+    // Each settling line stays in its own segment as the record of what the user said there.
+    let history = rendered_tiers(&stored);
+    for (row, settled) in [(1, &put_off), (4, &case.decided_line())] {
+        for tier in &history[row] {
+            assert!(tier.contains(settled.as_str()), "{tier}");
+        }
+    }
+}
+
 const CONSTRAINT: &str = "Do not fix product bugs during the baseline measurement";
 const LIFT: &str = "fix each of these bugs in its own pull request";
 const CONSTRAINT_LINE: &str =
