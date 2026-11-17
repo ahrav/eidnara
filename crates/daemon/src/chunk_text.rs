@@ -231,13 +231,30 @@ fn system_reminder_tag_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)</?system-reminder>").unwrap())
 }
 
-/// Whether `text`, the native text of a text block, is text someone typed to the assistant.
-/// Two forms are left out, for every harness: the text the Pi codec gives a bash execution,
-/// which holds a command and its output and which memory capture leaves out for `pi`, and text
-/// that opens with a marker the transform reads as injected by a plugin.
-pub(crate) fn is_typed_text(text: &str) -> bool {
+/// Whether `block`, a text block whose native text is `text`, holds text someone typed to the
+/// assistant. Two forms of text are left out, for every harness: the text the Pi codec gives a
+/// bash execution, which holds a command and its output and which memory capture leaves out
+/// for `pi`, and text that opens with a marker the transform reads as injected by a plugin. A
+/// block that the OpenCode codec decoded from a part with a marker kind is left out as well.
+pub(crate) fn is_typed_text(block: &crate::wire::WireBlock, text: &str) -> bool {
     !crate::memory_capture::is_pi_bash_execution_text(text)
         && !crate::transform::is_system_injected_text(text)
+        && !has_opencode_marker_kind(block)
+}
+
+/// Whether the `opencode` namespace of `block` holds `metadata.marker.kind` with a value other
+/// than null, the marker half of the OpenCode plugin's `isMachineAuthoredPart`. The codec
+/// copies a part's `metadata` into that namespace and leaves the part's `synthetic` flag out,
+/// so a part that is marked `synthetic` alone reads as typed here.
+fn has_opencode_marker_kind(block: &crate::wire::WireBlock) -> bool {
+    block
+        .provider_extras
+        .get(crate::codec::opencode::HARNESS)
+        .and_then(|namespace| namespace.get("metadata"))
+        .and_then(|metadata| metadata.get("marker"))
+        .and_then(|marker| marker.as_object())
+        .and_then(|marker| marker.get("kind"))
+        .is_some_and(|kind| !kind.is_null())
 }
 
 fn is_user_written((text, cleaned_text): &(String, bool)) -> bool {

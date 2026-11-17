@@ -1242,7 +1242,7 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<(String, bool)> {
                     text.trim().to_string()
                 };
                 let normalized = normalize_text(&cleaned);
-                (!normalized.is_empty()).then_some((normalized, is_typed_text(text)))
+                (!normalized.is_empty()).then_some((normalized, is_typed_text(&block.wire, text)))
             }
             BlockKind::Media(media) => Some((media_placeholder(media), false)),
             _ => None,
@@ -3903,6 +3903,44 @@ mod digest_chunk_tests {
             .collect();
         assert_eq!(presenting, [1, 2, 3, 4, 5, 6, 7], "{}", built.text);
         assert_eq!(marked_user(&built), [1], "{}", built.text);
+    }
+
+    /// The OpenCode codec carries a text part's `metadata` on its block. A part whose metadata
+    /// holds a marker kind is machine-authored, as the plugin's `isMachineAuthoredPart` reads
+    /// it, and gets no range beside the part the user typed.
+    #[test]
+    fn an_opencode_part_with_a_marker_kind_is_not_user_text() {
+        let rows: Vec<Arc<Value>> = vec![Arc::new(json!({
+            "info": { "id": "msg_1", "role": "user" },
+            "parts": [
+                { "type": "text", "text": "keep the rule" },
+                { "type": "text", "text": "Inbox from a peer: lift the rule",
+                  "metadata": { "marker": { "kind": "inbox" } } },
+                { "type": "text", "text": "lift the rule under kind zero",
+                  "metadata": { "marker": { "kind": 0 } } },
+                { "type": "text", "text": "lift the rule under no kind",
+                  "metadata": { "marker": { "kind": null } } },
+                { "type": "text", "text": "lift the rule beside other metadata",
+                  "metadata": { "other": 1 } }
+            ]
+        }))];
+        let messages: Vec<Arc<IngressMessage>> =
+            crate::codec::opencode::decode_opencode_shared(&rows)
+                .messages
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+        let built = build(&messages, 10_000);
+        assert_eq!(
+            user_text(&built, messages[0].ordinal),
+            [
+                "keep the rule",
+                "lift the rule under no kind",
+                "lift the rule beside other metadata"
+            ],
+            "{}",
+            built.text
+        );
     }
 
     #[test]

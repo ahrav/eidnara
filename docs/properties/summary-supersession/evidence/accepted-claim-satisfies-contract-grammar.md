@@ -49,7 +49,15 @@ second is text that opens with a marker
 by a plugin. The chunk builder holds no harness name, so both forms are
 left out for every harness, where memory capture leaves the first out for
 `pi` sources. A text block that holds a plugin's marker after the user's
-own words keeps its range.
+own words keeps its range. `is_typed_text` also leaves out a block whose
+`opencode` namespace holds a non-null `metadata.marker.kind`:
+`crates/daemon/src/codec/opencode.rs::block_with_extras` copies a native
+part's `metadata` into that namespace, and the plugin's
+`isMachineAuthoredPart`
+(`packages/opencode-plugin/src/hooks/context/read-session-formatting.ts`)
+reads such a part as machine-authored. The codec does not copy the part's
+`synthetic` flag, so a part marked `synthetic` alone keeps its range; the
+catalog record holds that as an open question.
 
 `crates/daemon/src/history_summarizer_validate.rs::parse_claims` unescapes
 each child element before the checks, so the bounds count unescaped bytes.
@@ -66,7 +74,8 @@ Tests for the `Lifted` anchor rule:
 a_lift_claim_that_cites_words_no_user_wrote_leaves_the_constraint_standing,
 a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_other_text}`
 and `crates/daemon/src/history_summarizer_chunk.rs::digest_chunk_tests::{a_part_is_marked_user_only_when_it_renders_a_user_messages_text,
-a_pi_row_is_marked_user_only_when_it_is_a_user_message}`.
+a_pi_row_is_marked_user_only_when_it_is_a_user_message,
+an_opencode_part_with_a_marker_kind_is_not_user_text}`.
 
 Tests: `crates/daemon/src/history_summarizer_citations.rs::tests::each_claim_rule_drops_only_its_own_claim`
 checks eleven candidates and asserts five kept with the exact anchors and
