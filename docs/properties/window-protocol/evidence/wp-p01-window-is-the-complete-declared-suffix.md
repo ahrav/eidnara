@@ -175,7 +175,7 @@ Tickets #1062, #1063, and #1065; PRs #1069 (head `6d527babf`) and #1070
   Tool pairing moves the head: `windowStart` (`:898-903`) walks later past a
   tool result whose call is outside the suffix, or back to the message
   carrying the calls, which can carry the suffix past half the cap, as the
-  wire permits (`docs/host-wire-protocol.md:996`) and
+  wire permits (`docs/host-wire-protocol.md:1025`) and
   `packages/pi-plugin/src/transform/pi-transform.test.ts:488` constructs.
   Pi spreads `measure` only under `inputs.eidnaraFolds`
   (`packages/pi-plugin/src/transform/pi-transform.ts:268-275`), set per run

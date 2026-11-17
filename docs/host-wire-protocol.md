@@ -1076,7 +1076,8 @@ passed its checks, or else of the run's first sentence; two memories of one
 source that share a category and `content` as proposed refuse the source,
 before the join as after it; a joined memory whose
 `duplicate_of` names a fact served on `auto_inject` with another text names
-the served fact that holds the joined text word for word, or drops the link.
+the served fact that holds the joined text word for word, up to edge
+whitespace and its closing `.` or `!`, or drops the link.
 The joined memories then freeze under the rule below for memories that share
 a category and quotation, as one memory: a later replacement of it
 supersedes the whole joined statement, every sentence of it. A sentence
@@ -1207,9 +1208,10 @@ and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
-later paragraph. Two ASCII apostrophes with nothing between them and no
-letter or digit directly before or after them inside an
-inline code span are an empty string literal, as in `` `''` `` or
+later paragraph. Two ASCII apostrophes with nothing between them inside an
+inline code span are an empty string literal when they are the span's whole
+content, as in `` `''` ``, or when a `,`, `)`, `]`, or `}` follows them and
+a character other than a letter or digit precedes them, as in
 `` `.get('', 0)` ``, and are code to this rule; every other single mark
 inside a span is read as a mark of the prose, since a backtick of the user's
 can pair with one inside quoted text and the span can then hold the mark
@@ -1217,10 +1219,12 @@ that opens or closes a quotation. An apostrophe, `'` or `’`, between a span's
 closing run and a letter joins a suffix to the span, as in
 `` `Parser`'s ``. An empty literal and a suffix apostrophe open and close
 no quotation, and the suffix apostrophe starts no word, so it leaves its
-paragraph free of a single opening mark. A single mark that starts a word
-inside a span still makes its paragraph one that holds a single opening
-mark, so that paragraph is left out as one with a double mark inside a span
-is. A single mark closes a quotation of one word when it ends a
+paragraph free of a single opening mark. A single mark inside a span that
+follows a character other than a letter or digit, the first mark of an
+empty literal included, still makes its own paragraph one that holds a
+single opening mark, so that paragraph is left out as one with a double
+mark inside a span is; the empty literal keeps the paragraphs after it in
+prose. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
 after `s`, a number, or a letter that is a number, which may be a plural
 possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a

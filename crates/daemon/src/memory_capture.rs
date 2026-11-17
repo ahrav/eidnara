@@ -420,13 +420,14 @@ fn join_sentence_runs(
     let widened = widened_statements(&prose, memories);
     // Each place a quotation holds in the message, in message order: whether
     // it is a statement on its own, and the proposals that quote it.
-    let mut places: BTreeMap<(usize, usize), (bool, Vec<usize>)> = BTreeMap::new();
-    // Where each placed proposal's quotation stands as proposed, and the
-    // quotations with no place. Proposals that quote one stretch of the
-    // message share one decision, whatever whitespace or closing mark their
-    // quotations add: a copy of an unplaced one takes no place.
-    let mut quoted: Vec<(usize, (usize, usize))> = Vec::new();
-    let mut unplaced: HashSet<(usize, usize)> = HashSet::new();
+    // Each place holds its proposals with the stretch each quotes as
+    // proposed; `unplaced` holds the stretches of the quotations with no
+    // place. Proposals that quote one stretch of the message share one
+    // decision, whatever whitespace or closing mark their quotations add:
+    // a copy of an unplaced one takes no place.
+    type Stretch = (usize, usize);
+    let mut places: BTreeMap<Stretch, (bool, Vec<(usize, Stretch)>)> = BTreeMap::new();
+    let mut unplaced: HashSet<Stretch> = HashSet::new();
     for (index, memory) in memories.iter().enumerate() {
         let quote = memory.quote.as_str();
         let trimmed = quote.trim();
@@ -459,29 +460,23 @@ fn join_sentence_runs(
                 .then_some((start, end, false))
         };
         match place {
-            Some((from, to, alone)) => {
-                places
-                    .entry((from, to))
-                    .or_insert((alone, Vec::new()))
-                    .1
-                    .push(index);
-                quoted.push((index, (start, end)));
-            }
+            Some((from, to, alone)) => places
+                .entry((from, to))
+                .or_insert((alone, Vec::new()))
+                .1
+                .push((index, (start, end))),
             None => {
                 unplaced.insert((start, end));
             }
         }
     }
     for (_, quoting) in places.values_mut() {
-        quoting.retain(|index| {
-            quoted
-                .iter()
-                .any(|(placed, stretch)| placed == index && !unplaced.contains(stretch))
-        });
+        quoting.retain(|(_, stretch)| !unplaced.contains(stretch));
     }
     places.retain(|_, (_, quoting)| !quoting.is_empty());
     let mut runs: Vec<SentenceRun> = Vec::new();
     for ((start, end), (alone, quoting)) in places {
+        let quoting = quoting.into_iter().map(|(index, _)| index);
         let joins = !alone
             && runs.last().is_some_and(|run| {
                 run.to < start
@@ -497,7 +492,7 @@ fn join_sentence_runs(
             runs.push(SentenceRun {
                 from: start,
                 to: end,
-                members: quoting,
+                members: quoting.collect(),
                 joined: false,
             });
         }
@@ -613,11 +608,12 @@ fn is_another_approved_text(previous: &ExistingCaptureMemory, content: &str) -> 
     previous.automatic && statement_text(&previous.content) != statement_text(content)
 }
 
-/// The approved memory that holds `content` word for word.
+/// The approved memory that holds `content` word for word: the one
+/// [`is_another_approved_text`] reads as the same statement.
 fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<String> {
     existing
         .iter()
-        .find(|previous| previous.automatic && previous.content == content)
+        .find(|previous| previous.automatic && !is_another_approved_text(previous, content))
         .map(|approved| approved.id.clone())
 }
 
@@ -2908,12 +2904,12 @@ fn joins_suffix_to_code(place: CodePlace, ch: char, next: Option<char>) -> bool 
 /// so they close nothing and the quotation stays open. An apostrophe inside
 /// a word neither opens nor closes.
 ///
-/// Two ASCII apostrophes with nothing between them and no letter or digit
-/// beside them inside an inline code span are an empty string literal, as
-/// in `` `''` `` or `` `.get('', 0)` ``, and a mark that
-/// [`joins_suffix_to_code`] accepts is an apostrophe. A pair a letter
-/// touches, a prefixed literal such as `b''` included, is read as marks of
-/// the prose. Each
+/// Two ASCII apostrophes inside an inline code span that
+/// [`is_empty_literal`] accepts are an empty string literal, as in
+/// `` `''` `` or `` `.get('', 0)` ``, and a mark that
+/// [`joins_suffix_to_code`] accepts is an apostrophe. Any other pair, such
+/// as one a letter touches (`b''`) or one before a word or an opening
+/// bracket, is read as marks of the prose. Each
 /// keeps the quotation state and counts as an ordinary character beside the
 /// marks around it. Every other single mark inside a span is read as a mark
 /// of the prose: a backtick of the user's can pair with one inside quoted
@@ -2931,17 +2927,12 @@ fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, u
             let next = chars.peek().map(|&(_, after)| after);
             if SINGLE_QUOTATION_MARKS.contains(&ch) {
                 let place = spans.place(start + at);
-                // An empty literal stands apart from words on both sides.
                 // Its second apostrophe lies inside the span too: the span
                 // ends in a backtick.
                 if place == CodePlace::Code
                     && ch == '\''
                     && next == Some('\'')
-                    && previous.is_none_or(|before| !before.is_alphanumeric())
-                    && line[at + 2..]
-                        .chars()
-                        .next()
-                        .is_none_or(|after| !after.is_alphanumeric())
+                    && is_empty_literal(previous, line[at + 2..].chars().next())
                 {
                     chars.next();
                     previous = Some(ch);
@@ -2980,6 +2971,20 @@ fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, u
         several_words |= open > 0;
     }
     open > 0
+}
+
+/// Whether two adjacent ASCII apostrophes inside an inline code span, with
+/// `before` and `after` beside them, are an empty string literal. The pair
+/// is the span's whole content, or an argument or element that a `,`, `)`,
+/// `]`, or `}` closes after a character that is no letter or digit. Quoted
+/// words start with none of those closing characters, so a pair this rule
+/// accepts opens no quotation of the prose around the span.
+fn is_empty_literal(before: Option<char>, after: Option<char>) -> bool {
+    match (before, after) {
+        (Some('`'), Some('`')) => true,
+        (Some(before), Some(',' | ')' | ']' | '}')) => !before.is_alphanumeric(),
+        _ => false,
+    }
 }
 
 /// The single marks [`opens_single_quotation`] reads as a quotation's opening.
@@ -6979,6 +6984,35 @@ mod tests {
                 release,
                 false,
             ),
+            // A pair before an opening bracket or another mark of quoted
+            // text can open quotations as well.
+            (
+                "The key ` is broken, so Bob wrote ''(Use the `-key instead).\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            (
+                "The key ` is broken, so Bob wrote ''*Use* the `-key instead.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            // A literal a letter touches, and one that no closing bracket
+            // or comma follows, keep the reading of marks of the prose.
+            (
+                "Open the file with a `b''` default.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            (
+                "Set `name = ''` there.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            (
+                "Pass `[x, '']` there.\n\nWe deploy from the release branch.",
+                release,
+                true,
+            ),
             // Marks around words inside a span can be a quotation of the
             // prose whose opening mark a backtick hides, so only the empty
             // literal is code.
@@ -7539,7 +7573,7 @@ mod tests {
             "an approved statement of the first sentence alone holds another text"
         );
         assert_eq!(
-            links(&[first_only, whole.clone()], "mem_first"),
+            links(&[first_only.clone(), whole.clone()], "mem_first"),
             vec![Some("mem_whole".to_string()); 3],
             "the approved statement that holds the joined text is the duplicate"
         );
@@ -7556,6 +7590,11 @@ mod tests {
             links(std::slice::from_ref(&unclosed), "mem_unclosed"),
             vec![Some("mem_unclosed".to_string()); 3],
             "an approved statement that differs by its closing mark holds the same text"
+        );
+        assert_eq!(
+            links(&[first_only.clone(), unclosed], "mem_first"),
+            vec![Some("mem_unclosed".to_string()); 3],
+            "the approved statement that holds the joined text but for its closing mark is the duplicate"
         );
         assert_eq!(
             links(std::slice::from_ref(&note), "mem_note"),
