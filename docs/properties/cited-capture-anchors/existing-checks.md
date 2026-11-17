@@ -129,7 +129,7 @@ part.
 
 - No production path reads `anchors` rows into applicability candidates, so
   every S1 check runs on fixtures (specification K3).
-- The capture prompt rule at `crates/daemon/src/memory_capture.rs:180` is the
+- The capture prompt's `quote` rule at `crates/daemon/src/memory_capture.rs:180` is the
   only statement of the quote contract the model sees; no test pins the
   prompt text to the validator.
 - No test publishes one message id in two sessions to show the citation

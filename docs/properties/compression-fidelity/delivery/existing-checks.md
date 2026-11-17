@@ -93,10 +93,10 @@ provenance assertion was found. Existing generic tests should be reused.
 
 | Location and check | What its assertions cover | Status |
 | --- | --- | --- |
-| [canonical_memory.rs:677-708](../../../../crates/daemon/src/canonical_memory.rs#L675-L706), `injectable_rows_are_visible_decisions_in_a_positive_category` | Drops negative category, labeled row, and nondecision row. | unaudited |
-| [canonical_memory.rs:749-844](../../../../crates/daemon/src/canonical_memory.rs#L747-L842), revision tests | Digest follows rendered rows, not read timestamp, dropped rows, or edits past the render cap. | unaudited |
-| [canonical_memory.rs:846-895](../../../../crates/daemon/src/canonical_memory.rs#L844-L893), `rows_past_the_memory_budget_are_neither_injected_nor_digested` | Oversized row is absent and cannot move the revision. | unaudited |
-| [canonical_memory.rs:897-915](../../../../crates/daemon/src/canonical_memory.rs#L895-L913), `withheld_reads_record_the_verdict_and_inject_nothing` | Withheld and available-empty reads differ despite both having no rows. | unaudited |
+| [canonical_memory.rs:677-708](../../../../crates/daemon/src/canonical_memory.rs#L677-L708), `injectable_rows_are_visible_decisions_in_a_positive_category` | Drops negative category, labeled row, and nondecision row. | unaudited |
+| [canonical_memory.rs:749-844](../../../../crates/daemon/src/canonical_memory.rs#L749-L844), revision tests | Digest follows rendered rows, not read timestamp, dropped rows, or edits past the render cap. | unaudited |
+| [canonical_memory.rs:846-895](../../../../crates/daemon/src/canonical_memory.rs#L846-L895), `rows_past_the_memory_budget_are_neither_injected_nor_digested` | Oversized row is absent and cannot move the revision. | unaudited |
+| [canonical_memory.rs:897-915](../../../../crates/daemon/src/canonical_memory.rs#L897-L915), `withheld_reads_record_the_verdict_and_inject_nothing` | Withheld and available-empty reads differ despite both having no rows. | unaudited |
 | [memory_render.rs:365-388,416-443](../../../../crates/daemon/src/memory_render.rs#L365-L443) | Nonpositive categories drop; UTF-8 truncation respects the 64 KiB content cap. | unaudited |
 | [m0_compose.rs:299-355](../../../../crates/daemon/src/m0_compose.rs#L299-L355), budget boundary and reference-model tests | Skip-and-continue selection matches the retained reference loop. | unaudited |
 | [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217) | Candidate, retired, superseded, negative-category, wrong-project, and wrong-domain examples do not appear; quarantine changes the next pass; warm state remains stable. | unaudited |
