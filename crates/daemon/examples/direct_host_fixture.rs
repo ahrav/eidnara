@@ -20,6 +20,14 @@ mod compression_fidelity_corpus;
 #[path = "../tests/support/eval_cassette.rs"]
 #[allow(dead_code)]
 mod eval_cassette;
+/// The embedding lane a payload carries, built as `eidnara-host serve` builds it.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[path = "../src/bin/eidnara_host/payload_local_embeddings.rs"]
+mod payload_local_embeddings;
+#[cfg(all(unix, not(target_os = "macos")))]
+#[path = "../tests/support/projection_gate.rs"]
+#[allow(dead_code)]
+mod projection_gate;
 /// The recorded cassette is published under the same contract as the
 /// campaign's report and manifest.
 #[cfg(unix)]
@@ -30,6 +38,9 @@ mod publish;
 #[cfg(unix)]
 #[path = "direct_host_fixture/review_witness.rs"]
 mod review_witness;
+#[cfg(all(unix, not(target_os = "macos")))]
+#[path = "search_admission_records/records.rs"]
+mod search_admission;
 #[cfg(unix)]
 #[path = "direct_host_fixture/support.rs"]
 #[allow(dead_code)]
@@ -1244,6 +1255,20 @@ mod unix {
             })
     }
 
+    /// `Ok` when no host process holds `root`'s runtime or lifetime lock; a held lock (a host starting, running, or stopping) or an unreadable lifecycle refuses.
+    fn no_host_holds(root: &Path) -> Result<(), String> {
+        match host_runtime::probe_lifecycle(Some(root), &host_runtime::ProbeFreshness::default()) {
+            Ok(observed) if observed.instance_lock_free && observed.lifetime_lock_free => Ok(()),
+            Ok(observed) => Err(format!(
+                "a host holds the state root ({:?})",
+                observed.state
+            )),
+            Err(error) => Err(format!(
+                "the state root's lifecycle could not be read: {error:?}"
+            )),
+        }
+    }
+
     async fn wait_for_publication(
         root: &Path,
         publication: &Path,
@@ -1281,11 +1306,19 @@ mod unix {
         root: PathBuf,
         cassette: CassetteMode,
         harness_runtime: Option<PathBuf>,
+        search: SearchRoute,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum SearchRoute {
+        Legacy,
+        Production { payload_manifest: PathBuf },
     }
 
     const USAGE: &str = "usage: direct_host_fixture --state-root <path> \
         [--cassette-record <file> | --cassette-replay <file>] [--cassette-namespace <ns>] \
-        [--harness-runtime <file>]";
+        [--harness-runtime <file>] \
+        [--query-route production --local-embeddings-manifest <payload-manifest.json>]";
 
     /// One pinned harness closure: its manifest and the directories its source roots name.
     #[derive(Deserialize)]
@@ -1397,10 +1430,99 @@ mod unix {
         ))
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[derive(Deserialize)]
+    struct PayloadManifest {
+        files: Vec<PayloadFile>,
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[derive(Deserialize)]
+    struct PayloadFile {
+        path: String,
+        sha256: String,
+    }
+
+    /// The production route's embedding lane and the fixture admission records derived from its bundle manifest, which `install` writes under the state root once the fixture owns it.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    struct ProductionSearch {
+        lane: LocalEmbeddingsComponent,
+        runtime_manifest: Vec<u8>,
+        campaign: Vec<u8>,
+        model: String,
+        payload_manifest: PathBuf,
+    }
+
+    impl ProductionSearch {
+        fn install(&self, root: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+            daemon::projection_admission::install(root, &self.runtime_manifest, &self.campaign)
+                .map_err(|refusal| format!("search admission records refused: {refusal}"))?;
+            eprintln!(
+                "direct_host_fixture: search route production, embedding model {}, payload {}, admission from fixture records",
+                self.model,
+                self.payload_manifest.display(),
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn production_search(
+        payload_manifest: &Path,
+    ) -> Result<ProductionSearch, Box<dyn Error + Send + Sync>> {
+        use crate::payload_local_embeddings::{BUNDLE_MANIFEST, ORT_LIBRARY};
+        let manifest: PayloadManifest = serde_json::from_slice(&fs::read(payload_manifest)?)?;
+        let payload_root = payload_manifest
+            .parent()
+            .ok_or("the payload manifest path names no directory")?;
+        let sha256_of = |path: &str| {
+            manifest
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .map(|file| file.sha256.as_str())
+        };
+        for path in [ORT_LIBRARY, BUNDLE_MANIFEST] {
+            if sha256_of(path).is_none() {
+                return Err(format!("the payload manifest names no {path}").into());
+            }
+        }
+        let bundle_bytes = fs::read(payload_root.join(BUNDLE_MANIFEST))?;
+        let digest: String = sha2::Sha256::digest(&bundle_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        if sha256_of(BUNDLE_MANIFEST) != Some(digest.as_str()) {
+            return Err("the bundle manifest's digest differs from the payload manifest's".into());
+        }
+        let bundle: serde_json::Value = serde_json::from_slice(&bundle_bytes)?;
+        let (runtime_manifest, campaign) = crate::search_admission::records(&bundle)?;
+        Ok(ProductionSearch {
+            lane: crate::payload_local_embeddings::component(payload_root, sha256_of),
+            runtime_manifest: serde_json::to_vec(&runtime_manifest)?,
+            campaign: serde_json::to_vec(&campaign)?,
+            model: bundle["model"].as_str().unwrap_or("unnamed").to_owned(),
+            payload_manifest: payload_manifest.to_owned(),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn production_search(
+        _payload_manifest: &Path,
+    ) -> Result<ProductionSearch, Box<dyn Error + Send + Sync>> {
+        Err("the production search route runs the Linux embedding lane".into())
+    }
+
     fn parse_args() -> Result<Args, Box<dyn Error + Send + Sync>> {
-        let mut args = std::env::args_os().skip(1);
+        parse_args_from(std::env::args_os().skip(1))
+    }
+
+    fn parse_args_from(
+        mut args: impl Iterator<Item = std::ffi::OsString>,
+    ) -> Result<Args, Box<dyn Error + Send + Sync>> {
         let (mut root, mut record, mut replay, mut namespace) = (None, None, None, None);
         let mut harness_runtime = None;
+        let (mut query_route, mut embeddings_manifest) = (None, None);
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(USAGE)?;
             match flag.to_str().ok_or(USAGE)? {
@@ -1411,6 +1533,8 @@ mod unix {
                 "--cassette-namespace" => {
                     namespace = Some(value.to_str().ok_or(USAGE)?.to_string())
                 }
+                "--query-route" => query_route = Some(value.to_str().ok_or(USAGE)?.to_string()),
+                "--local-embeddings-manifest" => embeddings_manifest = Some(PathBuf::from(&value)),
                 _ => return Err(USAGE.into()),
             }
         }
@@ -1424,10 +1548,18 @@ mod unix {
         if harness_runtime.is_some() && cassette != CassetteMode::Off {
             return Err(USAGE.into());
         }
+        let search = match (query_route.as_deref(), embeddings_manifest) {
+            (None, None) => SearchRoute::Legacy,
+            (Some("production"), Some(payload_manifest)) => {
+                SearchRoute::Production { payload_manifest }
+            }
+            _ => return Err(USAGE.into()),
+        };
         Ok(Args {
             root,
             cassette,
             harness_runtime,
+            search,
         })
     }
 
@@ -1436,8 +1568,16 @@ mod unix {
             root,
             cassette,
             harness_runtime,
+            search,
         } = parse_args()?;
         prepare_state_root(&root)?;
+        // The payload is validated before the socket is bound; its admission records are written only once this process owns the state root and has built its host.
+        let production = match &search {
+            SearchRoute::Legacy => None,
+            SearchRoute::Production { payload_manifest } => {
+                Some(production_search(payload_manifest)?)
+            }
+        };
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());
         let mut recording: Option<(Arc<CassetteBackend>, PathBuf)> = None;
@@ -1473,9 +1613,24 @@ mod unix {
             let own_socket = socket_identity(&control_path)?;
             (listener, own_socket)
         };
+        let production_lane = production
+            .as_ref()
+            .map(|production| production.lane.clone());
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
         let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()));
+        let handler = match &production_lane {
+            Some(lane) => {
+                let handler = handler.with_local_embeddings(lane.clone());
+                handler
+                    .set_query_route_limits(Some(
+                        daemon::query_route::QueryRouteLimits::production(),
+                    ))
+                    .map_err(|refusal| format!("query route limits refused: {refusal}"))?;
+                handler
+            }
+            None => handler,
+        };
         let (accepting_tx, accepting_rx) = tokio::sync::oneshot::channel();
         let control_shutdown = shutdown.clone();
         let control_backend = Arc::clone(&backend);
@@ -1497,7 +1652,7 @@ mod unix {
             .await
             .map_err(|_| "control server failed to start")?;
 
-        let local_embeddings = local_embeddings_component();
+        let local_embeddings = production_lane.unwrap_or_else(local_embeddings_component);
         let composite = StaticComposite::new(
             handler,
             local_embeddings,
@@ -1526,6 +1681,17 @@ mod unix {
             },
             ..Default::default()
         };
+        // The records are written after every fallible step that builds the host, so a start that fails before this point leaves the state root's admission as it found it. An install that fails partway can leave records from two payloads; the projection gate admits only records whose identity matches the running lane, so a mixed pair closes admission and search stays on the labeled snapshot fallback. A refused install also unlinks the socket this process bound.
+        if let Some(production) = &production {
+            // A daemon that owns the data home holds no fixture control socket, so its lifecycle record is checked too; the records are left untouched for it.
+            if let Err(reason) = no_host_holds(&root) {
+                let _ = unlink_own_control_socket(&control_path, own_socket);
+                return Err(format!("{reason}; search admission records left unchanged").into());
+            }
+            production.install(&root).inspect_err(|_| {
+                let _ = unlink_own_control_socket(&control_path, own_socket);
+            })?;
+        }
         let host_shutdown = shutdown.clone();
         let mut host =
             tokio::spawn(async move { host_runtime::run(composite, config, host_shutdown).await });
@@ -1602,6 +1768,48 @@ mod unix {
 
         fn sink(status: SinkStatus) -> EventSink {
             EventSink::new(Arc::new(move |_| status))
+        }
+
+        fn parse(args: &[&str]) -> Result<Args, String> {
+            parse_args_from(args.iter().map(std::ffi::OsString::from))
+                .map_err(|error| error.to_string())
+        }
+
+        #[test]
+        fn the_production_route_takes_both_search_flags_and_the_default_stays_legacy() {
+            let base = ["--state-root", "/state"];
+            assert_eq!(parse(&base).unwrap().search, SearchRoute::Legacy);
+            let production = parse(&[
+                "--state-root",
+                "/state",
+                "--query-route",
+                "production",
+                "--local-embeddings-manifest",
+                "/payload/payload-manifest.json",
+            ])
+            .unwrap();
+            assert_eq!(
+                production.search,
+                SearchRoute::Production {
+                    payload_manifest: PathBuf::from("/payload/payload-manifest.json")
+                }
+            );
+            for refused in [
+                &["--query-route", "production"][..],
+                &[
+                    "--local-embeddings-manifest",
+                    "/payload/payload-manifest.json",
+                ],
+                &[
+                    "--query-route",
+                    "fused",
+                    "--local-embeddings-manifest",
+                    "/payload/payload-manifest.json",
+                ],
+            ] {
+                let args: Vec<&str> = base.iter().chain(refused).copied().collect();
+                assert_eq!(parse(&args).err().as_deref(), Some(USAGE), "{refused:?}");
+            }
         }
 
         fn filler_summary(script: &Mutex<CaseScript>) -> Option<Summary> {

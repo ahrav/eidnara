@@ -1,7 +1,8 @@
 # p5dep-kernel-domain-read-has-no-row-bound
 
 HEAD `3a3b916b7`; the `claim_facts.rs` reference is re-verified at the
-#1166 branch tip. Surface S2.
+#1166 branch tip, and the `admission.rs`, `read.rs`, and `kernel_routes.rs`
+references at the #1209 branch tip. Surface S2.
 
 ## Discovery trigger
 
@@ -13,22 +14,37 @@ resource boundaries, vacuity.
 
 ## Evidence trail
 
-- `crates/kernel/src/admission.rs:3165-3176`: signature `(surface,
+- `crates/kernel/src/admission.rs:3278-3287`: signature `(surface,
   requested: i64, domain_id: &str, scope: Option<ScopeTermFilter>) ->
   Result<VisibleAsOf, KernelError>`. No `max_rows`, no `max_bytes`, no
   `EvalBudget`.
-- `admission.rs:3178-3231` `visible_selected_as_of`: `served_rows(..)?
+- `admission.rs:3315-3340` `visible_selected_as_of`: `served_rows(..)?
   .into_iter().filter_map(..).collect()` into `Vec<VisibleRow>`, then
   `sort_unstable_by`. Every matching row is materialized.
-- `admission.rs:3482-3499` `served_rows`: `served_classes_selected(..)?
+- `admission.rs:3587-3605` `served_rows`: `served_classes_selected(..)?
   .into_iter().map(..).collect()`; also a full `Vec`.
 - `crates/kernel/src/open.rs:595-607` `lock_reader`: the plain reader lock
   used by `read_snapshot` has no deadline.
-- Daemon: `read.rs:191-192` applies `NewestRows` after the full `Vec` is
-  returned; `visible.rows` is consumed by the `for` loop at `:192` with no
-  intermediate binding, so the observable is the Kernel API's return value.
-- The daemon cap test `kernel_routes.rs:1958` constructs over-cap rows but
-  observes only the wire response; the Kernel-side count is not asserted.
+- Daemon: `read.rs:480-481`, in `read_visible_page`, applies `NewestRows`
+  after the full `Vec` is returned; `visible.rows` is consumed by the `for`
+  loop at `:481` with no intermediate binding, so the observable is the
+  Kernel API's return value. The caller is the domain arm at `:472-477`,
+  which `read_visible_within` reaches for the capture read of the `memory`
+  domain. `domain_decisions_in_serving_order` (`:404-432`) calls the API for
+  the canonical-memory delivery walk and returns every row that passes the
+  scope filter, with no row cap.
+- `kernel.read` does not call this API. A request with `object_ids` reads
+  `visible_as_of_in_scope` (`read.rs:469-471`). A request with none reads
+  `visible_chunk_as_of_in_scope` (`read.rs:310-319`), which ends a chunk at
+  the first commit boundary that holds `min_rows` rows or passes
+  `payload_budget` bytes (`admission.rs:3244-3276`).
+- The daemon cap test `kernel_routes.rs:1958` constructs over-cap rows, reads
+  them through `kernel.read` with no `object_ids`, and observes only the wire
+  response. `crates/daemon/src/kernel_routes/read.rs:1088`
+  `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` puts 8,193
+  same-project `memory` decisions through the domain read by way of
+  `read_visible` and observes the daemon's `truncated` flag; the Kernel-side
+  count of the domain read is not asserted.
 
 ## Failure scenario
 
@@ -50,7 +66,8 @@ None; the cost is in the read itself.
 ## What a test must construct
 
 - At least 8193 visible same-project `memory` decisions at one snapshot.
-- Inside the over-cap fixture (`kernel_routes.rs:1958`), call the Kernel API
+- Inside an over-cap fixture of `memory` decisions
+  (`crates/daemon/src/kernel_routes/read.rs:1088` builds one), call the Kernel API
   directly and record `rows.len()` on its return value; assert
   `sometimes(len > MAX_READ_ROWS)` across the campaign. No production marker
   is needed.
@@ -62,12 +79,16 @@ None; the cost is in the read itself.
 
 - Sources examined: `slice/read.rs:126-220` (`decision_page_within_budget`),
   `:236-243` (`decisions_for_objects_as_of_within_budget`),
-  `claim_facts.rs:240-257`, `admission.rs:3146-3164`
-  (`visible_as_of_in_scope` with `ids`).
+  `claim_facts.rs:240-257`, `admission.rs:3220-3242`
+  (`visible_as_of_in_scope` with `ids`), `admission.rs:3244-3276`
+  (`visible_chunk_as_of_in_scope`).
 - Findings: the page API is store-wide (no domain or scope predicate) and its
   budget bounds only the reader wait (D2). The `ids` variant of
-  `visible_as_of_in_scope` narrows before SQL but needs the ids first. No
-  bounded, domain- and scope-filtered read exists.
+  `visible_as_of_in_scope` narrows before SQL but needs the ids first.
+  `visible_chunk_as_of_in_scope` takes a row count, a payload budget, and the
+  scope prefilter, but its statement selects every object kind and domain
+  (`admission.rs:3857-3858`). No bounded, domain- and scope-filtered read
+  exists.
 - Missing evidence: the P5 author's choice between adding a bounded variant
   and accepting a page-then-filter design.
 - Conclusion: needs human input.

@@ -397,7 +397,7 @@ memory-only search path are inspected. #723 corrected the prompt conflict at
 HEAD; the hint footer and generated outputs still await the human guidance
 review, and no consumer incident is observed.
 Existing check: [Registry guidance test:272-319][registry-tests],
-[search-description test:428-439][search-tests], unaudited, and the
+[search-description test:452-463][search-tests], unaudited, and the
 [summarizer prompt guidance-capability test][prompt]
 `the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out`, which pins
 the prompt's recovery limit and rejects the search-recovery phrases #723

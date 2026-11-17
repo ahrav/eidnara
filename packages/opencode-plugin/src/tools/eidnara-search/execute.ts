@@ -7,12 +7,7 @@
 
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import { getErrorMessage } from "../../shared/error-message";
-import {
-    isAvailable,
-    type MemoryState,
-    type ReadRow,
-    renderToolStateText,
-} from "../../shared/kernel-client";
+import { type MemoryState, type ReadRow, renderToolStateText } from "../../shared/kernel-client";
 import {
     boundDynamicField,
     describeQueryBoundsViolation,
@@ -24,6 +19,7 @@ import {
     parseObjectIdQuery,
     readObjectRowsChunked,
     resolveContests,
+    scanSnapshotForLexicalSearch,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 import { normalizeEidnaraSearchArgs, prepareQueryFromNormalizedArgs } from "./query-input";
@@ -117,7 +113,7 @@ type MemoryRead =
           truncated: boolean;
           unresolvedObjectIds: string[];
           /** The store state the rows were read at. */
-          knownAsOf: number;
+          knownAsOf: number | null;
           state: null;
       }
     | { state: MemoryState };
@@ -231,13 +227,20 @@ export async function executeEidnaraSearch(
                   }
                 : { state: read.state };
         }
-        const read = await client.read({ surface: "explicit_search", gated, ...signal });
-        return isAvailable(read)
+        const read = await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated,
+            query,
+            limit,
+            ...signal,
+        });
+        return read.ok
             ? {
                   rows: read.rows,
                   truncated: read.truncated,
                   unresolvedObjectIds: [],
-                  knownAsOf: read.known_as_of,
+                  knownAsOf: read.knownAsOf,
                   state: null,
               }
             : { state: read.state };
@@ -263,7 +266,7 @@ export async function executeEidnaraSearch(
             `Memory: unresolved object id${unresolvedObjectIds.length === 1 ? "" : "s"} (the daemon read stayed truncated): ${unresolvedObjectIds.join(", ")}`,
         );
     }
-    // A truncated snapshot drops the oldest rows, so a lexical hit that lives only in an omitted memory is silently missing; the note keeps "no results" from reading as a complete search.
+    // The truncation note marks results as partial because unread memories may contain lexical matches.
     if (memoryTruncated) {
         notes.push("Memory: the memory read was truncated; older memories were not searched.");
     }

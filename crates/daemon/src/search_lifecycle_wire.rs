@@ -47,14 +47,19 @@ fn terminal(code: &str) -> PreparedOutcome {
     response(json!({ "kind": "terminal", "terminal": code }))
 }
 
-fn refused(reason: impl std::fmt::Display) -> PreparedOutcome {
-    let reason = reason.to_string();
+/// `reason` cut to its first `REASON_CHARS` characters.
+fn bounded(reason: &str) -> &str {
     let end = reason
         .char_indices()
         .map(|(index, _)| index)
         .nth(REASON_CHARS)
         .unwrap_or(reason.len());
-    response(json!({ "kind": "terminal", "terminal": "refused", "reason": &reason[..end] }))
+    &reason[..end]
+}
+
+fn refused(reason: impl std::fmt::Display) -> PreparedOutcome {
+    let reason = reason.to_string();
+    response(json!({ "kind": "terminal", "terminal": "refused", "reason": bounded(&reason) }))
 }
 
 /// The budget includes time spent waiting for a blocking worker.
@@ -63,6 +68,14 @@ fn budget() -> EvalBudget {
         Some(std::time::Instant::now() + OPERATION_BUDGET),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )
+}
+
+struct CancelOnDrop(EvalBudget);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 fn operation(intent: &LifecycleIntent, state: &str) -> Value {
@@ -111,7 +124,7 @@ impl HandlerCore {
         Ok((owner, parsed))
     }
 
-    pub(crate) fn handle_search_lifecycle_status(
+    pub(crate) async fn handle_search_lifecycle_status(
         &self,
         channel: RouteHandle,
         request: Value,
@@ -124,10 +137,32 @@ impl HandlerCore {
             Ok(()) => json!({ "state": "admitted" }),
             Err(reason) => json!({ "state": "refused", "reason": reason }),
         };
+        let record = record_json(&owner.lifecycle_record());
+        // The tip read waits for one of the kernel's pooled readers, so it runs off the async workers.
+        let budget = budget();
+        // The drop guard propagates request cancellation to the blocking progress read's budget.
+        let _cancel = CancelOnDrop(budget.clone());
+        let Ok((progress, tip)) = blocking(move || owner.progress(&budget)).await else {
+            return terminal("unavailable");
+        };
+        let lag = tip
+            .zip(progress.checkpoint)
+            .map(|(tip, checkpoint)| tip.saturating_sub(checkpoint).max(0));
         response(json!({
             "kind": "status",
-            "record": record_json(&owner.lifecycle_record()),
+            "record": record,
             "admission": admission,
+            "progress": {
+                "tip": tip,
+                "checkpoint": progress.checkpoint,
+                "lag_commits": lag,
+                "rebuilds": {
+                    "recorded": progress.rebuilds_recorded,
+                    "completed": progress.rebuilds_completed,
+                    "renewed": progress.rebuilds_renewed,
+                },
+                "blocked": progress.blocked.as_deref().map(bounded),
+            },
         }))
     }
 

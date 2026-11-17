@@ -13,6 +13,7 @@ pub mod generation;
 pub mod handler;
 pub mod harness_closure;
 pub mod lifecycle;
+mod lifecycle_deadline;
 pub mod local_embeddings;
 pub mod model_execution;
 #[doc(hidden)]

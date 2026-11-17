@@ -38,6 +38,139 @@ export interface SearchAdmission {
     reason?: string;
 }
 
+/** One request over a Context route bound to `projectRoot` on the host behind `connectionFile`; the route and the connection are closed before the answer returns. */
+async function contextRequest(
+    connectionFile: string,
+    projectRoot: string,
+    sessionId: string,
+    body: Record<string, unknown>,
+): Promise<unknown> {
+    const identity = {
+        project_root: resolve(projectRoot),
+        harness: "opencode",
+        session: sessionId,
+    };
+    const client = await HostClient.connect({
+        connectionFile,
+        identity,
+        targetKind: "tool_provider",
+    });
+    try {
+        const route = await client.routeOpen(
+            { kind: "tool_provider", module_id: "context" },
+            identity,
+        );
+        try {
+            return await client.request(route, { ...body, session_id: sessionId });
+        } finally {
+            await client.closeRoute(route).catch(() => undefined);
+        }
+    } finally {
+        await client.closeAsync().catch(() => undefined);
+    }
+}
+
+/** The `search_admission` block `session.status` reports for a session of `projectRoot` on the host behind `connectionFile`. */
+export async function searchAdmission(
+    connectionFile: string,
+    projectRoot: string,
+    sessionId: string,
+): Promise<SearchAdmission | undefined> {
+    const status = (await contextRequest(connectionFile, projectRoot, sessionId, {
+        method: "session.status",
+    })) as { search_admission?: SearchAdmission } | null;
+    return status?.search_admission;
+}
+
+/** The `progress` block of `search.lifecycle.status`: the projection's lag behind the kernel tip and the slice loop's rebuild outcomes. */
+export interface SearchProgress {
+    tip: number | null;
+    checkpoint: number | null;
+    lag_commits: number | null;
+    rebuilds: { recorded: number; completed: number; renewed: number };
+    blocked: string | null;
+}
+
+/** The `status` answer of `search.lifecycle.status`. */
+export interface SearchLifecycleStatus {
+    kind: "status";
+    record: { state: string; cause?: string };
+    admission: SearchAdmission;
+    progress: SearchProgress;
+}
+
+/** Whether `answer` is the `status` answer, which alone carries `record` and `progress`; any other value, a `null` or a body of another shape among them, is not. */
+export function isSearchLifecycleStatus(answer: unknown): answer is SearchLifecycleStatus {
+    if (typeof answer !== "object" || answer === null) return false;
+    const { kind, record, admission, progress } = answer as Record<string, unknown>;
+    return (
+        kind === "status" &&
+        typeof record === "object" &&
+        record !== null &&
+        typeof admission === "object" &&
+        admission !== null &&
+        typeof progress === "object" &&
+        progress !== null
+    );
+}
+
+/** `search.lifecycle.status` of the host behind `connectionFile`, asked over a route bound to `projectRoot`: the wire answer as received, for `isSearchLifecycleStatus` to judge. */
+export async function searchLifecycleStatus(
+    connectionFile: string,
+    projectRoot: string,
+    sessionId: string,
+): Promise<unknown> {
+    return contextRequest(connectionFile, projectRoot, sessionId, {
+        method: "search.lifecycle.status",
+        project_root: resolve(projectRoot),
+    });
+}
+
+/** Polls `search.lifecycle.status` until the projection is Current, admitted, and at the kernel tip, and returns that status. */
+export async function waitForSearchCaughtUp(
+    host: { connectionFile: string; hostLog(): string },
+    projectRoot: string,
+    sessionId: string,
+    timeoutMs: number,
+): Promise<SearchLifecycleStatus> {
+    const deadline = Date.now() + timeoutMs;
+    let last: unknown;
+    while (Date.now() < deadline) {
+        last = await searchLifecycleStatus(host.connectionFile, projectRoot, sessionId);
+        if (
+            isSearchLifecycleStatus(last) &&
+            last.record.state === "current" &&
+            last.admission.state === "admitted" &&
+            last.progress.lag_commits === 0
+        ) {
+            return last;
+        }
+        await Bun.sleep(500);
+    }
+    throw new Error(
+        `the search projection did not catch up within ${timeoutMs}ms: ${JSON.stringify(last ?? null)}\n${host.hostLog()}`,
+    );
+}
+
+/** Polls `session.status` until the session's search admission reads `admitted`. */
+export async function waitForSearchAdmitted(
+    host: { connectionFile: string; hostLog(): string },
+    projectRoot: string,
+    sessionId: string,
+    timeoutMs: number,
+): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let last: SearchAdmission | undefined;
+    while (Date.now() < deadline) {
+        last = await searchAdmission(host.connectionFile, projectRoot, sessionId);
+        if (last?.state === "admitted") return;
+        await Bun.sleep(500);
+    }
+    throw new Error(
+        `search admission did not open within ${timeoutMs}ms: ${JSON.stringify(last ?? null)}\n${host.hostLog()}`,
+    );
+}
+
 interface CommandResult {
     status: number | null;
     stdout: string;
@@ -97,54 +230,12 @@ export class PayloadHost implements HarnessHost {
         }
     }
 
-    async searchAdmission(
-        projectRoot: string,
-        sessionId: string,
-    ): Promise<SearchAdmission | undefined> {
-        const identity = {
-            project_root: resolve(projectRoot),
-            harness: "opencode",
-            session: sessionId,
-        };
-        const client = await HostClient.connect({
-            connectionFile: this.connectionFile,
-            identity,
-            targetKind: "tool_provider",
-        });
-        try {
-            const route = await client.routeOpen(
-                { kind: "tool_provider", module_id: "context" },
-                identity,
-            );
-            try {
-                const status = (await client.request(route, {
-                    method: "session.status",
-                    session_id: sessionId,
-                })) as { search_admission?: SearchAdmission } | null;
-                return status?.search_admission;
-            } finally {
-                await client.closeRoute(route).catch(() => undefined);
-            }
-        } finally {
-            await client.closeAsync().catch(() => undefined);
-        }
-    }
-
     async waitForAdmitted(
         projectRoot: string,
         sessionId: string,
         timeoutMs: number,
     ): Promise<void> {
-        const deadline = Date.now() + timeoutMs;
-        let last: SearchAdmission | undefined;
-        while (Date.now() < deadline) {
-            last = await this.searchAdmission(projectRoot, sessionId);
-            if (last?.state === "admitted") return;
-            await Bun.sleep(500);
-        }
-        throw new Error(
-            `search admission did not open within ${timeoutMs}ms: ${JSON.stringify(last ?? null)}\n${this.hostLog()}`,
-        );
+        await waitForSearchAdmitted(this, projectRoot, sessionId, timeoutMs);
     }
 
     hostLog(): string {

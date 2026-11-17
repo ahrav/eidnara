@@ -31,7 +31,7 @@ or related repositories are supplied. No tests or model calls run here.
   factory when the plugin is enabled and returns no tools when disabled.
 - [search tools.ts:13-26,33-51][tools] permits only the `memory` source and
   dispatches to `executeEidnaraSearch`.
-- [execute.ts:33-85,172-260][execute] rejects other source names and searches
+- [execute.ts:29-83,168-263][execute] rejects other source names and searches
   memory rows from the kernel client's `explicit_search` read. That registered
   path does not retrieve the history segment that supplied the hint.
 - [Registry tests:32-44,272-319][registry-tests] pin four tool IDs and check

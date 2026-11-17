@@ -203,8 +203,8 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - the search maintenance loop calls
-`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2360`), which
-runs `ClaimMaterializer` (`:555`, the materializer call at `:574`) and grants
+`run_claim_slice` (`crates/daemon/src/search_lifecycle_owner.rs:2490`), which
+runs `ClaimMaterializer` (`:577`, the materializer call at `:596`) and grants
 and checks no projection-gate admission before it publishes claim source
 descriptors. Claim validation on the query route is `explicit-config-only`:
 `validate_claims` (`crates/daemon/src/query_route.rs:1712`) runs inside the
@@ -659,10 +659,10 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
-(`crates/daemon/src/search_lifecycle_owner.rs:1258`) runs
-`SearchCatchUp::run_episode` (`:1302`) over the claim commits the claim slice
+(`crates/daemon/src/search_lifecycle_owner.rs:1374`) runs
+`SearchCatchUp::run_episode` (`:1418`) over the claim commits the claim slice
 publishes, after an installed search admission admits `EmbeddingBootstrap`
-and `GitDurableRows` (`:1277-1283`).
+and `GitDurableRows` (`:1393-1399`).
 Status: active
 Exercised: partial - claim rows travel through the RP2.1 shared catch-up.
 `claim_catch_up_crash_cuts_recover_to_the_seed_ledger_and_never_acknowledge_early`
@@ -768,10 +768,10 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - the search lifecycle owner's `catch_up`
-(`crates/daemon/src/search_lifecycle_owner.rs:1258`) runs claim catch-up under
-a budget linked to the caller's (`:1301`) and cancels the episode when an
-admission grant is invalidated (`:1309-1311`), after an installed search
-admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1277-1283`).
+(`crates/daemon/src/search_lifecycle_owner.rs:1374`) runs claim catch-up under
+a budget linked to the caller's (`:1417`) and cancels the episode when an
+admission grant is invalidated (`:1425-1427`), after an installed search
+admission admits `EmbeddingBootstrap` and `GitDurableRows` (`:1393-1399`).
 Status: active
 Exercised: partial -
 `cancelling_claim_catch_up_at_each_boundary_keeps_durable_work_and_replays_to_the_ledger`

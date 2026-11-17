@@ -822,6 +822,62 @@ describe("eidnara_search through the fused route", () => {
         }
     });
 
+    it("reads a contesting observation at the snapshot the fallback's scan read", async () => {
+        const observation = "Assistant reported: The limit is 500 now.";
+        class CommittingTransport extends FakeKernelTransport {
+            snapshot: number | null = null;
+            async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+                const reply = (await super.call(args)) as {
+                    state?: { kind?: string };
+                    known_as_of?: number;
+                };
+                // A commit lands after the scan's page is read.
+                if (
+                    args.method === "kernel.read" &&
+                    this.snapshot === null &&
+                    reply.state?.kind === "available"
+                ) {
+                    this.snapshot = reply.known_as_of ?? null;
+                    this.kernel.seedDecision({
+                        object_id: id(3),
+                        decision_kind: "CONFIG_VALUES",
+                        summary: "The deploy window opens at noon.",
+                    });
+                }
+                return reply;
+            }
+        }
+        const transport = new CommittingTransport(new FakeKernel());
+        const { kernel, run } = harness(transport);
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "CONFIG_VALUES",
+            summary: observation,
+            source_id: "memory_capture",
+        });
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "CONFIG_VALUES",
+            summary: "User stated: The gateway admits at most 300 clients.",
+            rationale: JSON.stringify({
+                source: "memory_capture",
+                contested_by: { memory: id(2), stated_seq: 1 },
+            }),
+            source_id: "memory_capture",
+            labeled: false,
+        });
+        kernel.routeReply = () => ({ kind: "terminal", terminal: "disabled" });
+        const execution = await run({ query: "gateway clients" });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.text).toContain(`Contested by ${id(2)}: ${JSON.stringify(observation)}`);
+        // The scan keeps the rows that match the query, so the observation is read by id.
+        const contestRead = transport.calls.filter((call) => call.method === "kernel.read").at(-1)
+            ?.body as { as_of: number | null; object_ids?: string[] };
+        expect(transport.snapshot).not.toBeNull();
+        expect(kernel.tip).toBeGreaterThan(transport.snapshot as number);
+        expect(contestRead).toMatchObject({ as_of: transport.snapshot, object_ids: [id(2)] });
+    });
+
     it("shows a contested statement with its observation's served text through the route", async () => {
         const { kernel, run } = harness();
         const observation = "Assistant reported: The client limit is 500 now.";
