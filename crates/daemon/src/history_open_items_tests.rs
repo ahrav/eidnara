@@ -411,6 +411,7 @@ fn a_question_raised_again_after_its_key_was_settled_stays_open_until_its_next_a
         );
         // The newest segment determines the key's open status, even after an earlier settlement.
         let history = rendered_tiers(&stored);
+        assert_eq!(history.len(), at + 1, "fold {at}");
         for (row, tiers) in history.iter().enumerate() {
             let open = if row == at && *status == waiting {
                 vec![waiting.as_str()]
