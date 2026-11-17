@@ -29,25 +29,37 @@ folding exists as a check; the goldens imply both (e.g. `HTTPServer` stays
 | Check | Location | Asserts | Status |
 | --- | --- | --- | --- |
 | `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain` | `crates/kernel/tests/kernel_scope.rs:235-388` | filter on `branch=main` keeps matching, redacted, and no-term scopes, drops the other branch; a redacted filter value keeps everything | unaudited |
-| `the_domain_selection_equals_the_filtered_full_read` | `crates/kernel/tests/kernel_canonical_read.rs:227` | domain selection equals the full read filtered to the domain's decisions | unaudited |
-| `the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact` | `:286` | sensitivity folding for decision-kind rows | unaudited |
-| `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order` | `:420` | domain read sees rows the capped unfiltered read drops | unaudited |
-| `the_domain_selection_reads_no_row_of_another_domains_payload_pressure` | `:448` | another domain's payload volume does not cost the domain read | unaudited |
-| in-module test at `crates/kernel/src/admission.rs:6264-6281` | | domain read on `memory` returns the one visible decision after a reopen | unaudited |
+| `the_domain_selection_equals_the_filtered_full_read` | `crates/kernel/tests/kernel_canonical_read.rs:229` | domain selection equals the full read filtered to the domain's decisions | unaudited |
+| `the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact` | `:288` | sensitivity folding for decision-kind rows | unaudited |
+| `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order` | `:422` | domain read sees rows the capped unfiltered read drops | unaudited |
+| `the_domain_selection_reads_no_row_of_another_domains_payload_pressure` | `:450` | another domain's payload volume does not cost the domain read | unaudited |
+| in-module test at `crates/kernel/src/admission.rs:6635-6651` | | domain read on `memory` returns the one visible decision after a reopen | unaudited |
 | `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation` | `crates/daemon/tests/kernel_routes.rs:1958` | `MAX_READ_ROWS` newest rows, `truncated: true` | unaudited |
 | `bounded_selection_matches_a_full_sort_and_truncate` | `:2080` | `NewestRows` equals sort-then-truncate | unaudited |
 | `a_read_over_the_byte_budget_serves_the_newest_rows_that_fit` | `:2112` | byte budget cut | unaudited |
+| `paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once` | `:6973` | a `before` cursor ahead of every row serves `MAX_READ_ROWS` rows with `truncated: true`; the page after the first holds the remaining rows with `truncated: false` | unaudited |
+| `a_read_continues_past_the_rows_its_scope_filter_drops` | `:7106` | a page whose first chunk holds more than `MAX_READ_ROWS` unscoped decisions serves the older project rows with `truncated: false` | unaudited |
+| `a_page_serves_the_decisions_its_chunk_carried_by_size_alone` | `:7174` | one commit over the byte budget serves its first rows in `object_id` order with `truncated: true`, each with its decision text | unaudited |
+| `the_row_cap_serves_a_surface_of_its_size_whole_and_flags_one_row_more` | `:7225` | `MAX_READ_ROWS` rows serve with `truncated: false`; one row more serves the newest `MAX_READ_ROWS` with `truncated: true` | unaudited |
+| `a_read_fails_closed_for_a_decision_object_without_a_live_decision_row` | `:7273` | a decision object whose decision row is not live at the snapshot answers `store_unsupported` and serves no row | unaudited |
+| `a_full_page_reads_later_chunks_to_decide_truncation` | `:7414` | a page that fills at the end of a chunk reports `truncated: true` when a later chunk holds a project row and `truncated: false` when it holds none | unaudited |
 | `rows_serve_only_to_the_project_their_scope_names` | `:1803` | cross-project rows absent | unaudited |
 | `recorded_cross_project_read_is_empty` | `:1366` | | unaudited |
 | `a_request_naming_another_project_root_is_refused_before_any_work` | `:1487` | project mismatch before work | unaudited |
+| `a_domain_selection_over_the_row_cap_keeps_the_newest_rows` | `crates/daemon/src/kernel_routes/read.rs:1088` | `read_visible` over one decision more than `MAX_READ_ROWS` keeps the newest rows with their decisions and `truncated: true` | unaudited |
 
 Production guards: `CorruptCanonicalRow` when a visible decision lacks its
-payload size or row (`read.rs:215-219`, `:239-243`).
+payload size or row in `read_visible_page` (`read.rs:504-509`, `:537-542`),
+or its decision in the chunk or in the read by id in `newest_page`
+(`read.rs:338`, `:369-371`).
 
 None found: no test asserts the Kernel API's lack of a row bound (it is an
 absence, not a check), and no test drives `visible_domain_decisions_as_of_in_scope`
 with a `ScopeTermFilter` on `Dimension::Project` directly; the daemon tests
-cover that path through `kernel.read`.
+reach that filter through `kernel.read`, which passes it to the chunk and
+named-id statements and does not run the domain statement, and through
+`read_visible` (`crates/daemon/src/kernel_routes/read.rs:1088`), which passes
+it to the domain statement.
 
 ## S3 budgeted Kernel reads
 
@@ -141,7 +153,7 @@ through the MemoryReviewer class only as far as this pass found.
 | `a_published_proposal_reads_from_every_root_after_a_newer_root_binds` | `:342` | | unaudited |
 | `review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record` | `:409` | `v` field is `invalid_params` (`:643-649`) | unaudited |
 | wire-doc literal test | `crates/daemon/src/memory_reviewer/wire.rs:448-463+` | the doc's `review.accept` terminal set equals the produced set | unaudited |
-| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:35945` | | unaudited |
+| `an_observational_binding_reads_its_project_and_takes_no_part_in_background_work` | `crates/daemon/src/lib.rs:36087` | | unaudited |
 
 None found: no test drives `store_unavailable` on `review.list`/`review.read`
 through a failing store read, as far as this pass found (the terminal is

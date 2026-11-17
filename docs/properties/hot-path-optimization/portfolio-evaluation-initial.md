@@ -101,7 +101,7 @@ This keeps the invariant safety-shaped. Any promise that work eventually
 releases a reservation needs a separate bounded liveness record.
 
 **Finding 3, K3 gap.** Row pressure and byte pressure are distinct failure
-classes in `crates/daemon/src/kernel_routes/read.rs:181-224`. One disjunctive
+classes in `crates/daemon/src/kernel_routes/read.rs:479-526`. One disjunctive
 marker can pass while the other cap is never stressed. Targeted discovery must
 split the two precondition witnesses or require two fixed campaign markers.
 
@@ -218,7 +218,7 @@ APIs.
   isolated stores and controlled lineage facts are feasible.
 - **K3, yes but expensive.** Existing tests seed more than 8192 rows and a
   payload over the byte budget at
-  `crates/daemon/tests/kernel_routes.rs:2002-2056,2156-2195`.
+  `crates/daemon/tests/kernel_routes.rs:1958-2013,2112-2152`.
 - **E1, no for the proposed worker.** The transform closure runs synchronously
   at `crates/daemon/src/lib.rs:8151-8216`. Host tracking covers the callback at
   `crates/host-runtime/src/dispatch.rs:873-934`, not a future detached worker.
@@ -293,7 +293,7 @@ and harness are unverified.
 | `catalog.md` `[tokenizer-dependency]`, `daemon/Cargo.toml:21-32` | VERIFIED | `tokenizer` is a normal dependency at line 32. |
 | `_lenses/guarded-store.md` `[cache]`, `storage/src/lib.rs:487-498` | VERIFIED | Documents expiry on scope installation and per-callback reuse. |
 | `_lenses/history-render.md` `[outer]`, `daemon/src/m0_compose.rs:178-215` | VERIFIED | Counts wrapped history and retries at most three times over 105 percent. |
-| `_lenses/canonical-read.md` `[sql]`, `kernel/src/admission.rs:3189-3355` | VERIFIED | Query has admission joins, scope prefilter, object-ID order, and Vec collection. |
+| `_lenses/canonical-read.md` `[sql]`, `kernel/src/admission.rs:3818-4078` | VERIFIED | Query has admission joins and a scope prefilter, and no `ORDER BY` for the domain read; the rows are collected into a Vec and sorted by object ID in Rust (`kernel/src/admission.rs:3328`). |
 | `_lenses/redaction-ownership.md` `[json]`, `memory-store/src/lib.rs:2133-2143` | VERIFIED | Records empty retained text with detections and ownership metadata. |
 
 No sampled anchor is off.

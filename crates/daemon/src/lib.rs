@@ -5399,6 +5399,11 @@ impl HandlerCore {
                         )
                     });
                 let _ = history_summarizer_chunk::presented_input(&mut chunk, token_budget);
+                let chunk_transcript = history_summarizer_chunk::stored_chunk_transcript(
+                    parsed.messages.as_slice(),
+                    &live,
+                    &chunk.chunk,
+                );
                 let prior_history_segments = match store.load_history_segments(&session_id) {
                     Ok(cs) => cs
                         .iter()
@@ -5477,7 +5482,7 @@ impl HandlerCore {
                                 project_path: &project_path,
                                 observed_chunk_fingerprint: &observed,
                                 validation_chunk: &chunk.chunk,
-                                chunk_transcript: &chunk.text,
+                                chunk_transcript: &chunk_transcript,
 
                                 boundary_dates: &boundary_dates,
                                 prior_history_segments: &prior_history_segments,
@@ -14015,7 +14020,7 @@ where
     PreparedSettlement::Response(body)
 }
 
-/// Transform and exact-length bodies take the direct-serialize path; every other outcome, JSON and emitted bodies included, takes the owned path.
+/// Transform and exact-length bodies take the direct-serialize path; every other outcome, JSON bodies included, takes the owned path.
 async fn settle_prepared_via<W, Owned, OwnedReserved, Direct, DirectReserved, Cancelled>(
     outcome: PreparedOutcome,
     cancelled: Cancelled,
@@ -14776,7 +14781,7 @@ impl HandlerCore {
                     self.handle_review_candidates(channel, request).await
                 }
                 search_lifecycle_wire::STATUS => {
-                    self.handle_search_lifecycle_status(channel, request)
+                    self.handle_search_lifecycle_status(channel, request).await
                 }
                 search_lifecycle_wire::REBUILD => {
                     self.handle_search_lifecycle_rebuild(channel, request).await
@@ -14868,7 +14873,7 @@ pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |now| now.saturating_add(kernel::wall_clock_step_ms()))
 }
 
 /// The answer to a window the coverage resolution refused: `boundary_unknown` or `invalid_params`.
@@ -19487,23 +19492,12 @@ mod tests {
         body
     }
 
-    /// Only transform and exact-length bodies take the direct path; JSON and emitted bodies stay owned.
+    /// Only transform and exact-length bodies take the direct path; JSON bodies stay owned.
     #[test]
     fn only_transform_and_exact_bodies_serialize_directly() {
-        struct Fixed;
-        impl crate::dispatch::Emit for Fixed {
-            fn emit(
-                &self,
-                destination: &mut dyn std::io::Write,
-            ) -> Result<(), crate::dispatch::PreparedOutputError> {
-                destination.write_all(b"{}")?;
-                Ok(())
-            }
-        }
         assert!(direct_transform().serializes_directly());
         assert!(PreparedOutput::cached_bytes(b"x".to_vec()).serializes_directly());
         assert!(!PreparedOutput::json(json!({"a": 1})).serializes_directly());
-        assert!(!PreparedOutput::emit(Arc::new(Fixed)).serializes_directly());
     }
 
     /// Which reservation a settlement took, and the bytes it produced.
@@ -19541,19 +19535,9 @@ mod tests {
         }
     }
 
-    /// The production branch sends transform and exact-length bodies to the direct reservation with the owned path's bytes, and JSON and emitted bodies to the owned reservation.
+    /// The production branch sends transform and exact-length bodies to the direct reservation with the owned path's bytes, and JSON bodies to the owned reservation.
     #[tokio::test]
     async fn transform_and_exact_bodies_settle_direct_with_the_owned_bytes() {
-        struct Fixed;
-        impl crate::dispatch::Emit for Fixed {
-            fn emit(
-                &self,
-                destination: &mut dyn std::io::Write,
-            ) -> Result<(), crate::dispatch::PreparedOutputError> {
-                destination.write_all(b"{}")?;
-                Ok(())
-            }
-        }
         for output in [
             direct_transform(),
             PreparedOutput::cached_bytes(b"exact-body".to_vec()),
@@ -19564,16 +19548,12 @@ mod tests {
                 Some(Reserved::Direct(expected))
             );
         }
-        for output in [
-            PreparedOutput::json(json!({"a": [1, 2]})),
-            PreparedOutput::emit(Arc::new(Fixed)),
-        ] {
-            let expected = owned_bytes(output.clone()).await;
-            assert_eq!(
-                settle_recording(PreparedOutcome::Response(output)).await,
-                Some(Reserved::Owned(expected))
-            );
-        }
+        let output = PreparedOutput::json(json!({"a": [1, 2]}));
+        let expected = owned_bytes(output.clone()).await;
+        assert_eq!(
+            settle_recording(PreparedOutcome::Response(output)).await,
+            Some(Reserved::Owned(expected))
+        );
     }
 
     /// Charges a response holds travel with its direct serializer and return once it runs; a retained clone and an error outcome hold none.
@@ -20349,13 +20329,13 @@ mod tests {
                 let (expected_text, expected_end) = match budget {
                     1 => ("[1-2] U: «s1»α🙂e\u{301} 中文".to_string(), 2),
                     128 => (
-                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\""
+                        "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; output=\"tool output 🙂\""
                             .to_string(),
                         4,
                     ),
                     _ => (
                         format!(
-                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; head=\"tool output 🙂\"\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
+                            "[1-2] U: «s1»α🙂e\u{301} 中文\n[3-4] A: «s2»TC: bash / «s3»TC: bash; completed; bytes=16; output=\"tool output 🙂\"\n[5] U: «s4»{}\n[8] A: «s5»kept reply",
                             "word ".repeat(2_000).trim_end(),
                         ),
                         8,
@@ -20387,8 +20367,8 @@ mod tests {
                 assert_eq!(firing.prompt.as_bytes(), expected_prompt.as_bytes());
                 let expected_digest = match budget {
                     1 => "cc8e4171645e669d0e79005cfff6da6e5dfbdf9bf3a45673d0e91200d3759e2a",
-                    128 => "74d1738475d92a8383985a5733703b35109322ad062ab909693192dfc03f9322",
-                    _ => "8e0816dfc8297ff468c8fd662e3982bf78d8866d0a4af825210a43f8a4a2edd1",
+                    128 => "c8840b8897a7539e77f599d5a643e909e72c23d078b866654409fa67a425dd9e",
+                    _ => "798b8bf14d5f583d1646a8b2c182ca6f697be6c6ee75ba67f452676ff0a7c722",
                 };
                 assert_eq!(
                     format!("{:x}", Sha256::digest(firing.prompt.as_bytes())),
@@ -44265,6 +44245,67 @@ mod tests {
         let history_segments = store.load_history_segments("ses").unwrap();
         assert_eq!(history_segments.len(), 1);
         assert_eq!(history_segments[0].end_message, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_reattach_stores_a_transcript_whose_tool_output_was_scanned_as_printed() {
+        let producer = Arc::new(ProducerState::default());
+        producer
+            .outputs
+            .lock()
+            .unwrap()
+            .push_back(history_summarizer_output(1, 3, "reattached"));
+        let printed = "first\nDB_PASSWORD=\"Xk7'Qm2Lr8Wv4Zd6Pn9\"\nlast\n";
+        assert!(
+            !context_core::redaction::redact_durable_text(printed)
+                .text
+                .contains("Qm2Lr8Wv4Zd6Pn9")
+        );
+        let messages = vec![
+            ck("m1", 1, "read the environment file"),
+            assistant_tool_call("m2", 2),
+            tool_result("result-m2", 3, printed),
+        ];
+        let (handler, store, dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        seed_awaiting(&store, &messages);
+
+        let response = call_transform(&handler, messages).await;
+        assert_eq!(response["history_summarizer"]["no_fire"], "reattaching");
+        wait_for_idle(&store).await;
+
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.last_failure, None, "{state:?}");
+        let transcripts = store
+            .load_chunk_transcripts_for_range("ses", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(transcripts.len(), 1);
+        let transcript = transcripts[0].transcript.as_deref().unwrap();
+        assert!(!transcript.contains("Qm2Lr8Wv4Zd6Pn9"), "{transcript}");
+        assert!(
+            transcript.contains("output=\"first DB_PASSWORD='<REDACTED:db_password>' last\""),
+            "{transcript}"
+        );
+
+        // The scan ledger's receipt for the transcript counts the store's scan of the text it received, which holds the placeholder.
+        let ledger = rusqlite::Connection::open_with_flags(
+            sqlite_store_path(dir.path().join("data").to_str().unwrap(), DEFAULT_MODULE_ID),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let receipts: Vec<(i64, i64)> = ledger
+            .prepare(
+                "SELECT DISTINCT s.scan_id, s.finding_count,
+                        (SELECT COUNT(*) FROM scan_detections d WHERE d.scan_id = s.scan_id)
+                   FROM field_scans s JOIN scan_owner_copies o USING (scan_id)
+                  WHERE o.field_id = 'chunk_transcript'",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(receipts, [(0, 0)]);
     }
 
     /// A reattachment must use the retry budget; otherwise it restores aliases the live cut removed from an oversized message and can accept facts citing unseen bytes.

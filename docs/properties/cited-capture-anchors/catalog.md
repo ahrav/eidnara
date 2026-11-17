@@ -240,7 +240,7 @@ Check: `always` - for every receipt of producer `memory_capture`, a second commi
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
 Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:2709` and the frozen-plan read in `publish` at `:1154`
-Existing check: `crates/daemon/src/memory_capture.rs:6358`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24963` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:6358`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24943` (unaudited)
 Impact: a non-replaying retry would duplicate memories; a digest that omitted plan fields would let a changed plan replay the old receipt
 Open questions: None.
 
@@ -255,7 +255,7 @@ Check: `always` - for every prepared memory, `source.text.contains(quote)` for t
 Fault/timing angle: none
 Required faults and enabling state: a quote taken from another message of the batch; an invented `message_id`; a duplicate `message_id`; an empty quote
 Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:231` and `validate_capture_memories` at `:302`; the prompt states the rule at `:151` (offset corrected by refinement R8)
-Existing check: `crates/daemon/src/memory_capture.rs:3162`, `:3195`, `:3227`, `:3350`, `:5341`; `crates/daemon/src/lib.rs:25371` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:3162`, `:3195`, `:3227`, `:3350`, `:5341`; `crates/daemon/src/lib.rs:25351` (unaudited)
 Impact: a quote from another message would cite evidence for a statement the source never made
 Open questions: None.
 
@@ -270,7 +270,7 @@ Check: `always` - for every capture job, `job_id == job_id(source, redacted_text
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
 Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:136`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:418`, and the object id at `:2872`
-Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:5360`, `:5409`, `:6070`, `:6092`, `:6358`; `crates/daemon/src/lib.rs:24963`, `:26423` (unaudited)
+Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:5360`, `:5409`, `:6070`, `:6092`, `:6358`; `crates/daemon/src/lib.rs:24943`, `:26403` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -284,8 +284,8 @@ Guarantee: Capture publication, capture checkpointing, source-capture publish, a
 Check: `always` - no capture or source publish commit for a session has a `commit_seq` after that session's delete sweep committed; observed by holding the gate from a test thread and asserting the competing operation has not committed (refinement R5 adds this gate-hold observation method)
 Fault/timing angle: a checkpoint or publish admitted before a delete that runs after it
 Required faults and enabling state: a session delete issued while a checkpoint or publish waits on the gate
-Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1163`, the delete path at `crates/daemon/src/lib.rs:7047`, and `capture_after_response` at `crates/daemon/src/lib.rs:9301`
-Existing check: `crates/daemon/src/lib.rs:25543`, `:25881`, `:26093`, `:26746`; `crates/daemon/src/lib.rs:25268`; `crates/daemon/src/source_capture_tests.rs:1062` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1163`, the delete path at `crates/daemon/src/lib.rs:7052`, and `capture_after_response` at `crates/daemon/src/lib.rs:9306`
+Existing check: `crates/daemon/src/lib.rs:25523`, `:25861`, `:26073`, `:26726`; `crates/daemon/src/lib.rs:25248`; `crates/daemon/src/source_capture_tests.rs:1062` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 
@@ -392,7 +392,7 @@ Check: `always` - every job frozen by one submission carries the identical `head
 Fault/timing angle: a `git checkout` between the submit and its retry
 Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
 Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:681`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:2731`)
-Existing check: `crates/daemon/src/lib.rs:25106`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3528`, `:3700` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:25086`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3528`, `:3700` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
@@ -407,7 +407,7 @@ Check: `always-or-unreached` - the path runs only when the head observation is u
 Fault/timing angle: none
 Required faults and enabling state: a root with no `.git`; an unborn branch; an `objectFormat` gix refuses
 Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:32`) maps every other refusal to `HeadUnavailable`
-Existing check: `crates/daemon/src/memory_capture/head.rs:373`, `:416`, `:568`; `crates/daemon/src/lib.rs:25106`, `:25216`; `crates/daemon/src/source_capture_tests.rs:3700` (unaudited)
+Existing check: `crates/daemon/src/memory_capture/head.rs:373`, `:416`, `:568`; `crates/daemon/src/lib.rs:25086`, `:25196`; `crates/daemon/src/source_capture_tests.rs:3700` (unaudited)
 Impact: capture would stop in fresh checkouts
 Open questions: None.
 

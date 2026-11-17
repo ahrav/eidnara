@@ -253,8 +253,8 @@ kernel-route boundary. T3 and T4 are default-production: the daemon sends
 every transform and exact-length response through the direct path. T3's
 check applies unchanged to a `MeasuredSource::Json` response, which the owned
 path measures structurally (`measure_json`,
-`crates/daemon/src/dispatch.rs:605-610`) and serializes once into the
-reserved body (`MeasuredOutput::write_to`, `:464-480`); the serializer-based
+`crates/daemon/src/dispatch.rs:616-621`) and serializes once into the
+reserved body (`MeasuredOutput::write_to`, `:476-501`); the serializer-based
 count runs only for a value past the wire cap.
 
 [unit-runner-live]: ../../../../crates/daemon/src/transform_unit.rs#L23-L49
@@ -1796,7 +1796,7 @@ frame and a reusable slot;
 `transform_and_exact_bodies_settle_direct_with_the_owned_bytes`
 (`daemon/src/lib.rs`) drives the production branch and shows transform and
 exact bodies take the direct reservation with the owned path's bytes while
-JSON and emitted bodies stay owned;
+JSON bodies stay owned;
 `a_failed_direct_serializer_publishes_nothing_and_returns_its_charge`
 (`host-runtime/tests/direct_frames.rs`) drives the four fault arms of the
 `direct_fill` fixture through a real host and ring at the one-frame egress
@@ -3176,8 +3176,8 @@ evaluation of this area and its disposition are recorded in
 [active-match]: ../../../../crates/daemon/src/transform.rs#L7429
 [t-collapsed]: ../../../../crates/daemon/src/transform.rs#L27958
 [synthetic-reference]: ../../../../crates/daemon/src/transform.rs#L27709
-[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L25540
-[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25823
+[synthetic-delta-witness]: ../../../../crates/daemon/src/lib.rs#L25576
+[synthetic-delta-parity]: ../../../../crates/daemon/src/lib.rs#L25859
 [synthetic-lineage-rebase]: ../../../../crates/daemon/src/transform.rs#L28976
 [tag-baseline]: ../../../../crates/daemon/src/transform.rs#L3045-L3046
 [tag-protection]: ../../../../crates/daemon/src/transform.rs#L3707-L3720
@@ -3204,7 +3204,7 @@ evaluation of this area and its disposition are recorded in
 [sidecar-merge]: ../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../crates/daemon/src/codec/sidecar.rs#L68
 [todo-prefix]: ../../../../crates/daemon/src/injection.rs#L187-L189
-[segment-served]: ../../../../crates/daemon/src/dispatch.rs#L50-L72
+[segment-served]: ../../../../crates/daemon/src/dispatch.rs#L104-L110
 [tail-reclaim]: ../../../../crates/daemon/src/healing.rs#L130
 [ser-msg]: ../../../../crates/memory-store/src/lib.rs#L145-L161
 [meta-doc]: ../../../../crates/memory-store/src/lib.rs#L210-L216
@@ -3420,9 +3420,9 @@ evaluation of this area and its disposition are recorded in
 [t-bypass]: ../../../../crates/daemon/src/transform.rs#L24332
 [selection-sharing]: ../../../../crates/daemon/src/transform.rs#L24584
 [sidecar-order-check]: ../../../../crates/daemon/src/codec/opencode.rs#L2083
-[native-sharing]: ../../../../crates/daemon/src/lib.rs#L22946
-[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L23264
-[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23386
+[native-sharing]: ../../../../crates/daemon/src/lib.rs#L22945
+[native-ingress-sharing]: ../../../../crates/daemon/src/lib.rs#L23263
+[native-charge-floor]: ../../../../crates/daemon/src/lib.rs#L23385
 [soft-reference]: ../../../../crates/daemon/src/transform.rs#L24361
 [soft-threshold-check]: ../../../../crates/daemon/src/transform.rs#L24387
 [soft-gates-check]: ../../../../crates/daemon/src/transform.rs#L24521
@@ -3450,7 +3450,7 @@ evaluation of this area and its disposition are recorded in
 [trunc]: ../../../../crates/daemon/src/history_summarizer_chunk.rs#L744
 [boundary-view]: ../../../../crates/daemon/src/lib.rs#L17569-L17619
 [construction-corpus]: ../../../../crates/daemon/src/lib.rs#L18512
-[firing-capture]: ../../../../crates/daemon/src/lib.rs#L25540
+[firing-capture]: ../../../../crates/daemon/src/lib.rs#L25576
 [fp]: ../../../../crates/daemon/src/history_summarizer.rs#L166-L173
 [fp-field]: ../../../../crates/memory-store/src/lib.rs#L969
 [fp-verify]: ../../../../crates/daemon/src/history_summarizer.rs#L476-L487
@@ -3503,7 +3503,7 @@ evaluation of this area and its disposition are recorded in
 [backoff]: ../../../../crates/memory-store/src/lib.rs#L11744-L11748
 [fail-sc]: ../../../../crates/memory-store/src/lib.rs#L6325
 [daemon-cargo]: ../../../../crates/daemon/Cargo.toml#L97-L98
-[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38784
+[t-status-sc]: ../../../../crates/daemon/src/lib.rs#L38926
 [t-faults-sc]: ../../../../crates/memory-store/src/lib.rs#L20682
 [t-restart]: ../../../../crates/memory-store/src/lib.rs#L21058
 [sched-tick]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L327

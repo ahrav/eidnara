@@ -1114,6 +1114,7 @@ fn wall_ms() -> Result<i64, BuildError> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|time| i64::try_from(time.as_millis()).ok())
+        .map(|now| now.saturating_add(kernel::wall_clock_step_ms()))
         .ok_or(BuildError::Expired)
 }
 

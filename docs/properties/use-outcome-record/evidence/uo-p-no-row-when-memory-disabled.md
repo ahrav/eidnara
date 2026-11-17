@@ -11,7 +11,7 @@ Record kind: new obligation activated by #1155.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9801`).
+- Writer guard: `record_use_outcome` (`crates/daemon/src/lib.rs:9806`).
 
 - Guarantee under test: A route bound with `memory.enabled` off produces no
   serving record on any pass.

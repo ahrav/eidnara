@@ -1,44 +1,46 @@
 # p5dep-domain-decision-read-matches-domain-and-kind-in-sql
 
-HEAD `3a3b916b7`; the `admission.rs` references are re-verified at the
-#1166 branch tip. Surface S2.
+HEAD `3a3b916b7`; the `admission.rs`, `read.rs`, `canonical_memory.rs`,
+`memory_capture.rs`, and `kernel_canonical_read.rs` references are
+re-verified at the #1209 branch tip. Surface S2.
 
 ## Discovery trigger
 
 Plan R2 names `visible_domain_decisions_as_of_in_scope(Surface::ExplicitSearch,
 tip, "memory", Some(ScopeTermFilter {..}))` as the candidate-set read. The
-doc comment at `crates/kernel/src/admission.rs:3165-3167` claims the domain
+doc comment at `crates/kernel/src/admission.rs:3278-3280` claims the domain
 and kind are matched in SQL "before any row is read, so rows of other domains
 are neither decoded nor counted against a caller's bounds, and a corrupt row
 outside the domain never fails this read." Lens: protocol contracts; C4.
 
 ## Evidence trail
 
-- `admission.rs:3168-3200`: the public method passes
+- `admission.rs:3281-3313`: the public method passes
   `ServedSelection::DomainDecisions(domain_id)` to `visible_selected_as_of`.
-- `admission.rs:3505-3512` `ServedSelection` variants: `All`, `Named(&str)`
-  (JSON array bound as `:ids`), `DomainDecisions(&str)` (bound as
-  `:domain_id`). "Each variant is its own prepared statement, so its
+- `admission.rs:3763-3776` `ServedSelection` variants: `All`, `Page(i64)`
+  (the chunk read's statement, bound as `:created_at_or_before`),
+  `Named(&str)` (JSON array bound as `:ids`), `DomainDecisions(&str)` (bound
+  as `:domain_id`). "Each variant is its own prepared statement, so its
   predicate is one the planner can serve from an index."
-- `admission.rs:3578-3584` `ids_predicate`: for `DomainDecisions`,
+- `admission.rs:3845-3869` `ids_predicate`: for `DomainDecisions`,
   `"o.domain_id=:domain_id AND o.object_kind='decision' AND"`, prepended to
-  the `WHERE` clause at `:3649`.
-- `admission.rs:3585-3597`: for `DomainDecisions` the joins omit
+  the `WHERE` clause at `:3934`.
+- `admission.rs:3870-3882`: for `DomainDecisions` the joins omit
   `observations` and use `dec.scope_id` / `dec.evidence_id` directly, so the
   statement reads only decision rows.
-- `admission.rs:3701-3705`: three `LazyLock<String>` statement texts, one per
+- `admission.rs:4009-4015`: four `LazyLock<String>` statement texts, one per
   shape, so `prepare_cached` reuses them.
-- `admission.rs:3202-3235` `visible_selected_as_of`: reads in one
+- `admission.rs:3315-3340` `visible_selected_as_of`: reads in one
   `read_snapshot`, filters `Hidden`, sorts by `object_id`.
-- Daemon re-check: `crates/daemon/src/kernel_routes/read.rs:89-97`
+- Daemon re-check: `crates/daemon/src/kernel_routes/read.rs:109-116`
   `RowSelection::keeps` re-checks `object_kind == "decision" && domain_id ==
   domain_id` on each returned row ("Applied in the kernel query as well;
-  `keeps` re-checks each returned row", `:84`).
-- Tests: `crates/kernel/tests/kernel_canonical_read.rs:227`
-  `the_domain_selection_equals_the_filtered_full_read`; `:448`
+  `keeps` re-checks each returned row", `:104`).
+- Tests: `crates/kernel/tests/kernel_canonical_read.rs:229`
+  `the_domain_selection_equals_the_filtered_full_read`; `:450`
   `the_domain_selection_reads_no_row_of_another_domains_payload_pressure`;
-  `:420` `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order`;
-  in-module `admission.rs:6291-6299` reads `"memory"` after a reopen.
+  `:422` `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order`;
+  in-module `admission.rs:6635-6643` reads `"memory"` after a reopen.
 
 ## Failure scenario
 
@@ -70,8 +72,11 @@ reader.
 
 - Sources examined: grep for `visible_domain_decisions_as_of_in_scope`
   across `crates/`.
-- Findings: `crates/daemon/src/kernel_routes/read.rs:185` is the only
-  non-test caller; it is reached from `canonical_memory.rs:188`,
-  `memory_capture.rs:1054`, `:1611`, and `lib.rs` tests.
+- Findings: two non-test callers.
+  `crates/daemon/src/kernel_routes/read.rs:472`, in `read_visible_page`, is
+  reached through `read_visible_within` from `memory_capture.rs:1981` and
+  through `read_visible` from tests. `crates/daemon/src/kernel_routes/read.rs:411`,
+  in `domain_decisions_in_serving_order`, is reached from
+  `canonical_memory.rs:291`. The `kernel.read` route reaches neither.
 - Missing evidence: none.
 - Conclusion: resolved; P5 would be the second direct caller.

@@ -20,7 +20,12 @@ and #1157 (`review.use_outcome`). The design-time companions
 (`dependencies/system-model.md`, `dependencies/portfolio-evaluation.md`,
 `proposed/certificate.md`, `proposed/open-questions.md`) describe
 `3a3b916b7`; their references were remapped and the S7 and S8 passages
-updated where the code changed. Records are claims under test, not proof.
+updated where the code changed. #1209 pages `kernel.read` and holds `main`
+at `da360026c`: the references it rewrote in `dependencies/` and
+`proposed/certificate.md`, which cite `kernel_routes/read.rs`,
+`admission.rs`, `kernel_routes/project.rs`, and the kernel route and
+canonical-read tests, are re-verified at the #1209 branch tip. Records are
+claims under test, not proof.
 Tracker spec: `https://github.com/ahrav/eidnara/issues/1163`.
 Method: `docs/properties/METHOD.md`.
 
