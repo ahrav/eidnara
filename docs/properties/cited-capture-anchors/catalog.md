@@ -421,7 +421,7 @@ Guarantee: Every citation a capture decision carries is the `detail.evidence_id`
 Check: `always` - for every capture citation event, the evidence id equals the `detail.evidence_id` of a descriptor of the job's lineage tuple live at the decision's commit, and `PreparedCapture` (which denies unknown fields) has no evidence field
 Fault/timing angle: none
 Required faults and enabling state: model output naming a source outside the batch; a message published in another session with the same id
-Confidence: high - [evidence](evidence/p2-new-citation-is-alias-only.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:301`, which derives each lineage from the job row alone (`message_lineages`, `:152`, which validates the shared identity fields and hashes their encoding once through the Kernel's `lineage_ids_varying_last_field`), and the call inside the publish envelope at `crates/daemon/src/memory_capture.rs:4174`
+Confidence: high - [evidence](evidence/p2-new-citation-is-alias-only.md). Read `Citation::lookup` at `crates/daemon/src/memory_capture/cite.rs:301`, which derives each lineage from the job row alone (`message_lineages`, `:152`, which validates the shared identity fields and hashes their encoding once through the Kernel's `lineage_ids_varying_last_field`), and the call inside the publish envelope at `crates/daemon/src/memory_capture.rs:4172-4175`
 Existing check: `crates/daemon/src/source_capture_tests.rs:3528`, `:3791` (unaudited)
 Impact: a model-emitted id would let the extraction forge its own evidence link
 Open questions: None.
