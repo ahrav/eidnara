@@ -548,6 +548,69 @@ fn a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message() {
 }
 
 #[test]
+fn a_lift_claim_that_cites_words_no_user_wrote_leaves_the_constraint_standing() {
+    let said = |text: String| BlockKind::Text { text };
+    let attachment = BlockKind::Media(memory_store::MediaBlock {
+        kind: memory_store::MediaKind::File,
+        media_type: "text/plain".into(),
+        filename: Some(format!("{LIFT}.txt")),
+        source: json!({"type": "data_base64", "data": "stable-bytes"}),
+    });
+    let nested_reminder =
+        format!("<system-reminder><system-reminder>x</system-reminder>{LIFT}</system-reminder>");
+    let cases = [
+        ("open-items-5", said(format!("So {LIFT}.")), true),
+        ("open-items-5", attachment, false),
+        ("open-items-5", said(nested_reminder), false),
+        ("eidnara:custom:5", said(LIFT.into()), false),
+    ];
+    for (mid, block, lifts) in cases {
+        let mut messages = constraint_session();
+        messages[4] = IngressMessage {
+            mid: mid.into(),
+            ordinal: 5,
+            ck: WireMessage::from_parts(
+                "user",
+                vec![WireBlock::bare(block)],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid.into()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let mut stored = constraint_then_other_work(&messages);
+        let chunk = chunk_of(&messages, 5, 7);
+        let p1 = format!("{LIFTED_LINE}\nI opened two pull requests.");
+        let text = output(
+            &[segment_xml(5, 6, [&p1, &p1, &p1, ""])],
+            &[claim(
+                "policy.baseline-fixes",
+                &cite(&chunk, 5, LIFT),
+                LIFT,
+                LIFTED_LINE,
+            )],
+            7,
+        );
+        let rows = fold(&mut stored, &text, &chunk);
+        let presented = &chunk.aliases.aliases[0].presented;
+        assert_eq!(rows[0].claims[0].value, LIFT, "{presented}");
+        assert_eq!(
+            rows[0].claims[0].anchor.is_some(),
+            lifts,
+            "{mid} {presented}"
+        );
+        let standing = if lifts { vec![] } else { vec![CONSTRAINT_LINE] };
+        assert_eq!(
+            open_lines(&rendered_tiers(&stored)[0][0]),
+            standing,
+            "{mid} {presented}"
+        );
+    }
+}
+
+#[test]
 fn an_answer_and_a_lift_under_other_keys_leave_the_constraint_standing() {
     let case = &ANSWERED[0];
     let messages = vec![

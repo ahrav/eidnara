@@ -226,9 +226,18 @@ fn space_before_punct_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\s+([,.;:])").unwrap())
 }
 
+fn system_reminder_tag_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)</?system-reminder>").unwrap())
+}
+
+pub(crate) fn is_user_written((text, cleaned_text): &(String, bool)) -> bool {
+    *cleaned_text && !is_system_directive(text) && !system_reminder_tag_regex().is_match(text)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_COMMITS_PER_BLOCK, clean_user_text, merge_commit_hashes};
+    use super::{MAX_COMMITS_PER_BLOCK, clean_user_text, is_user_written, merge_commit_hashes};
 
     fn hashes(prefix: &str, count: usize) -> Vec<String> {
         (0..count).map(|i| format!("{prefix}{i}")).collect()
@@ -279,5 +288,29 @@ mod tests {
             clean_user_text("a<system-reminder>unterminated b"),
             "a<system-reminder>unterminated b"
         );
+    }
+
+    #[test]
+    fn text_that_keeps_a_reminder_tag_through_cleaning_is_not_user_written() {
+        let written = |text: &str| is_user_written(&(clean_user_text(text), true));
+        for text in [
+            "<system-reminder><system-reminder>x</system-reminder>y</system-reminder>",
+            "a<SYSTEM-REMINDER>unterminated b",
+            "a</\u{17f}ystem-reminder>b",
+            "[SYSTEM DIRECTIVE: EIDNARA] a",
+        ] {
+            assert!(!written(text), "{text:?}");
+        }
+        for text in [
+            "a<system-reminder>x</system-reminder>b",
+            "a < b </ c>",
+            "<system-reminders>",
+        ] {
+            assert!(written(text), "{text:?}");
+            assert!(
+                !is_user_written(&(clean_user_text(text), false)),
+                "{text:?}"
+            );
+        }
     }
 }

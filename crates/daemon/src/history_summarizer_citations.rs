@@ -38,7 +38,7 @@ pub struct FrozenAlias {
     pub presented: String,
     /// Whether the presented text is a transformation of the native text (compaction, truncation, tool summary, marker escaping) rather than a verbatim copy.
     pub transformed: bool,
-    /// Whether the part renders the text of a user message; a part that holds only tool calls and results reads false, as does a table frozen before this field existed. The mark covers the whole part, so the tool-result digests that follow the text in a user message's part share it.
+    /// Marks parts that render user-message text, including any tool-result digests following that text. The mark is false for attachment-only parts, parts containing only tool calls and results, rows with reserved IDs, cleaned text retaining a `<system-reminder>` tag, and stored tables lacking a `user` member.
     #[serde(default)]
     pub user: bool,
 }
