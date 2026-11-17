@@ -580,9 +580,9 @@ pub(super) fn settle_batch_contests(batch: &mut [(Vec<CapturedMemory>, Vec<bool>
 /// holds it, so the stored statement keeps a lead-in, a negation, or a
 /// condition the extractor left out.
 ///
-/// A proposal that replaces, retires, or contests memories keeps its
-/// quotation: the extractor judged that relation from the clause it quoted,
-/// and only a correction quoted whole replaces a memory served
+/// A proposal that replaces, retires, or contests memories is left as it
+/// is here: the extractor judged that relation from the clause it quoted,
+/// and only a correction quoted in whole sentences replaces a memory served
 /// automatically. A replacement the parser released as a contest is such a
 /// proposal. Two
 /// proposals of different categories that name one sentence keep their own

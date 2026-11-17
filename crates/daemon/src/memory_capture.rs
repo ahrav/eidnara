@@ -322,11 +322,23 @@ fn parse_capture_batch(
             {
                 return Err("capture memory must quote its source exactly in at most 2048 bytes");
             }
+            // Memories are told apart as the extractor wrote them: joining
+            // gives the members of a run one quotation and one category.
+            let mut distinct = BTreeSet::new();
+            if !decision
+                .memories
+                .iter()
+                .all(|memory| distinct.insert((memory.category.as_str(), memory.content.as_str())))
+            {
+                return Err("capture output repeats a memory in one source");
+            }
             // Sentences quoted one by one are joined before any link is
             // judged, so each link is judged for the statement that is stored.
-            if message.role == CaptureRole::User && message.own_id {
-                join_sentence_runs(&message.text, &mut decision.memories, existing);
-            }
+            let runs = if message.role == CaptureRole::User && message.own_id {
+                join_sentence_runs(&message.text, &mut decision.memories, existing)
+            } else {
+                Vec::new()
+            };
             let released = release_unsupported_targets(
                 &mut decision.memories,
                 message,
@@ -334,6 +346,9 @@ fn parse_capture_batch(
                 &replaced,
                 &|memory| states(index, memory),
             );
+            // A run takes its category from the links that passed their
+            // checks.
+            unify_run_categories(&mut decision.memories, &runs);
             if released > 0 {
                 eprintln!(
                     "daemon: native memory capture released {released} target links that failed their checks"
@@ -351,9 +366,8 @@ fn parse_capture_batch(
 }
 
 /// Joins the quotations of one user message that follow one another in a
-/// paragraph into the one statement they make, when a later one is no whole
-/// statement on its own. Sentences that follow a colon are the case this
-/// serves.
+/// paragraph into the one statement they make, when the later ones are
+/// whole statements but for a colon before them.
 ///
 /// A user often opens a paragraph with a clause that ends in a colon and
 /// gives the fact over several sentences: "Correction: two tasks are open.
@@ -364,11 +378,9 @@ fn parse_capture_batch(
 /// stored for explicit search and the delivered statement names no task.
 /// The same rule accepts the sentences as one quotation from the first word
 /// of the first, with the clause that introduces them. So a quotation the
-/// statement rule refuses alone is joined to the statement that ends where
-/// it starts, across whitespace, when the joined text is a whole statement
-/// under [`quotes_whole_statements`] and fits one memory. The joined text is
-/// then what the rule accepts as one quotation, whatever kept the later
-/// sentence from standing alone.
+/// statement rule refuses only for that colon is joined to the statement
+/// that ends where it starts, across whitespace, when the joined text is a
+/// whole statement under [`quotes_whole_statements`] and fits one memory.
 ///
 /// Only sentences the extractor quoted are joined, so the stored statement
 /// holds exactly the sentences it chose. A run starts at a quotation that is
@@ -379,22 +391,20 @@ fn parse_capture_batch(
 /// no one place and joins nothing.
 ///
 /// Each member of a run takes the joined quotation, so the members freeze
-/// as one memory under the collapse rule. They take one category: that of
-/// the first member that names a replacement, which a correction shares
-/// with the memory it replaces, or else that of the run's first sentence. A
-/// member that names a replacement of its own keeps its category, and so
-/// does a member whose content another memory of the source already holds
-/// under the run's category. The joined text is new, so a member that named an approved statement with
+/// as one memory under the collapse rule once [`unify_run_categories`] has
+/// given them one category. The joined text is new, so a member that named an approved statement with
 /// another text as the memory already holding its sentence names the
 /// approved statement that holds the joined text word for word, or none
 /// (see [`names_another_approved_text`]).
+///
+/// Returns the members of each run, by index and in message order.
 fn join_sentence_runs(
     text: &str,
     memories: &mut [CapturedMemory],
     existing: &[ExistingCaptureMemory],
-) {
+) -> Vec<Vec<usize>> {
     if memories.len() < 2 {
-        return;
+        return Vec::new();
     }
     let prose = Prose::of(text);
     // Each quotation with one place: its span, its index, and whether it is
@@ -426,15 +436,19 @@ fn join_sentence_runs(
             } else {
                 enclosing_statement(&prose, quote)
             };
-            Some(match widened {
+            match widened {
                 // The statement is a slice of the message, so its address
                 // gives its place.
                 Some(statement) => {
                     let from = statement.as_ptr().addr() - text.as_ptr().addr();
-                    (from, from + statement.len(), index, true)
+                    Some((from, from + statement.len(), index, true))
                 }
-                None => (start, end, index, false),
-            })
+                // Whole sentences that are statements but for a colon
+                // before them can continue a run. Any other quotation
+                // starts and joins nothing.
+                None => (reads_as_statement(trimmed) && quotes_sentences_of_prose(&prose, quote))
+                    .then_some((start, end, index, false)),
+            }
         })
         .collect();
     spans.sort_unstable();
@@ -468,42 +482,48 @@ fn join_sentence_runs(
         }
         judged = Some((start, end, joins || alone));
     }
-    for (from, to, members, joined) in runs {
-        if !joined {
-            continue;
-        }
-        let joined = &text[from..to];
+    runs.retain(|&(_, _, _, joined)| joined);
+    for (from, to, members, _) in &runs {
+        let joined = &text[*from..*to];
         let content = format!("{USER_STATED}: {joined}");
-        let category = members
-            .iter()
-            .find(|&&member| memories[member].replaces.is_some())
-            .map_or(members[0], |&member| member);
-        let category = memories[category].category.clone();
-        for member in members {
-            // Validation tells the memories of a source apart by category
-            // and content, so a member takes the run's category only where
-            // that keeps it distinct.
-            let distinct = !memories.iter().enumerate().any(|(other, memory)| {
-                other != member
-                    && memory.category == category
-                    && memory.content == memories[member].content
-            });
+        for &member in members {
             let memory = &mut memories[member];
             memory.quote = joined.to_owned();
-            if memory.replaces.is_none() && distinct {
-                memory.category.clone_from(&category);
-            }
             if names_another_approved_text(existing, memory.duplicate_of.as_deref(), &content) {
                 memory.duplicate_of = approved_copy(existing, &content);
             }
         }
     }
+    runs.into_iter().map(|(_, _, members, _)| members).collect()
 }
 
-/// Whether a proposal keeps the quotation the extractor chose: one that
-/// names a replacement or a contest. The extractor judged that relation from
-/// the clause it quoted, and only a correction quoted whole replaces a
-/// memory served automatically.
+/// Gives the members of each run [`join_sentence_runs`] returned one
+/// category, so they freeze as one memory. It runs once the links of the
+/// source are settled: the category is that of the first member whose
+/// replacement passed its checks, which a correction shares with the memory
+/// it replaces, or else that of the run's first sentence. A member that
+/// names a replacement of its own keeps its category, and freezes as its
+/// own memory when its target is another one.
+fn unify_run_categories(memories: &mut [CapturedMemory], runs: &[Vec<usize>]) {
+    for members in runs {
+        let category = members
+            .iter()
+            .find(|&&member| memories[member].replaces.is_some())
+            .map_or(members[0], |&member| member);
+        let category = memories[category].category.clone();
+        for &member in members {
+            if memories[member].replaces.is_none() {
+                memories[member].category.clone_from(&category);
+            }
+        }
+    }
+}
+
+/// Whether widening leaves a proposal's quotation as it is: one that names
+/// a replacement or a contest. The extractor judged that relation from the
+/// clause it quoted, and only a correction quoted in whole sentences
+/// replaces a memory served automatically. [`join_sentence_runs`] can still
+/// give such a proposal the run its whole sentences belong to.
 fn keeps_quotation(memory: &CapturedMemory) -> bool {
     memory.replaces.is_some() || !memory.also_replaces.is_empty() || !memory.contests.is_empty()
 }
@@ -704,7 +724,6 @@ fn validate_capture_memories(
     existing: &[ExistingCaptureMemory],
     replaced: &mut BTreeSet<String>,
 ) -> Result<(), &'static str> {
-    let mut distinct = BTreeSet::new();
     let prose = Prose::of(&source.text);
     for memory in memories {
         if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
@@ -800,9 +819,6 @@ fn validate_capture_memories(
                     return Err("capture retires a target that does not restate the replaced fact");
                 }
             }
-        }
-        if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
-            return Err("capture output repeats a memory in one source");
         }
     }
     Ok(())
@@ -2558,10 +2574,17 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
             || excluded.get(index).is_some_and(|below| *below);
         let kept = code_spans.len();
         let unclosed = inline_code_spans(text, range, &mut code_spans);
+        // A span whose single marks pair up holds string literals. Marks
+        // that stand otherwise may open or close a quotation of the prose,
+        // so the paragraph's quotations are unknown.
+        let unknown = code_spans[kept..]
+            .iter()
+            .any(|&(open, close)| !single_marks_pair(&text[open..close]));
         let mut spans = CodeSpanCursor::new(&code_spans[kept..]);
-        let quotes = block.iter().any(|&(start, line)| {
-            line.contains(is_quotation_mark) || opens_single_quotation(start, line, &mut spans)
-        });
+        let quotes = unknown
+            || block.iter().any(|&(start, line)| {
+                line.contains(is_quotation_mark) || opens_single_quotation(start, line, &mut spans)
+            });
         let structured = quotes
             || bordered
             || block.iter().any(|(_, line)| {
@@ -2582,8 +2605,9 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         // out with every block after it.
         let readable = unreadable_from.is_none_or(|line| index <= line);
         unpaired = unpaired
+            || unknown
             || !quotations_close_in_turn(block, &code_spans[kept..])
-            || leaves_single_quotation_open(text, block, &code_spans[kept..]);
+            || leaves_single_quotation_open(block, &code_spans[kept..]);
         if readable && !structured && !introduces && !lead_in && !unclosed_code {
             paragraphs.push(range);
         } else {
@@ -2734,8 +2758,8 @@ fn quotations_close_in_turn(block: &[(usize, &str)], code_spans: &[(usize, usize
         let mut previous_opened = false;
         let mut chars = line.char_indices().peekable();
         while let Some((at, ch)) = chars.next() {
-            let family = quotation_family(ch)
-                .filter(|_| !matches!(spans.place(start + at), CodePlace::Code(_)));
+            let family =
+                quotation_family(ch).filter(|_| spans.place(start + at) != CodePlace::Code);
             let mut opened = false;
             if let Some(family) = family {
                 let next = chars.peek().map(|&(_, after)| after);
@@ -2770,8 +2794,8 @@ fn quotations_close_in_turn(block: &[(usize, &str)], code_spans: &[(usize, usize
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CodePlace {
     Prose,
-    /// Inside the span of this index.
-    Code(usize),
+    /// Inside a span.
+    Code,
     /// Directly after a span's closing run.
     AfterCode,
 }
@@ -2800,7 +2824,7 @@ impl<'a> CodeSpanCursor<'a> {
         }
         match self.spans.get(self.next) {
             Some(&(_, close)) if close == at => CodePlace::AfterCode,
-            Some(&(open, _)) if open <= at => CodePlace::Code(self.next),
+            Some(&(open, _)) if open <= at => CodePlace::Code,
             _ => CodePlace::Prose,
         }
     }
@@ -2819,22 +2843,33 @@ fn joins_suffix_to_code(place: CodePlace, ch: char, next: Option<char>) -> bool 
 }
 
 /// Whether the single marks of an inline code span pair up, as the marks of
-/// a string literal do: `` `''` ``, `` `'utf-8'` ``, `` `.get('id')` ``. The
-/// span holds an even number of single marks outside words; an apostrophe
-/// between two letters or digits belongs to its word. A span with an odd
-/// number may hold the mark that opens a quotation of the prose, when a
-/// backtick of the user's pairs with one inside quoted text.
+/// string literals do: `` `''` ``, `` `'utf-8'` ``, `` `.get('id')` ``. The
+/// marks outside words open and close in turn: one that opens follows the
+/// span's start or a character that is no letter or digit, the next closes
+/// before the span's end or such a character, and none is left open. An
+/// apostrophe between two letters or digits belongs to its word. Any other
+/// arrangement may hold a mark that opens or closes a quotation of the
+/// prose: a backtick of the user's can pair with one inside quoted text,
+/// and a span inside a quotation can end in an elision. Its paragraph's
+/// quotations are then unknown.
 fn single_marks_pair(code: &str) -> bool {
     let mut previous: Option<char> = None;
     let mut chars = code.chars().peekable();
-    let mut marks = 0_usize;
+    let mut open = false;
     while let Some(ch) = chars.next() {
-        let in_word = previous.is_some_and(char::is_alphanumeric)
-            && chars.peek().is_some_and(|next| next.is_alphanumeric());
-        marks += usize::from(SINGLE_QUOTATION_MARKS.contains(&ch) && !in_word);
+        let word_before = previous.is_some_and(char::is_alphanumeric);
+        let word_after = chars.peek().is_some_and(|next| next.is_alphanumeric());
+        if SINGLE_QUOTATION_MARKS.contains(&ch) && !(word_before && word_after) {
+            // The mark that opens stands where a word can start, and the
+            // mark that closes where one can end.
+            if if open { word_after } else { word_before } {
+                return false;
+            }
+            open = !open;
+        }
         previous = Some(ch);
     }
-    marks.is_multiple_of(2)
+    !open
 }
 
 /// Whether a paragraph opens a single quotation it does not close. A mark
@@ -2846,25 +2881,19 @@ fn single_marks_pair(code: &str) -> bool {
 /// so they close nothing and the quotation stays open. An apostrophe inside
 /// a word neither opens nor closes.
 ///
-/// A mark inside an inline code span whose single marks pair up (see
-/// [`single_marks_pair`]) is code, and a mark that
+/// A mark inside an inline code span is code, and a mark that
 /// [`joins_suffix_to_code`] accepts is an apostrophe. Each keeps the
 /// quotation state and counts as an ordinary character beside the marks
 /// around it, as a double mark inside a span does in
-/// [`quotations_close_in_turn`]. `text` is the message and `code_spans` are
-/// the paragraph's inline code spans, ascending.
-fn leaves_single_quotation_open(
-    text: &str,
-    block: &[(usize, &str)],
-    code_spans: &[(usize, usize)],
-) -> bool {
+/// [`quotations_close_in_turn`]. The caller reads a paragraph whose spans
+/// hold marks that do not pair up as one whose quotations are unknown (see
+/// [`single_marks_pair`]). `code_spans` are the paragraph's inline code
+/// spans, ascending.
+fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> bool {
     let mut open = 0_usize;
     // Whether the innermost open quotation holds whitespace.
     let mut several_words = false;
     let mut spans = CodeSpanCursor::new(code_spans);
-    // The span read last and whether its single marks pair up, so each span
-    // is read once.
-    let mut paired: Option<(usize, bool)> = None;
     for &(start, line) in block {
         let mut previous: Option<char> = None;
         let mut chars = line.char_indices().peekable();
@@ -2872,17 +2901,7 @@ fn leaves_single_quotation_open(
             let next = chars.peek().map(|&(_, after)| after);
             if SINGLE_QUOTATION_MARKS.contains(&ch) {
                 let place = spans.place(start + at);
-                let code = match place {
-                    CodePlace::Code(span) => {
-                        if paired.is_none_or(|(read, _)| read != span) {
-                            let (first, last) = code_spans[span];
-                            paired = Some((span, single_marks_pair(&text[first..last])));
-                        }
-                        paired.is_some_and(|(_, pairs)| pairs)
-                    }
-                    _ => joins_suffix_to_code(place, ch, next),
-                };
-                if code {
+                if place == CodePlace::Code || joins_suffix_to_code(place, ch, next) {
                     previous = Some(ch);
                     continue;
                 }
@@ -6865,7 +6884,7 @@ mod tests {
             ("Keep `main`' as it is.", "Keep `main`' as it is.", false),
             // A backtick of the user's can pair with one inside quoted text
             // and hide the mark that opens the quotation. The span then
-            // holds one mark, so the mark keeps its reading as prose,
+            // holds one mark, so its paragraph's quotations are unknown,
             // wherever the mark that closes the quotation stands.
             (
                 "The key ` is broken, so Bob wrote 'Use the `-key instead.\n\nWe deploy from the release branch.\n\nThanks.'",
@@ -6881,6 +6900,27 @@ mod tests {
                 "The key ` is broken, so Bob wrote 'Use the `-key instead.\n\nWe deploy from the release branch.",
                 release,
                 false,
+            ),
+            // Two marks of a span that both start a word are no pair: each
+            // can open a quotation.
+            (
+                "The key ` is broken, so Bob wrote 'Use the 'a lifetime before the `-key instead.\n\nWe deploy from the release branch.\n\nThanks'.",
+                release,
+                false,
+            ),
+            // A lone mark in a span inside a quotation closes nothing: the
+            // paragraph's quotations are unknown.
+            (
+                "Bob wrote '`goin'` is the alias.\n\nWe deploy from the release branch.\n\nThanks'.",
+                release,
+                false,
+            ),
+            // The suffix apostrophe leaves the quotation state as it was
+            // after an earlier paragraph whose quotation closed.
+            (
+                "He said \"no\" twice.\n\nLook at `Parser`'s error path first.\n\nWe deploy from the release branch.",
+                release,
+                true,
             ),
             // An apostrophe inside a word of the span is no mark of a pair.
             (
@@ -7026,24 +7066,28 @@ mod tests {
             ]),
             [paragraph.as_str(); 3]
         );
-        // The joined text is what the statement rule accepts as one
-        // quotation: a later sentence that starts with an inline code span
-        // is no statement alone and joins the statement before it.
-        let flag = "Note for the migration: use the flag.";
-        let default = "`DRY_RUN=1` is the default.";
-        let with_code = format!("{flag} {default}");
-        assert_eq!(
-            parsed_quotes(
-                &with_code,
-                CaptureRole::User,
-                true,
-                &[(flag, "CONSTRAINTS", None), (default, "CONSTRAINTS", None)]
-            )
-            .into_iter()
-            .map(|(quote, _, _)| quote)
-            .collect::<Vec<_>>(),
-            [with_code.as_str(); 2]
-        );
+        // Only a sentence the colon keeps from standing alone joins. One
+        // the statement rule refuses for its first character stays as
+        // proposed, after a colon and with no colon in the paragraph.
+        for flag in [
+            "Note for the migration: use the flag.",
+            "We deploy from the release branch.",
+        ] {
+            let default = "`DRY_RUN=1` is the default.";
+            let with_code = format!("{flag} {default}");
+            assert_eq!(
+                parsed_quotes(
+                    &with_code,
+                    CaptureRole::User,
+                    true,
+                    &[(flag, "CONSTRAINTS", None), (default, "CONSTRAINTS", None)]
+                )
+                .into_iter()
+                .map(|(quote, _, _)| quote)
+                .collect::<Vec<_>>(),
+                [flag, default]
+            );
+        }
         // Two facts that quote one sentence share its place in the run,
         // whichever sentence it is.
         assert_eq!(
@@ -7126,20 +7170,33 @@ mod tests {
                 ),
             ]
         );
-        // With no correction among them the sentences take the category
-        // of the first.
+        // A replacement that fails its checks gives the run no category:
+        // the target is of another category than the proposal, so the link
+        // is released and the sentences take the category of the first.
         assert_eq!(
             own(&[
                 (OPEN_TASKS, "PROJECT_RULES", None),
+                (RETRY_COUNTER, "ARCHITECTURE", Some("mem_tasks")),
+            ])
+            .into_iter()
+            .map(|(_, category, replaces)| (category, replaces))
+            .collect::<Vec<_>>(),
+            vec![("PROJECT_RULES".to_string(), None); 2]
+        );
+        // With no correction among them the sentences take the category
+        // of the first sentence of the message, whatever the order of the
+        // proposals.
+        assert_eq!(
+            own(&[
+                (DRY_RUN, "NAMING", None),
+                (OPEN_TASKS, "PROJECT_RULES", None),
                 (RETRY_COUNTER, "ARCHITECTURE", None),
             ]),
-            [
-                (first_two.clone(), "PROJECT_RULES".to_string(), None),
-                (first_two.clone(), "PROJECT_RULES".to_string(), None),
-            ]
+            vec![(paragraph.clone(), "PROJECT_RULES".to_string(), None); 3]
         );
-        // Two proposals whose content texts are equal stay distinct to
-        // validation: the second keeps its own category.
+        // Two proposals whose content texts are equal under two categories
+        // are two memories as the extractor wrote them. Joined, they take
+        // one category and freeze as one memory.
         let same_content: Vec<Value> = [(OPEN_TASKS, "PROJECT_RULES"), (RETRY_COUNTER, "ARCHITECTURE")]
             .iter()
             .map(|(quote, category)| json!({"category": category, "content": "the open tasks", "quote": quote}))
@@ -7162,10 +7219,24 @@ mod tests {
                 .iter()
                 .map(|memory| (memory.quote.as_str(), memory.category.as_str()))
                 .collect::<Vec<_>>(),
-            [
-                (first_two.as_str(), "PROJECT_RULES"),
-                (first_two.as_str(), "ARCHITECTURE")
-            ]
+            [(first_two.as_str(), "PROJECT_RULES"); 2]
+        );
+        let frozen = native::collapse_quotations(USER_STATED, parsed.memories);
+        assert_eq!(frozen.len(), 1, "the joined sentences are one memory");
+        // The same content text twice under one category is a repeat, as
+        // it is with no join.
+        let repeated: Vec<Value> = [OPEN_TASKS, RETRY_COUNTER]
+            .iter()
+            .map(|quote| json!({"category": "CONSTRAINTS", "content": "the open tasks", "quote": quote}))
+            .collect();
+        let response =
+            json!({"version": 1, "decisions": [{"message_id": "m", "memories": repeated}]});
+        assert_eq!(
+            parse_batch(&response.to_string(), &message, &[])
+                .unwrap()
+                .remove(0)
+                .err(),
+            Some("capture output repeats a memory in one source")
         );
         // A first sentence that names a replacement and is cut is kept as
         // quoted, so no run starts at it.

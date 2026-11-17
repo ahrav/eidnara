@@ -1045,26 +1045,27 @@ quoted, and the whole sentence can say the opposite. A sentence with a reporting
 colon, such as `My teammate wrote: always rebase.`, is the user's sentence
 and is stored whole with that clause. Quotations of one user message that
 follow one another in a paragraph are joined into one quotation before any
-link of the proposals is judged, when the later one is no whole statement on
-its own, starts where the statement before it ends with only whitespace
-between, and the joined text is whole statements under the statement rule
-below and fits 2,048 bytes. A quotation that stops directly before its
-sentence's closing `.` or `!` ends after that mark for this rule. Sentences after a colon are the main case: of
+link of the proposals is judged, when the later one is whole statements under
+the statement rule below but for a colon earlier in its paragraph, starts
+where the statement before it ends with only whitespace between, and the
+joined text is whole statements under that rule and fits 2,048 bytes. A quotation that stops directly before its
+sentence's closing `.` or `!` ends after that mark for this rule. Of
 `Correction: two tasks are open. One is the retry counter. The other is the
 dry-run flag.`, quoted one sentence per memory, the first sentence is a whole
 statement and each later one follows the colon, so the three are stored as
 the one statement from `Correction` through `flag.`. A later sentence the
-statement rule refuses alone for its first character, such as one that starts
-with an inline code span, joins the statement before it the same way. A run starts at a
+statement rule refuses for another reason, such as one that starts with an
+inline code span, is stored as proposed. A run starts at a
 quotation that is a whole statement as proposed, or at one that names no
 `replaces`, `also_replaces`, or `contests` and widens to one, counted from
 that sentence's first word. Only quoted sentences are joined, proposals that
 quote one span share its place in the run, a quotation with a second copy in
 the message, overlapping or apart, joins nothing, and a source under a
-hashed id is left as proposed. The joined memories take the category of the
-first of them that names `replaces`, or else of the run's first sentence; a
-memory that names `replaces` keeps its own, and so does a memory whose
-`content` another memory of the source already holds under that category; a joined memory whose
+hashed id is left as proposed. Once the links of the source are judged, the joined
+memories take the category of the first of them whose `replaces` passed its
+checks, or else of the run's first sentence, and a memory that names
+`replaces` keeps its own; two memories of one source that share a category
+and `content` as proposed refuse the source, before the join as after it; a joined memory whose
 `duplicate_of` names a fact served on `auto_inject` with another text names
 the served fact that holds the joined text word for word, or drops the link.
 The joined memories then freeze under the rule below for memories that share
@@ -1196,11 +1197,15 @@ crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
 later paragraph. The single marks inside an inline code span are code to this
-rule when they pair up as the marks of a string literal do, as in
-`` `''` `` or `` `.get('id')` ``: the span holds an even number of single
-marks, counting each mark that is not between two letters or digits. A span
-with an odd number may hold the mark that opens a quotation, so its marks
-are read as marks of the prose. An apostrophe, `'` or `’`, between a span's
+rule when they pair up as the marks of string literals do, as in
+`` `''` `` or `` `.get('id')` ``: counting each mark that is not between two
+letters or digits, the marks open and close in turn, one that opens follows
+the span's start or a character that is no letter or digit, one that closes
+precedes the span's end or such a character, and none is left open. A span
+whose marks stand otherwise may hold a mark that opens or closes a quotation
+of the prose, so it leaves its paragraph's quotations unknown: that paragraph
+and every paragraph after the first one that holds a quotation mark are left
+out. An apostrophe, `'` or `’`, between a span's
 closing run and a letter joins a suffix to the span, as in
 `` `Parser`'s ``. A mark that is code and a suffix apostrophe open and close
 no quotation, and the suffix apostrophe starts no word, so it leaves its
