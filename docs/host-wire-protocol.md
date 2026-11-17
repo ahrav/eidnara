@@ -1034,10 +1034,11 @@ rule's list, or one of `。`, `｡`, `．`, `！`, `।`, `॥`, `۔`, `…`, `�
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
 names `replaces`, `also_replaces`, or `contests`, and one whose replacement
-the parser released as a contest, is stored as proposed, so only a
-correction the extractor quoted whole meets the statement rule and replaces a
-fact served on `auto_inject`, and a contest shows the clause the extractor
-judged. A widened quotation whose `duplicate_of` names
+the parser released as a contest, is stored as proposed or, when its
+quotation joins a run (below), with the joined text, so only a
+correction the extractor quoted in whole sentences meets the statement rule
+and replaces a fact served on `auto_inject`, and a contest shows the clause
+or the sentences the extractor judged. A widened quotation whose `duplicate_of` names
 a fact served on `auto_inject` with another text drops that link and is
 stored as the user's own statement: the extractor matched the clause it
 quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
@@ -1047,15 +1048,17 @@ follow one another in a paragraph are joined into one quotation before any
 link of the proposals is judged, when the later one is no whole statement on
 its own, starts where the statement before it ends with only whitespace
 between, and the joined text is whole statements under the statement rule
-below and fits 2,048 bytes. Sentences after a colon are the case: of
+below and fits 2,048 bytes. A quotation that stops directly before its
+sentence's closing `.` or `!` ends after that mark for this rule. Sentences after a colon are the case: of
 `Correction: two tasks are open. One is the retry counter. The other is the
 dry-run flag.`, quoted one sentence per memory, the first sentence is a whole
 statement and each later one follows the colon, so the three are stored as
 the one statement from `Correction` through `flag.`. A run starts at a
 quotation that is a whole statement as proposed, or at one that names no
 `replaces`, `also_replaces`, or `contests` and widens to one, counted from
-that sentence's first word. Only quoted sentences are joined, a quotation
-that occurs more than once in the message joins nothing, and a source under a
+that sentence's first word. Only quoted sentences are joined, proposals that
+quote one span share its place in the run, a quotation with a second copy in
+the message, overlapping or apart, joins nothing, and a source under a
 hashed id is left as proposed. The joined memories take the category of the
 first of them that names `replaces`, or else of the run's first sentence, and
 a memory that names `replaces` keeps its own; a joined memory whose
@@ -1184,14 +1187,19 @@ and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
-later paragraph. A single mark inside an inline code span is code to this
-rule, as in `` `''` `` or `` `.get('id')` ``, and a single mark between a
-span's closing run and a letter joins a suffix to the span, as in
-`` `Parser`'s ``: neither opens or closes a quotation, and the suffix mark
-starts no word, so it does not make its paragraph one that holds a single
-opening mark. A single mark that starts a word inside a span still makes its
-paragraph one that holds a single opening mark, so that paragraph is left out
-as one with a double mark inside a span is. A single mark closes a quotation of one word when it ends a
+later paragraph. The single marks inside an inline code span are code to this
+rule when they pair up as the marks of a string literal do, as in
+`` `''` `` or `` `.get('id')` ``: the span holds an even number of single
+marks, counting each mark that is not between two letters or digits. A span
+with an odd number may hold the mark that opens a quotation, so its marks
+are read as marks of the prose. An apostrophe, `'` or `’`, between a span's
+closing run and a letter joins a suffix to the span, as in
+`` `Parser`'s ``. A mark that is code and a suffix apostrophe open and close
+no quotation, and the suffix apostrophe starts no word, so it leaves its
+paragraph free of a single opening mark. A single mark that starts a word
+inside a span still makes its paragraph one that holds a single opening
+mark, so that paragraph is left out as one with a double mark inside a span
+is. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
 after `s`, a number, or a letter that is a number, which may be a plural
 possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a

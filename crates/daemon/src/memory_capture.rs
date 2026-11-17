@@ -351,8 +351,9 @@ fn parse_capture_batch(
 }
 
 /// Joins the quotations of one user message that follow one another in a
-/// paragraph into the one statement they make, when the later ones follow a
-/// colon.
+/// paragraph into the one statement they make, when a later one is no whole
+/// statement on its own. Sentences that follow a colon are the case this
+/// serves.
 ///
 /// A user often opens a paragraph with a clause that ends in a colon and
 /// gives the fact over several sentences: "Correction: two tasks are open.
@@ -365,23 +366,27 @@ fn parse_capture_batch(
 /// of the first, with the clause that introduces them. So a quotation the
 /// statement rule refuses alone is joined to the statement that ends where
 /// it starts, across whitespace, when the joined text is a whole statement
-/// under [`quotes_whole_statements`] and fits one memory.
+/// under [`quotes_whole_statements`] and fits one memory. The joined text is
+/// then what the rule accepts as one quotation, whatever kept the later
+/// sentence from standing alone.
 ///
 /// Only sentences the extractor quoted are joined, so the stored statement
-/// holds no sentence it left out. A run starts at a quotation that is a
-/// whole statement as quoted, or at one that names no replacement or contest
-/// and widens to one under [`enclosing_statement`], as publication widens
-/// it. A quotation that occurs more than once in the message has no one
-/// place and joins nothing.
+/// holds exactly the sentences it chose. A run starts at a quotation that is
+/// a whole statement as quoted, or at one that [`keeps_quotation`] leaves
+/// free and that widens to one under [`enclosing_statement`], as publication
+/// widens it. Proposals that quote one span share its place in the run. A
+/// quotation with a second copy in the message, overlapping or apart, has
+/// no one place and joins nothing.
 ///
 /// Each member of a run takes the joined quotation, so the members freeze
 /// as one memory under the collapse rule. They take one category: that of
 /// the first member that names a replacement, which a correction shares
 /// with the memory it replaces, or else that of the run's first sentence. A
-/// member that names a replacement of its own keeps its category. A member
-/// that named, as the memory already holding its sentence, an approved
-/// statement with another text names the approved statement that holds the
-/// joined text word for word, or none.
+/// member that names a replacement of its own keeps its category. The
+/// joined text is new, so a member that named an approved statement with
+/// another text as the memory already holding its sentence names the
+/// approved statement that holds the joined text word for word, or none
+/// (see [`names_another_approved_text`]).
 fn join_sentence_runs(
     text: &str,
     memories: &mut [CapturedMemory],
@@ -397,64 +402,73 @@ fn join_sentence_runs(
         .iter()
         .enumerate()
         .filter_map(|(index, memory)| {
-            let trimmed = memory.quote.trim();
-            let mut places = text.match_indices(memory.quote.as_str());
-            let (at, _) = places.next().filter(|_| !trimmed.is_empty())?;
-            if places.next().is_some() {
+            let quote = memory.quote.as_str();
+            let trimmed = quote.trim();
+            // The last copy, overlapping copies included, is the first one
+            // only when the quotation occurs once.
+            let at = text.find(quote).filter(|_| !trimmed.is_empty())?;
+            if text.rfind(quote) != Some(at) {
                 return None;
             }
-            let start = at + (memory.quote.len() - memory.quote.trim_start().len());
-            if quotes_whole_statements(&prose, &memory.quote) {
-                return Some((start, start + trimmed.len(), index, true));
+            let start = at + (quote.len() - quote.trim_start().len());
+            // A quotation that stops directly before its sentence's closing
+            // mark is that sentence, as the statement rule reads it; its
+            // place runs through the mark, so the next sentence follows it.
+            let end = start + trimmed.len();
+            let closes = !trimmed.ends_with(['.', '!']) && text[end..].starts_with(['.', '!']);
+            let end = end + usize::from(closes);
+            if quotes_whole_statements(&prose, quote) {
+                return Some((start, end, index, true));
             }
-            let linked = memory.replaces.is_some()
-                || !memory.also_replaces.is_empty()
-                || !memory.contests.is_empty();
-            let widened = if linked {
+            let widened = if keeps_quotation(memory) {
                 None
             } else {
-                enclosing_statement(&prose, &memory.quote)
+                enclosing_statement(&prose, quote)
             };
-            // The quotation has one place in the message, so it has one in
-            // the sentence that holds it.
-            Some(
-                match widened.and_then(|statement| Some((statement, statement.find(trimmed)?))) {
-                    Some((statement, within)) => (
-                        start - within,
-                        start - within + statement.len(),
-                        index,
-                        true,
-                    ),
-                    None => (start, start + trimmed.len(), index, false),
-                },
-            )
+            Some(match widened {
+                // The statement is a slice of the message, so its address
+                // gives its place.
+                Some(statement) => {
+                    let from = statement.as_ptr().addr() - text.as_ptr().addr();
+                    (from, from + statement.len(), index, true)
+                }
+                None => (start, end, index, false),
+            })
         })
         .collect();
     spans.sort_unstable();
-    let mut runs: Vec<(usize, usize, Vec<usize>)> = Vec::new();
-    // Whether the last run takes the next quotation: a quotation that joins
-    // nothing ends the run before it.
-    let mut open = false;
+    // Each run: its span, its members, and whether a later sentence joined
+    // it. A run that only holds proposals of its first statement changes
+    // nothing.
+    let mut runs: Vec<(usize, usize, Vec<usize>, bool)> = Vec::new();
+    // The span judged last, and whether its quotation is in the last run.
+    // Proposals that quote one span are judged once and share the outcome.
+    let mut judged: Option<(usize, usize, bool)> = None;
     for (start, end, index, alone) in spans {
-        if !alone
-            && open
-            && let Some((from, to, members)) = runs.last_mut()
-            && *to < start
-            && text[*to..start].chars().all(char::is_whitespace)
-            && end - *from <= MAX_CAPTURE_MEMORY_BYTES
-            && quotes_whole_statements(&prose, &text[*from..end])
-        {
+        if let Some((_, _, member)) = judged.filter(|&(from, to, _)| (from, to) == (start, end)) {
+            if member && let Some((_, _, members, _)) = runs.last_mut() {
+                members.push(index);
+            }
+            continue;
+        }
+        let joins = !alone
+            && runs.last().is_some_and(|&(from, to, _, _)| {
+                to < start
+                    && text[to..start].chars().all(char::is_whitespace)
+                    && end - from <= MAX_CAPTURE_MEMORY_BYTES
+                    && quotes_whole_statements(&prose, &text[from..end])
+            });
+        if joins && let Some((_, to, members, joined)) = runs.last_mut() {
             *to = end;
             members.push(index);
-        } else {
-            open = alone;
-            if alone {
-                runs.push((start, end, vec![index]));
-            }
+            *joined = true;
+        } else if alone {
+            runs.push((start, end, vec![index], false));
         }
+        judged = Some((start, end, joins || alone));
     }
-    for (from, to, members) in runs {
-        if members.len() < 2 {
+    for (from, to, members, joined) in runs {
+        if !joined {
             continue;
         }
         let joined = &text[from..to];
@@ -470,21 +484,45 @@ fn join_sentence_runs(
             if memory.replaces.is_none() {
                 memory.category.clone_from(&category);
             }
-            let names_another_text = memory.duplicate_of.as_ref().is_some_and(|target| {
-                existing.iter().any(|previous| {
-                    previous.id == *target
-                        && previous.automatic
-                        && statement_text(&previous.content) != statement_text(&content)
-                })
-            });
-            if names_another_text {
-                memory.duplicate_of = existing
-                    .iter()
-                    .find(|previous| previous.automatic && previous.content == content)
-                    .map(|approved| approved.id.clone());
+            if names_another_approved_text(existing, memory.duplicate_of.as_deref(), &content) {
+                memory.duplicate_of = approved_copy(existing, &content);
             }
         }
     }
+}
+
+/// Whether a proposal keeps the quotation the extractor chose: one that
+/// names a replacement or a contest. The extractor judged that relation from
+/// the clause it quoted, and only a correction quoted whole replaces a
+/// memory served automatically.
+fn keeps_quotation(memory: &CapturedMemory) -> bool {
+    memory.replaces.is_some() || !memory.also_replaces.is_empty() || !memory.contests.is_empty()
+}
+
+/// Whether `named` is an approved memory whose statement differs from
+/// `content`. A statement whose text capture widened or joined holds more
+/// than the clause the extractor matched to that memory, so it duplicates an
+/// approved memory only word for word (see [`approved_copy`]).
+fn names_another_approved_text(
+    existing: &[ExistingCaptureMemory],
+    named: Option<&str>,
+    content: &str,
+) -> bool {
+    named.is_some_and(|target| {
+        existing.iter().any(|previous| {
+            previous.id == target
+                && previous.automatic
+                && statement_text(&previous.content) != statement_text(content)
+        })
+    })
+}
+
+/// The approved memory that holds `content` word for word.
+fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<String> {
+    existing
+        .iter()
+        .find(|previous| previous.automatic && previous.content == content)
+        .map(|approved| approved.id.clone())
 }
 
 /// Drops each link from a proposed memory to an existing one that fails the
@@ -2522,7 +2560,7 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         let readable = unreadable_from.is_none_or(|line| index <= line);
         unpaired = unpaired
             || !quotations_close_in_turn(block, &code_spans[kept..])
-            || leaves_single_quotation_open(block, &code_spans[kept..]);
+            || leaves_single_quotation_open(text, block, &code_spans[kept..]);
         if readable && !structured && !introduces && !lead_in && !unclosed_code {
             paragraphs.push(range);
         } else {
@@ -2667,19 +2705,14 @@ const CLOSING_ONLY: [char; 8] = [
 /// adjacent marks. `code_spans` must be sorted in ascending order.
 fn quotations_close_in_turn(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> bool {
     let mut open = [false; QUOTATION_FAMILIES.len()];
-    let mut span = 0;
+    let mut spans = CodeSpanCursor::new(code_spans);
     for &(start, line) in block {
         let mut previous: Option<char> = None;
         let mut previous_opened = false;
         let mut chars = line.char_indices().peekable();
         while let Some((at, ch)) = chars.next() {
-            let family = quotation_family(ch).filter(|_| {
-                let at = start + at;
-                while code_spans.get(span).is_some_and(|&(_, close)| close <= at) {
-                    span += 1;
-                }
-                code_spans.get(span).is_none_or(|&(open, _)| at < open)
-            });
+            let family = quotation_family(ch)
+                .filter(|_| !matches!(spans.place(start + at), CodePlace::Code(_)));
             let mut opened = false;
             if let Some(family) = family {
                 let next = chars.peek().map(|&(_, after)| after);
@@ -2709,9 +2742,20 @@ fn quotations_close_in_turn(block: &[(usize, &str)], code_spans: &[(usize, usize
     !open.contains(&true)
 }
 
-/// Where one character of a paragraph stands against the paragraph's inline
-/// code spans. Characters are asked in ascending order, so the cursor passes
-/// each span once.
+/// Where a character of a paragraph stands against the paragraph's inline
+/// code spans.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodePlace {
+    Prose,
+    /// Inside the span of this index.
+    Code(usize),
+    /// Directly after a span's closing run.
+    AfterCode,
+}
+
+/// Places the characters of one paragraph against its inline code spans.
+/// Characters are asked in ascending order, so the cursor passes each span
+/// once.
 struct CodeSpanCursor<'a> {
     /// Ascending and disjoint.
     spans: &'a [(usize, usize)],
@@ -2723,9 +2767,7 @@ impl<'a> CodeSpanCursor<'a> {
         Self { spans, next: 0 }
     }
 
-    /// Whether the character at `at` lies inside a span, and whether a span's
-    /// closing run ends directly before it.
-    fn place(&mut self, at: usize) -> (bool, bool) {
+    fn place(&mut self, at: usize) -> CodePlace {
         while self
             .spans
             .get(self.next)
@@ -2734,21 +2776,42 @@ impl<'a> CodeSpanCursor<'a> {
             self.next += 1;
         }
         match self.spans.get(self.next) {
-            Some(&(_, close)) if close == at => (false, true),
-            Some(&(open, _)) => (open <= at, false),
-            None => (false, false),
+            Some(&(_, close)) if close == at => CodePlace::AfterCode,
+            Some(&(open, _)) if open <= at => CodePlace::Code(self.next),
+            _ => CodePlace::Prose,
         }
     }
 }
 
-/// Whether the single mark at `at` is code or an apostrophe beside code. A
-/// mark inside an inline code span is code, as in `` `''` `` or
-/// `` `.get('id')` ``. A mark between a span's closing run and a letter joins
-/// a suffix to the span, as in `` `Parser`'s ``, and the span is the word it
-/// sits in. Neither opens or closes a quotation.
-fn is_code_or_suffix_mark(spans: &mut CodeSpanCursor<'_>, at: usize, next: Option<char>) -> bool {
-    let (inside, follows) = spans.place(at);
-    inside || (follows && next.is_some_and(char::is_alphabetic))
+/// Whether `ch` at `place` is the apostrophe that joins a suffix to an
+/// inline code span, as in `` `Parser`'s ``: an apostrophe glyph directly
+/// after the span's closing run and before a letter. The span is the word
+/// the suffix belongs to, so the mark starts no word and opens no
+/// quotation. A glyph that only ever opens a quotation, such as U+2018 or
+/// U+201A, keeps its reading beside code.
+fn joins_suffix_to_code(place: CodePlace, ch: char, next: Option<char>) -> bool {
+    place == CodePlace::AfterCode
+        && matches!(ch, '\'' | '\u{2019}')
+        && next.is_some_and(char::is_alphabetic)
+}
+
+/// Whether the single marks of an inline code span pair up, as the marks of
+/// a string literal do: `` `''` ``, `` `'utf-8'` ``, `` `.get('id')` ``. The
+/// span holds an even number of single marks outside words; an apostrophe
+/// between two letters or digits belongs to its word. A span with an odd
+/// number may hold the mark that opens a quotation of the prose, when a
+/// backtick of the user's pairs with one inside quoted text.
+fn single_marks_pair(code: &str) -> bool {
+    let mut previous: Option<char> = None;
+    let mut chars = code.chars().peekable();
+    let mut marks = 0_usize;
+    while let Some(ch) = chars.next() {
+        let in_word = previous.is_some_and(char::is_alphanumeric)
+            && chars.peek().is_some_and(|next| next.is_alphanumeric());
+        marks += usize::from(SINGLE_QUOTATION_MARKS.contains(&ch) && !in_word);
+        previous = Some(ch);
+    }
+    marks.is_multiple_of(2)
 }
 
 /// Whether a paragraph opens a single quotation it does not close. A mark
@@ -2760,23 +2823,46 @@ fn is_code_or_suffix_mark(spans: &mut CodeSpanCursor<'_>, at: usize, next: Optio
 /// so they close nothing and the quotation stays open. An apostrophe inside
 /// a word neither opens nor closes.
 ///
-/// A mark that [`is_code_or_suffix_mark`] accepts keeps the quotation state
-/// and counts as an ordinary character beside the marks around it, as a
-/// double mark inside a span does in [`quotations_close_in_turn`].
-/// `code_spans` are the paragraph's inline code spans, ascending.
-fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> bool {
+/// A mark inside an inline code span whose single marks pair up (see
+/// [`single_marks_pair`]) is code, and a mark that
+/// [`joins_suffix_to_code`] accepts is an apostrophe. Each keeps the
+/// quotation state and counts as an ordinary character beside the marks
+/// around it, as a double mark inside a span does in
+/// [`quotations_close_in_turn`]. `text` is the message and `code_spans` are
+/// the paragraph's inline code spans, ascending.
+fn leaves_single_quotation_open(
+    text: &str,
+    block: &[(usize, &str)],
+    code_spans: &[(usize, usize)],
+) -> bool {
     let mut open = 0_usize;
     // Whether the innermost open quotation holds whitespace.
     let mut several_words = false;
     let mut spans = CodeSpanCursor::new(code_spans);
+    // The span read last and whether its single marks pair up, so each span
+    // is read once.
+    let mut paired: Option<(usize, bool)> = None;
     for &(start, line) in block {
         let mut previous: Option<char> = None;
         let mut chars = line.char_indices().peekable();
         while let Some((at, ch)) = chars.next() {
             let next = chars.peek().map(|&(_, after)| after);
-            if SINGLE_QUOTATION_MARKS.contains(&ch)
-                && !is_code_or_suffix_mark(&mut spans, start + at, next)
-            {
+            if SINGLE_QUOTATION_MARKS.contains(&ch) {
+                let place = spans.place(start + at);
+                let code = match place {
+                    CodePlace::Code(span) => {
+                        if paired.is_none_or(|(read, _)| read != span) {
+                            let (first, last) = code_spans[span];
+                            paired = Some((span, single_marks_pair(&text[first..last])));
+                        }
+                        paired.is_some_and(|(_, pairs)| pairs)
+                    }
+                    _ => joins_suffix_to_code(place, ch, next),
+                };
+                if code {
+                    previous = Some(ch);
+                    continue;
+                }
                 let closing_place = previous.is_some_and(|before| {
                     (before.is_alphabetic() && !before.is_numeric() && !matches!(before, 's' | 'S'))
                         || matches!(before, '.' | ',' | '!' | ';')
@@ -2828,8 +2914,8 @@ fn fence_opener(line: &str) -> Option<&str> {
 }
 
 /// A single quotation mark opens a quotation when it starts a word after the
-/// line start, whitespace, or `(`. The mark that joins a suffix to an inline
-/// code span, as in `` `Parser`'s ``, starts no word. `start` is the line's
+/// line start, whitespace, or `(`. The apostrophe that
+/// [`joins_suffix_to_code`] accepts starts no word. `start` is the line's
 /// offset in the message and `spans` walks its paragraph's inline code
 /// spans, so the lines of a paragraph are asked in order. A mark inside a
 /// span that starts a word there counts, so its paragraph holds a quotation
@@ -2842,8 +2928,7 @@ fn opens_single_quotation(start: usize, line: &str, spans: &mut CodeSpanCursor<'
             && previous.is_none_or(|before: char| !before.is_alphanumeric())
         {
             let next = chars.peek().map(|&(_, after)| after);
-            let (_, follows) = spans.place(start + at);
-            if !(follows && next.is_some_and(char::is_alphabetic)) {
+            if !joins_suffix_to_code(spans.place(start + at), ch, next) {
                 return true;
             }
         }
@@ -6713,7 +6798,7 @@ mod tests {
                 true,
             ),
             (
-                "Call `.get('id', None)` there.\n\nWe deploy from the release branch.",
+                "Call `.get('', None)` there.\n\nWe deploy from the release branch.",
                 release,
                 true,
             ),
@@ -6747,19 +6832,57 @@ mod tests {
                 release,
                 false,
             ),
-            // A mark after a span that no letter follows joins no suffix.
+            // A mark after a span that no letter follows joins no suffix:
+            // it starts a word, so its paragraph holds a quotation mark.
             (
                 "Bob calls it '`main`' in his notes.\n\nWe deploy from the release branch.",
                 release,
                 false,
             ),
+            ("Keep `main`' as it is.", "Keep `main`' as it is.", false),
             // A backtick of the user's can pair with one inside quoted text
-            // and hide the mark that opens the quotation. The mark that
-            // closes it then stands alone in a later paragraph.
+            // and hide the mark that opens the quotation. The span then
+            // holds one mark, so the mark keeps its reading as prose,
+            // wherever the mark that closes the quotation stands.
             (
                 "The key ` is broken, so Bob wrote 'Use the `-key instead.\n\nWe deploy from the release branch.\n\nThanks.'",
                 release,
                 false,
+            ),
+            (
+                "The key ` is broken, so Bob wrote 'Use the `-key instead.\n\nWe deploy from the release branch.\n\nThanks'.",
+                release,
+                false,
+            ),
+            (
+                "The key ` is broken, so Bob wrote 'Use the `-key instead.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            // An apostrophe inside a word of the span is no mark of a pair.
+            (
+                "Rename `it's_ok('a')` first.\n\nWe deploy from the release branch.",
+                release,
+                true,
+            ),
+            // A glyph that only opens a quotation keeps that reading
+            // directly after a span.
+            (
+                "Bob wrote about `Parser`\u{201a}Hi team.\n\nWe deploy from the release branch.\n\nCheers\u{2019}",
+                release,
+                false,
+            ),
+            (
+                "Bob copied `README`\u{2018}Hi team.\n\nWe deploy from the release branch.\n\nThanks.\u{2019}",
+                release,
+                false,
+            ),
+            // The typographic apostrophe joins a suffix as the ASCII one
+            // does.
+            (
+                "Look at `Parser`\u{2019}s error path first.\n\nWe deploy from the release branch.",
+                release,
+                true,
             ),
         ] {
             let found = quotes_whole_statements(&Prose::of(text), quote);
@@ -6784,17 +6907,28 @@ mod tests {
         own_id: bool,
         quotes: &[(&str, &str, Option<&str>)],
     ) -> Vec<(String, String, Option<String>)> {
-        let existing = [ExistingCaptureMemory {
-            id: "mem_tasks".into(),
-            category: "CONSTRAINTS".into(),
-            content: "User stated: One task is open, the retry counter for the upload client."
-                .into(),
+        let approved = |id: &str, category: &str, content: &str| ExistingCaptureMemory {
+            id: id.into(),
+            category: category.into(),
+            content: content.into(),
             can_replace: true,
             source_revision: 1,
             created_commit_seq: 1,
             automatic: true,
             contested: false,
-        }];
+        };
+        let existing = [
+            approved(
+                "mem_tasks",
+                "CONSTRAINTS",
+                "User stated: One task is open, the retry counter for the upload client.",
+            ),
+            approved(
+                "mem_flag",
+                "ARCHITECTURE",
+                "User stated: The migrate command has no dry-run flag.",
+            ),
+        ];
         let messages = [CaptureMessage {
             id: "m".into(),
             role,
@@ -6869,13 +7003,65 @@ mod tests {
             ]),
             [paragraph.as_str(); 3]
         );
+        // The joined text is what the statement rule accepts as one
+        // quotation: a later sentence that starts with an inline code span
+        // is no statement alone and joins the statement before it.
+        let flag = "Note for the migration: use the flag.";
+        let default = "`DRY_RUN=1` is the default.";
+        let with_code = format!("{flag} {default}");
+        assert_eq!(
+            parsed_quotes(
+                &with_code,
+                CaptureRole::User,
+                true,
+                &[(flag, "CONSTRAINTS", None), (default, "CONSTRAINTS", None)]
+            )
+            .into_iter()
+            .map(|(quote, _, _)| quote)
+            .collect::<Vec<_>>(),
+            [with_code.as_str(); 2]
+        );
+        // Two facts that quote one sentence share its place in the run,
+        // whichever sentence it is.
+        assert_eq!(
+            plain(&[OPEN_TASKS, RETRY_COUNTER, RETRY_COUNTER, DRY_RUN]),
+            [paragraph.as_str(); 4]
+        );
+        assert_eq!(
+            plain(&[OPEN_TASKS, OPEN_TASKS, RETRY_COUNTER, DRY_RUN]),
+            [paragraph.as_str(); 4]
+        );
         // A sentence the extractor left out stays out: the last sentence
         // does not follow the first.
         assert_eq!(plain(&[OPEN_TASKS, DRY_RUN]), [OPEN_TASKS, DRY_RUN]);
-        // A quotation cut out of its sentence joins nothing.
+        // A quotation cut out of its sentence joins nothing, and the whole
+        // sentence proposed beside it still joins.
         assert_eq!(
             plain(&[OPEN_TASKS, "a retry counter for the upload client."]),
             [OPEN_TASKS, "a retry counter for the upload client."]
+        );
+        assert_eq!(
+            plain(&[OPEN_TASKS, "One is a retry counter", RETRY_COUNTER]),
+            [
+                first_two.as_str(),
+                "One is a retry counter",
+                first_two.as_str()
+            ]
+        );
+        // A quotation that stops before its sentence's closing mark is
+        // that sentence: the mark stays in the statement and the next
+        // sentence follows it.
+        assert_eq!(
+            plain(&[
+                OPEN_TASKS.trim_end_matches('.'),
+                RETRY_COUNTER.trim_end_matches('.'),
+                DRY_RUN
+            ]),
+            [paragraph.as_str(); 3]
+        );
+        assert_eq!(
+            plain(&[OPEN_TASKS, RETRY_COUNTER.trim_end_matches('.')]),
+            [first_two.as_str(); 2]
         );
         // The correction among the sentences keeps its target, and the
         // statement takes the category of the memory it replaces.
@@ -6895,6 +7081,40 @@ mod tests {
                 (paragraph.clone(), "CONSTRAINTS".to_string(), None),
             ]
         );
+        // Each correction among the sentences keeps the category of the
+        // memory it replaces; the other sentences take the first one's.
+        assert_eq!(
+            own(&[
+                (OPEN_TASKS, "PROJECT_RULES", None),
+                (RETRY_COUNTER, "CONSTRAINTS", Some("mem_tasks")),
+                (DRY_RUN, "ARCHITECTURE", Some("mem_flag")),
+            ]),
+            [
+                (paragraph.clone(), "CONSTRAINTS".to_string(), None),
+                (
+                    paragraph.clone(),
+                    "CONSTRAINTS".to_string(),
+                    Some("mem_tasks".to_string())
+                ),
+                (
+                    paragraph.clone(),
+                    "ARCHITECTURE".to_string(),
+                    Some("mem_flag".to_string())
+                ),
+            ]
+        );
+        // With no correction among them the sentences take the category
+        // of the first.
+        assert_eq!(
+            own(&[
+                (OPEN_TASKS, "PROJECT_RULES", None),
+                (RETRY_COUNTER, "ARCHITECTURE", None),
+            ]),
+            [
+                (first_two.clone(), "PROJECT_RULES".to_string(), None),
+                (first_two.clone(), "PROJECT_RULES".to_string(), None),
+            ]
+        );
         // A first sentence that names a replacement and is cut is kept as
         // quoted, so no run starts at it.
         let cut = "two tasks are open and their order is undecided.";
@@ -6910,10 +7130,113 @@ mod tests {
         );
     }
 
-    /// Sentences that are statements on their own stay separate memories,
-    /// and text the statement rule refuses for another reason joins nothing.
+    /// The joined statement is new text. A sentence of it that the extractor
+    /// matched to an approved statement with another text is recorded with
+    /// the rest as the user's statement; the link stays when the approved
+    /// statement holds the joined text word for word, and when the named
+    /// memory is a note that is not approved.
     #[test]
-    fn only_sentences_a_colon_keeps_from_standing_alone_are_joined() {
+    fn a_joined_statement_duplicates_an_approved_statement_only_word_for_word() {
+        let paragraph = format!("{OPEN_TASKS} {RETRY_COUNTER} {DRY_RUN}");
+        let memory = |id: &str, content: &str, automatic: bool| ExistingCaptureMemory {
+            id: id.into(),
+            category: "CONSTRAINTS".into(),
+            content: content.into(),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic,
+            contested: false,
+        };
+        let first_only = memory("mem_first", &format!("User stated: {OPEN_TASKS}"), true);
+        let whole = memory("mem_whole", &format!("User stated: {paragraph}"), true);
+        let note = memory(
+            "mem_note",
+            "Two tasks are open: a retry counter and a dry-run flag.",
+            false,
+        );
+        let messages = [CaptureMessage {
+            id: "m".into(),
+            role: CaptureRole::User,
+            text: paragraph.clone(),
+            own_id: true,
+        }];
+        let links = |existing: &[ExistingCaptureMemory], named: &str| -> Vec<Option<String>> {
+            let memories: Vec<Value> = [OPEN_TASKS, RETRY_COUNTER, DRY_RUN]
+                .iter()
+                .enumerate()
+                .map(|(index, quote)| json!({"category": "CONSTRAINTS", "content": format!("fact {index}"), "quote": quote, "duplicate_of": named}))
+                .collect();
+            let response =
+                json!({"version": 1, "decisions": [{"message_id": "m", "memories": memories}]});
+            parse_batch(&response.to_string(), &messages, existing)
+                .unwrap()
+                .remove(0)
+                .unwrap()
+                .memories
+                .into_iter()
+                .map(|memory| {
+                    assert_eq!(memory.quote, paragraph);
+                    memory.duplicate_of
+                })
+                .collect()
+        };
+        assert_eq!(
+            links(std::slice::from_ref(&first_only), "mem_first"),
+            [None, None, None],
+            "an approved statement of the first sentence alone holds another text"
+        );
+        assert_eq!(
+            links(&[first_only, whole.clone()], "mem_first"),
+            vec![Some("mem_whole".to_string()); 3],
+            "the approved statement that holds the joined text is the duplicate"
+        );
+        assert_eq!(
+            links(std::slice::from_ref(&whole), "mem_whole"),
+            vec![Some("mem_whole".to_string()); 3]
+        );
+        assert_eq!(
+            links(std::slice::from_ref(&note), "mem_note"),
+            vec![Some("mem_note".to_string()); 3],
+            "a note that is not approved stays named, so the statement is recorded beside it"
+        );
+    }
+
+    /// A cut quotation that starts a run is placed where its sentence
+    /// stands in the message. The quotation here occurs once with its
+    /// leading space, while its words also occur earlier inside another
+    /// word and a character of several bytes follows the sentence.
+    #[test]
+    fn a_run_starts_where_the_widened_sentence_stands() {
+        let first = "Correction: transport is enabled and the port is enabled.";
+        let second = "The upload client of the caf\u{e9} host uses it.";
+        let text = format!("{first} {second}");
+        assert_eq!(
+            parsed_quotes(
+                &text,
+                CaptureRole::User,
+                true,
+                &[
+                    (" port is enabled", "CONSTRAINTS", None),
+                    (second, "CONSTRAINTS", Some("mem_tasks")),
+                ],
+            ),
+            [
+                (text.clone(), "CONSTRAINTS".to_string(), None),
+                (
+                    text.clone(),
+                    "CONSTRAINTS".to_string(),
+                    Some("mem_tasks".to_string())
+                ),
+            ]
+        );
+    }
+
+    /// Sentences that are statements on their own stay separate memories,
+    /// and a quotation joins a statement only when the two make a whole
+    /// statement of one paragraph that fits one memory.
+    #[test]
+    fn quotations_that_make_no_whole_statement_together_stay_as_proposed() {
         let quotes = |text: &str, role, own_id, quotes: &[&str]| -> Vec<String> {
             let quotes: Vec<_> = quotes
                 .iter()
@@ -6972,13 +7295,23 @@ mod tests {
             ),
             [OPEN_TASKS, RETRY_COUNTER]
         );
-        // A statement longer than one memory holds is left as quoted.
-        let long_tail = format!("The other is {}.", "a dry-run flag ".repeat(133).trim_end());
-        let long = format!("{OPEN_TASKS} {long_tail}");
-        assert_eq!(
-            quotes(&long, CaptureRole::User, true, &[OPEN_TASKS, &long_tail]),
-            [OPEN_TASKS, long_tail.as_str()]
-        );
+        // A statement of exactly the bytes one memory holds is joined, and
+        // one byte more leaves the quotations as proposed.
+        for (extra, joined) in [(0, true), (1, false)] {
+            let filler = MAX_CAPTURE_MEMORY_BYTES - OPEN_TASKS.len() - " The other is .".len();
+            let tail = format!("The other is {}.", "x".repeat(filler + extra));
+            let long = format!("{OPEN_TASKS} {tail}");
+            assert_eq!(long.len(), MAX_CAPTURE_MEMORY_BYTES + extra);
+            let expected = if joined {
+                [long.as_str(), long.as_str()]
+            } else {
+                [OPEN_TASKS, tail.as_str()]
+            };
+            assert_eq!(
+                quotes(&long, CaptureRole::User, true, &[OPEN_TASKS, &tail]),
+                expected
+            );
+        }
     }
 
     /// Proposals that collapse into one memory can join more contests than

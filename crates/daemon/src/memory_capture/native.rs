@@ -594,10 +594,7 @@ fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory
     let widened: Vec<Option<&str>> = proposed
         .iter()
         .map(|memory| {
-            if memory.replaces.is_some()
-                || !memory.also_replaces.is_empty()
-                || !memory.contests.is_empty()
-            {
+            if super::keeps_quotation(memory) {
                 None
             } else {
                 enclosing_statement(prose, &memory.quote)
@@ -848,29 +845,22 @@ impl CaptureWork {
                     continue;
                 };
                 if named.is_none_or(|previous| !previous.automatic)
-                    && let Some(approved) = plan
-                        .existing
-                        .iter()
-                        .find(|previous| previous.automatic && previous.content == memory.content)
+                    && let Some(approved) = super::approved_copy(&plan.existing, &memory.content)
                 {
-                    memory.duplicate_of = Some(approved.id.clone());
+                    memory.duplicate_of = Some(approved);
                 } else if widened.contains(&memory.quote)
-                    && named.is_some_and(|previous| {
-                        previous.automatic
-                            && super::statement_text(&previous.content)
-                                != super::statement_text(&memory.content)
-                    })
+                    && super::names_another_approved_text(
+                        &plan.existing,
+                        memory.duplicate_of.as_deref(),
+                        &memory.content,
+                    )
                 {
                     // The extractor matched the clause it quoted to an
                     // approved statement. The widened sentence is another
                     // text, such as that clause negated, so it is written
                     // as the user's own statement, or names the approved
                     // statement that holds it word for word.
-                    memory.duplicate_of = plan
-                        .existing
-                        .iter()
-                        .find(|previous| previous.automatic && previous.content == memory.content)
-                        .map(|approved| approved.id.clone());
+                    memory.duplicate_of = super::approved_copy(&plan.existing, &memory.content);
                 }
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for

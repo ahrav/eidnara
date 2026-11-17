@@ -2553,9 +2553,9 @@ async fn a_reporting_clause_before_a_colon_stays_in_the_stored_statement() {
 /// A user corrects an earlier statement over several sentences: a clause
 /// before a colon, then the new state one sentence at a time. The extractor
 /// quotes each sentence as its own memory and names the earlier statement
-/// as replaced by the first. A later session is delivered the correction
-/// as one statement that holds every sentence, and the earlier statement
-/// leaves the block.
+/// as replaced by one of them, the first or a later one. A later session is
+/// delivered the correction as one statement that holds every sentence,
+/// and the earlier statement leaves the block.
 #[tokio::test]
 async fn a_correction_given_over_several_sentences_is_delivered_whole_in_place_of_the_earlier_statement()
  {
@@ -2566,41 +2566,49 @@ async fn a_correction_given_over_several_sentences_is_delivered_whole_in_place_o
         "The other is a dry-run flag for the migrate command.",
     ];
     let correction = sentences.join(" ");
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(&handler, FIRST, "s1", &[("m1", "user", earlier)], |_, _| {
-        vec![fact(earlier)]
-    })
-    .await;
-    capture(
-        &handler,
-        SECOND,
-        "s2",
-        &[("m2", "user", &correction)],
-        |_, existing| {
-            let mut memories: Vec<Extracted> = sentences.iter().map(|quote| fact(quote)).collect();
-            memories[0].replaces = ids_containing(existing, "audit log export");
-            assert_eq!(memories[0].replaces.len(), 1, "{existing:?}");
-            memories
-        },
-    )
-    .await;
+    for replacing in [0, 1] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", earlier)], |_, _| {
+            vec![fact(earlier)]
+        })
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", &correction)],
+            |_, existing| {
+                let mut memories: Vec<Extracted> =
+                    sentences.iter().map(|quote| fact(quote)).collect();
+                memories[replacing].replaces = ids_containing(existing, "audit log export");
+                assert_eq!(memories[replacing].replaces.len(), 1, "{existing:?}");
+                memories
+            },
+        )
+        .await;
 
-    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
-        .expect("the correction is delivered");
-    assert_eq!(block.matches(&stated(&correction)).count(), 1, "{block}");
-    assert!(
-        !block.contains("audit log export"),
-        "the replaced statement leaves the block: {block}"
-    );
-    assert_eq!(
-        explicit_search(&handler, (THIRD, "s3"), &project).await,
-        [(stated(&correction), "visible".to_string())],
-        "the sentences are one approved row"
-    );
-    assert_eq!(
-        live_statement_records(&handler, &project),
-        [stated(&correction)]
-    );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the correction is delivered");
+        assert_eq!(
+            block.matches(&stated(&correction)).count(),
+            1,
+            "sentence {replacing} replaces: {block}"
+        );
+        assert!(
+            !block.contains("audit log export"),
+            "sentence {replacing} replaces; the replaced statement leaves the block: {block}"
+        );
+        assert_eq!(
+            explicit_search(&handler, (THIRD, "s3"), &project).await,
+            [(stated(&correction), "visible".to_string())],
+            "sentence {replacing} replaces; the sentences are one approved row"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(&correction)],
+            "sentence {replacing} replaces"
+        );
+    }
 }
 
 /// A user message often refers to code before it states a fact: a string
@@ -2612,7 +2620,7 @@ async fn a_correction_after_a_paragraph_that_quotes_code_replaces_the_earlier_st
     for reference in [
         "Before you change the router, check that the two `''` tests assert the root path.",
         "Before you change the router, look at `Router`'s error path.",
-        "Before you change the router, read how `.get('id', None)` falls back.",
+        "Before you change the router, read how `.get('', None)` falls back.",
     ] {
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
         capture(
