@@ -22,7 +22,7 @@ revision.
 - Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
   (`crates/daemon/src/lib.rs:25564`);
   `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
-  (`crates/daemon/tests/kernel_routes.rs:3849`);
+  (`crates/daemon/tests/kernel_routes.rs:3852`);
   `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
   (`crates/daemon/src/use_outcome_lifecycle_tests.rs:215`). Status: unaudited.
 

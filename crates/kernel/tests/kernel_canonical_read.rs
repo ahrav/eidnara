@@ -285,6 +285,32 @@ fn ingest_decision_kind_artifact(store: &KernelStore, sensitivity: Sensitivity) 
 /// Domain decision reads enforce artifact sensitivity even when the artifact's `object_kind` is `decision`: a replay
 /// that tightens the artifact to secret withholds it from the full read and from the domain read alike.
 #[test]
+fn a_commit_reports_the_time_it_was_recorded() {
+    let directory = tempfile::tempdir().unwrap();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let store = store_with(directory.path(), 1, 0, 0);
+    let tip = store.tip().unwrap();
+    assert!(tip >= 1);
+    let mut previous = before;
+    for commit_seq in 1..=tip {
+        let recorded = store
+            .commit_recorded_at(commit_seq)
+            .unwrap()
+            .expect("every commit in the log has a time");
+        assert!(
+            recorded >= previous,
+            "commit {commit_seq} is recorded no earlier than the one before it"
+        );
+        previous = recorded;
+    }
+    assert_eq!(store.commit_recorded_at(tip + 1).unwrap(), None);
+    assert_eq!(store.commit_recorded_at(0).unwrap(), None);
+}
+
+#[test]
 fn the_domain_selection_folds_the_evidence_class_of_a_decision_kind_artifact() {
     let directory = tempfile::tempdir().unwrap();
     let store = store_with(directory.path(), 3, 0, 0);

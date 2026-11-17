@@ -679,7 +679,11 @@ const PROJECT_SCOPES_DOMAIN_ID: &str = "project-scopes";
 
 /// A caller-named domain; the route-owned one is refused as invalid input.
 fn caller_domain(domain_id: &str) -> Result<&str, KernelError> {
-    if domain_id == PROJECT_SCOPES_DOMAIN_ID {
+    // Capture alone writes the statement domain: a row there approves a
+    // captured memory as the user's statement.
+    if domain_id == PROJECT_SCOPES_DOMAIN_ID
+        || domain_id == crate::memory_capture::STATEMENT_DOMAIN_ID
+    {
         return Err(KernelError::InvalidInput);
     }
     Ok(domain_id)

@@ -991,7 +991,8 @@ content-free `error`: `cancelled`, `provider_unavailable`, `model_failed`, or
 
 `processed` acknowledges processing the proposal, not successful capture of
 every source. Malformed or source-local invalid proposals leave sources
-pending with failures recorded. Valid decisions from other sources may still
+pending with failures recorded; a proposal whose only defect is a link to a
+reference memory keeps its fact and loses that link. Valid decisions from other sources may still
 commit. Clients must request `next` again and see `ready` before reporting
 completion. Other submission states include `stale`, `pending`, `disabled`,
 and `store_failed`; mismatched models and malformed envelopes are errors.
@@ -1032,9 +1033,11 @@ rule's list, or one of `。`, `｡`, `．`, `！`, `।`, `॥`, `۔`, `…`, `�
 `၊`, `။`, `។`, `‼`, `﹒`, `․`, `﹗`); when the
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
-names `replaces` or `also_replaces` is stored as proposed, so only a
+names `replaces`, `also_replaces`, or `contests`, and one whose replacement
+the parser released as a contest, is stored as proposed, so only a
 correction the extractor quoted whole meets the statement rule and replaces a
-fact served on `auto_inject`. A widened quotation whose `duplicate_of` names
+fact served on `auto_inject`, and a contest shows the clause the extractor
+judged. A widened quotation whose `duplicate_of` names
 a fact served on `auto_inject` with another text drops that link and is
 stored as the user's own statement: the extractor matched the clause it
 quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
@@ -1045,9 +1048,10 @@ category and quotation freeze as one memory, keeping any replacement target
 among them; distinct replacement targets
 keep one memory each, since a memory supersedes exactly one predecessor. The
 frozen memory names `duplicate_of` only when every memory it joins names the
-same target, and a frozen memory that still names `duplicate_of` and whose
-stored text equals a reference memory served on
-`auto_inject` is a duplicate of that memory whichever target it named. Relevant and sufficiently complete quote selection still depends
+same target, and a frozen memory that names under `duplicate_of` a reference
+memory not served on `auto_inject`, and whose stored text equals a reference
+memory that is, is a duplicate of the served one; a named target that is
+served on `auto_inject` is kept. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
 target may be replaced once per batch whichever source claims it. User intent
@@ -1188,7 +1192,8 @@ a single quotation. The rule reads sentence ends in `.` and `!` only, so text
 in a script that ends sentences otherwise is judged a paragraph at a time. Capture records each such fact with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
-automatic surfaces. The statement record's source is the user message it
+automatic surfaces. Capture alone writes the `user-statements` domain: a
+`kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
 quotes: source kind `user`, source id `memory_capture_statement:` followed by
 the first 32 hexadecimal digits of the capture source's identity, revision 1.
 The Kernel bounds the authority-bearing accepted decisions of one source
@@ -1199,13 +1204,17 @@ When the Kernel's admission policy refuses a statement record, or the
 admission that rests on it, the same frozen plan commits with each of its user
 statements as a labeled memory for explicit search, and
 `decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
-as a replacement stays live and served on `auto_inject` beside the labeled correction, and the labeled commit supersedes
+as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and the labeled commit supersedes
 or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
-for explicit search, not human approval or automatic-context eligibility.
+for explicit search, not human approval or automatic-context eligibility; the
+one text of such a fact that reaches automatic context is the bounded, quoted
+excerpt on a contested statement's line (below).
 Each reference memory offered to the extractor carries `user_statement`, true
 when the Kernel serves it on automatic surfaces, which a user's recorded
 statement is. A proposal that names
-`duplicate_of` writes nothing, with one exception: a user's statement that
+`duplicate_of` writes no fact, with one exception, may still record a
+contest through the fact it duplicates, and settles a contest when it is the
+user's own statement of a contested fact (both below): a user's statement that
 duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, the duplicated memory stays, and the
@@ -1241,7 +1250,137 @@ characters, or of two that hold a digit, other than common English function
 words) and a replaced
 memory the host memory tool wrote, and
 retires the statement record of each fact it removes; no surface serves a
-superseded or retired fact. A host `kernel.commit` that supersedes or retires a
+superseded or retired fact. When a capture-owned fact that a correction
+supersedes or retires, as its `replaces` target or one of its `also_replaces`
+targets, names a memory under `restates`, that memory is retired with it if it
+is live, belongs to the project, was written by capture or the host memory
+tool, is not served on `auto_inject`, and states the replaced fact: each of
+the two holds at least half of the other's distinct content words. A memory that holds the
+fact among several others is kept, and one with a few more words is retired
+whole. The extractor is offered at most 64 reference memories. Up to
+32 are ranked by BM25 (k1 1.2, b 0.75, over the project's memory summaries)
+against each message of the batch on its own, a memory taking its best
+score, so the short statement a correction or an observation names ranks
+ahead of long memories that share common words with the batch. The first 16
+of those places go to facts served on `auto_inject`, ranked among themselves,
+so the reports of one topic cannot fill the share a statement needs; the rest
+of the 64 are the memories sharing the most of the whole batch's words,
+newest first among ties; a summary's attribution label counts for neither
+ranking. A reference memory carries `contested: true` when an observation
+contests it. A proposal from any
+role may name `contests`: at most four reference memories whose value its observation
+contradicts without the user changing the fact, each sharing at least one
+content word with the quotation. Proposals that capture stores as one fact
+contest the first four targets they name between them. A `contests` or `also_replaces` array given
+as `null` names no target. A user quotation that does not meet the
+statement rule replaces no fact served on `auto_inject` and takes no
+replacement claim: each such target
+named in `replaces` or `also_replaces` becomes a contest, and when the
+`replaces` target is one, every target of the proposal does. A user statement
+whose `replaces` target is released contests that target when the Kernel
+serves it on `auto_inject`, so the two values are shown as a disagreement. A
+user source's contests are kept when the source reaches capture under its
+own message id and its quotation is one or more whole sentences of the
+message, such as a question; a clause cut out of a sentence can say the
+opposite of that sentence and contests nothing, and a fragment of a long
+message has edges the user did not write. A link from a
+proposed fact to a reference memory that fails its check is released and the
+fact is still stored: a `replaces` target that is unprovided, protected,
+already claimed by an earlier fact of the same source, of another category,
+or shares no content word with the quotation is released with its
+`also_replaces` targets; a user's replacement of a target an earlier source
+of the batch already replaces is refused with its source, which is extracted
+again in the next drain against the committed replacement, so two corrections
+of one fact are stored in order; an
+`also_replaces` target that is unprovided, protected, claimed, or no
+restatement of the replaced fact is released alone; a `duplicate_of` target
+that is unprovided, that a user source names beside `replaces`, or that
+shares no content word with the quotation of a proposal that also names
+`contests`, is released; a `contests`
+target that is unprovided, shares no content word with the quotation, is
+also replaced, is the proposal's `duplicate_of` target, or is past the fourth is released; and the `replaces` and `also_replaces` targets an
+assistant source names become contests under the contest check. After
+quotations collapse, the facts of one source name each target for one
+purpose: a target one of them replaces or retires is contested by none, a
+fact that only duplicates such a target is dropped, since its text is the
+value the sibling replaces, and each target is contested by the first fact
+that names it. The contests of one batch are then settled across its sources
+before any plan is frozen: a target any source of the batch replaces or
+retires is contested by none of them, and a target is contested by the first
+source that names it, so a question and the correction that follows it commit
+in one pass. A contested fact
+stays live, and the contesting fact's rationale lists what it contests under
+`contests`. A
+proposal that names `duplicate_of` and `contests` and writes no fact records
+the fact it duplicates as the contesting fact, so an observation the store
+already holds, such as a note the agent wrote in the same turn, contests what
+the message contradicts. The contests of a commit are recorded after its
+other writes, and a target the commit replaced, retired, or settled is passed
+over. A contest recorded through a duplicated fact that the commit retires as
+a restated memory is dropped, and its target keeps its row. When the contested fact is a capture-owned fact that the Kernel serves as
+approved, the commit supersedes it with a fact of the same
+text, category, and approval whose rationale holds `contested_by`, an object
+with `memory` (the contesting fact's id),
+`stated_seq` (the commit that first recorded the statement), and `session`
+(the session whose message recorded the contest). The record names the
+contesting fact and holds none of its text. The statement record stays
+live, and the new fact cites again, in order, each piece of evidence the fact
+it supersedes cites that is still live; a `span` citation, whose blocks hold
+the quotation only together, cites again only while every block is live.
+When it cited evidence and none is
+live, its `citation` reads `descriptor_not_found`, and a fact recorded with
+no citation keeps the reason it was recorded with. When one commit contests
+a statement and also contests the fact that contests it, the first names the
+row that superseded the second; contests that name each other in a ring are
+left unrecorded, and a contest that names a fact of such a ring records that
+fact's unchanged row. A stored plan whose fact names more than four contests
+is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
+sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
+fact supersedes the statement again and names that newer fact, and a contest
+by the fact already named writes nothing. The `<project-memory>` block renders
+a contested statement as
+`<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
+the dates being the UTC days on which the statement's first commit and the
+newest contest's commit were recorded, `unknown date` when the commit log
+holds none. The fact id is shown as written when it is 1 to 128 characters of
+ASCII letters, digits, `_`, `-`, `.`, and `:`, which the ids capture and the
+host memory tool derive are; an object id is text its writer chose, so any
+other id is shown in the excerpt's bounded, quoted form. The excerpt is the contesting text with runs of Unicode
+whitespace (the `White_Space` property) folded to
+single spaces, cut to 240 characters with an ellipsis, and to fewer when the
+quoted form would pass 1,024 bytes, as a JSON string, so
+text an assistant wrote stays inside its quotation marks; 240 characters hold
+the observed value and where it was seen, and the fact id leads to the full
+text through `eidnara_search`. A reader takes the contesting text from the
+contesting fact's own row, read by id on `explicit_search` in the project at
+the store state of the statements it renders, and shows the contest only
+while that read serves the fact: live, not hidden, and of normal sensitivity.
+A labeled fact, such as an assistant's report, is served there; a fact a
+disposition hides, a retired fact, and a fact of another project contest
+nothing a reader is shown. The block shows the stored statement alone in
+those cases, and a pass whose contest read fails is withheld as any failed
+read of the pass is. Every session whose block holds the statement is shown
+the contest, the one whose message recorded it included: the excerpt is the
+one text from a session's own messages that its block carries, because that
+session's observation of the newer value can leave its conversation at a
+fold while the statement, which came from another session, stays in its
+block. The session whose message made the statement is delivered neither the
+statement nor its contest, as with every fact captured from its own messages.
+`eidnara_search` renders a contested statement with a line
+`Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
+contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
+of that fact's served text; when the contesting fact cannot be read, the line
+is `Contested by <fact id>` and a note says so. A later statement of the user
+settles a contest: a user statement that replaces the contested fact ends it,
+and a user statement that repeats the contested fact word for word, up to
+edge whitespace and its closing `.` or `!`, which names it under
+`duplicate_of` and writes no fact, supersedes it with a fact of the same
+text and approval whose rationale holds no `contested_by` and keeps the
+record's `stated_seq` as its own `stated_seq`, so a later contest dates the
+statement from its first commit. A user statement
+of another text that names a contested fact under `duplicate_of` is stored as
+its own fact and the contest stays. The extractor is
+told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
 and defaults to true; the daemon ignores a project-tier value with a warning,

@@ -452,6 +452,7 @@ mod tests {
             replaces: None,
             also_replaces: Vec::new(),
             duplicate_of: None,
+            contests: Vec::new(),
         }
     }
 

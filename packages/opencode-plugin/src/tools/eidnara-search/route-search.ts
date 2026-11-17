@@ -19,6 +19,7 @@ import {
     memoryResultFromRow,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    resolveContests,
 } from "./kernel-memory-search";
 
 export const ROUTE_MAX_SELECTORS = 16;
@@ -140,6 +141,7 @@ export async function searchThroughRoute(args: {
     // A whole number of places, so each pass names at least one decision.
     let places = Math.floor(args.limit);
     let snapshot: number | null = null;
+    const hydrated: ReadRow[] = [];
     for (let next = 0; places > 0 && next < ranking.length; ) {
         const selected = ranking.slice(next, next + places);
         if (selected.length === 0) break;
@@ -161,6 +163,7 @@ export async function searchThroughRoute(args: {
             return refusedState(unavailable("snapshot_diverged"));
         }
         snapshot = read.knownAsOf;
+        hydrated.push(...read.rows);
         unresolvedObjectIds.push(...read.unresolvedObjectIds);
         const rows = new Map(read.rows.map((row) => [row.object.object_id, row]));
         const unresolved = new Set(read.unresolvedObjectIds);
@@ -191,6 +194,19 @@ export async function searchThroughRoute(args: {
             });
         }
     }
+    const contestNote = await resolveContests({
+        client: args.client,
+        results,
+        rows: hydrated,
+        asOf: snapshot,
+        ...(args.signal ? { signal: args.signal } : {}),
+        deadline,
+    });
+    // The contest read is one more read of the search: a daemon connection that changed since the ranking refuses the search, as it does for the hydration reads.
+    if (args.client.connectionIdentity() !== connection) {
+        return refusedState(unavailable("snapshot_diverged"));
+    }
+    if (contestNote) notes.push(contestNote);
     if (stale.length > 0) {
         notes.push(
             `Memory: ${stale.length} ranked ${stale.length === 1 ? "memory" : "memories"} changed or became unreadable after ranking and ${stale.length === 1 ? "was" : "were"} not rendered.`,
