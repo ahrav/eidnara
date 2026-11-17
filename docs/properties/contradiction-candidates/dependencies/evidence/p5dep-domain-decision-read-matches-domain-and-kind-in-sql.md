@@ -74,7 +74,7 @@ reader.
   across `crates/`.
 - Findings: two non-test callers.
   `crates/daemon/src/kernel_routes/read.rs:472`, in `read_visible_page`, is
-  reached through `read_visible_within` from `memory_capture.rs:3260` and
+  reached through `read_visible_within` from `memory_capture.rs:3265` and
   through `read_visible` from tests. `crates/daemon/src/kernel_routes/read.rs:411`,
   in `domain_decisions_in_serving_order`, is reached from
   `canonical_memory.rs:291`. The `kernel.read` route reaches neither.
