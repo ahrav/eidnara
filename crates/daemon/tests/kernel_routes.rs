@@ -6891,3 +6891,579 @@ async fn a_plugin_route_cannot_write_rows_under_the_verifier_id_prefixes() {
     assert_eq!(daemon.tip(), tip);
     daemon.handler.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn recorded_read_after_a_cursor_serves_the_older_rows() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    // Decisions 3 and 4 share one commit, so the page after decision 3 starts inside that commit.
+    for (key, indices) in [
+        ("create-1", vec![1]),
+        ("create-2", vec![2]),
+        ("create-pair", vec![3, 4]),
+    ] {
+        let operations = indices.into_iter().map(insert_decision).collect();
+        let created = daemon.commit(key, operations, vec![]).await;
+        assert_state(&created, "available", None);
+    }
+    let newest = daemon.read("explicit_search", None).await;
+    let cursor = &newest["rows"][0]["object"];
+    assert_eq!(cursor["object_id"], "decision-object-3");
+    assert_eq!(
+        newest["rows"][1]["object"]["created_commit_seq"],
+        cursor["created_commit_seq"]
+    );
+    let mut request = read_request(&daemon.project, SESSION, "explicit_search", None);
+    request["before"] = json!({
+        "created_commit_seq": cursor["created_commit_seq"],
+        "object_id": cursor["object_id"],
+    });
+    let page = daemon.call(daemon.route, request).await;
+    assert_state(&page, "available", None);
+    assert_eq!(page["truncated"], false);
+    let served: Vec<&str> = page["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["object"]["object_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        served,
+        [
+            "decision-object-4",
+            "decision-object-2",
+            "decision-object-1"
+        ]
+    );
+    assert_matches_route_fixture(
+        &with_scope_placeholder(&daemon.project, page),
+        "read-explicit-search-after-cursor.json",
+    );
+    for malformed in [
+        json!({ "created_commit_seq": 1 }),
+        json!({ "created_commit_seq": 1, "object_id": "decision-object-3", "extra": true }),
+    ] {
+        let mut request = read_request(&daemon.project, SESSION, "explicit_search", None);
+        request["before"] = malformed;
+        assert!(matches!(
+            daemon.handler.dispatch_value_for_test(daemon.route, request).await,
+            PreparedOutcome::Error { code, .. } if code == "invalid_params"
+        ));
+    }
+    daemon.handler.shutdown().await.unwrap();
+}
+
+async fn commit_decisions(daemon: &Daemon, total: usize) {
+    let mut index = 0usize;
+    let mut batch = 0usize;
+    while index < total {
+        let operations: Vec<Value> = (index..total.min(index + 256))
+            .map(|index| insert_decision(index as i64))
+            .collect();
+        index += operations.len();
+        let response = daemon
+            .commit(&format!("bulk-{batch}"), operations, vec![])
+            .await;
+        assert_state(&response, "available", None);
+        batch += 1;
+    }
+}
+
+#[tokio::test]
+async fn paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let total = MAX_READ_ROWS + 300;
+    commit_decisions(&daemon, total).await;
+    let oldest = "decision-object-0".to_owned();
+
+    let first = daemon.read("explicit_search", None).await;
+    assert_state(&first, "available", None);
+    assert_eq!(first["truncated"], true);
+    assert!(!object_ids(&first).contains(&oldest));
+    let snapshot = first["known_as_of"].as_i64().unwrap();
+    // The cursor keeps a decision committed after the first page out of later pages. The oldest decision, retired after the first page, stays in them because they read the pinned `snapshot`.
+    let inserted = daemon
+        .commit(
+            "after-first-page",
+            vec![insert_decision(total as i64)],
+            vec![],
+        )
+        .await;
+    assert_state(&inserted, "available", None);
+    let retired = daemon
+        .commit(
+            "retire-oldest",
+            vec![json!({"op": "retire_decision", "object_id": oldest})],
+            vec![token(&oldest, snapshot)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    let mut at_tip = read_request(&daemon.project, SESSION, "explicit_search", None);
+    at_tip["object_ids"] = json!([oldest]);
+    let at_tip = daemon.call(daemon.route, at_tip).await;
+    assert!(object_ids(&at_tip).is_empty(), "{at_tip}");
+
+    // A cursor ahead of every row serves the first page again, so the row cap binds a cursor read as it binds an unfiltered one.
+    let mut ahead = read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+    ahead["before"] = json!({ "created_commit_seq": snapshot + 1, "object_id": "" });
+    let ahead = daemon.call(daemon.route, ahead).await;
+    assert_state(&ahead, "available", None);
+    assert_eq!(ahead["truncated"], true);
+    assert_eq!(ahead["rows"].as_array().unwrap().len(), MAX_READ_ROWS);
+    assert_eq!(ahead["rows"], first["rows"]);
+
+    let mut served: Vec<(i64, String)> = Vec::new();
+    let mut page = first;
+    let mut pages = 1;
+    loop {
+        let rows = page["rows"].as_array().unwrap();
+        assert!(!rows.is_empty(), "{page}");
+        served.extend(rows.iter().map(|row| {
+            (
+                row["object"]["created_commit_seq"].as_i64().unwrap(),
+                row["object"]["object_id"].as_str().unwrap().to_owned(),
+            )
+        }));
+        if page["truncated"] == false {
+            break;
+        }
+        let (seq, id) = served.last().unwrap().clone();
+        let mut request = read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+        request["before"] = json!({ "created_commit_seq": seq, "object_id": id });
+        page = daemon.call(daemon.route, request).await;
+        assert_state(&page, "available", None);
+        assert_eq!(page["known_as_of"], snapshot);
+        // The first page ends inside a commit, so the cursor's object-id order decides where the next page starts.
+        assert_eq!(page["rows"][0]["object"]["created_commit_seq"], seq);
+        pages += 1;
+        assert!(pages <= 2, "paging did not advance past the first page");
+    }
+    assert_eq!(pages, 2);
+    assert!(
+        served
+            .windows(2)
+            .all(|pair| pair[0].0 > pair[1].0 || (pair[0].0 == pair[1].0 && pair[0].1 < pair[1].1))
+    );
+    let mut ids: Vec<String> = served.into_iter().map(|(_, id)| id).collect();
+    ids.sort();
+    let mut expected: Vec<String> = (0..total)
+        .map(|index| format!("decision-object-{index}"))
+        .collect();
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(ids.contains(&oldest));
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// The object ids of a read's rows in the order the daemon served them.
+fn served_order(read: &Value) -> Vec<String> {
+    read["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["object"]["object_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Commits `specs` straight into the store in one commit, each admitted as an explicit user decision.
+fn commit_admitted(store: &kernel::KernelStore, key: &str, specs: Vec<DecisionSpec>) {
+    store
+        .commit(intent(key), |envelope| {
+            for spec in specs {
+                let object_id = spec.object_id.clone();
+                envelope.insert_decision(spec)?;
+                envelope.record_admission(admission(
+                    &object_id,
+                    EventKind::Other,
+                    None,
+                    (SourceClass::ExplicitUser, TaintClass::UserExplicit),
+                ))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+}
+
+/// A store decision under `scope_id` whose summary starts with its index and fills `summary_bytes`.
+fn sized_decision(index: i64, scope_id: Option<&str>, summary_bytes: usize) -> DecisionSpec {
+    let mut spec = store_decision(
+        index,
+        scope_id.unwrap_or(""),
+        &format!("sized-lineage-{index}"),
+    );
+    spec.scope_id = scope_id.map(str::to_string);
+    spec.payload.summary = format!("{index:04}{}", "s".repeat(summary_bytes - 4));
+    spec
+}
+
+/// The kernel's scope prefilter keeps a decision with no scope for every project, and the route's scope filter
+/// serves it to none. A page whose first chunk holds more of those than the row cap reads on, so the project
+/// rows older than them are served and the read reports no truncation.
+#[tokio::test]
+async fn a_read_continues_past_the_rows_its_scope_filter_drops() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    let older = daemon
+        .commit(
+            "older",
+            vec![insert_decision(1), insert_decision(2)],
+            vec![],
+        )
+        .await;
+    assert_state(&older, "available", None);
+    let dropped: Vec<i64> = (0..(MAX_READ_ROWS + 10) as i64).collect();
+    for (batch, indexes) in dropped.chunks(256).enumerate() {
+        let specs = indexes
+            .iter()
+            .map(|&index| sized_decision(index, None, 16))
+            .collect();
+        commit_admitted(&store, &format!("unscoped-{batch}"), specs);
+    }
+    let newest = daemon
+        .commit("newest", vec![insert_decision(3)], vec![])
+        .await;
+    assert_state(&newest, "available", None);
+
+    let read = daemon.read("explicit_search", None).await;
+    assert_state(&read, "available", None);
+    assert_eq!(
+        served_order(&read),
+        [
+            "decision-object-3",
+            "decision-object-1",
+            "decision-object-2"
+        ]
+    );
+    assert_eq!(read["truncated"], false);
+
+    let snapshot = read["known_as_of"].as_i64().unwrap();
+    let mut after_newest =
+        read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+    after_newest["before"] = json!({
+        "created_commit_seq": read["rows"][0]["object"]["created_commit_seq"],
+        "object_id": "decision-object-3",
+    });
+    let page = daemon.call(daemon.route, after_newest).await;
+    assert_state(&page, "available", None);
+    assert_eq!(
+        served_order(&page),
+        ["decision-object-1", "decision-object-2"]
+    );
+    assert_eq!(page["truncated"], false);
+
+    // A read of named ids serves each row as the page serves it, decision included.
+    let mut named = read_request(&daemon.project, SESSION, "explicit_search", Some(snapshot));
+    named["object_ids"] = json!(["decision-object-2", "decision-object-3"]);
+    let named = daemon.call(daemon.route, named).await;
+    assert_state(&named, "available", None);
+    assert_eq!(named["rows"], json!([read["rows"][0], read["rows"][2]]));
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A page serves each decision object with its decision text when the kernel's chunk carried the row's size alone:
+/// a payload over the chunk's inline size, and a row the chunk read after its payload budget was spent. One commit
+/// holds more payload than the byte budget, so the page ends inside it and serves that commit's first rows in
+/// object-id order.
+#[tokio::test]
+async fn a_page_serves_the_decisions_its_chunk_carried_by_size_alone() {
+    use daemon::kernel_routes::read::MAX_READ_ROW_BYTES;
+
+    for (name, first, count, summary_bytes) in [
+        ("large", 1000_i64, 20_i64, 480 * 1024_usize),
+        ("inline", 2000, 200, 60 * 1024),
+    ] {
+        let daemon = Daemon::start().await;
+        let store = daemon.store();
+        seed_domain(&store);
+        let seeded = daemon
+            .commit("seed", vec![insert_decision(1)], vec![])
+            .await;
+        assert_state(&seeded, "available", None);
+        let scope_id = daemon.project_scope_id().await;
+        let specs = (first..first + count)
+            .map(|index| sized_decision(index, Some(&scope_id), summary_bytes))
+            .collect();
+        commit_admitted(&store, name, specs);
+
+        let read = daemon.read("explicit_search", None).await;
+        assert_state(&read, "available", None);
+        assert_eq!(read["truncated"], true, "{name}");
+        let rows = read["rows"].as_array().unwrap();
+        // Every row of the commit encodes to the same length, so the byte budget, which charges each row one
+        // separator byte, fixes how many the page holds.
+        let row_bytes = serde_json::to_vec(&rows[0]).unwrap().len();
+        let fitting = MAX_READ_ROW_BYTES / (row_bytes + 1);
+        assert!(
+            fitting > 1 && (fitting as i64) < count,
+            "{name}: {fitting} of {count} rows fit"
+        );
+        let expected: Vec<String> = (first..first + fitting as i64)
+            .map(|index| format!("store-decision-object-{index}"))
+            .collect();
+        assert_eq!(served_order(&read), expected, "{name}");
+        for (row, index) in rows.iter().zip(first..) {
+            let summary = row["decision"]["payload"]["summary"].as_str();
+            assert_eq!(
+                summary.map(|summary| (&summary[..4], summary.len())),
+                Some((format!("{index:04}").as_str(), summary_bytes)),
+                "{name}: row {index}"
+            );
+        }
+        daemon.handler.shutdown().await.unwrap();
+    }
+}
+
+/// A surface of exactly the row cap is served whole with no truncation, and one row more is served as the newest
+/// rows of the cap with truncation, when the row past the cap is alone in the oldest commit.
+#[tokio::test]
+async fn the_row_cap_serves_a_surface_of_its_size_whole_and_flags_one_row_more() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    let oldest = daemon
+        .commit("oldest", vec![insert_decision(0)], vec![])
+        .await;
+    assert_state(&oldest, "available", None);
+    let mut index = 1_i64;
+    for batch in 0..MAX_READ_ROWS / 256 {
+        let operations: Vec<Value> = (0..256)
+            .map(|offset| insert_decision(index + offset))
+            .collect();
+        index += 256;
+        let response = daemon
+            .commit(&format!("bulk-{batch}"), operations, vec![])
+            .await;
+        assert_state(&response, "available", None);
+    }
+
+    let over = daemon.read("explicit_search", None).await;
+    assert_state(&over, "available", None);
+    assert_eq!(over["rows"].as_array().unwrap().len(), MAX_READ_ROWS);
+    assert_eq!(over["truncated"], true);
+    assert!(!object_ids(&over).contains(&"decision-object-0".to_string()));
+
+    let snapshot = over["known_as_of"].as_i64().unwrap();
+    let retired = daemon
+        .commit(
+            "retire-oldest",
+            vec![json!({"op": "retire_decision", "object_id": "decision-object-0"})],
+            vec![token("decision-object-0", snapshot)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    let exact = daemon.read("explicit_search", None).await;
+    assert_state(&exact, "available", None);
+    assert_eq!(exact["rows"].as_array().unwrap().len(), MAX_READ_ROWS);
+    assert_eq!(exact["truncated"], false);
+    assert_eq!(served_order(&exact), served_order(&over));
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A visible decision object whose decision row is not live at the snapshot fails the read closed: the route
+/// answers `store_unsupported` and serves no row with a null decision. A snapshot at which the decision row is
+/// live serves the object with its decision.
+#[tokio::test]
+async fn a_read_fails_closed_for_a_decision_object_without_a_live_decision_row() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    for index in 1..=3 {
+        let response = daemon
+            .commit(
+                &format!("decision-{index}"),
+                vec![insert_decision(index)],
+                vec![],
+            )
+            .await;
+        assert_state(&response, "available", None);
+    }
+    let tip = daemon.tip();
+    // The registry row stays live; only the decision row ends at the tip, as a damaged store could hold it.
+    core_connection(&daemon)
+        .execute(
+            "UPDATE decisions SET invalidated_commit_seq=?1 WHERE object_id='decision-object-1'",
+            [tip],
+        )
+        .unwrap();
+
+    let broken = daemon.read("explicit_search", None).await;
+    assert_state(&broken, "unavailable", Some("store_unsupported"));
+    assert!(broken.get("rows").is_none(), "{broken}");
+
+    let before = daemon.read("explicit_search", Some(tip - 1)).await;
+    assert_state(&before, "available", None);
+    let first = before["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["object"]["object_id"] == "decision-object-1")
+        .expect("the object is visible before its decision row ends");
+    assert_eq!(first["decision"]["payload"]["summary"], "decision 1");
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A page serves the kernel's own payload text with its escapes and multi-byte characters intact. A payload stored
+/// in any other layout is decoded by id: valid JSON for a decision payload serves the same summary and rationale a
+/// read of the named object serves, and text that is no decision payload fails the read closed.
+#[tokio::test]
+async fn a_page_decodes_a_payload_stored_in_another_layout_and_refuses_one_that_is_no_payload() {
+    let daemon = Daemon::start().await;
+    seed_domain(&daemon.store());
+    // Text with a quote, a backslash, control bytes, and multi-byte characters takes the stored path.
+    let escaped = "quote \" slash \\ tab \t line \n bell \u{7} é \u{1F600}";
+    let seeded = daemon
+        .commit(
+            "seed",
+            vec![insert_decision(1), insert_decision_with_summary(2, escaped)],
+            vec![],
+        )
+        .await;
+    assert_state(&seeded, "available", None);
+    let connection = core_connection(&daemon);
+    let stored: Vec<u8> = connection
+        .query_row(
+            "SELECT decision_payload FROM decisions WHERE object_id='decision-object-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(stored).unwrap(),
+        r#"{"summary":"decision 1","rationale":"because 1"}"#
+    );
+    let store_payload = |payload: &[u8]| {
+        connection
+            .execute(
+                "UPDATE decisions SET decision_payload=?1 WHERE object_id='decision-object-1'",
+                [payload],
+            )
+            .unwrap();
+    };
+    let payloads = |read: &Value| -> Vec<Value> {
+        read["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["decision"]["payload"].clone())
+            .collect()
+    };
+    let named = || {
+        let mut named = read_request(&daemon.project, SESSION, "explicit_search", None);
+        named["object_ids"] = json!(["decision-object-1"]);
+        daemon.call(daemon.route, named)
+    };
+
+    let page = daemon.read("explicit_search", None).await;
+    assert_state(&page, "available", None);
+    assert_eq!(
+        payloads(&page),
+        [
+            json!({"summary": "decision 1", "rationale": "because 1"}),
+            json!({"summary": escaped, "rationale": "because 2"}),
+        ]
+    );
+
+    for (payload, summary, rationale) in [
+        (
+            &br#"{ "rationale": "r\u0041\/\n", "summary": "s \ud83d\ude00", "extra": [1] }"#[..],
+            "s \u{1F600}",
+            "rA/\n",
+        ),
+        (br#"{"rationale":"r","summary":"s"}"#, "s", "r"),
+        (br#"{"summary":"\u0073","rationale":"r"}"#, "s", "r"),
+        (br#"{"summary":"s","rationale":"r"} "#, "s", "r"),
+        (br#"{"summary":"s","rationale":"r","extra":1}"#, "s", "r"),
+    ] {
+        store_payload(payload);
+        let text = String::from_utf8_lossy(payload);
+        let page = daemon.read("explicit_search", None).await;
+        assert_state(&page, "available", None);
+        let decoded = json!({"summary": summary, "rationale": rationale});
+        assert_eq!(payloads(&page)[0], decoded, "{text}");
+        assert_eq!(page["rows"][0], named().await["rows"][0], "{text}");
+    }
+
+    for payload in [
+        &br#"{}"#[..],
+        br#"{"summarx":"s","rationale":"r"}"#,
+        br#"{"summary":"s","rationalx":"r"}"#,
+        br#"{"summary":"s","rationale":7}"#,
+        br#"{"summary":"s","rationale":"r""#,
+        b"{\"summary\":\"\xff\",\"rationale\":\"r\"}",
+    ] {
+        store_payload(payload);
+        let text = String::from_utf8_lossy(payload);
+        let page = daemon.read("explicit_search", None).await;
+        assert_state(&page, "unavailable", Some("store_unsupported"));
+        assert!(page.get("rows").is_none(), "{text}: {page}");
+        assert_state(&named().await, "unavailable", Some("store_unsupported"));
+    }
+    daemon.handler.shutdown().await.unwrap();
+}
+
+/// A page that fills at the end of a chunk reads on to learn whether a row follows it. The rows after the full
+/// page are ones the scope filter drops, so only a later chunk holds the row that decides `truncated`: with that
+/// row the read reports truncation, and without it the same page reports none.
+#[tokio::test]
+async fn a_full_page_reads_later_chunks_to_decide_truncation() {
+    use daemon::kernel_routes::read::MAX_READ_ROWS;
+
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    let oldest = daemon
+        .commit("oldest", vec![insert_decision(0)], vec![])
+        .await;
+    assert_state(&oldest, "available", None);
+    let scope_id = daemon.project_scope_id().await;
+    // Rows of no project sit between the oldest project row and the rest in two commits. The larger one holds more
+    // rows than a chunk asks for, so the chunk that fills the page ends with it, short of the surface's end.
+    for (name, indexes) in [
+        ("unscoped-oldest", 0..50),
+        ("unscoped-older", 100..100 + MAX_READ_ROWS as i64),
+    ] {
+        let specs = indexes
+            .map(|index| sized_decision(index, None, 16))
+            .collect();
+        commit_admitted(&store, name, specs);
+    }
+    let next = daemon
+        .commit("next", vec![insert_decision(1)], vec![])
+        .await;
+    assert_state(&next, "available", None);
+    // The newest commit holds one project row fewer than the cap and rows of no project beside them, so the
+    // first chunk ends with the page one row short.
+    let newest = (10_000..10_000 + MAX_READ_ROWS as i64 - 1)
+        .map(|index| sized_decision(index, Some(&scope_id), 16))
+        .chain((20_000..20_010).map(|index| sized_decision(index, None, 16)))
+        .collect();
+    commit_admitted(&store, "newest", newest);
+
+    let over = daemon.read("explicit_search", None).await;
+    assert_state(&over, "available", None);
+    let served = served_order(&over);
+    assert_eq!(served.len(), MAX_READ_ROWS);
+    assert_eq!(served.last().map(String::as_str), Some("decision-object-1"));
+    assert_eq!(over["truncated"], true);
+
+    let snapshot = over["known_as_of"].as_i64().unwrap();
+    let retired = daemon
+        .commit(
+            "retire-oldest",
+            vec![json!({"op": "retire_decision", "object_id": "decision-object-0"})],
+            vec![token("decision-object-0", snapshot)],
+        )
+        .await;
+    assert_state(&retired, "available", None);
+    let exact = daemon.read("explicit_search", None).await;
+    assert_state(&exact, "available", None);
+    assert_eq!(served_order(&exact), served);
+    assert_eq!(exact["truncated"], false);
+    daemon.handler.shutdown().await.unwrap();
+}

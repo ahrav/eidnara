@@ -275,7 +275,7 @@ Confidence: high -
 `read_project_memory` captures the tip and passes it as the requested snapshot
 (`read_project_memory` (`crates/daemon/src/canonical_memory.rs:205`)); the route
 returns `known_as_of` from the visible read
-(`crates/daemon/src/kernel_routes/read.rs:305`).
+(`crates/daemon/src/kernel_routes/read.rs:544`).
 Existing check:
 `transform_composes_project_memory_from_canonical_rows_and_observes_absence`
 (`crates/daemon/tests/transform_canonical_memory.rs:46`) (assertions
@@ -335,7 +335,7 @@ wrapup reads the live config (`prepare_wrapup_fire`
 `SessionBinding.config` versus `effective_config` at the two call sites.
 Existing check:
 `history_summarizer_diagnostics_omit_project_memory_when_memory_is_disabled_or_not_fired`
-(`crates/daemon/src/lib.rs:40322`); `only_an_available_composition_is_recorded`
+(`crates/daemon/src/lib.rs:40302`); `only_an_available_composition_is_recorded`
 (`crates/daemon/src/use_outcome_writer_tests.rs:181`);
 `a_wrapup_under_a_config_that_differs_from_the_binding_records_no_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:600`). Status: unaudited.
@@ -368,10 +368,10 @@ Required faults and enabling state: A decision admitted, then a committed
 Confidence: high -
 [evidence](evidence/uo-disputed-decision-is-hidden-on-auto-inject-and-labeled-on-explicit-search.md).
 `visibility_row` maps `Disputed` to `ExplicitLabeled` (`visibility_row`
-(`crates/kernel/src/admission.rs:4348`)); `surface_visibility` hides it on every
-surface but explicit search (`crates/kernel/src/admission.rs:4221`).
+(`crates/kernel/src/admission.rs:4686`)); `surface_visibility` hides it on every
+surface but explicit search (`crates/kernel/src/admission.rs:4559`).
 Existing check: `visibility_matrix_and_sensitivity_ceiling_are_total`
-(`crates/kernel/src/admission.rs:5107`);
+(`crates/kernel/src/admission.rs:5445`);
 `every_non_active_disposition_has_the_contracted_surface_row`
 (`crates/kernel/tests/kernel_admission.rs:2890`);
 `dispositions_and_sensitivity_only_reduce_visibility`
@@ -396,8 +396,8 @@ SQL.
 Confidence: high -
 [evidence](evidence/uo-admission-reads-require-a-non-null-commit-seq.md). the
 predicates filter `commit_seq IS NOT NULL`
-(`crates/kernel/src/admission.rs:691`); the production writer binds the envelope
-sequence at `crates/kernel/src/admission.rs:1853`. The use-outcome dispute join
+(`crates/kernel/src/admission.rs:748`); the production writer binds the envelope
+sequence at `crates/kernel/src/admission.rs:1910`. The use-outcome dispute join
 and citation predicate filter the same way
 (`crates/kernel/src/use_outcome.rs:180`).
 Existing check:
@@ -424,12 +424,12 @@ Required faults and enabling state: A `mark_stale` and a `mark_disputed`
 committed together.
 Confidence: high -
 [evidence](evidence/uo-disposition-events-append-rows-and-newest-by-commit-seq-wins.md).
-`LATEST_SUBJECT_DECISION_PREDICATE` (`crates/kernel/src/admission.rs:691`) and
+`LATEST_SUBJECT_DECISION_PREDICATE` (`crates/kernel/src/admission.rs:748`) and
 its single-row seek.
 Existing check: `both_latest_decision_formulations_choose_the_same_row`
 (`crates/kernel/tests/kernel_admission.rs:2252`);
 `an_event_that_names_a_disposition_keeps_its_own_outcome`
-(`crates/kernel/src/admission.rs:5437`). Status: unaudited.
+(`crates/kernel/src/admission.rs:5775`). Status: unaudited.
 Impact: The dispute join counts event existence (C12), so this record bounds
 what a reader sees, not the join.
 Open questions:
@@ -532,7 +532,7 @@ Existing check:
 `session_delete_retires_only_its_own_captures_and_recovers_a_stop_between_pages`
 (`crates/daemon/src/source_capture_tests.rs:1717`);
 `session_delete_waits_for_the_capture_gate_off_the_runtime_worker`
-(`crates/daemon/src/lib.rs:26739`);
+(`crates/daemon/src/lib.rs:26719`);
 `a_delete_marks_the_records_before_the_memory_rows_go_and_a_retry_keeps_the_first_time`
 (`crates/daemon/src/use_outcome_lifecycle_tests.rs:41`). Status: unaudited.
 Impact: #1156 places the `deleted_at` write in this Kernel step; a reordering
@@ -560,7 +560,7 @@ Confidence: high -
 `unbind_route` (`crates/daemon/src/lib.rs:4741`) calls `purge_session_state`
 (`crates/daemon/src/lib.rs:4781`), which clears in-memory maps only.
 Existing check: `route_teardown_keeps_an_admitted_checkpoint_alive`
-(`crates/daemon/src/lib.rs:25584`);
+(`crates/daemon/src/lib.rs:25564`);
 `route_teardown_releases_the_staged_upload_while_the_session_stays_bound`
 (`crates/daemon/tests/kernel_routes.rs:3849`);
 `a_route_torn_down_after_a_hard_fold_leaves_its_records_live`
@@ -881,7 +881,7 @@ and before n; a null row and another lineage by SQL.
 Confidence: high -
 [evidence](evidence/uo-p-disputed-after-serve-from-committed-events-only.md).
 the join is `crates/kernel/src/use_outcome.rs:198-236`, using the admission
-lineage text through `crates/kernel/src/admission.rs:926`.
+lineage text through `crates/kernel/src/admission.rs:983`.
 Existing check:
 `disputed_after_serve_counts_only_later_committed_disputes_on_the_same_lineage`
 (`crates/kernel/tests/kernel_use_outcome.rs:401`);

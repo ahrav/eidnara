@@ -237,11 +237,11 @@ Open questions:
 ### p5dep-domain-decision-read-matches-domain-and-kind-in-sql
 
 Type: safety
-Reachability: default-production - `kernel.read` with
-`RowSelection::DomainDecisions("memory")` is used by `canonical_memory.rs:188`
-and `memory_capture.rs:1054`, both on default paths.
+Reachability: default-production - `domain_decisions_in_serving_order`
+(`canonical_memory.rs:291`) and `read_visible_within` with `RowSelection::DomainDecisions("memory")`
+(`memory_capture.rs:1981`) reach the domain read, both on default paths.
 Status: active
-Exercised: yes - `crates/kernel/tests/kernel_canonical_read.rs:227`, `:448`
+Exercised: yes - `crates/kernel/tests/kernel_canonical_read.rs:229`, `:450`
 compare the domain selection to the filtered full read and show another
 domain's payload volume does not cost the domain read.
 Guarantee: `visible_domain_decisions_as_of_in_scope(surface, as_of, domain,
@@ -257,10 +257,10 @@ Fault/timing angle: none; single snapshot.
 Required faults and enabling state: decisions in two domains at one snapshot;
 a corrupt or oversize payload in the other domain.
 Confidence: high - [evidence](evidence/p5dep-domain-decision-read-matches-domain-and-kind-in-sql.md).
-Read `admission.rs:3575-3580` (`ids_predicate`) and `:3178-3231`.
+Read `admission.rs:3845-3856` (`ids_predicate`) and `:3291-3336`.
 Existing check: `the_domain_selection_equals_the_filtered_full_read`,
 `the_domain_selection_reads_no_row_of_another_domains_payload_pressure`,
-in-module `admission.rs:6264-6281`. Status unaudited.
+in-module `admission.rs:6635-6651`. Status unaudited.
 Impact: the P5 candidate set would include non-memory decisions or fail on
 another domain's corruption.
 Open questions: None.
@@ -269,7 +269,7 @@ Open questions: None.
 
 Type: safety
 Reachability: default-production - every `kernel.read` passes
-`project.scope_term()` (`read.rs:178`).
+`project.scope_term()` (`read.rs:301`, `:465`).
 Status: active
 Exercised: partial - `crates/kernel/tests/kernel_scope.rs:235-388` covers
 branch-dimension terms: matching, other value, redacted, no term on the
@@ -289,11 +289,11 @@ the filtered read; equivalently the filtered set is a superset of the
 algebra's match set. `always` because a dropped matching row is a silent
 cross-project omission on every read.
 Fault/timing angle: redaction placeholders decode to `Uncertain`; the filter
-must keep them (`admission.rs:3567-3574`).
+must keep them (`admission.rs:3834-3841`).
 Required faults and enabling state: scopes with no term, with a non-exact
 operator, with a redacted value; a redacted filter value; a NULL scope row.
 Confidence: high - [evidence](evidence/p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict.md).
-Read `admission.rs:3650-3664` (the `WHERE` tail) and `project.rs:207-220`.
+Read `admission.rs:3938-3952` (the `WHERE` tail) and `project.rs:207-220`.
 Existing check: `a_scope_filter_keeps_rows_whose_redacted_term_the_algebra_reports_uncertain`.
 Status unaudited.
 Re-exercised by #1167: the pass applies the SQL prefilter and then
@@ -307,7 +307,7 @@ and rows with no scope (D5); a prefilter that dropped uncertain rows would
 hide same-project decisions from the candidate set.
 Open questions:
 - D5: the daemon `ScopeFilter::matches` returns `false` for a `None` scope
-  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3664`). Is a
+  (`project.rs:212-214`) while the SQL keeps NULL scopes (`admission.rs:3949`). Is a
   decision with no scope ever written in the `memory` domain at HEAD?
   (partial: `ProjectBinding::scope_spec` always attaches a scope for
   route-written rows; other writers not audited)
@@ -315,64 +315,98 @@ Open questions:
 ### p5dep-daemon-bounds-rows-after-the-scope-filter
 
 Type: safety
-Reachability: default-production - `read_visible` (`read.rs:163`) is the
-only path behind `kernel.read` and the in-process `DomainDecisions` callers.
+Reachability: default-production - `kernel.read` (`read.rs:724-740`) serves a
+request with `object_ids` through `read_visible_page` (`read.rs:448`) and a
+request with none through `newest_page` (`read.rs:289`); `read_visible`
+(`read.rs:383`) and `read_visible_within` (`read.rs:435`) put the capture
+read of the `memory` domain and the classifier's named-id read
+(`crates/daemon/src/lib.rs:15228`) on `read_visible_page`.
 Status: active
-Exercised: yes - `crates/daemon/tests/kernel_routes.rs:1958`, `:2080`,
-`:2112` construct over-cap row counts and over-budget payloads.
-Guarantee: after the Kernel read and the daemon `ScopeFilter`, `read_visible`
-keeps at most `MAX_READ_ROWS` (8192) newest rows by `(created_commit_seq
-desc, object_id)`, sets `truncated` when any row was dropped, reads
-`decision_payload_sizes_as_of` for the kept decision ids before loading any
-payload, cuts the row list where cumulative payload bytes pass
-`MAX_READ_ROW_BYTES`, and only then loads `decisions_for_objects_as_of` for
-the retained ids; a kept decision without a payload size or row fails the
-read as `CorruptCanonicalRow`.
-Check: `always` - `rows.len() <= 8192`; `truncated == (filtered_count >
-8192 || payload_cut)`; the kept set equals sort-then-truncate of the filtered
-set; no `decisions_for_objects_as_of` call names an id outside the retained
+Exercised: yes - on the `newest_page` path,
+`crates/daemon/tests/kernel_routes.rs:1958`, `:7225`, and `:7414` construct
+over-cap row counts, and `:2112` and `:7174` over-budget payloads. On the
+`read_visible_page` path, `crates/daemon/tests/kernel_routes.rs:2080`
+constructs over-cap inputs for `NewestRows` alone,
+`crates/daemon/src/kernel_routes/read.rs:1088` puts one row more than
+`MAX_READ_ROWS` through `read_visible`, and
+`crates/daemon/src/lib.rs:38209` puts over-budget payloads through
+`read_visible`.
+Guarantee: after the Kernel read, the optional `before` cursor of
+`kernel.read`, and the daemon `ScopeFilter` (`read.rs:329`, `:482-484`),
+both paths keep at most `MAX_READ_ROWS` (8192) newest rows by
+`(created_commit_seq desc, object_id)`, set `truncated` when any row was dropped, cut
+the row list where cumulative payload bytes pass `MAX_READ_ROW_BYTES`, and
+fail the read as `CorruptCanonicalRow` when a kept decision has no decision
+row; `read_visible_page` reads `decision_payload_sizes_as_of` for the kept
+decision ids before loading any payload and only then loads
+`decisions_for_objects_as_of` for the retained ids, and `newest_page` takes
+each payload size from its chunk row and loads `decisions_for_objects_as_of`
+only for the retained decisions whose stored payload it cannot serve as
+stored.
+Check: `always` - on both paths, `rows.len() <= 8192`; `truncated == (filtered_count >
+8192 || payload_cut)`, where the filtered set holds the rows that pass the
+selection, the cursor, and the scope filter; the retained set is a prefix of
+sort-then-truncate of the filtered set, whole when no payload cut applies; no `decisions_for_objects_as_of` call names an id outside the retained
 set; and `sum(payload_sizes[retained]) <= MAX_READ_ROW_BYTES` or the retained
 set is exactly the prefix the cut allows. `always` because every read must
 hold these bounds.
 Fault/timing angle: the row bound cannot be a SQL `LIMIT` because the filter
-runs after SQL (`read.rs:190`); a bound applied before the filter would
-under-serve.
+runs after SQL (`read.rs:302`, `:479`); a bound applied before the filter would
+under-serve. `newest_page` reads the next chunk until a row passes the
+filter beyond the cap, the payload cut applies, or a chunk reports the
+surface exhausted (`read.rs:323-356`).
 Required faults and enabling state: more than 8192 same-project visible rows;
 decisions whose payload sizes sum past `MAX_WIRE_BODY_BYTES / 8`; a decision
 row deleted out of band to force `CorruptCanonicalRow`.
 Confidence: high - [evidence](evidence/p5dep-daemon-bounds-rows-after-the-scope-filter.md).
-Read `read.rs:186-249`.
+Read `read.rs:289-381` and `:448-550`.
 Existing check: `a_read_over_the_row_cap_serves_the_newest_rows_and_flags_truncation`,
 `bounded_selection_matches_a_full_sort_and_truncate`,
-`a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`. Status
-unaudited.
+`a_read_over_the_byte_budget_serves_the_newest_rows_that_fit`, and, for the
+cursor under the row cap,
+`paging_with_before_serves_every_row_of_a_surface_over_the_row_cap_once`
+(`crates/daemon/tests/kernel_routes.rs:6973`); for `newest_page`,
+`a_read_continues_past_the_rows_its_scope_filter_drops` (`:7106`),
+`a_page_serves_the_decisions_its_chunk_carried_by_size_alone` (`:7174`),
+`the_row_cap_serves_a_surface_of_its_size_whole_and_flags_one_row_more`
+(`:7225`), and
+`a_read_fails_closed_for_a_decision_object_without_a_live_decision_row`
+(`:7273`), and `a_full_page_reads_later_chunks_to_decide_truncation`
+(`:7414`); for `read_visible_page`,
+`a_domain_selection_over_the_row_cap_keeps_the_newest_rows`
+(`crates/daemon/src/kernel_routes/read.rs:1088`). The route tests' over-cap
+and over-budget reads carry no `object_ids`, so `newest_page` serves them.
+Status unaudited.
 Re-exercised by #1167: the pass bounds its candidate set with `NewestRows`
 after the scope filter; the test at
 `crates/daemon/src/candidate_pass_tests.rs:665` cuts the two oldest at a
 reduced cap.
-Impact: a P5 pass that copies this pattern (plan U1 "patterns to follow"
-`read.rs:185`) inherits a bound that is applied after full materialization of
+Impact: a P5 pass that copies the `read_visible_page` pattern (plan U1 "patterns to follow",
+cited there as line 185 and now at `read.rs:472`) inherits a bound that is applied after full materialization of
 the Kernel rows; see the next record.
 Open questions: None.
 
 ### p5dep-kernel-domain-read-has-no-row-bound
 
 Type: reachability
-Reachability: default-production - any `kernel.read` on a project with many
-decisions.
+Reachability: default-production - any in-process `DomainDecisions` read
+through `read_visible` (`read.rs:472-477`), such as the canonical memory
+read, on a project with many decisions. `kernel.read` does not call this API.
 Status: active
-Exercised: not yet - no test constructs a same-project `memory` domain with
-more than `MAX_READ_ROWS` decisions and observes the Kernel-side
-materialization before the daemon heap.
+Exercised: partial - `crates/daemon/src/kernel_routes/read.rs:1088` puts
+8,193 same-project `memory` decisions through the domain read by way of
+`read_visible` and asserts `truncated`, which holds only when the domain read
+returned more than `MAX_READ_ROWS` rows; the count on the Kernel API's return
+value is not asserted.
 Guarantee: the situation "the Kernel returned more rows than the daemon
 keeps" is reachable at HEAD: `visible_domain_decisions_as_of_in_scope` has
 no `max_rows`, `max_bytes`, or `EvalBudget` parameter and materializes every
-matching row (`admission.rs:3207-3220`); the only bounds are the daemon's,
+matching row (`admission.rs:3323-3328`); the only bounds are the daemon's,
 applied afterwards.
 Check: `sometimes` - a campaign must produce at least one history in which
 `rows.len() > MAX_READ_ROWS` is observed on the Kernel API's return value
 inside the over-cap fixture (`kernel_routes.rs:1958`), calling the Kernel
-API directly rather than probing `read.rs:192`, so that the daemon-side
+API directly rather than probing `read.rs:481`, so that the daemon-side
 bound and the plan's OQ5-1 concern are exercised rather than vacuously
 satisfied. `sometimes` because this is situation coverage of the state
 "Kernel returned more rows than the daemon will keep"; it is not a code
@@ -381,16 +415,22 @@ Fault/timing angle: none; a large project is the enabling state.
 Required faults and enabling state: at least 8193 visible same-project
 `memory` decisions at one snapshot.
 Confidence: high - [evidence](evidence/p5dep-kernel-domain-read-has-no-row-bound.md).
-Read the signature at `admission.rs:3165-3176` and `visible_selected_as_of`.
-Existing check: none for the Kernel-side count; the daemon-side cap test
-(`kernel_routes.rs:1958`) constructs over-cap rows and so would witness this
-state if instrumented. Status unaudited.
+Read the signature at `admission.rs:3278-3287` and `visible_selected_as_of`.
+Existing check: none for the Kernel-side count.
+`a_domain_selection_over_the_row_cap_keeps_the_newest_rows`
+(`crates/daemon/src/kernel_routes/read.rs:1088`) constructs the state and
+observes it through the daemon's `truncated` flag. The route cap test
+(`kernel_routes.rs:1958`) constructs over-cap rows, but its `kernel.read`
+reads them through `visible_chunk_as_of_in_scope`, so it would witness this
+state only by calling the domain read directly. Status unaudited.
 Relied on by #1167: the pass calls
 `visible_domain_decisions_as_of_in_scope` without a row or budget bound (the
 `sometimes` witness); the pass's own bound applies after the read.
 Impact: the plan's R2 reads the whole scope-filtered domain per pass; the
 work is unbounded in project size at the Kernel layer (plan OQ5-1). A P5
-design that assumes a bounded Kernel read is unsound at HEAD.
+design that assumes the domain read is bounded is unsound at HEAD; the read
+with row and payload arguments, `visible_chunk_as_of_in_scope`
+(`admission.rs:3249-3276`), has no domain selection.
 Open questions:
 - OQ5-1 (plan): add a budgeted or bounded variant, or read ids then page.
   (needs human input)

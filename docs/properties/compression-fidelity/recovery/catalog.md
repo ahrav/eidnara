@@ -220,7 +220,7 @@ Confidence: high - [evidence](evidence/cf-unavailable-evidence-no-credit.md).
 Typed read failures, scanner refusal, and search outcome distinctions were
 inspected; no consumer-safety or fidelity campaign ran.
 Existing check: `crates/daemon/tests/harness_sources.rs:1459-1483` checks
-refused bytes; search `tools.test.ts:350-425,473-508` checks unavailable and
+refused bytes; search `tools.test.ts:374-449,497-532` checks unavailable and
 undelivered results; all unaudited. No complete disposition join was found.
 Impact: Safe abstention or a successful internal witness can conceal loss of
 the evidence needed for a useful, supported answer.
@@ -301,7 +301,7 @@ Confidence: high - [evidence](evidence/cf-shipped-recovery-capabilities.md).
 Registration, memory-only execution, default enablement, and Pi's transform flag,
 false at the inspected revision, were inspected; no future capability is assumed.
 Existing check: `packages/opencode-plugin/src/plugin/tool-registry.test.ts:69-119,127-164`
-pins registry/schema behavior, search `tools.test.ts:428-439` pins descriptions,
+pins registry/schema behavior, search `tools.test.ts:452-463` pins descriptions,
 and `packages/pi-plugin/src/index.test.ts:59-78` pins the Pi gate; all unaudited.
 Impact: Internal source availability can be misreported as an agent feature,
 or unsupported Pi scenarios can make cross-harness coverage appear complete.

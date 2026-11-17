@@ -1,7 +1,8 @@
 # p5dep-claim-fact-bounds-are-refused-before-any-row-is-read
 
 HEAD `3a3b916b7`; the `claim_facts.rs` references are re-verified at the
-#1166 branch tip. Surface S3.
+#1166 branch tip, and the `kernel_routes/read.rs` reference at the #1209
+branch tip. Surface S3.
 
 ## Discovery trigger
 
@@ -72,7 +73,7 @@ Reader acquisition is the only wait; the bound check precedes it.
 ### Q: D1. Which API supplies decision summary text for P5?
 
 - Sources examined: `claim_facts.rs:85-156`, `slice/mod.rs:25-28`,
-  `slice/read.rs:126-243`, `kernel_routes/read.rs:231-242`.
+  `slice/read.rs:126-243`, `kernel_routes/read.rs:527-542`.
 - Findings: `ClaimFacts` has no text. `DecisionRow.payload.summary` is
   returned by `decisions_for_objects_as_of` (unbudgeted),
   `decisions_for_objects_as_of_within_budget` (reader-wait budget), and
