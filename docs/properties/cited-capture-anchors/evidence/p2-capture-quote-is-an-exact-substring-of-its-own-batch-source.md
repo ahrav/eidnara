@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`parse_capture_batch` (`crates/daemon/src/memory_capture.rs:266`) refuses the batch when a row's `message_id` names no batch message or repeats one. `validate_capture_memories` (`:732`) refuses a memory whose quote is empty, over `MAX_CAPTURE_MEMORY_BYTES`, or not contained in its own source's text (`:745`). The system prompt states the rule at `:180`. A refusal fails only the affected source's jobs. For a user message under its own id, `join_sentence_runs` (`:405`) runs before that validation and gives quotations that follow one another the slice of the same message that spans them, so the quotation validation checks is the one the plan freezes.
+`parse_capture_batch` (`crates/daemon/src/memory_capture.rs:266`) refuses the batch when a row's `message_id` names no batch message or repeats one. `validate_capture_memories` (`:732`) refuses a memory whose quote is empty, over `MAX_CAPTURE_MEMORY_BYTES`, or not contained in its own source's text (`:745`). The system prompt states the rule at `:180`. A refusal fails only the affected source's jobs. For a user message under its own id, `join_sentence_runs` (`:405`) runs before that validation and gives quotations that follow one another the slice of the same message that spans them, so validation checks the joined quotation.
 
 ## Failure scenario
 

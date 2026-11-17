@@ -1037,8 +1037,9 @@ names `replaces`, `also_replaces`, or `contests`, and one whose replacement
 the parser released as a contest, is stored as proposed or, when its
 quotation joins a run (below), with the joined text, so only a
 correction the extractor quoted in whole sentences meets the statement rule
-and replaces a fact served on `auto_inject`, and a contest shows the clause
-or the sentences the extractor judged. A widened quotation whose `duplicate_of` names
+and replaces a fact served on `auto_inject`, and a contest shows the
+quotation the extractor judged: a clause of an assistant source, whole
+sentences of a user source. A widened quotation whose `duplicate_of` names
 a fact served on `auto_inject` with another text drops that link and is
 stored as the user's own statement: the extractor matched the clause it
 quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
@@ -1056,9 +1057,8 @@ statement and each later one follows the colon, so the three are stored as
 the one statement from `Correction` through `flag.`. A later sentence the
 statement rule refuses for another reason, such as one that starts with an
 inline code span, is stored as proposed. A run starts at a
-quotation that is a whole statement as proposed, or at one that names no
-`replaces`, `also_replaces`, or `contests` and widens to one, counted from
-that sentence's first word. Only quoted sentences are joined, proposals that
+quotation that is a whole statement as proposed, or at one that widening
+above stores as its whole sentence, counted from that sentence's first word. Only quoted sentences are joined, proposals that
 quote one span share its place in the run, a quotation with a second copy in
 the message, overlapping or apart, joins nothing, and a source under a
 hashed id is left as proposed. Once the links of the source are judged, the joined

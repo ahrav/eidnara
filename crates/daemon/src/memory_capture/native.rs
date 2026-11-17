@@ -578,40 +578,15 @@ pub(super) fn settle_batch_contests(batch: &mut [(Vec<CapturedMemory>, Vec<bool>
 
 /// Widens each cut quotation of a user message to the whole sentence that
 /// holds it, so the stored statement keeps a lead-in, a negation, or a
-/// condition the extractor left out.
-///
-/// A proposal that replaces, retires, or contests memories is left as it
-/// is here: the extractor judged that relation from the clause it quoted,
-/// and only a correction quoted in whole sentences replaces a memory served
-/// automatically. A replacement the parser released as a contest is such a
-/// proposal. Two
-/// proposals of different categories that name one sentence keep their own
-/// quotations, so one sentence is stored once per category at most and each
-/// clause stays its own memory.
+/// condition the extractor left out (see [`super::widened_statements`]).
 ///
 /// Returns the widened quotations.
 fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) -> Vec<String> {
-    let widened: Vec<Option<&str>> = proposed
-        .iter()
-        .map(|memory| {
-            if super::keeps_quotation(memory) {
-                None
-            } else {
-                enclosing_statement(prose, &memory.quote)
-            }
-        })
-        .collect();
+    let widened = super::widened_statements(prose, proposed);
     let mut quotations = Vec::new();
-    for index in 0..proposed.len() {
-        let Some(statement) = widened[index] else {
-            continue;
-        };
-        let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
-            other.category != proposed[index].category
-                && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
-        });
-        if !shared {
-            proposed[index].quote = statement.to_owned();
+    for (memory, statement) in proposed.iter_mut().zip(widened) {
+        if let Some(statement) = statement {
+            memory.quote = statement.to_owned();
             quotations.push(statement.to_owned());
         }
     }

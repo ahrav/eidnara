@@ -388,9 +388,8 @@ fn parse_capture_batch(
 ///
 /// Only sentences the extractor quoted are joined, so the stored statement
 /// holds exactly the sentences it chose. A run starts at a quotation that is
-/// a whole statement as quoted, or at one that [`keeps_quotation`] leaves
-/// free and that widens to one under [`enclosing_statement`], as publication
-/// widens it. Proposals that quote one span share its place in the run. A
+/// a whole statement as quoted, or at one that widens to one under
+/// [`widened_statements`], as publication widens it. Proposals that quote one span share its place in the run. A
 /// quotation with a second copy in the message, overlapping or apart, has
 /// no one place and joins nothing.
 ///
@@ -411,6 +410,7 @@ fn join_sentence_runs(
         return Vec::new();
     }
     let prose = Prose::of(text);
+    let widened = widened_statements(&prose, memories);
     // Each place a quotation holds in the message, in message order: whether
     // it is a statement on its own, and the proposals that quote it.
     let mut places: BTreeMap<(usize, usize), (bool, Vec<usize>)> = BTreeMap::new();
@@ -434,9 +434,7 @@ fn join_sentence_runs(
         let end = end + usize::from(closes);
         let place = if quotes_whole_statements(&prose, quote) {
             Some((start, end, true))
-        } else if let Some(statement) =
-            enclosing_statement(&prose, quote).filter(|_| !keeps_quotation(memory))
-        {
+        } else if let Some(statement) = widened[index] {
             // The statement is a slice of the message, so its address gives
             // its place.
             let from = statement.as_ptr().addr() - text.as_ptr().addr();
@@ -525,6 +523,38 @@ fn unify_run_categories(memories: &mut [CapturedMemory], runs: &[Vec<usize>]) {
             }
         }
     }
+}
+
+/// For each proposal of one user message, the whole sentence its cut
+/// quotation widens to under [`enclosing_statement`], or `None` where the
+/// quotation is stored as proposed.
+///
+/// A proposal that replaces, retires, or contests memories is left as it
+/// is (see [`keeps_quotation`]); a replacement the parser released as a
+/// contest is such a proposal. Two proposals of different categories that
+/// name one sentence keep their own quotations, so one sentence is stored
+/// once per category at most and each clause stays its own memory.
+fn widened_statements<'t>(prose: &Prose<'t>, proposed: &[CapturedMemory]) -> Vec<Option<&'t str>> {
+    let widened: Vec<Option<&str>> = proposed
+        .iter()
+        .map(|memory| {
+            if keeps_quotation(memory) {
+                None
+            } else {
+                enclosing_statement(prose, &memory.quote)
+            }
+        })
+        .collect();
+    (0..proposed.len())
+        .map(|index| {
+            let statement = widened[index]?;
+            let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
+                other.category != proposed[index].category
+                    && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
+            });
+            (!shared).then_some(statement)
+        })
+        .collect()
 }
 
 /// Whether widening leaves a proposal's quotation as it is: one that names
@@ -7271,6 +7301,20 @@ mod tests {
                 .remove(0)
                 .err(),
             Some("capture output repeats a memory in one source")
+        );
+        // Two clauses of the first sentence under two categories are
+        // stored as proposed, so no run starts at their sentence.
+        let clauses = [
+            ("open and their order is undecided.", "CONSTRAINTS", None),
+            ("their order is undecided.", "ARCHITECTURE", None),
+            (RETRY_COUNTER, "CONSTRAINTS", None),
+        ];
+        assert_eq!(
+            own(&clauses)
+                .into_iter()
+                .map(|(quote, _, _)| quote)
+                .collect::<Vec<_>>(),
+            clauses.map(|(quote, _, _)| quote)
         );
         // A first sentence that names a replacement and is cut is kept as
         // quoted, so no run starts at it.
