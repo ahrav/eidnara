@@ -10333,7 +10333,7 @@ const SYSTEM_INJECTION_MARKERS: &[&str] = &[
     "**THE SUBAGENT JUST CLAIMED THIS TASK IS DONE.",
 ];
 
-fn is_system_injected_text(text: &str) -> bool {
+pub(crate) fn is_system_injected_text(text: &str) -> bool {
     let text = tag_stripped_text(text);
     text == "<!-- OMO_INTERNAL_INITIATOR -->"
         || (text.starts_with("<system-reminder>") && text.ends_with("</system-reminder>"))

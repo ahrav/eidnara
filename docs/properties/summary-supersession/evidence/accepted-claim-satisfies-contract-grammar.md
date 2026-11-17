@@ -39,12 +39,17 @@ range of the presented part per text block of a user-role message outside
 the reserved `eidnara:` id space whose cleaned text passes
 `is_user_written`. Attachment placeholders and tool-result digests lie
 outside every range. `text_parts` flags a text block through
-`chunk_text::is_typed_text`, which leaves out native text in the form
-`crates/daemon/src/codec/pi.rs::bash_execution_text` writes, read by
-`crates/daemon/src/memory_capture.rs::is_pi_bash_execution_text`. A Pi
-`bashExecution` row decodes to one such text block, so it has no range.
-The chunk builder holds no harness name, so the form is left out for every
-harness, where memory capture leaves it out for `pi` sources.
+`chunk_text::is_typed_text`, which leaves out two forms of native text. The
+first is the form `crates/daemon/src/codec/pi.rs::bash_execution_text`
+writes, read by
+`crates/daemon/src/memory_capture.rs::is_pi_bash_execution_text`; a Pi
+`bashExecution` row decodes to one such text block, so it has no range. The
+second is text that opens with a marker
+`crates/daemon/src/transform.rs::is_system_injected_text` reads as injected
+by a plugin. The chunk builder holds no harness name, so both forms are
+left out for every harness, where memory capture leaves the first out for
+`pi` sources. A text block that holds a plugin's marker after the user's
+own words keeps its range.
 
 `crates/daemon/src/history_summarizer_validate.rs::parse_claims` unescapes
 each child element before the checks, so the bounds count unescaped bytes.

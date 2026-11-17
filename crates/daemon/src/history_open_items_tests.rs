@@ -719,7 +719,7 @@ fn a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_othe
         (start, start + LIFT.len())
     };
     let whole: CitedSpan = |part| (0, part.len());
-    let cases: [(Vec<BlockKind>, CitedSpan, bool); 11] = [
+    let cases: [(Vec<BlockKind>, CitedSpan, bool); 16] = [
         // The user's text holds the words, and so does the tool result after it.
         (vec![own(), returned()], first, true),
         (vec![own(), returned()], last, false),
@@ -730,6 +730,10 @@ fn a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_othe
         // The attachment's file name holds the words, alone and after the user's text.
         (vec![other(), attachment()], first, false),
         (vec![own(), attachment()], last, false),
+        // The attachment stands before the user's text, and between two text blocks.
+        (vec![attachment(), own()], last, true),
+        (vec![attachment(), own()], first, false),
+        (vec![other(), attachment(), other()], whole, false),
         // The user's text holds marker brackets before the words.
         (
             vec![said(format!("\u{ab}Done\u{bb}, so {LIFT}.")), returned()],
@@ -745,6 +749,19 @@ fn a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_othe
         ),
         (
             vec![said(format!("Ran `echo {LIFT}`\n(no output)"))],
+            first,
+            false,
+        ),
+        // A row another plugin builds under the user role, by its opening marker.
+        (
+            vec![said(format!(
+                "[SYSTEM DIRECTIVE: OH-MY-OPENCODE - TODO CONTINUATION] Keep going: {LIFT}."
+            ))],
+            first,
+            false,
+        ),
+        (
+            vec![said(format!("[Category+Skill Reminder] {LIFT}."))],
             first,
             false,
         ),

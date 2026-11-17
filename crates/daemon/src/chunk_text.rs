@@ -232,10 +232,12 @@ fn system_reminder_tag_regex() -> &'static Regex {
 }
 
 /// Whether `text`, the native text of a text block, is text someone typed to the assistant.
-/// The text the Pi codec gives a bash execution holds a command and its output, so it is the
-/// one form that is left out, for every harness, as memory capture leaves it out for `pi`.
+/// Two forms are left out, for every harness: the text the Pi codec gives a bash execution,
+/// which holds a command and its output and which memory capture leaves out for `pi`, and text
+/// that opens with a marker the transform reads as injected by a plugin.
 pub(crate) fn is_typed_text(text: &str) -> bool {
     !crate::memory_capture::is_pi_bash_execution_text(text)
+        && !crate::transform::is_system_injected_text(text)
 }
 
 fn is_user_written((text, cleaned_text): &(String, bool)) -> bool {
