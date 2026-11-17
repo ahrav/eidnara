@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`publish` (`crates/daemon/src/memory_capture.rs:1006`) reads the frozen plan through `prepare_memory_capture` (`crates/memory-store/src/memory_capture.rs:373`), which returns the stored `prepared_json` once frozen. `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:1215`) builds the intent with producer `memory_capture`, the project's operation key for the job id (`:1227`), and the SHA-256 of the frozen plan (`:1230`). The envelope replays a receipt with an equal digest and returns `Conflict` for a different one (`crates/kernel/tests/kernel_envelope.rs:160`).
+`publish` (`crates/daemon/src/memory_capture.rs:1392`) reads the frozen plan and its dispatch count through `frozen_memory_capture` (`crates/memory-store/src/memory_capture.rs:455`), a read that returns the stored `prepared_json` of a job that holds one; `prepare_memory_capture` (`crates/memory-store/src/memory_capture.rs:415`) freezes the plan at extraction and returns the stored plan once frozen. `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:3507`) builds the intent with producer `memory_capture`, the project's operation key for the job id (`:3567`), and the SHA-256 of the frozen plan (`:3570`). The envelope replays a receipt with an equal digest and returns `Conflict` for a different one (`crates/kernel/tests/kernel_envelope.rs:160`).
 
 ## Failure scenario
 
@@ -18,13 +18,13 @@ The reply of a successful commit is lost and the job is retried.
 
 ## What a test must construct
 
-A publish, then a second publish of the same job; a frozen plan edited under the same key in a test store.
+A publish, then a second publish of the same job; a frozen plan edited under the same key in a test store; a committed source whose queue row is deleted and whose message is queued and planned again.
 
 ## Investigation log
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:2016`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24515`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/memory_capture.rs:7860`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24943`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

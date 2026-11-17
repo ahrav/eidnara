@@ -52,7 +52,7 @@ Host wire and application:
   `lanes=...`, followed by `provenance=...`.
 - Pi's tool (`packages/pi-plugin/src/tools/eidnara-search.ts:3`) imports
   `executeEidnaraSearch` from the OpenCode package, which calls
-  `searchThroughRoute` (`execute.ts:183`). One application path serves both
+  `searchThroughRoute` (`execute.ts:179`). One application path serves both
   hosts.
 - `packages/pi-plugin/src/tools/eidnara-search.test.ts:114` asserts
   `match=fused lanes=dense provenance=unknown` from a scripted route reply; the reply names the

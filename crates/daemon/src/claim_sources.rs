@@ -70,6 +70,11 @@ impl ClaimSubject {
 pub enum ClaimExclusion {
     /// The representation's text is empty, so the class has one fewer representation rather than an empty row.
     EmptyRepresentation(Representation),
+    /// The decision is of a domain other than `memory`. A decision of
+    /// another promoted domain keeps its canonical representation and yields
+    /// no memory-class occurrence. A statement record of the
+    /// `user-statements` domain yields no occurrence at all: the memory it
+    /// approves publishes the same text.
     OutsideMemoryDomain,
     NegativeCategory,
     /// A decision without a project scope serves no project; publishing it would retain bytes and queue work no read can reach.
@@ -130,6 +135,13 @@ pub fn claim_units(
     }
     if decision.scope_id.is_none() {
         out.exclusions.push(ClaimExclusion::Unscoped);
+        return Ok(out);
+    }
+    // A statement record approves one captured memory and repeats its text.
+    // The memory's own units carry that text, so the record publishes none
+    // and a statement is ranked once.
+    if subject.domain_id == crate::memory_capture::STATEMENT_DOMAIN_ID {
+        out.exclusions.push(ClaimExclusion::OutsideMemoryDomain);
         return Ok(out);
     }
     let promoted = if subject.domain_id != MEMORY_DOMAIN_ID {

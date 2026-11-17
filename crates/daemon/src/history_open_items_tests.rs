@@ -714,7 +714,7 @@ fn composed_baseline(store: &MemoryStore) -> String {
             now_ms: 0,
             history_budget_tokens: 60_000.0,
             covered_system_messages: &[],
-            memory_enabled: false,
+            inject_memory: false,
             user_profile_budget_tokens: 0.0,
             inject_docs: false,
             project_doc_files: &[],

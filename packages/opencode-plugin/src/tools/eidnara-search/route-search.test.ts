@@ -4,7 +4,7 @@ import { renderAntiMemoryContent } from "../../shared/kernel-client/anti-memory"
 import { FakeKernel, FakeKernelTransport } from "../../shared/kernel-client-testing/fake-kernel";
 import type { KernelClientResolver } from "../eidnara-memory/types";
 import { executeEidnaraSearch } from "./execute";
-import { ROUTE_MAX_SELECTORS, ROUTE_SEARCH_DEADLINE_MS } from "./route-search";
+import { ROUTE_MAX_SELECTORS, ROUTE_SEARCH_DEADLINE_MS, searchThroughRoute } from "./route-search";
 
 const ctx = { sessionID: "ses-route", directory: "/tmp/eidnara-route" };
 const id = (n: number) => `mem_${String(n).padStart(32, "0")}`;
@@ -414,8 +414,197 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).not.toContain("Use Redis");
         expect(execution.text).not.toContain("Still current.");
         expect(execution.text).toContain(
-            "Memory: 4 ranked memories changed or became unreadable after ranking and were not rendered.",
+            "Memory: 3 ranked memories changed or became unreadable after ranking and were not rendered.",
         );
+    });
+
+    it("gives a ranked decision of another domain no result place and no stale note", async () => {
+        const { kernel, run } = harness();
+        // Each memory is ranked beside the statement record that approves it and repeats its text.
+        const ranked: { object: string }[] = [];
+        for (const index of [1, 2, 3]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `User stated: fact ${index}.`,
+            });
+            kernel.seedDecision({
+                object_id: id(index + 10),
+                decision_kind: "adr_accepted",
+                summary: `User stated: fact ${index}.`,
+                domain_id: "user-statements",
+            });
+            ranked.push({ object: id(index + 10) }, { object: id(index) });
+        }
+        kernel.routeReply = () => fused(ranked);
+        const execution = await run({ query: "fact", limit: 2 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(1), id(2)]);
+        expect(execution.text).not.toContain("changed or became unreadable");
+        expect(execution.text).not.toContain(id(11));
+    });
+
+    it("gives a ranked decision that left the store before the read no result place", async () => {
+        const { kernel, transport, run } = harness();
+        // A correction retired the first memory and its statement record after the ranking, so the read returns neither row.
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "NAMING",
+            summary: "User stated: fact 2.",
+        });
+        kernel.routeReply = () => fused([{ object: id(11) }, { object: id(1) }, { object: id(2) }]);
+        const tip = kernel.tip;
+        const execution = await run({ query: "fact", limit: 2 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(2)]);
+        expect(execution.text).toContain(
+            "Memory: 2 ranked memories changed or became unreadable after ranking and were not rendered.",
+        );
+        const reads = transport.calls.filter((call) => call.method === "kernel.read");
+        expect(reads.map((call) => (call.body as { as_of?: number | null }).as_of ?? null)).toEqual(
+            [null, tip],
+        );
+    });
+
+    it("gives a ranked memory whose row is present a place, whatever became of it", async () => {
+        const { kernel, transport, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Revised text.",
+            source_revision: 2,
+        });
+        for (const index of [2, 3]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `Fact ${index}.`,
+            });
+        }
+        kernel.routeReply = () =>
+            fused([{ object: id(1), revision: 1 }, { object: id(2) }, { object: id(3) }]);
+        const execution = await run({ query: "fact", limit: 2 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(2)]);
+        const named = transport.calls
+            .filter((call) => call.method === "kernel.read")
+            .flatMap((call) => (call.body as { object_ids?: string[] }).object_ids ?? []);
+        expect(named).toEqual([id(1), id(2)]);
+    });
+
+    it("gives a ranked id the read could not resolve a place and names it", async () => {
+        const { kernel, transport, run } = harness();
+        for (const index of [1, 2]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `Fact ${index}.`,
+            });
+        }
+        // Every filtered read answers truncated with no row, so a single named id stays unresolved.
+        kernel.filteredReadRowCap = 0;
+        kernel.routeReply = () => fused([{ object: id(1) }, { object: id(2) }]);
+        const execution = await run({ query: "fact", limit: 1 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack).toEqual([]);
+        expect(execution.text).toContain(`Memory: unresolved ranked memory ids: ${id(1)}`);
+        expect(execution.text).not.toContain("changed or became unreadable");
+        expect(transport.calls.filter((call) => call.method === "kernel.read")).toHaveLength(1);
+    });
+
+    it("ends a ranking of decisions that all left the store within one read per decision", async () => {
+        const { kernel, transport, run } = harness();
+        const ranked = Array.from({ length: 32 }, (_, index) => ({ object: id(index + 1) }));
+        kernel.routeReply = () => fused(ranked);
+        const execution = await run({ query: "fact", limit: 1 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack).toEqual([]);
+        expect(execution.text).toContain(
+            "Memory: 32 ranked memories changed or became unreadable after ranking and were not rendered.",
+        );
+        expect(transport.calls.filter((call) => call.method === "kernel.read")).toHaveLength(32);
+    });
+
+    it("reads every refill at the first read's store state when a commit lands between them", async () => {
+        class CommittingTransport extends FakeKernelTransport {
+            reads = 0;
+            async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+                const reply = await super.call(args);
+                if (args.method === "kernel.read") {
+                    this.reads += 1;
+                    // Another writer commits after each read answers.
+                    this.kernel.seedDecision({
+                        object_id: id(90 + this.reads),
+                        decision_kind: "NAMING",
+                        summary: `Unrelated commit ${this.reads}.`,
+                    });
+                }
+                return reply;
+            }
+        }
+        const transport = new CommittingTransport(new FakeKernel());
+        const { kernel, run } = harness(transport);
+        const ranked: { object: string }[] = [];
+        for (const index of [1, 2, 3]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `User stated: fact ${index}.`,
+            });
+            kernel.seedDecision({
+                object_id: id(index + 10),
+                decision_kind: "adr_accepted",
+                summary: `User stated: fact ${index}.`,
+                domain_id: "user-statements",
+            });
+            ranked.push({ object: id(index + 10) }, { object: id(index) });
+        }
+        kernel.routeReply = () => fused(ranked);
+        const tip = kernel.tip;
+        const execution = await run({ query: "fact", limit: 2 });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(1), id(2)]);
+        const reads = transport.calls.filter((call) => call.method === "kernel.read");
+        expect(reads.length).toBeGreaterThan(1);
+        expect(reads.map((call) => (call.body as { as_of?: number | null }).as_of ?? null)).toEqual(
+            [null, ...reads.slice(1).map(() => tip)],
+        );
+        expect(kernel.tip).toBeGreaterThan(tip);
+    });
+
+    it("settles for a limit that is not a whole number", async () => {
+        const { kernel, transport } = harness();
+        for (const index of [1, 2, 3]) {
+            kernel.seedDecision({
+                object_id: id(index),
+                decision_kind: "NAMING",
+                summary: `Fact ${index}.`,
+            });
+        }
+        kernel.routeReply = () => fused([{ object: id(1) }, { object: id(2) }, { object: id(3) }]);
+        const search = async (limit: number) => {
+            const client = new KernelClient({
+                transport,
+                enabled: true,
+                sessionId: ctx.sessionID,
+                projectRoot: "git:route-project",
+            });
+            const before = transport.calls.filter((call) => call.method === "kernel.read").length;
+            const outcome = await searchThroughRoute({ client, query: "fact", limit });
+            if (outcome.kind !== "ranked") throw new Error(JSON.stringify(outcome));
+            const reads =
+                transport.calls.filter((call) => call.method === "kernel.read").length - before;
+            return { ids: outcome.results.map((result) => result.objectId), reads };
+        };
+        expect(await search(0.5)).toEqual({ ids: [], reads: 0 });
+        expect(await search(1.5)).toEqual({ ids: [id(1)], reads: 1 });
+        expect(await search(0)).toEqual({ ids: [], reads: 0 });
+        expect(await search(-1)).toEqual({ ids: [], reads: 0 });
+        expect(await search(Number.NaN)).toEqual({ ids: [], reads: 0 });
+        expect(await search(Number.POSITIVE_INFINITY)).toEqual({
+            ids: [id(1), id(2), id(3)],
+            reads: 1,
+        });
     });
 
     it("labels a result the route validated as labeled", async () => {
@@ -586,6 +775,133 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).toContain(
             "Memory: the fused ranking is degraded: lexical incomplete (common_terms, rank_budget).",
         );
+    });
+
+    it("refuses a search whose daemon connection changed before the contest read, on the route and on the fallback", async () => {
+        const observation = "Assistant reported: The client limit is 500 now.";
+        for (const fallback of [false, true]) {
+            class MovingTransport extends FakeKernelTransport {
+                identity = "first";
+                reads = 0;
+                connectionIdentity(): string {
+                    return this.identity;
+                }
+                async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+                    const reply = await super.call(args);
+                    // The daemon is replaced after the read that returns the statement.
+                    if (args.method === "kernel.read" && ++this.reads === 1)
+                        this.identity = "second";
+                    return reply;
+                }
+            }
+            const transport = new MovingTransport(new FakeKernel());
+            const { kernel, run } = harness(transport);
+            kernel.seedDecision({
+                object_id: id(2),
+                decision_kind: "CONFIG_VALUES",
+                summary: observation,
+                source_id: "memory_capture",
+            });
+            kernel.seedDecision({
+                object_id: id(1),
+                decision_kind: "CONFIG_VALUES",
+                summary: "User stated: The gateway admits at most 300 clients.",
+                rationale: JSON.stringify({
+                    source: "memory_capture",
+                    contested_by: { memory: id(2), stated_seq: 1 },
+                }),
+                source_id: "memory_capture",
+                labeled: false,
+            });
+            kernel.routeReply = () =>
+                fallback ? { kind: "terminal", terminal: "disabled" } : fused([{ object: id(1) }]);
+            const execution = await run({ query: fallback ? id(1) : "gateway clients" });
+            expect(execution.status).toBe("invalid");
+            expect(execution.text).toContain("the known snapshot is ahead of the store");
+            expect(execution.text).not.toContain("500 now");
+        }
+    });
+
+    it("reads a contesting observation at the snapshot the fallback's scan read", async () => {
+        const observation = "Assistant reported: The limit is 500 now.";
+        class CommittingTransport extends FakeKernelTransport {
+            snapshot: number | null = null;
+            async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+                const reply = (await super.call(args)) as {
+                    state?: { kind?: string };
+                    known_as_of?: number;
+                };
+                // A commit lands after the scan's page is read.
+                if (
+                    args.method === "kernel.read" &&
+                    this.snapshot === null &&
+                    reply.state?.kind === "available"
+                ) {
+                    this.snapshot = reply.known_as_of ?? null;
+                    this.kernel.seedDecision({
+                        object_id: id(3),
+                        decision_kind: "CONFIG_VALUES",
+                        summary: "The deploy window opens at noon.",
+                    });
+                }
+                return reply;
+            }
+        }
+        const transport = new CommittingTransport(new FakeKernel());
+        const { kernel, run } = harness(transport);
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "CONFIG_VALUES",
+            summary: observation,
+            source_id: "memory_capture",
+        });
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "CONFIG_VALUES",
+            summary: "User stated: The gateway admits at most 300 clients.",
+            rationale: JSON.stringify({
+                source: "memory_capture",
+                contested_by: { memory: id(2), stated_seq: 1 },
+            }),
+            source_id: "memory_capture",
+            labeled: false,
+        });
+        kernel.routeReply = () => ({ kind: "terminal", terminal: "disabled" });
+        const execution = await run({ query: "gateway clients" });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.text).toContain(`Contested by ${id(2)}: ${JSON.stringify(observation)}`);
+        // The scan keeps the rows that match the query, so the observation is read by id.
+        const contestRead = transport.calls.filter((call) => call.method === "kernel.read").at(-1)
+            ?.body as { as_of: number | null; object_ids?: string[] };
+        expect(transport.snapshot).not.toBeNull();
+        expect(kernel.tip).toBeGreaterThan(transport.snapshot as number);
+        expect(contestRead).toMatchObject({ as_of: transport.snapshot, object_ids: [id(2)] });
+    });
+
+    it("shows a contested statement with its observation's served text through the route", async () => {
+        const { kernel, run } = harness();
+        const observation = "Assistant reported: The client limit is 500 now.";
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "CONFIG_VALUES",
+            summary: observation,
+            source_id: "memory_capture",
+        });
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "CONFIG_VALUES",
+            summary: "User stated: The gateway admits at most 300 clients.",
+            rationale: JSON.stringify({
+                source: "memory_capture",
+                contested_by: { memory: id(2), stated_seq: 1 },
+            }),
+            source_id: "memory_capture",
+            labeled: false,
+        });
+        kernel.routeReply = () => fused([{ object: id(1) }]);
+        const execution = await run({ query: "gateway clients" });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.text).toContain(`Contested by ${id(2)}: ${JSON.stringify(observation)}`);
     });
 
     it("refuses a ranking whose daemon connection changed before hydration", async () => {

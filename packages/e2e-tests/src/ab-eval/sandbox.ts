@@ -156,9 +156,24 @@ export function ensureSandboxScript(runRoot: string): string {
     return path;
 }
 
-/** Passwordless `sudo` runs the launcher's exact command shape here: environment preserved, namespaces created. */
+/**
+ * Passwordless `sudo` runs the launcher's exact command shape here: environment preserved, namespaces
+ * created. The launcher hands the arm its `PATH` through the preserved environment, so the probe
+ * passes only when a variable set here reaches the command inside the namespaces.
+ */
 export function sandboxAvailable(): boolean {
-    return (
-        spawnSync("sudo", ["-n", "--preserve-env", "unshare", ...UNSHARE_ARGS, "true"]).status === 0
+    const probe = spawnSync(
+        "sudo",
+        [
+            "-n",
+            "--preserve-env",
+            "unshare",
+            ...UNSHARE_ARGS,
+            "/bin/sh",
+            "-c",
+            '[ "$AB_SANDBOX_PROBE" = preserved ]',
+        ],
+        { env: { ...process.env, AB_SANDBOX_PROBE: "preserved" } },
     );
+    return probe.status === 0;
 }

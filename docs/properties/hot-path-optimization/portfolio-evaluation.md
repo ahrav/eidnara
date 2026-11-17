@@ -143,7 +143,7 @@ setup (`existing-checks.md:221-223`). Neither passage names
 therefore outside this catalog's declared scope by omission rather than by
 statement. One dependency crosses that line: the K3/K4 byte threshold is
 `MAX_READ_ROW_BYTES = MAX_WIRE_BODY_BYTES / 8`
-(`crates/daemon/src/kernel_routes/read.rs:26`), where `MAX_WIRE_BODY_BYTES`
+(`crates/daemon/src/kernel_routes/read.rs:30`), where `MAX_WIRE_BODY_BYTES`
 is `host_runtime::MAX_FRAME_BODY_LEN` (`crates/daemon/src/dispatch.rs:8`),
 which is `shm_transport::MAX_FRAME_BYTES`
 (`crates/host-runtime/src/wire.rs:38`), defined as 64 MiB
@@ -239,14 +239,14 @@ the other differentials.
 module for request and store-row builders
 (`crates/daemon/src/lib.rs:12103-12104`), and
 `crates/daemon/tests/kernel_routes.rs` has row-cap, byte-cap, and proptest
-full-sort comparison tests (`:2002`, `:2122-2152`, `:2156-2195`).
+full-sort comparison tests (`:1958-2013`, `:2112-2152`, `:2078-2109`).
 K3 needs more than 8192 admitted visible candidates; K4 needs more than 8 MiB
 of stored payload before a target. Both are seed-size questions, not
-mechanism questions. K1's owner gate is real: `visible_as_of_in_scope`
-decodes every candidate row inside `query_map` before the caller applies
-domain and kind selection (`crates/kernel/src/admission.rs:3291-3297`,
-`:3352-3353`), so a pushdown removes the error path for excluded corrupt
-rows. The catalog states this correctly (`catalog.md:129-132`).
+mechanism questions. K1's owner gate is resolved: the domain read matches
+domain and kind in the served-row query before any row is decoded
+(`crates/kernel/src/admission.rs:3278-3280`, `:3852-3856`), so a corrupt row
+outside the domain does not fail the read. The owner approved that
+suppression during #443, and the catalog records it (`catalog.md:114-116`).
 
 **History (H1 to H4).** The four goldens exist under
 `crates/daemon/testdata/` and the real-estimator test at
@@ -291,9 +291,9 @@ were read at HEAD.
 | `crates/daemon/src/lib.rs:11817-11838` (parse admission) | verified | `_parse_charge` at 11813; only `ctx.route` forwarded at 11824. |
 | `crates/daemon/src/lib.rs:15421-15467` (footprint) | verified | Doc at 15408, `VALUE_ENVELOPE_BYTES` at 15454. |
 | `crates/daemon/src/canonical_memory.rs:141-212` | verified | `read_project_memory` 141-175, `injectable_snapshot` 184-212. |
-| `crates/daemon/src/kernel_routes/read.rs:23-26`, `:159-248` | verified | Caps at 23 and 26; `read_visible` 159-248; cutoff loop 208-224. |
-| `crates/kernel/src/admission.rs:3189-3355` | verified | SQL 3113-3204, `ORDER BY o.object_id` at 3202, decode 3215-3277. |
-| `crates/kernel/src/admission.rs:2956-2986` | verified | `visible_as_of_in_scope`. |
+| `crates/daemon/src/kernel_routes/read.rs:26-30`, `:383-550` | verified | Caps at 27 and 30; `read_visible` 383-398, `read_visible_within` 435-444, and `read_visible_page` 448-550; cutoff loop 510-526. |
+| `crates/kernel/src/admission.rs:3818-4078` | verified | SQL 3818-3955; the sort by `object_id` is in Rust at 3328; decode 3979-4078. |
+| `crates/kernel/src/admission.rs:3608-3620` | verified | `visible_row`, which `visible_as_of_in_scope` applies through `visible_selected_as_of` at 3326. |
 | `crates/kernel/src/slice/read.rs:140-158` | verified | Payload-size query doc and return. |
 | `crates/daemon/src/config.rs:125` | verified | `memory_enabled: true`. |
 | `crates/host-runtime/src/dispatch.rs:823-855`, `:857-934`, `:937-954`, `:1226-1268` | verified | Permits, tracked spawn, cancel arm, close gate. |
@@ -335,7 +335,7 @@ evidence files also cite "the independent review" as the trigger for K4 and
 H4 and for K3's resolution
 (`evidence/canonical-memory-byte-pressure-is-exercised.md:8`,
 `evidence/history-outer-retry-pressure-is-exercised.md:8`,
-`evidence/canonical-memory-selection-pressure-is-exercised.md:52`). The
+`evidence/canonical-memory-selection-pressure-is-exercised.md:54`). The
 catalog therefore incorporates corrections from a review whose text is not
 on disk under the name the catalog links, and describes this document's
 contents before it was written. METHOD rules 1 and 2 forbid stating an
@@ -462,7 +462,7 @@ gate before any optimization surface (M1, M5, or the others) is opened.
 and K3 was narrowed, in response to a prior review
 (`evidence/canonical-memory-byte-pressure-is-exercised.md:8`,
 `evidence/history-outer-retry-pressure-is-exercised.md:8`,
-`evidence/canonical-memory-selection-pressure-is-exercised.md:52`). The S and
+`evidence/canonical-memory-selection-pressure-is-exercised.md:54`). The S and
 R groups, which no review pointed at, have no witnesses. The H lens followed
 the estimator into `decay_render` and did not examine the two direct
 tokenizer calls on the SOFT path (finding 10). Judgment required: whether to

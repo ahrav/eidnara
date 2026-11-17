@@ -1,4 +1,5 @@
-//! The encoder writes `&str` values as JSON strings byte-identical to `serde_json` output.
+//! The encoder writes `&str` values as JSON strings byte-identical to `serde_json` output, and
+//! the token scan accepts exactly the string tokens that encoder writes.
 
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
@@ -139,9 +140,63 @@ pub(crate) fn json_string_len(value: &str) -> usize {
         .sum::<usize>()
 }
 
+/// `canonical_string_end` returns the end of the JSON string token that starts at `bytes[start]`,
+/// when the token is the encoding `serde_json` writes for its text: [`escape`]'s bytes for a
+/// quote, a backslash, and each control byte, and every other byte as it is. Encoding the text
+/// such a token decodes to writes the token again, so a caller can serve the token in place of
+/// that round trip. The caller checks that `bytes` is UTF-8.
+pub(crate) fn canonical_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if *bytes.get(start)? != b'"' {
+        return None;
+    }
+    let mut at = start + 1;
+    loop {
+        // A word with no quote, backslash, or control byte is string content.
+        while let Some(word) = bytes.get(at..at + 8) {
+            let marks = escape_marks(u64::from_le_bytes(word.try_into().unwrap_or_default()));
+            if marks != 0 {
+                at += (marks.trailing_zeros() / 8) as usize;
+                break;
+            }
+            at += 8;
+        }
+        match *bytes.get(at)? {
+            b'"' => return Some(at + 1),
+            b'\\' => {
+                let named = match *bytes.get(at + 1)? {
+                    b'"' => b'"',
+                    b'\\' => b'\\',
+                    b'b' => 0x08,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'f' => 0x0c,
+                    b'r' => b'\r',
+                    b'u' => {
+                        // The last two hex digits name the byte. The comparison below holds all
+                        // four digits to the lowercase `00xx` that `serde_json` writes.
+                        let digit = |index: usize| char::from(*bytes.get(index)?).to_digit(16);
+                        (digit(at + 4)? << 4 | digit(at + 5)?) as u8
+                    }
+                    _ => return None,
+                };
+                // The escape is canonical when it is the bytes `serde_json` writes for the byte it names.
+                let (written, len) = escape(named);
+                if bytes.get(at..at + len)? != &written[..len] {
+                    return None;
+                }
+                at += len;
+            }
+            0..=0x1f => return None,
+            _ => at += 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{escape, json_string_len, push_json_string};
+    use proptest::prelude::Strategy as _;
+
+    use super::{canonical_string_end, escape, json_string_len, push_json_string};
 
     #[test]
     fn every_ascii_byte_escapes_as_serde_json_writes_it() {
@@ -270,5 +325,101 @@ mod tests {
         let mut out = b"{\"k\":".to_vec();
         push_json_string(&mut out, "a\"b");
         assert_eq!(out, b"{\"k\":\"a\\\"b\"");
+    }
+
+    proptest::proptest! {
+        /// The token of any text ends where `serde_json` ends it, at every offset into a word and
+        /// with any bytes after it.
+        #[test]
+        fn the_encoding_of_any_text_is_a_canonical_token(
+            text in proptest::collection::vec(proptest::prelude::any::<char>(), 0..24),
+            lead in 0usize..24,
+            trail in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..24),
+        ) {
+            let text: String = text.into_iter().collect();
+            let token = serde_json::to_vec(&text).unwrap();
+            let mut bytes = vec![b'a'; lead];
+            bytes.extend_from_slice(&token);
+            bytes.extend_from_slice(&trail);
+            proptest::prop_assert_eq!(canonical_string_end(&bytes, lead), Some(lead + token.len()));
+        }
+
+        /// Bytes the scan accepts as a token decode to a text whose encoding is those bytes, so
+        /// serving them equals decoding and encoding again.
+        #[test]
+        fn an_accepted_token_is_the_encoding_of_its_text(
+            pieces in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::sample::select(vec![
+                        "\\\\", "\\\"", "\\u", "\\u00", "\\u001", "\\u000", "\\u001f", "\\u0000", "\\n", "\\t", "\\/", "0", "1",
+                        "a", "f", "A", "F", "b", "\u{7f}", "\u{1f}", "\n", "é", "\u{1F600}", "xxxxxxx",
+                    ]).prop_map(str::to_string),
+                    proptest::prelude::any::<char>().prop_map(String::from),
+                ],
+                0..24,
+            ),
+            lead in 0usize..12,
+        ) {
+            let mut bytes = vec![b'a'; lead];
+            bytes.push(b'"');
+            bytes.extend_from_slice(pieces.concat().as_bytes());
+            bytes.push(b'"');
+            if let Some(end) = canonical_string_end(&bytes, lead) {
+                let token = &bytes[lead..end];
+                let text: String = serde_json::from_slice(token).unwrap();
+                proptest::prop_assert_eq!(serde_json::to_vec(&text).unwrap(), token);
+            }
+        }
+    }
+
+    /// Every escape `serde_json` reads is a canonical token exactly when `serde_json` writes that
+    /// escape back, at each offset of the escape into a word.
+    #[test]
+    fn an_escape_is_canonical_exactly_when_serde_json_writes_it() {
+        let canonical = |escape: &[u8]| {
+            let mut verdict = false;
+            for lead in 0..9 {
+                let mut token = vec![b'"'];
+                token.extend_from_slice(&b"abcdefgh"[..lead]);
+                token.extend_from_slice(escape);
+                token.push(b'"');
+                let accepted = canonical_string_end(&token, 0) == Some(token.len());
+                let rewritten = serde_json::from_slice::<String>(&token)
+                    .is_ok_and(|text| serde_json::to_vec(&text).unwrap() == token);
+                assert_eq!(accepted, rewritten, "{:?}", String::from_utf8_lossy(&token));
+                verdict = accepted;
+            }
+            verdict
+        };
+        let mut short = 0;
+        for byte in 0u8..=0x7f {
+            short += usize::from(canonical(&[b'\\', byte]));
+            // A raw control byte, quote, or backslash is no string content.
+            canonical(&[byte]);
+        }
+        assert_eq!(short, 7, "the two-byte escapes serde_json writes");
+        let hex = b"0123456789abcdefABCDEF";
+        let mut long = 0;
+        for a in hex {
+            for b in hex {
+                for c in hex {
+                    for d in hex {
+                        long += usize::from(canonical(&[b'\\', b'u', *a, *b, *c, *d]));
+                    }
+                }
+            }
+        }
+        assert_eq!(long, 0x20 - 5, "the control bytes with no two-byte escape");
+        for token in [
+            &b""[..],
+            b"\"",
+            b"\"abc",
+            b"\"abc\\",
+            b"\"\\u00",
+            b"\"\\u001",
+            b"abc\"",
+        ] {
+            assert_eq!(canonical_string_end(token, 0), None, "{token:?}");
+        }
     }
 }

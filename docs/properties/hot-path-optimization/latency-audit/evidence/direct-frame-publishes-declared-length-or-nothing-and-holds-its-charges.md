@@ -175,7 +175,7 @@ the #1040 head the direct path has a production sender: the daemon's
 transform and exact-length response through `settle_direct_with` (`:13424`)
 and `RequestCtx::output_from_direct_write`
 (`crates/host-runtime/src/handler.rs:565`) to `reserve_direct`
-(`crates/host-runtime/src/dispatch.rs:574`); JSON and emitted bodies keep the
+(`crates/host-runtime/src/dispatch.rs:574`); JSON bodies keep the
 owned path through `settle_prepared_with` (`lib.rs:13351`). The record is
 `default-production` and `Exercised: yes`.
 
@@ -187,7 +187,7 @@ measurement failure settles the request as `encode_failed` before any
 reservation. Two charges cover a direct frame until commit: the egress charge
 of the measured length plus header covers the ring bytes, and the decode's
 scratch charges travel with the response through `PreparedOutcome::holding`
-(`crates/daemon/src/dispatch.rs:415`), owned by the serializer closure until
+(`crates/daemon/src/dispatch.rs:409`), owned by the serializer closure until
 it runs or the queued frame drops. A body failure increments
 `direct_serialize_failure.observed` in `host.status`
 (`crates/host-runtime/src/ring_transport.rs:444-445`); a refused commit does

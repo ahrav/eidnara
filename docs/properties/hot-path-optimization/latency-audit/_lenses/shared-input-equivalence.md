@@ -472,12 +472,12 @@ both sides and neither resolved here:
 [boundary-filter]: ../../../../../crates/daemon/src/lib.rs#L16626
 [sel-kind]: ../../../../../crates/daemon/src/lib.rs#L16666-L16681
 [token-count]: ../../../../../crates/daemon/src/lib.rs#L2045-L2067
-[t-native-inc]: ../../../../../crates/daemon/src/lib.rs#L21365
-[t-astro]: ../../../../../crates/daemon/src/lib.rs#L22007
-[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L22785
-[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L22855
-[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L23328
-[t-dup]: ../../../../../crates/daemon/src/lib.rs#L23371
+[t-native-inc]: ../../../../../crates/daemon/src/lib.rs#L21364
+[t-astro]: ../../../../../crates/daemon/src/lib.rs#L22006
+[t-vacuity]: ../../../../../crates/daemon/src/lib.rs#L22784
+[t-native-reject]: ../../../../../crates/daemon/src/lib.rs#L22854
+[t-projdiff]: ../../../../../crates/daemon/src/lib.rs#L23327
+[t-dup]: ../../../../../crates/daemon/src/lib.rs#L23370
 [served-reusing]: ../../../../../crates/daemon/src/transform.rs#L164-L224
 [with-identity]: ../../../../../crates/daemon/src/transform.rs#L226-L233
 [ser-served]: ../../../../../crates/daemon/src/transform.rs#L301-L308
@@ -550,7 +550,7 @@ both sides and neither resolved here:
 [injection-consume]: ../../../../../crates/daemon/src/injection.rs#L400-L403
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [chunk-build]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L350-L381
-[segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L50-L72
+[segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L104-L110
 [compaction-default]: ../../../../../crates/daemon/src/config.rs#L124
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../../crates/memory-store/src/lib.rs#L145-L161

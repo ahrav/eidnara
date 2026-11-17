@@ -688,5 +688,5 @@ all-feature Clippy with `--locked -- -D warnings`, and `cargo fmt --all --
 [sidecar-inc]: ../../../../../crates/daemon/src/codec/opencode.rs#L272-L312
 [sidecar-merge]: ../../../../../crates/daemon/src/codec/opencode.rs#L288-L310
 [remember]: ../../../../../crates/daemon/src/codec/sidecar.rs#L67-L73
-[segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L50-L72
+[segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L104-L110
 [serde-features]: ../../../../../Cargo.toml#L47

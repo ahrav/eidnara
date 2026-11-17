@@ -25,7 +25,7 @@ identity-contract version.
 Contract identifiers are `CC1` through `CC12`. The adoption table at the end
 maps each later ticket to the contracts it consumes. Changing any contract
 changes `identity_contract_version`
-(`search-projection-identity-v4`), which is one of the invalidation identities every hook
+(`search-projection-identity-v5`), which is one of the invalidation identities every hook
 carries (CC10) and one of the five rebuild triggers in the specification's C7.
 
 ## CC1. Source classes and stable identifiers
@@ -312,6 +312,30 @@ slice), and `explicit` (an operator action). The evaluation checks five gates,
 `class_coverage`, `freshness`, `resource`, `capability`, and `both_harness`,
 against evidence bound to the hook's invalidation identity. Evidence for a
 different identity is inapplicable and does not pass.
+
+The lifecycle owner's own work on the projection passes the same evaluation
+with one difference in the `freshness` gate: a family that trails the kernel
+by more than `catchup_lag_commits` is admitted, and a checkpoint past the
+observed tip is refused as for every other caller. That work is every
+admission the owner's thread makes inside `run_slice`, `request`, and
+`renew_expired_rebuild`: the Current family's catch-up episode; the recording,
+construction, selection, renewal, and completion of its replacement; the
+recording and catch-up of an authorized recovery; and the start of the
+embedding supervisor from the owner's slice, at whichever entry point each
+asks (`startup`, `reload`, `dispatch`, `explicit`). It is the work that applies the commits a
+trailing family lacks or replaces the family, so refusing it on freshness
+leaves the family refused for the life of the data home. The gate keeps both
+verdicts for each hook and selects the lifecycle-work verdict for the thread
+that holds `HookGate::lifecycle_work`, which the owner takes with its manager
+(`docs/search-projection.md`, *Lifecycle work past the freshness limit*).
+Every other admission, including a reader's pin, a supervisor's slice, and a
+producer's dispatch, passes all five gates as stated above. This paragraph
+changes which admissions the freshness gate refuses, so it revises
+`identity_contract_version` to `search-projection-identity-v5`. A family built
+under the earlier version is replaced once under the running identity (C7), and
+admission requires evidence bound to the running version. The revision
+keeps every encoder, identifier, hook, gate name, limit name, and record field
+as the earlier version defined it.
 
 The invalidation identity is the tuple `(schema_version,
 tokenizer_fingerprint, analysis_identity, embedding_model,

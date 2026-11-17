@@ -10,13 +10,18 @@ mechanism to remain unchallenged. K4 requires byte pressure separately from K3.
 
 ## Evidence trail
 
-- [read.rs:23-26][caps] separates the 8192-row bound from the 8 MiB byte budget.
-- [read.rs:182-224][cutoff] selects rows first and then limits cumulative stored
+- [read.rs:26-30][caps] separates the 8192-row bound from the 8 MiB byte budget.
+- [read.rs:466-526][cutoff] selects rows first and then limits cumulative stored
   decision payload bytes. Domain/kind and scope exclusion precede both caps.
+  Since #1210 the canonical-memory delivery walk applies the same two caps to
+  each reader in `read_other_sessions`
+  (`crates/daemon/src/canonical_memory.rs:372-376`).
 - [slice/read.rs:140-158][sizes] queries `length(decision_payload)` at the
   requested snapshot. This is BLOB byte length, not rendered summary length.
-- [kernel_routes.rs:2156-2195][test] asserts a nonempty truncated newest prefix;
+- [kernel_routes.rs:2112-2152][test] asserts a nonempty truncated newest prefix;
   it does not independently assert exact byte usage or maximal fitting count.
+  It reads through `kernel.read` with no `object_ids`, which `newest_page`
+  serves, so it does not run the cutoff above.
 
 ## Failure scenario
 
@@ -56,7 +61,7 @@ Existing checks remain unaudited; no pressure fixture or campaign runs here.
   pending. Byte pressure cannot substitute for K3's separate row witness.
 
 [scope]: ../catalog.md#scope-and-provenance
-[caps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L23-L26
-[cutoff]: ../../../../crates/daemon/src/kernel_routes/read.rs#L182-L224
+[caps]: ../../../../crates/daemon/src/kernel_routes/read.rs#L26-L30
+[cutoff]: ../../../../crates/daemon/src/kernel_routes/read.rs#L466-L526
 [sizes]: ../../../../crates/kernel/src/slice/read.rs#L140-L158
-[test]: ../../../../crates/daemon/tests/kernel_routes.rs#L2156-L2195
+[test]: ../../../../crates/daemon/tests/kernel_routes.rs#L2112-L2152
