@@ -322,15 +322,19 @@ fn parse_capture_batch(
             {
                 return Err("capture memory must quote its source exactly in at most 2048 bytes");
             }
-            // Memories are told apart as the extractor wrote them: joining
-            // gives the members of a run one quotation and one category.
+            // Joining gives the members of a run one quotation and one
+            // category, so each memory's category is checked, and the
+            // memories are told apart, as the extractor wrote them.
             let mut distinct = BTreeSet::new();
-            if !decision
-                .memories
-                .iter()
-                .all(|memory| distinct.insert((memory.category.as_str(), memory.content.as_str())))
-            {
-                return Err("capture output repeats a memory in one source");
+            for memory in &decision.memories {
+                if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
+                    return Err(
+                        "capture category must be PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING",
+                    );
+                }
+                if !distinct.insert((memory.category.as_str(), memory.content.as_str())) {
+                    return Err("capture output repeats a memory in one source");
+                }
             }
             // Sentences quoted one by one are joined before any link is
             // judged, so each link is judged for the statement that is stored.
@@ -722,6 +726,9 @@ fn target_shape_is_valid(memory: &CapturedMemory) -> bool {
 
 /// One source's proposed memories against its own text and the provided
 /// targets. `replaced` carries replacement uniqueness across the caller's scope.
+/// [`parse_capture_batch`] checks each category and that the memories are
+/// distinct before it joins quotations, so those two checks read the
+/// extractor's own values.
 fn validate_capture_memories(
     memories: &[CapturedMemory],
     source: &CaptureMessage,
@@ -730,11 +737,6 @@ fn validate_capture_memories(
 ) -> Result<(), &'static str> {
     let prose = Prose::of(&source.text);
     for memory in memories {
-        if !MEMORY_CATEGORY_ORDER.contains(&memory.category.as_str()) {
-            return Err(
-                "capture category must be PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING",
-            );
-        }
         if memory.content.trim().is_empty() || memory.content.len() > MAX_CAPTURE_MEMORY_BYTES {
             return Err("capture memory content must be nonempty and at most 2048 bytes");
         }
@@ -7235,6 +7237,26 @@ mod tests {
         );
         let frozen = native::collapse_quotations(USER_STATED, parsed.memories);
         assert_eq!(frozen.len(), 1, "the joined sentences are one memory");
+        // A category outside the list refuses the source, on a sentence
+        // that would take the run's category as on any other.
+        let unlisted: Vec<Value> = [
+            (OPEN_TASKS, "PROJECT_RULES"),
+            (RETRY_COUNTER, "NOT_A_CATEGORY"),
+        ]
+        .iter()
+        .map(|(quote, category)| json!({"category": category, "content": quote, "quote": quote}))
+        .collect();
+        let response =
+            json!({"version": 1, "decisions": [{"message_id": "m", "memories": unlisted}]});
+        assert_eq!(
+            parse_batch(&response.to_string(), &message, &[])
+                .unwrap()
+                .remove(0)
+                .err(),
+            Some(
+                "capture category must be PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING"
+            )
+        );
         // The same content text twice under one category is a repeat, as
         // it is with no join.
         let repeated: Vec<Value> = [OPEN_TASKS, RETRY_COUNTER]
