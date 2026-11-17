@@ -1040,7 +1040,9 @@ correction the extractor quoted in whole sentences meets the statement rule
 and replaces a fact served on `auto_inject`, and a contest shows the
 quotation the extractor judged: a clause of an assistant source, whole
 sentences of a user source. A widened quotation whose `duplicate_of` names
-a fact served on `auto_inject` with another text drops that link and is
+a fact served on `auto_inject` with another text names the served fact that
+holds the widened sentence, up to its attribution label, edge whitespace,
+and closing `.` or `!`, or drops that link and is
 stored as the user's own statement: the extractor matched the clause it
 quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
 colon, such as `My teammate wrote: always rebase.`, is the user's sentence
@@ -1076,8 +1078,9 @@ passed its checks, or else of the run's first sentence; two memories of one
 source that share a category and `content` as proposed refuse the source,
 before the join as after it; a joined memory whose
 `duplicate_of` names a fact served on `auto_inject` with another text names
-the served fact that holds the joined text word for word, up to edge
-whitespace and its closing `.` or `!`, or drops the link.
+the served fact that holds the joined text word for word, up to its
+attribution label, edge whitespace, and closing `.` or `!`, or drops the
+link.
 The joined memories then freeze under the rule below for memories that share
 a category and quotation, as one memory: a later replacement of it
 supersedes the whole joined statement, every sentence of it. A sentence
@@ -1093,8 +1096,9 @@ among them; distinct replacement targets
 keep one memory each, since a memory supersedes exactly one predecessor. The
 frozen memory names `duplicate_of` only when every memory it joins names the
 same target, and a frozen memory that names under `duplicate_of` a reference
-memory not served on `auto_inject`, and whose stored text equals a reference
-memory that is, is a duplicate of the served one; a named target that is
+memory not served on `auto_inject`, and whose stored text equals that of a
+reference memory that is, up to its attribution label, edge whitespace, and
+closing `.` or `!`, is a duplicate of the served one; a named target that is
 served on `auto_inject` is kept. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
@@ -1210,7 +1214,8 @@ that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
 later paragraph. Two ASCII apostrophes with nothing between them inside an
 inline code span are an empty string literal when they are the span's whole
-content, as in `` `''` ``, or when a `,`, `)`, `]`, or `}` follows them and
+content between its opening and closing runs, as in `` `''` ``, or when a
+`,`, `)`, `]`, or `}` follows them and
 a character other than a letter or digit precedes them, as in
 `` `.get('', 0)` ``, and are code to this rule; every other single mark
 inside a span is read as a mark of the prose, since a backtick of the user's

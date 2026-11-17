@@ -3055,6 +3055,9 @@ async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_
         "''(Thanks.)''",
         "''(Thanks.",
         "''*Thanks.",
+        // The two marks stand between backticks inside a span that two
+        // backticks open, so they are part of longer content.
+        "`''`Thanks.",
     ] {
         let (opening, closing) = closing.split_at(closing.find('T').unwrap());
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
@@ -3066,9 +3069,13 @@ async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_
             |_, _| vec![fact(THURSDAY)],
         )
         .await;
-        let message = format!(
-            "The key ` is broken, so Bob wrote {opening}Use the `-key instead.\n\n{TUESDAY}\n\n{closing}"
-        );
+        let message = if opening.starts_with('`') {
+            format!("The note ``Bob wrote {opening}Use the key`` is old.\n\n{TUESDAY}\n\n{closing}")
+        } else {
+            format!(
+                "The key ` is broken, so Bob wrote {opening}Use the `-key instead.\n\n{TUESDAY}\n\n{closing}"
+            )
+        };
         capture(
             &handler,
             SECOND,

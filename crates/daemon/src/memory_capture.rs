@@ -2881,6 +2881,23 @@ impl<'a> CodeSpanCursor<'a> {
             _ => CodePlace::Prose,
         }
     }
+
+    /// Whether the two bytes at `at`, which [`Self::place`] just placed
+    /// inside a span of `line`, are the span's whole content: the span's
+    /// opening run ends where they start and its closing run of the same
+    /// length starts where they end. `start` is the line's offset.
+    fn holds_only_pair(&self, at: usize, (start, line): (usize, &str)) -> bool {
+        self.spans.get(self.next).is_some_and(|&(open, close)| {
+            let backticks = |from: usize, to: usize| {
+                start <= from
+                    && from < to
+                    && line
+                        .get(from - start..to - start)
+                        .is_some_and(|run| run.bytes().all(|byte| byte == b'`'))
+            };
+            backticks(open, at) && backticks(at + 2, close) && at - open == close - (at + 2)
+        })
+    }
 }
 
 /// Whether `ch` at `place` is the apostrophe that joins a suffix to an
@@ -2904,10 +2921,10 @@ fn joins_suffix_to_code(place: CodePlace, ch: char, next: Option<char>) -> bool 
 /// so they close nothing and the quotation stays open. An apostrophe inside
 /// a word neither opens nor closes.
 ///
-/// Two ASCII apostrophes inside an inline code span that
-/// [`is_empty_literal`] accepts are an empty string literal, as in
-/// `` `''` `` or `` `.get('', 0)` ``, and a mark that
-/// [`joins_suffix_to_code`] accepts is an apostrophe. Any other pair, such
+/// Two ASCII apostrophes inside an inline code span are an empty string
+/// literal when they are the span's whole content, as in `` `''` ``, or
+/// when [`closes_empty_literal`] accepts them, as in `` `.get('', 0)` ``,
+/// and a mark that [`joins_suffix_to_code`] accepts is an apostrophe. Any other pair, such
 /// as one a letter touches (`b''`) or one before a word or an opening
 /// bracket, is read as marks of the prose. Each
 /// keeps the quotation state and counts as an ordinary character beside the
@@ -2932,7 +2949,8 @@ fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, u
                 if place == CodePlace::Code
                     && ch == '\''
                     && next == Some('\'')
-                    && is_empty_literal(previous, line[at + 2..].chars().next())
+                    && (spans.holds_only_pair(start + at, (start, line))
+                        || closes_empty_literal(previous, line[at + 2..].chars().next()))
                 {
                     chars.next();
                     previous = Some(ch);
@@ -2974,17 +2992,14 @@ fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, u
 }
 
 /// Whether two adjacent ASCII apostrophes inside an inline code span, with
-/// `before` and `after` beside them, are an empty string literal. The pair
-/// is the span's whole content, or an argument or element that a `,`, `)`,
-/// `]`, or `}` closes after a character that is no letter or digit. Quoted
-/// words start with none of those closing characters, so a pair this rule
-/// accepts opens no quotation of the prose around the span.
-fn is_empty_literal(before: Option<char>, after: Option<char>) -> bool {
-    match (before, after) {
-        (Some('`'), Some('`')) => true,
-        (Some(before), Some(',' | ')' | ']' | '}')) => !before.is_alphanumeric(),
-        _ => false,
-    }
+/// `before` and `after` beside them, are an empty string literal given as
+/// an argument or element: a `,`, `)`, `]`, or `}` closes them after a
+/// character that is no letter or digit. Quoted words start with none of
+/// those closing characters, so a pair this rule accepts opens no quotation
+/// of the prose around the span.
+fn closes_empty_literal(before: Option<char>, after: Option<char>) -> bool {
+    before.is_some_and(|before| !before.is_alphanumeric())
+        && matches!(after, Some(',' | ')' | ']' | '}'))
 }
 
 /// The single marks [`opens_single_quotation`] reads as a quotation's opening.
@@ -7010,6 +7025,48 @@ mod tests {
             ),
             (
                 "Pass `[x, '']` there.\n\nWe deploy from the release branch.",
+                release,
+                true,
+            ),
+            // A letter directly before a pair that a comma closes keeps the
+            // pair marks of the prose.
+            (
+                "Call `f(b'', 1)` there.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            // The pair is the whole content of a span of two backticks. A
+            // pair between single backticks inside such a span is part of
+            // longer content.
+            (
+                "Keep the ``''`` default.\n\nWe deploy from the release branch.",
+                release,
+                true,
+            ),
+            (
+                "The note ``Bob wrote `''`Use the key`` is old.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            (
+                "The note `Bob wrote ``''``Use the key` is old.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            // A span that starts with the pair holds more than the pair.
+            (
+                "Run `''Use` there.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            // Each closing bracket closes an argument or element.
+            (
+                "Call `f('')` there.\n\nWe deploy from the release branch.",
+                release,
+                true,
+            ),
+            (
+                "Pass `{x, ''}` there.\n\nWe deploy from the release branch.",
                 release,
                 true,
             ),
