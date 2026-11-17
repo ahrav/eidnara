@@ -26,7 +26,7 @@ use super::sidecar::{
 
 pub type MessageV2Json = Value;
 
-const HARNESS: &str = "opencode";
+pub(crate) const HARNESS: &str = "opencode";
 
 #[cfg(test)]
 pub(crate) fn decode_opencode(messages: &[MessageV2Json]) -> DecodedHarnessMessages {

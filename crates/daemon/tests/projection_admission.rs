@@ -509,6 +509,11 @@ fn refresh_installs_only_for_valid_records_and_a_selected_projection() {
         lag: LAG_LIMIT as i64 + 1,
         max: LAG_LIMIT,
     });
+    // The lifecycle owner's work was admitted over the stale family, so evidence that refuses that work as well withdraws the grants issued before it.
+    assert_eq!(
+        refresh_with(&admission, &current, None),
+        Refresh::Installed(Renewal::Invalidated)
+    );
 
     let ledger = gate.ledger();
     assert_eq!(

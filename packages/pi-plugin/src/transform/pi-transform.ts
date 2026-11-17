@@ -401,6 +401,10 @@ export function createPiTransform(options: PiTransformOptions) {
         folds(sessionId: string): boolean {
             return !declined.has(sessionId);
         },
+        /** The fold authority the daemon last reported for the session: `true` under native authority, which serves Pi's messages untagged. */
+        nativeAuthority(sessionId: string): boolean | undefined {
+            return client.state(sessionId).nativeAuthority;
+        },
         clearSession(sessionId: string): void {
             declined.delete(sessionId);
             acknowledged.delete(sessionId);

@@ -24,8 +24,40 @@ an alias the frozen table does not resolve; a cited range that is not a span
 of the presented bytes containing the value; and an alias ordinal outside
 every accepted segment. It keeps the anchor only when it is non-empty,
 within `CLAIM_ANCHOR_MAX_BYTES`, and contained in the segment's trimmed
-`p1`. A later claim for a key removes the earlier one, then each segment is
-truncated to `CLAIMS_PER_SEGMENT`. The position in the vector is the index.
+`p1`. An anchor that reads as a `Lifted` status line
+(`crates/daemon/src/history_open_items.rs::is_lifted_line`) is kept only
+when the value is non-empty, the value lies inside the cited span within one
+of the alias's `user_text` ranges, and the anchor is a whole `Lifted` line of
+that `p1` (`is_lifted_line_of`); otherwise the anchor is dropped and the
+claim is kept. A later claim for a key removes the earlier one, then each
+segment is truncated to `CLAIMS_PER_SEGMENT`. The position in the vector is
+the index.
+
+`crates/daemon/src/chunk_text.rs::user_text_ranges` computes the ranges for
+`crates/daemon/src/history_summarizer_chunk.rs::message_part`: one byte
+range of the presented part per text block of a user-role message outside
+the reserved `eidnara:` id space whose cleaned text passes
+`is_user_written`. Attachment placeholders and tool-result digests lie
+outside every range. `text_parts` flags a text block through
+`chunk_text::is_typed_text`, which leaves out two forms of native text. The
+first is the form `crates/daemon/src/codec/pi.rs::bash_execution_text`
+writes, read by
+`crates/daemon/src/memory_capture.rs::is_pi_bash_execution_text`; a Pi
+`bashExecution` row decodes to one such text block, so it has no range. The
+second is text that opens with a marker
+`crates/daemon/src/transform.rs::is_system_injected_text` reads as injected
+by a plugin. The chunk builder holds no harness name, so both forms are
+left out for every harness, where memory capture leaves the first out for
+`pi` sources. A text block that holds a plugin's marker after the user's
+own words keeps its range. `is_typed_text` also leaves out a block whose
+`opencode` namespace holds a non-null `metadata.marker.kind`:
+`crates/daemon/src/codec/opencode.rs::block_with_extras` copies a native
+part's `metadata` into that namespace, and the plugin's
+`isMachineAuthoredPart`
+(`packages/opencode-plugin/src/hooks/context/read-session-formatting.ts`)
+reads such a part as machine-authored. The codec does not copy the part's
+`synthetic` flag, so a part marked `synthetic` alone keeps its range; the
+catalog record holds that as an open question.
 
 `crates/daemon/src/history_summarizer_validate.rs::parse_claims` unescapes
 each child element before the checks, so the bounds count unescaped bytes.
@@ -36,6 +68,14 @@ rewrites (`crates/memory-store/src/lib.rs::prepare_claims`, commit
 rewritten-key case in
 `crates/memory-store/tests/production_redaction.rs::history_segment_content_redacts_and_new_message_identities_reject`
 exercises this.
+
+Tests for the `Lifted` anchor rule:
+`crates/daemon/src/history_open_items_tests.rs::{a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message,
+a_lift_claim_that_cites_words_no_user_wrote_leaves_the_constraint_standing,
+a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_other_text}`
+and `crates/daemon/src/history_summarizer_chunk.rs::digest_chunk_tests::{a_part_is_marked_user_only_when_it_renders_a_user_messages_text,
+a_pi_row_is_marked_user_only_when_it_is_a_user_message,
+an_opencode_part_with_a_marker_kind_is_not_user_text}`.
 
 Tests: `crates/daemon/src/history_summarizer_citations.rs::tests::each_claim_rule_drops_only_its_own_claim`
 checks eleven candidates and asserts five kept with the exact anchors and

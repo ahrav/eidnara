@@ -239,8 +239,11 @@ pub struct HostTiming {
     /// The host retires a peer that stops reading instead of allowing it to pin shared egress budget indefinitely.
     /// budget indefinitely.
     pub frame_deadline: Duration,
-    /// The budget covers bind, route-gone, initialization, and health callbacks; expiry is host-fatal.
-    /// host-fatal.
+    /// The budget covers the bind, route-gone, initialization, and health callbacks and the shutdown
+    /// of an incarnation that recorded `running`; expiry is host-fatal.
+    /// A wait step that a suspension wakes more than 1 s late charges the callback's poll CPU time,
+    /// capped at the step's scheduled length plus 1 s, and at least that length when the step
+    /// before it was that late too (protocol §9.3).
     pub lifecycle_callback_deadline: Duration,
     /// The route-close budget settles or cancels one route's admitted work.
     pub route_close_budget: Duration,

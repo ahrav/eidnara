@@ -7,12 +7,7 @@
 
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import { getErrorMessage } from "../../shared/error-message";
-import {
-    isAvailable,
-    type MemoryState,
-    type ReadRow,
-    renderToolStateText,
-} from "../../shared/kernel-client";
+import { type MemoryState, type ReadRow, renderToolStateText } from "../../shared/kernel-client";
 import {
     boundDynamicField,
     describeQueryBoundsViolation,
@@ -23,6 +18,8 @@ import {
     type KernelMemorySearchResult,
     parseObjectIdQuery,
     readObjectRowsChunked,
+    resolveContests,
+    scanSnapshotForLexicalSearch,
     searchKernelMemoryRows,
 } from "./kernel-memory-search";
 import { normalizeEidnaraSearchArgs, prepareQueryFromNormalizedArgs } from "./query-input";
@@ -111,7 +108,14 @@ export type EidnaraSearchExecution =
 
 /** One memory read for the search: the rows it returned, or the state that refused it. */
 type MemoryRead =
-    | { rows: ReadRow[]; truncated: boolean; unresolvedObjectIds: string[]; state: null }
+    | {
+          rows: ReadRow[];
+          truncated: boolean;
+          unresolvedObjectIds: string[];
+          /** The store state the rows were read at. */
+          knownAsOf: number | null;
+          state: null;
+      }
     | { state: MemoryState };
 
 export async function executeEidnaraSearch(
@@ -218,15 +222,31 @@ export async function executeEidnaraSearch(
                       rows: read.rows,
                       truncated: false,
                       unresolvedObjectIds: read.unresolvedObjectIds,
+                      knownAsOf: read.knownAsOf,
                       state: null,
                   }
                 : { state: read.state };
         }
-        const read = await client.read({ surface: "explicit_search", gated, ...signal });
-        return isAvailable(read)
-            ? { rows: read.rows, truncated: read.truncated, unresolvedObjectIds: [], state: null }
+        const read = await scanSnapshotForLexicalSearch({
+            client,
+            surface: "explicit_search",
+            gated,
+            query,
+            limit,
+            ...signal,
+        });
+        return read.ok
+            ? {
+                  rows: read.rows,
+                  truncated: read.truncated,
+                  unresolvedObjectIds: [],
+                  knownAsOf: read.knownAsOf,
+                  state: null,
+              }
             : { state: read.state };
     };
+    // The rows and the contest read after them are one search: the daemon connection they are read under is the same one.
+    const connection = client.connectionIdentity();
     let memory = await readMemory(true);
     let freshnessNote: string | undefined;
     if (memory.state?.kind === "unavailable" && memory.state.reason === "no_required_consumer") {
@@ -246,16 +266,30 @@ export async function executeEidnaraSearch(
             `Memory: unresolved object id${unresolvedObjectIds.length === 1 ? "" : "s"} (the daemon read stayed truncated): ${unresolvedObjectIds.join(", ")}`,
         );
     }
-    // A truncated snapshot drops the oldest rows, so a lexical hit that lives only in an omitted memory is silently missing; the note keeps "no results" from reading as a complete search.
+    // The truncation note marks results as partial because unread memories may contain lexical matches.
     if (memoryTruncated) {
         notes.push("Memory: the memory read was truncated; older memories were not searched.");
     }
-    const memoryNote = notes.join("\n");
-    const hits = searchKernelMemoryRows({
+    const hits =
+        searchKernelMemoryRows({
+            rows: memoryRows,
+            query,
+            limit,
+            excludeObjectIds: new Set(),
+        }) ?? [];
+    const contestNote = await resolveContests({
+        client,
+        results: hits,
         rows: memoryRows,
-        query,
-        limit,
-        excludeObjectIds: new Set(),
+        asOf: memory.knownAsOf,
+        ...(toolContext.abort ? { signal: toolContext.abort } : {}),
     });
-    return completeFrom(hits ?? [], memoryNote);
+    if (client.connectionIdentity() !== connection) {
+        return {
+            status: "invalid",
+            text: `Error: ${renderToolStateText({ kind: "unavailable", reason: "snapshot_diverged" })}`,
+        };
+    }
+    if (contestNote) notes.push(contestNote);
+    return completeFrom(hits, notes.join("\n"));
 }

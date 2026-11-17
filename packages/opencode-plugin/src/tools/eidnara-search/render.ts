@@ -13,7 +13,11 @@ import {
     MAX_RENDERED_RESULT_TOKENS,
     renderAntiMemoryWarningLine,
 } from "./bounds";
-import type { AntiMemorySearchResult, KernelMemorySearchResult } from "./kernel-memory-search";
+import {
+    type AntiMemorySearchResult,
+    contestMemoryId,
+    type KernelMemorySearchResult,
+} from "./kernel-memory-search";
 
 export function renderAntiMemoryWarning(result: AntiMemorySearchResult): string {
     return renderAntiMemoryWarningLine({
@@ -46,7 +50,11 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
     }
     const source = result.sourceName ? ` source=${boundDynamicField(result.sourceName)}` : "";
     const policy = result.policyLabel ? ` trust=[${boundDynamicField(result.policyLabel)}]` : "";
-    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${routeFieldsOf(result)}${policy}\n${boundDynamicField(result.content)}`;
+    // The contest renders on its own line, so a long statement keeps the contesting memory's id and excerpt. The excerpt is bounded and quoted where it is made, so it renders whole with its closing quotation mark.
+    const contest = result.contestedBy
+        ? `\nContested by ${contestMemoryId(result.contestedBy.memory)}${result.contestedBy.excerpt === undefined ? "" : `: ${result.contestedBy.excerpt}`}`
+        : "";
+    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${routeFieldsOf(result)}${policy}\n${boundDynamicField(result.content)}${contest}`;
 }
 
 const SECTION_SEPARATOR = "\n\n";

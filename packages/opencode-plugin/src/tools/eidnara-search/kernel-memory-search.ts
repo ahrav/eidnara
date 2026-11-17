@@ -1,19 +1,20 @@
 /**
- * Ranks kernel memory rows for an explicit search. The daemon serves the
- * project's visible rows; matching them against the query is local because
- * the row set is already budget-sized and the match must not depend on a
- * second round trip.
+ * Memory search ranks kernel memory rows from the project's visible rows,
+ * which the daemon serves in bounded pages.
  */
 
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 
-import type { Deadline } from "../../shared/host-client";
+import { Deadline } from "../../shared/host-client";
 import {
     isAvailable,
     isMemoryDecisionRow,
     type KernelClient,
     MAX_READ_OBJECT_IDS,
     type MemoryState,
+    type ReadCursor,
+    type ReadDecision,
     type ReadRow,
     type RouteCausality,
     type Surface,
@@ -25,7 +26,14 @@ import {
     antiMemoryExpired,
     parseAntiMemoryContent,
 } from "../../shared/kernel-client/anti-memory";
-import { splitQueryOperands } from "./bounds";
+import { isRecord } from "../../shared/record-type-guard";
+import { MAX_RENDER_FIELD_BYTES, splitQueryOperands } from "./bounds";
+
+/** The observation that contests a user's statement: the contesting memory's own result id and the quoted excerpt of its text. `excerpt` is absent when the observation's row could not be read. */
+export interface MemoryContest {
+    memory: string;
+    excerpt?: string;
+}
 
 export interface MemorySearchResult {
     source: "memory";
@@ -44,6 +52,10 @@ export interface MemorySearchResult {
     provenance?: RouteCausality;
     /** Exact SHA-256 digest of the served revision's content bytes. */
     contentDigest?: string;
+    /** The memory capture recorded as contradicting this user statement, before `resolveContests` judges whether the daemon serves it. */
+    contestingMemoryId?: string;
+    /** Present when capture recorded an observation that contradicts this user statement and the daemon serves that observation on explicit search. */
+    contestedBy?: MemoryContest;
 }
 
 export interface AntiMemorySearchResult {
@@ -93,7 +105,7 @@ export type ChunkedObjectRead =
  * whose read still reports truncated without serving its row lands in
  * `unresolvedObjectIds` instead of passing as proven-missing.
  *
- * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`.
+ * Later chunks use the first reply's `known_as_of` as `asOf` to pin all rows to one store state. A caller that continues an earlier read passes that read's `knownAsOf` as `asOf`, and every chunk reads that store state. A mismatched `known_as_of` means chunks do not share one store state, and the read fails closed with `snapshot_diverged`.
  */
 export async function readObjectRowsChunked(args: {
     client: KernelClient;
@@ -104,10 +116,12 @@ export async function readObjectRowsChunked(args: {
     signal?: AbortSignal;
     /** Each chunk's read receives this deadline's remainder, so every chunk ends by the same instant. */
     deadline?: Deadline;
+    /** The store state to read; absent or `null` reads the tip. */
+    asOf?: number | null;
 }): Promise<ChunkedObjectRead> {
     const rows: ReadRow[] = [];
     const unresolvedObjectIds: string[] = [];
-    let snapshot: number | null = null;
+    let snapshot: number | null = args.asOf ?? null;
     const pending: (readonly string[])[] = [];
     for (let start = 0; start < args.objectIds.length; start += MAX_READ_OBJECT_IDS) {
         pending.push(args.objectIds.slice(start, start + MAX_READ_OBJECT_IDS));
@@ -190,6 +204,138 @@ export function antiMemoryPayloadOfRow(row: ReadRow): AntiMemoryPayload | null |
     }
 }
 
+/** The source id of the rows automatic capture writes; capture records a contest in the rationale of those rows (host wire protocol, section 7.9). */
+const CAPTURE_SOURCE_ID = "memory_capture";
+/** The source kind of those rows. */
+const CAPTURE_SOURCE_KIND = "assistant";
+
+/** The longest contest text a result shows, in characters; the daemon cuts the `<project-memory>` block's contest text at the same length (host wire protocol, section 7.9). */
+export const CONTEST_EXCERPT_CHARS = 240;
+
+/** The most bytes a quoted contest excerpt holds, one rendered field's bound; the daemon applies the same bound (host wire protocol, section 7.9). */
+export const CONTEST_EXCERPT_BYTES = MAX_RENDER_FIELD_BYTES;
+
+/** Runs of characters with the Unicode `White_Space` property, which the daemon folds with `str::split_whitespace`. JavaScript's `\s` holds U+FEFF and lacks U+0085, so the property is named. */
+const UNICODE_WHITESPACE = /\p{White_Space}+/u;
+
+/** The contesting text as one bounded, quoted literal: runs of Unicode whitespace fold to single spaces, the text is cut to `CONTEST_EXCERPT_CHARS` characters with an ellipsis, and to fewer when the quoted form would pass `CONTEST_EXCERPT_BYTES`, and the result is a JSON string, so the text stays inside its quotation marks whatever it holds. The daemon builds the same literal from the same text. */
+export function contestExcerpt(text: string): string {
+    const folded = text.split(UNICODE_WHITESPACE).filter(Boolean).join(" ");
+    const chars = Array.from(folded);
+    for (let kept = Math.min(chars.length, CONTEST_EXCERPT_CHARS); ; kept -= 1) {
+        const shown = chars.slice(0, kept).join("") + (kept < chars.length ? "\u2026" : "");
+        const quoted = JSON.stringify(shown);
+        if (Buffer.byteLength(quoted, "utf8") <= CONTEST_EXCERPT_BYTES || kept === 0) return quoted;
+    }
+}
+
+/** Host wire protocol section 7.9 limits verbatim contesting IDs to 128 characters. */
+export const CONTEST_ID_CHARS = 128;
+
+const PLAIN_CONTEST_ID = new RegExp(`^[A-Za-z0-9_.:-]{1,${CONTEST_ID_CHARS}}$`);
+
+/** IDs outside `PLAIN_CONTEST_ID` use `contestExcerpt`'s bounded quoting to contain writer-controlled text (host wire protocol, section 7.9). */
+export function contestMemoryId(id: string): string {
+    return PLAIN_CONTEST_ID.test(id) ? id : contestExcerpt(id);
+}
+
+/** The id of the memory a capture recorded as contradicting a user's statement. The record names the memory and holds none of its text. `undefined` for a row capture did not write and for a rationale that names no contesting memory. */
+function contestingMemoryOf(row: ReadRow, decision: ReadDecision): string | undefined {
+    const { rationale } = decision.payload;
+    // The shape of a capture decision, as the daemon's `is_capture_memory` reads it.
+    const captured =
+        isMemoryDecisionRow(row) &&
+        row.object.source_id === CAPTURE_SOURCE_ID &&
+        row.object.source_kind === CAPTURE_SOURCE_KIND;
+    if (!captured || !rationale.includes("contested_by")) return undefined;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(rationale);
+    } catch {
+        return undefined;
+    }
+    const contest = isRecord(parsed) ? parsed.contested_by : undefined;
+    // The whole record, as the daemon reads it: a string id, an integer commit, and a session that is a string, null, or absent.
+    const whole =
+        isRecord(contest) &&
+        typeof contest.memory === "string" &&
+        Number.isSafeInteger(contest.stated_seq) &&
+        (contest.session === undefined ||
+            contest.session === null ||
+            typeof contest.session === "string");
+    return whole ? (contest.memory as string) : undefined;
+}
+
+/** Whether a reader is shown this memory as a contesting observation: a live memory decision the daemon serves on explicit search, labeled or not, with normal sensitivity. */
+function servesAsObservation(row: ReadRow): boolean {
+    return (
+        isMemoryDecisionRow(row) &&
+        row.object.invalidated_commit_seq === null &&
+        row.visibility !== "hidden" &&
+        row.object.sensitivity === "normal"
+    );
+}
+
+/**
+ * Fills `contestedBy` on each result whose statement names a contesting memory. The contest shows the observation's own served text, so each named memory is read by id on explicit search at `asOf`, the store state the results were read at, unless `rows` already holds it. A memory that read does not serve, such as one the Kernel hides or one that was retired, contests nothing a reader is shown. When the read fails, the result names the observation without its text and the returned note says so.
+ */
+export async function resolveContests(args: {
+    client: KernelClient;
+    results: KernelMemorySearchResult[];
+    /** Rows already read at `asOf`. */
+    rows: readonly ReadRow[];
+    asOf: number | null;
+    signal?: AbortSignal;
+    deadline?: Deadline;
+}): Promise<string | undefined> {
+    const pending = args.results.filter(
+        (result): result is MemorySearchResult & { contestingMemoryId: string } =>
+            result.source === "memory" && result.contestingMemoryId !== undefined,
+    );
+    if (pending.length === 0) return undefined;
+    const known = new Map(args.rows.map((row) => [row.object.object_id, row]));
+    const missing = [
+        ...new Set(
+            pending.map((result) => result.contestingMemoryId).filter((id) => !known.has(id)),
+        ),
+    ];
+    const unreadIds = new Set<string>();
+    if (missing.length > 0) {
+        const read = await readObjectRowsChunked({
+            client: args.client,
+            surface: "explicit_search",
+            gated: false,
+            objectIds: missing,
+            asOf: args.asOf,
+            ...(args.signal ? { signal: args.signal } : {}),
+            ...(args.deadline ? { deadline: args.deadline } : {}),
+        });
+        if (read.ok && (args.asOf === null || read.knownAsOf === args.asOf)) {
+            for (const row of read.rows) known.set(row.object.object_id, row);
+            // An id a capped read left out is unread, not absent.
+            for (const id of read.unresolvedObjectIds) unreadIds.add(id);
+        } else {
+            for (const id of missing) unreadIds.add(id);
+        }
+    }
+    let unresolved = false;
+    for (const result of pending) {
+        const row = known.get(result.contestingMemoryId);
+        if (row === undefined && unreadIds.has(result.contestingMemoryId)) {
+            result.contestedBy = { memory: result.contestingMemoryId };
+            unresolved = true;
+        } else if (row !== undefined && servesAsObservation(row) && row.decision) {
+            result.contestedBy = {
+                memory: result.contestingMemoryId,
+                excerpt: contestExcerpt(row.decision.payload.summary),
+            };
+        }
+    }
+    return unresolved
+        ? "Memory: a contesting observation could not be read; its statement names it without its text."
+        : undefined;
+}
+
 /** A rejected-approach row emits `anti_memory`. An unparseable stored summary becomes a warning carrying the raw summary as the rejected strategy. Callers pass a previously parsed `antiMemory` value to reuse the parse result. */
 export function memoryResultFromRow(
     row: ReadRow,
@@ -231,6 +377,9 @@ export function memoryResultFromRow(
         category: decision?.decision_kind ?? row.object.object_kind,
         matchType,
         ...(row.labeled ? { policyLabel: "labeled" } : {}),
+        ...(decision && contestingMemoryOf(row, decision) !== undefined
+            ? { contestingMemoryId: contestingMemoryOf(row, decision) }
+            : {}),
     };
 }
 
@@ -255,9 +404,7 @@ export function searchKernelMemoryRows(
     args: KernelMemorySearchArgs,
 ): KernelMemorySearchResult[] | null {
     const nowMs = args.nowMs ?? Date.now();
-    const decisionRows = args.rows.filter(
-        (row) => isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, nowMs),
-    );
+    const decisionRows = args.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
     const ids = parseObjectIdQuery(args.query);
     if (ids) {
         const byId = new Map(decisionRows.map((row) => [row.object.object_id, row]));
@@ -271,9 +418,20 @@ export function searchKernelMemoryRows(
     const candidates = decisionRows.filter(
         (row) => !args.excludeObjectIds?.has(row.object.object_id),
     );
-    const terms = queryTerms(args.query);
-    if (terms.length === 0) return null;
-    const scored = candidates
+    const scored = rankLexicalRows(candidates, queryTerms(args.query), args.limit).map((entry) =>
+        memoryResultFromRow(entry.row, entry.score, "lexical"),
+    );
+    return scored.length > 0 ? scored : null;
+}
+
+/** Ranks the rows that contain a query term: best score first, then newest, then object id. A row's rank depends on that row alone. */
+function rankLexicalRows(
+    rows: readonly ReadRow[],
+    terms: readonly string[],
+    limit: number,
+): { row: ReadRow; score: number }[] {
+    if (terms.length === 0) return [];
+    return rows
         .map((row) => {
             const text = rowText(row).toLowerCase();
             const matched = terms.filter((term) => text.includes(term)).length;
@@ -286,7 +444,150 @@ export function searchKernelMemoryRows(
                 right.row.object.created_commit_seq - left.row.object.created_commit_seq ||
                 left.row.object.object_id.localeCompare(right.row.object.object_id),
         )
-        .slice(0, args.limit)
-        .map((entry) => memoryResultFromRow(entry.row, entry.score, "lexical"));
-    return scored.length > 0 ? scored : null;
+        .slice(0, limit);
+}
+
+/** A later page's position: the first page's snapshot and the last row served so far, whose id is encoded once per page. */
+interface ScanPosition {
+    asOf: number;
+    before: ReadCursor;
+    beforeId: Buffer;
+}
+
+/** The daemon breaks commit ties by UTF-8 byte order, so ids compare as bytes here too. */
+function followsCursor(position: ScanPosition, row: ReadRow): boolean {
+    const seq = row.object.created_commit_seq;
+    return (
+        seq < position.before.createdCommitSeq ||
+        (seq === position.before.createdCommitSeq &&
+            Buffer.compare(Buffer.from(row.object.object_id, "utf8"), position.beforeId) > 0)
+    );
+}
+
+/**
+ * The default scan reads up to sixteen pages at the first page's snapshot. A page holds at most
+ * 8,192 rows and 8 MiB of row bytes, so sixteen pages cover 131,072 memories (a project that keeps
+ * 100 memories a day for more than three years) and transfer at most 128 MiB.
+ */
+const MAX_SNAPSHOT_SCAN_PAGES = 16;
+
+/** One scan spends at most the deadline one memory read had before the scan paged, so the fallback answers no later than it did; pages the deadline leaves unread are reported as truncation. */
+const SNAPSHOT_SCAN_DEADLINE_MS = 10_000;
+
+/** The rows a lexical search ranks: memory decisions, minus anti-memories past their expiry. */
+function isSearchableMemoryRow(row: ReadRow, nowMs: number): boolean {
+    return isMemoryDecisionRow(row) && !isExpiredAntiMemoryRow(row, nowMs);
+}
+
+/**
+ * The rows a scan carries from page to page, in rank order: the best `limit` rows that cannot
+ * expire, and the best `limit` anti-memories that carry an expiry. A row's rank and its kind
+ * depend on that row alone, so applying both caps to each page's merge keeps the best `limit` rows
+ * of each kind over every page read. The final ranking reads the clock after the scan, and the
+ * place of an anti-memory that expired meanwhile goes to the next row kept here, when one is left.
+ */
+function retainRankedRows(rows: readonly ReadRow[], terms: readonly string[], limit: number) {
+    let lasting = 0;
+    let expiring = 0;
+    const kept: ReadRow[] = [];
+    for (const { row } of rankLexicalRows(rows, terms, Number.POSITIVE_INFINITY)) {
+        const canExpire = antiMemoryPayloadOfRow(row)?.expiresAt != null;
+        if (canExpire ? expiring++ < limit : lasting++ < limit) kept.push(row);
+    }
+    return kept;
+}
+
+export type SnapshotScan =
+    | {
+          ok: true;
+          rows: ReadRow[];
+          truncated: boolean;
+          /** The first page's `known_as_of`, the store state every page was read at; `null` when `maxPages` is zero. */
+          knownAsOf: number | null;
+      }
+    | { ok: false; state: MemoryState };
+
+/**
+ * Reads the surface page by page at the first page's snapshot. Among the rows of the pages read,
+ * the retained rows, at most twice `limit`, hold the top `limit` lexical results of the rows
+ * eligible at `nowMs`, the scan's start by default. When retained anti-memories expire before the
+ * final ranking, every row that cannot expire (a memory, or an anti-memory without an expiry) and
+ * ranks in the top `limit` of the rows still live then is among the retained rows. Of the
+ * anti-memories in the pages read that carry an expiry, the scan retains the best `limit` among
+ * those eligible at `nowMs`.
+ *
+ * Only the first page can be gated; later pages read the first page's snapshot. `truncated`
+ * reports rows left unread: after the first page for a query with no ranking term, after
+ * `maxPages` pages, past the deadline, or when the daemon refuses a later page or answers it from
+ * another snapshot, over another connection, or with a row at or before the cursor. A search the
+ * caller's signal cancels answers its state, as a refused first page does.
+ */
+export async function scanSnapshotForLexicalSearch(args: {
+    client: KernelClient;
+    surface: Surface;
+    gated: boolean;
+    query: string;
+    limit: number;
+    /** The instant that decides which anti-memories have expired; the scan's start by default. */
+    nowMs?: number;
+    signal?: AbortSignal;
+    /** Each page's read receives this deadline's remainder; the scan starts a `SNAPSHOT_SCAN_DEADLINE_MS` deadline by default. */
+    deadline?: Deadline;
+    maxPages?: number;
+}): Promise<SnapshotScan> {
+    const terms = queryTerms(args.query);
+    const nowMs = args.nowMs ?? Date.now();
+    const deadline = args.deadline ?? Deadline.start(SNAPSHOT_SCAN_DEADLINE_MS);
+    const maxPages = args.maxPages ?? MAX_SNAPSHOT_SCAN_PAGES;
+    const connection = args.client.connectionIdentity();
+    let kept: ReadRow[] = [];
+    let position: ScanPosition | null = null;
+    let knownAsOf: number | null = null;
+    for (let page = 0; page < maxPages; page += 1) {
+        // `prior` is null on the first page alone.
+        const prior = position;
+        if (prior !== null && deadline.isExpired()) {
+            return { ok: true, rows: kept, truncated: true, knownAsOf };
+        }
+        const read = await args.client.read({
+            surface: args.surface,
+            gated: prior === null && args.gated,
+            // The first page caches tokens as the single read did; later pages' rows mostly fall out of the ranking.
+            cacheTokens: prior === null,
+            ...(prior === null ? {} : { asOf: prior.asOf, before: prior.before }),
+            ...(args.signal ? { signal: args.signal } : {}),
+            deadlineMs: deadline.remainingMs(),
+        });
+        if (!isAvailable(read)) {
+            // The client reports an expired deadline as `cancelled` too, so only the caller's own signal marks a cancelled search.
+            const cancelled = args.signal?.aborted === true;
+            return prior === null || cancelled
+                ? { ok: false, state: read.state }
+                : { ok: true, rows: kept, truncated: true, knownAsOf };
+        }
+        // A reply from another daemon connection can reuse the same `known_as_of` for a different store state.
+        const continuesSnapshot =
+            prior === null ||
+            (read.known_as_of === prior.asOf &&
+                args.client.connectionIdentity() === connection &&
+                read.rows.every((row) => followsCursor(prior, row)));
+        if (!continuesSnapshot) return { ok: true, rows: kept, truncated: true, knownAsOf };
+        knownAsOf = read.known_as_of;
+        const candidates = read.rows.filter((row) => isSearchableMemoryRow(row, nowMs));
+        kept = retainRankedRows([...kept, ...candidates], terms, args.limit);
+        const last = read.rows.at(-1);
+        if (!read.truncated || last === undefined || terms.length === 0) {
+            return { ok: true, rows: kept, truncated: read.truncated, knownAsOf };
+        }
+        const before = {
+            createdCommitSeq: last.object.created_commit_seq,
+            objectId: last.object.object_id,
+        };
+        position = {
+            asOf: read.known_as_of,
+            before,
+            beforeId: Buffer.from(before.objectId, "utf8"),
+        };
+    }
+    return { ok: true, rows: kept, truncated: true, knownAsOf };
 }

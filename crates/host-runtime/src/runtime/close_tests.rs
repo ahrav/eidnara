@@ -1315,3 +1315,13 @@ async fn a_request_cancelled_by_route_close_before_its_copy_retires_on_a_failed_
     );
     drop(leases);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_lifecycle_join_does_not_read_the_thread_cpu_clock() {
+    let shared = shared();
+    let task = shared.spawn_lifecycle(async { 7 });
+    let reads = crate::lifecycle_deadline::test_cpu::reads();
+    let joined = shared.lifecycle_join("bind", task).await;
+    assert!(matches!(joined, Ok(7)));
+    assert_eq!(crate::lifecycle_deadline::test_cpu::reads(), reads);
+}

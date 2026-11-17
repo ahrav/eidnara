@@ -2,7 +2,7 @@
 //!
 //! Every message part the chunk renders carries an alias `sN` that names the native message, the blocks whose text produced the part, their content hashes, and the exact presented bytes. A fact cites `[sN:start-end]`, a half-open UTF-8 byte range inside that presented text; validation accepts a citation only when the alias exists, the range lies on character boundaries inside the presented bytes, and the alias's message falls inside the finally accepted history segment. The table travels with the chunk; a reattachment rebuilds it from the same frozen messages under the same budget, which the builder's tests hold byte-identical.
 
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,12 +38,23 @@ pub struct FrozenAlias {
     pub presented: String,
     /// Whether the presented text is a transformation of the native text (compaction, truncation, tool summary, marker escaping) rather than a verbatim copy.
     pub transformed: bool,
+    /// The byte ranges of `presented` that hold text a user wrote, one per text block of a user message. A text block counts when the message id is outside the reserved id space, the native text is outside the form the Pi codec gives a bash execution and opens with no marker of plugin-injected text, the block carries no OpenCode marker kind, and the cleaned text opens with no Eidnara system directive and holds no `<system-reminder>` tag. A stored table without this member reads as an empty list.
+    #[serde(default)]
+    pub user_text: Vec<Range<usize>>,
 }
 
 /// The chunk's alias table, in issue order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrozenAliasTable {
     pub aliases: Vec<FrozenAlias>,
+}
+
+impl FrozenAlias {
+    /// `self` with `user_text` as its ranges of user-written text.
+    pub(crate) fn with_user_text(mut self, user_text: Vec<Range<usize>>) -> Self {
+        self.user_text = user_text;
+        self
+    }
 }
 
 impl FrozenAliasTable {
@@ -204,7 +215,7 @@ pub enum ClaimsOutcome {
 }
 
 /// The D-7 claim-key grammar `[a-z0-9_-]+(\.[a-z0-9_-]+)+` within the byte bound.
-fn is_claim_key(key: &str) -> bool {
+pub(crate) fn is_claim_key(key: &str) -> bool {
     let part = |part: &str| {
         !part.is_empty()
             && part
@@ -219,7 +230,10 @@ fn is_claim_key(key: &str) -> bool {
 /// through the frozen alias table to a span of presented bytes whose message
 /// lies inside an accepted segment's range, with the value inside that span;
 /// an anchor within its bound that the segment's trimmed `p1` contains (else
-/// no anchor). A claim failing a rule before the anchor is dropped. Each
+/// no anchor), where an anchor that reads as a `Lifted` status line also has
+/// to be a whole `Lifted` line of that `p1`, with or without its bullet, on a
+/// claim whose value is words it cites from the text of a user message. A
+/// claim failing a rule before the anchor is dropped. Each
 /// segment then keeps the last claim per key and the first
 /// [`CLAIMS_PER_SEGMENT`] of those, in emitted order; a claim's position is
 /// its index. Returns the claims per segment, aligned with `segments`, and the
@@ -265,6 +279,21 @@ pub fn check_claim_set(
         let p1 = segments[index].1.trim();
         let anchor = candidate.anchor.clone().filter(|anchor| {
             !anchor.is_empty() && anchor.len() <= CLAIM_ANCHOR_MAX_BYTES && p1.contains(anchor)
+        });
+        // A `Lifted` line's anchor retires a constraint line at render, so it stays only as a
+        // whole `Lifted` line of `p1`, with or without its bullet, on a claim whose value lies in
+        // text a user wrote inside the cited span.
+        let user_words = || {
+            frozen.user_text.iter().any(|text| {
+                let cited = citation.start.max(text.start)..citation.end.min(text.end);
+                (frozen.presented.get(cited)).is_some_and(|cited| cited.contains(value))
+            })
+        };
+        let anchor = anchor.filter(|anchor| {
+            !crate::history_open_items::is_lifted_line(anchor)
+                || (!value.is_empty()
+                    && user_words()
+                    && crate::history_open_items::is_lifted_line_of(p1, anchor))
         });
         let claims = &mut per_segment[index];
         // The last claim for a key wins: an earlier one leaves the order.
@@ -391,6 +420,20 @@ mod tests {
             );
             let expected = presented.get(start..end).is_some_and(|span| span.contains(value.as_str()));
             prop_assert_eq!(claims[0].len() == 1, expected);
+        }
+    }
+
+    /// A table frozen by a build whose alias carried a `user` flag, or none of the two members,
+    /// reads as an alias with no user-written range.
+    #[test]
+    fn a_stored_alias_without_user_text_reads_as_no_ranges() {
+        for user in ["", r#","user":true"#] {
+            let stored = format!(
+                r#"{{"alias":"s1","message_id":"m1","ordinal":1,"block_ids":[],"block_hashes":[],"presented":"lift the rule","transformed":false{user}}}"#
+            );
+            let alias: FrozenAlias = serde_json::from_str(&stored).unwrap();
+            assert_eq!(alias.presented, "lift the rule");
+            assert!(alias.user_text.is_empty(), "{stored}");
         }
     }
 

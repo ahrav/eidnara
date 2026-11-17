@@ -226,9 +226,69 @@ fn space_before_punct_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\s+([,.;:])").unwrap())
 }
 
+fn system_reminder_tag_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)</?system-reminder>").unwrap())
+}
+
+/// Whether `block`, a text block whose native text is `text`, holds text someone typed to the
+/// assistant. Two forms of text are left out, for every harness: the text the Pi codec gives a
+/// bash execution, which holds a command and its output and which memory capture leaves out
+/// for `pi`, and text that opens with a marker the transform reads as injected by a plugin. A
+/// block that the OpenCode codec decoded from a part with a marker kind is left out as well.
+pub(crate) fn is_typed_text(block: &crate::wire::WireBlock, text: &str) -> bool {
+    !crate::memory_capture::is_pi_bash_execution_text(text)
+        && !crate::transform::is_system_injected_text(text)
+        && !has_opencode_marker_kind(block)
+}
+
+/// Whether the `opencode` namespace of `block` holds `metadata.marker.kind` with a value other
+/// than null, the marker half of the OpenCode plugin's `isMachineAuthoredPart`. The codec
+/// copies a part's `metadata` into that namespace and leaves the part's `synthetic` flag out,
+/// so a part that is marked `synthetic` alone reads as typed here.
+fn has_opencode_marker_kind(block: &crate::wire::WireBlock) -> bool {
+    block
+        .provider_extras
+        .get(crate::codec::opencode::HARNESS)
+        .and_then(|namespace| namespace.get("metadata"))
+        .and_then(|metadata| metadata.get("marker"))
+        .and_then(|marker| marker.as_object())
+        .and_then(|marker| marker.get("kind"))
+        .is_some_and(|kind| !kind.is_null())
+}
+
+fn is_user_written((text, cleaned_text): &(String, bool)) -> bool {
+    *cleaned_text && !is_system_directive(text) && !system_reminder_tag_regex().is_match(text)
+}
+
+/// The byte range each user-written part of `parts` takes in the text the chunk builder presents
+/// for a message: the parts joined by `" / "`, with alias marker characters escaped. A message
+/// with another role than `user`, or with a reserved id, has no such range.
+pub(crate) fn user_text_ranges(
+    role: &str,
+    mid: &str,
+    parts: &[(String, bool)],
+) -> Vec<std::ops::Range<usize>> {
+    if role != "user" || crate::codec::pi::is_reserved_id(mid) {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for part in parts {
+        let text = &part.0;
+        let escaped = crate::history_summarizer_chunk::escape_markers(text);
+        let end = start + escaped.map_or(text.len(), |escaped| escaped.len());
+        if is_user_written(part) {
+            ranges.push(start..end);
+        }
+        start = end + " / ".len();
+    }
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_COMMITS_PER_BLOCK, clean_user_text, merge_commit_hashes};
+    use super::{MAX_COMMITS_PER_BLOCK, clean_user_text, is_user_written, merge_commit_hashes};
 
     fn hashes(prefix: &str, count: usize) -> Vec<String> {
         (0..count).map(|i| format!("{prefix}{i}")).collect()
@@ -279,5 +339,29 @@ mod tests {
             clean_user_text("a<system-reminder>unterminated b"),
             "a<system-reminder>unterminated b"
         );
+    }
+
+    #[test]
+    fn text_that_keeps_a_reminder_tag_through_cleaning_is_not_user_written() {
+        let written = |text: &str| is_user_written(&(clean_user_text(text), true));
+        for text in [
+            "<system-reminder><system-reminder>x</system-reminder>y</system-reminder>",
+            "a<SYSTEM-REMINDER>unterminated b",
+            "a</\u{17f}ystem-reminder>b",
+            "[SYSTEM DIRECTIVE: EIDNARA] a",
+        ] {
+            assert!(!written(text), "{text:?}");
+        }
+        for text in [
+            "a<system-reminder>x</system-reminder>b",
+            "a < b </ c>",
+            "<system-reminders>",
+        ] {
+            assert!(written(text), "{text:?}");
+            assert!(
+                !is_user_written(&(clean_user_text(text), false)),
+                "{text:?}"
+            );
+        }
     }
 }

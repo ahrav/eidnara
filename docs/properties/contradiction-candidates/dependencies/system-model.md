@@ -45,21 +45,30 @@ folds case and diacritics. The daemon depends on `retrieval` at
 `crates/daemon/Cargo.toml:45` (plan cited `:41`; drifted).
 
 S2 scope-filtered Kernel read. `KernelStore::visible_domain_decisions_as_of_in_scope`
-(`crates/kernel/src/admission.rs:3168-3200`) calls `visible_selected_as_of`
-(`:3202-3235`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
-one snapshot through `served_rows` (`:3484-3500`), which runs
-`served_classes_selected` (`:3693-3771`) over the SQL in `served_classes_sql`
-(`:3554-3669`). The domain/kind predicate is `o.domain_id=:domain_id AND
-o.object_kind='decision'` (`:3581-3583`). The scope prefilter is the `WHERE`
-tail at `:3649-3667`. Rows are then sorted by `object_id` (`:3223`). No row
-limit and no budget parameter exist on this API. The daemon consumer is
-`read_visible` in `crates/daemon/src/kernel_routes/read.rs:163-258`: SQL
-prefilter with `project.scope_term()` (`:178`,
+(`crates/kernel/src/admission.rs:3281-3313`) calls `visible_selected_as_of`
+(`:3315-3340`) with `ServedSelection::DomainDecisions(domain_id)`. That reads
+one snapshot through `served_rows` (`:3589-3605`), which runs
+`served_classes_selected` (`:3979-3998`) over the SQL in `served_classes_sql`
+(`:3818-3955`). The domain/kind predicate is `o.domain_id=:domain_id AND
+o.object_kind='decision'` (`:3852-3856`). The scope prefilter is the `WHERE`
+tail at `:3934-3952`. Rows are then sorted by `object_id` (`:3328`). No row
+limit and no budget parameter exist on this API. The bounded daemon consumer is
+`read_visible_page` in `crates/daemon/src/kernel_routes/read.rs:448-550`: SQL
+prefilter with `project.scope_term()` (`:465`,
 `crates/daemon/src/kernel_routes/project.rs:106-111`), then `ScopeFilter`
 (`project.rs:186-222`) judges each kept row, then `NewestRows` heap of
-`MAX_READ_ROWS = 8192` (`read.rs:26`, `:128-161`, `:191-196`), then payload
-sizes before payloads (`:198-234`), then `decisions_for_objects_as_of` for the
-retained ids (`:235-250`).
+`MAX_READ_ROWS = 8192` (`read.rs:27`, `:148-181`, `:480-488`), then payload
+sizes before payloads (`:490-526`), then `decisions_for_objects_as_of` for the
+retained ids (`:527-542`). `domain_decisions_in_serving_order`
+(`read.rs:404-432`) is the second consumer: it applies the same prefilter and
+`ScopeFilter`, sorts every kept row in serving order, and applies no row cap,
+for the canonical-memory delivery walk (`crates/daemon/src/canonical_memory.rs:291`).
+`kernel.read` does not use this API: a request
+with `object_ids` reads `visible_as_of_in_scope` through the same
+`read_visible_page` (`read.rs:469-471`), and a request with none reads, in
+`newest_page` (`read.rs:289-381`), `visible_chunk_as_of_in_scope`
+(`crates/kernel/src/admission.rs:3249-3276`), which takes a row count and a
+payload budget and has no domain selection.
 
 S3 budgeted Kernel reads. `decision_page_within_budget`
 (`crates/kernel/src/slice/read.rs:126-220`): keyset page over the whole
@@ -93,7 +102,7 @@ kernel store, budget, units, memo, commit gate mutex (`:811`),
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
 (`crates/daemon/src/lib.rs:9258-9275`). The request owner runs the
 `AfterResponse` after `settle_prepared` (`lib.rs:13660-13664`;
-`crates/daemon/src/dispatch.rs:24-35`, `:445-460`). `publish_batch`
+`crates/daemon/src/dispatch.rs:24-35`, `:422-437`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1292-1298`), `Published` (`:549-562`),
 `MAX_SOURCE_UNIT_BYTES`/`MAX_SOURCE_BATCH_UNITS`/`MAX_SOURCE_BATCH_BYTES`
 (`:614-618`, resolving to 64 KiB, 32, 64 KiB through
@@ -135,9 +144,9 @@ S7 routed reads. `docs/host-wire-protocol.md:824-828` and `:848-856`
 (`:855` is `review.use_outcome`, added by #1157).
 `crates/daemon/src/memory_reviewer/wire.rs:1-26`; strict request structs
 (`:33-60`, `deny_unknown_fields`); `bind_review` (`:203-220`) calls
-`kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:446-455`) which
-binds scope (`kernel_route_scope` `:415-441`, project check at `:428-432`)
-before `parse_request_body` (`:463-474`, removes `ENVELOPE_KEYS` `:461`:
+`kernel_request` (`crates/daemon/src/kernel_routes/mod.rs:453-462`) which
+binds scope (`kernel_route_scope` `:422-448`, project check at `:435-439`)
+before `parse_request_body` (`:470-481`, removes `ENVELOPE_KEYS` `:468`:
 `method`, `kind`, `session_id`, `project_root`). `authority_project`
 (`wire.rs:131-139`) maps NotModule to `disabled`, store error to
 `store_unavailable`. Observational harness `cli`
@@ -200,12 +209,13 @@ C2 `analysis.rs:6`: "Parts keep their original bytes; the engine folds case
 and diacritics."
 C3 `crates/retrieval/AGENTS.md`: a change to any analysis rule needs a new
 epoch and an updated pinned digest; mutations pure; every bound caller-supplied.
-C4 `admission.rs:3165-3167`: domain and kind matched in SQL before any row is
+C4 `admission.rs:3278-3280`: domain and kind matched in SQL before any row is
 read; a corrupt row outside the domain never fails this read.
-C5 `admission.rs:3138-3144`: the scope restriction is a superset of the
+C5 `admission.rs:3220-3225`: the scope restriction is a superset of the
 algebra's verdict.
-C6 `read.rs:26`, `:189`: the row bound applies after the filter; `:197`:
-payload sizes read before any payload.
+C6 `read.rs:27`, `:302`, `:479-480`: the row bound applies after the filter
+on both read paths; `:490`: `read_visible_page` reads payload sizes before
+any payload.
 C7 `slice/read.rs:121`: a single decision larger than the bound is returned
 alone; the wait for a pooled reader stops at the budget.
 C8 `claim_facts.rs:232-234`: reader acquisition and every statement stop at
@@ -282,19 +292,20 @@ D4 `crates/retrieval/AGENTS.md` ties the pinned digest to analysis-rule
 changes. The digest preimage (`identity.rs:36-65`) also includes
 `char::UNICODE_VERSION`, `rusqlite::version()`, and `SQLITE_SOURCE_ID`, so a
 toolchain or SQLite bump changes `AnalysisIdentity::current()` and fails
-`identity_pins_the_manifest` (`tests/lexical_analysis.rs:389-412`) with no
-rule change and no epoch change. Documented intent (`identity.rs:35`) is that
+`identity_pins_the_manifest` (`tests/lexical_analysis.rs:389-412`) unless the
+test records a digest for the new Unicode version, with no rule change and no
+epoch change. Documented intent (`identity.rs:35`) is that
 this is deliberate. A P5 consumer that pins the epoch string alone pins less
 than the identity does.
 
 D5 The Kernel scope prefilter keeps rows whose `scope_id` is NULL
-(`admission.rs:3661`), and the daemon `ScopeFilter::matches` returns `false`
+(`admission.rs:3949`), and the daemon `ScopeFilter::matches` returns `false`
 for `None` (`project.rs:212-214`). The superset claim holds; a P5 consumer
 that uses the Kernel API without the daemon filter would see unscoped rows
 the daemon never serves.
 
 D6 `host-wire-protocol.md:825` names the envelope as `method`, `session_id`,
-`project_root`; `ENVELOPE_KEYS` (`kernel_routes/mod.rs:461`) also strips
+`project_root`; `ENVELOPE_KEYS` (`kernel_routes/mod.rs:468`) also strips
 `kind`. A body field named `kind` is therefore not `invalid_params`. The doc
 is silent on `kind`; recorded as a lead, not a defect.
 

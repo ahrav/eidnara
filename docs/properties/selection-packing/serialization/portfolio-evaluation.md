@@ -55,7 +55,7 @@ a wildcard pass that questioned the framing itself.
    `body().len() == rendered` (`crates/daemon/tests/packing_serialize.rs:136`)
    and never reads capacity, so `Vec::new()` would pass. What the check does
    prove is that the guard's write verified the measured length
-   (`crates/daemon/src/dispatch.rs:362-394`, `LengthMismatch`). The Guarantee
+   (`crates/daemon/src/dispatch.rs:475-501`, `LengthMismatch`). The Guarantee
    now says "written exactly once through `MeasuredOutput::write_to`, which
    verifies the measured length" and drops "reserved to exactly".
 2. **Same record: the transport arm is unreachable under manifest bounds.**

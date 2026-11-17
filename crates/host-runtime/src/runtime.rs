@@ -25,6 +25,8 @@ use crate::wire::ByteBudget;
 
 #[cfg(test)]
 mod close_tests;
+#[cfg(test)]
+mod poll_time_tests;
 
 /// HostError reports failures that prevent graceful completion.
 #[derive(Debug)]
@@ -184,7 +186,15 @@ impl<H: HostHandler> HostShared<H> {
         what: &'static str,
         mut task: JoinHandle<T>,
     ) -> Result<T, LifecycleFailure<T>> {
-        match timeout(self.timing.lifecycle_callback_deadline, &mut task).await {
+        // `join_polls` stays at zero: this wait polls the `JoinHandle` through `within_timed`.
+        let join_polls = crate::lifecycle_deadline::PollTime::default();
+        match crate::lifecycle_deadline::within_timed(
+            self.timing.lifecycle_callback_deadline,
+            &mut task,
+            &join_polls,
+        )
+        .await
+        {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(join_err)) => {
                 let kind = if join_err.is_panic() {
@@ -197,7 +207,6 @@ impl<H: HostHandler> HostShared<H> {
                 Err(LifecycleFailure { running: None })
             }
             Err(_) => {
-                // `timeout` cannot expire while a future fails to yield.
                 // `shared.tracker.wait()` reaps the detached task.
                 task.abort();
                 self.fatal
@@ -373,13 +382,17 @@ impl<H: HostHandler> PrePublicationCleanup<H> {
         self.handler.as_ref().expect("armed startup cleanup")
     }
 
-    fn start_initialization(&mut self, init: crate::config::HostInit) -> &mut InitTask {
+    fn start_initialization(
+        &mut self,
+        init: crate::config::HostInit,
+        polls: crate::lifecycle_deadline::PollTime,
+    ) -> &mut InitTask {
         let handler = Arc::clone(self.handler());
         self.init
             .insert(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
                 async move {
                     let callback = crate::panic_boundary::redact_sync(|| handler.initialize(init));
-                    crate::panic_boundary::redact(callback).await
+                    polls.timing(crate::panic_boundary::redact(callback)).await
                 },
             )))
     }
@@ -741,11 +754,16 @@ pub async fn run_with_publish_hook<H: HostHandler>(
     {
         // Move `config.init` rather than cloning it so no second descriptor copy remains outside the byte budgets.
         let init = std::mem::take(&mut config.init);
-        let init_task = cleanup.start_initialization(init);
+        let init_polls = crate::lifecycle_deadline::PollTime::default();
+        let init_task = cleanup.start_initialization(init, init_polls.clone());
         let joined = tokio::select! {
             biased;
             () = shutdown.cancelled() => None,
-            joined = timeout(config.timing.lifecycle_callback_deadline, init_task) => {
+            joined = crate::lifecycle_deadline::within_timed(
+                config.timing.lifecycle_callback_deadline,
+                init_task,
+                &init_polls,
+            ) => {
                 Some(joined)
             }
         };
@@ -1063,7 +1081,10 @@ fn spawn_health_task<H: HostHandler>(shared: &Arc<HostShared<H>>) {
                     // A probe that ignores shutdown keeps its tracker until the joining loop exits.
                     // shutdown budget.
                     () = watchdog.shutdown.cancelled() => None,
-                    result = timeout(deadline, crate::panic_boundary::redact(callback)) => {
+                    result = crate::lifecycle_deadline::within(
+                        deadline,
+                        crate::panic_boundary::redact(callback),
+                    ) => {
                         match result {
                             Ok(report) => Some(report),
                             Err(_) => {
@@ -1225,11 +1246,21 @@ async fn run_handler_shutdown<H: HostHandler>(shared: &Arc<HostShared<H>>) -> bo
         return false;
     }
     let handler = Arc::clone(&shared.handler);
+    let polls = crate::lifecycle_deadline::PollTime::default();
+    let callback_polls = polls.clone();
     let mut task = shared.spawn_lifecycle(async move {
         let callback = crate::panic_boundary::redact_sync(|| handler.shutdown());
-        crate::panic_boundary::redact(callback).await;
+        callback_polls
+            .timing(crate::panic_boundary::redact(callback))
+            .await;
     });
-    match timeout(shared.timing.lifecycle_callback_deadline, &mut task).await {
+    match crate::lifecycle_deadline::within_timed(
+        shared.timing.lifecycle_callback_deadline,
+        &mut task,
+        &polls,
+    )
+    .await
+    {
         Ok(Ok(())) => true,
         Ok(Err(join_err)) => {
             let kind = if join_err.is_panic() {

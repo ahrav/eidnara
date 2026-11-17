@@ -923,6 +923,21 @@ impl KernelStore {
         Self::tip_on(&reader)
     }
 
+    /// When the commit `commit_seq` was recorded, in milliseconds since the
+    /// Unix epoch by the writer's clock, or `None` for a sequence the log
+    /// does not hold. One statement is its own snapshot.
+    pub fn commit_recorded_at(&self, commit_seq: i64) -> Result<Option<i64>, KernelError> {
+        let reader = self.lock_reader()?;
+        reader
+            .query_row_cached(
+                "SELECT recorded_at FROM commit_log WHERE commit_seq=?1",
+                [commit_seq],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(map_sqlite)
+    }
+
     /// [`Self::tip`] for a caller carrying an [`EvalBudget`](crate::applicability::EvalBudget):
     /// the wait for a pooled reader stops at the budget's deadline or interrupt
     /// with `KernelError::Deadline`.

@@ -7,25 +7,28 @@ are golden-visible and `display_arg` had to reproduce them.
 
 ## Evidence trail
 
-- `format_tool_summary` (`crates/daemon/src/history_summarizer_chunk.rs:1290-1302`):
+- `format_tool_summary` (`crates/daemon/src/history_summarizer_chunk.rs:1326-1338`):
   a non-empty string `description` renders `TC: {description}`; otherwise
   `extract_key_arg` renders `TC: {name}({key_arg})`; otherwise `TC: {name}`;
   then `normalize_text`.
 - `extract_key_arg` (`crates/daemon/src/chunk_text.rs:122-127`) uses
   `display_arg`; path-like values pass through `truncate_arg`
   (`chunk_text.rs:129-137`), 60 scalar values plus `…`.
-- Callers: `history_summarizer_chunk.rs:1254`, `:1259` (through
+- Callers: `history_summarizer_chunk.rs:1290`, `:1295` (through
   `call_summary`), `crates/daemon/src/boundary.rs:1860`, `:1867`,
-  `crates/daemon/src/tool_outcome.rs:254`, `:273`.
+  `crates/daemon/src/tool_outcome.rs:437`, `:456`.
 - Reachability: the summarizer path needs a model chain (`catalog.md`,
   Reachability classes).
-- Tests: `history_summarizer_chunk.rs:3312` (description and key-argument
-  arms, on separate inputs), `:3251`;
-  `crates/daemon/src/lib.rs:19654`
+- Tests: `history_summarizer_chunk.rs:3581` (description and key-argument
+  arms, on separate inputs), `:3520`;
+  `crates/daemon/src/lib.rs:20052`
   `history_summarizer_boundary_construction_matches_owned_reference`, which
-  expects `TC: bash` (`lib.rs:19927-19932`) for a call whose input holds only
-  `command` (`lib.rs:26292`), the bare-name arm;
-  `crates/daemon/src/tool_vocabulary_tests.rs:66` (the cut).
+  expects `TC: bash` (`lib.rs:20338-20344`) for a call whose input holds only
+  `command` (`lib.rs:26936`), the bare-name arm;
+  `crates/daemon/src/tool_vocabulary_tests.rs:66` (the cut);
+  `crates/daemon/src/boundary.rs:3211`, the only input holding both a
+  description and a key argument, whose differential comparison calls
+  `format_tool_summary` on both sides, so it leaves the precedence unasserted.
 
 ## Failure scenario
 
@@ -45,8 +48,8 @@ One input holding both a non-empty `description` and a `filePath`, asserting
 
 ### Q: Does the description arm include the tool name?
 
-- Sources examined: `history_summarizer_chunk.rs:1291-1296`;
-  `history_summarizer_chunk.rs:3331`.
+- Sources examined: `history_summarizer_chunk.rs:1327-1332`;
+  `history_summarizer_chunk.rs:3600`.
 - Findings: no; the arm renders `TC: {description}`. The source record stated
   `name(description)`.
 - Missing evidence: none.
@@ -55,7 +58,7 @@ One input holding both a non-empty `description` and a `filePath`, asserting
 ### Q: Why does confidence move from the source's `medium` to `high`?
 
 - Sources examined: the source record in #1105; the code and tests cited above.
-- Findings: the source left the locations unverified; this pass read `format_tool_summary` and every caller at `41d889ea4`, and `history_summarizer_chunk.rs:3312`, `crates/daemon/src/lib.rs:19654` (`:19652` at `41d889ea4`), and `crates/daemon/src/tool_vocabulary_tests.rs:66` exercise all three arms on separate inputs.
+- Findings: the source left the locations unverified; this pass read `format_tool_summary` and every caller at `41d889ea4`, and `history_summarizer_chunk.rs:3581`, `crates/daemon/src/lib.rs:20052` (line 19639 at `41d889ea4`), and `crates/daemon/src/tool_vocabulary_tests.rs:66` exercise all three arms on separate inputs.
 - Missing evidence: none for the confidence level; an `Exercised` gap, where
   the record names one, stays open.
 - Conclusion: resolved with answer.

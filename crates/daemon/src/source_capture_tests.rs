@@ -694,7 +694,7 @@ async fn shutdown_drains_an_in_flight_batch_and_a_panicking_job_releases_its_slo
     *panicking.source_capture.before_publish.lock().unwrap() =
         Some(Arc::new(|| panic!("injected worker panic")));
     pass(&panicking, transform_with(&window, "base-1")).await;
-    settle(&panicking).await;
+    settle_panicked(&panicking, || report(&panicking)["worker_panicked"] == 1).await;
     assert_eq!(report(&panicking)["worker_panicked"], 1);
     assert_eq!(report(&panicking)["retained_bytes"], 0);
     assert_eq!(report(&panicking)["active"], 0);
@@ -2824,7 +2824,7 @@ async fn a_crash_between_retire_and_publish_leaves_no_live_row_and_the_next_pass
         panic!("injected crash between retire and publish")
     }));
     document_pass(&handler, "base-2").await;
-    assert_eq!(count(&handler, "worker_panicked"), 1);
+    settle_panicked(&handler, || count(&handler, "worker_panicked") == 1).await;
     assert_eq!(document_identities(&store, "ARCHITECTURE.md"), []);
 
     *handler
@@ -3466,8 +3466,13 @@ const CITED_SOURCES: [(&str, &str); 6] = [
         "pi-four",
         "The build uses cargo.\nTests run on nextest.\nDeploys go to region us-west-2.\nLogs ship to the collector.",
     ),
-    ("pi-span", "The cache lives in\nthe shared volume."),
-    ("pi-edge", "Retries are capped.\nBackoff doubles each time."),
+    // Two questions: a quotation cut from one stays a fragment, since capture
+    // widens a cut quotation only to sentences that are statements.
+    ("pi-span", "Does the cache live in\nthe shared volume?"),
+    (
+        "pi-edge",
+        "Are retries capped?\nDoes backoff double each time?",
+    ),
     (
         "pi-first",
         concat!(
@@ -3480,8 +3485,8 @@ const CITED_SOURCES: [(&str, &str); 6] = [
 const CITED_QUOTES: [&str; 6] = [
     "Use port 4321 for staging.",
     "Deploys go to region us-west-2.",
-    "lives in\nthe shared",
-    "\nBackoff doubles",
+    "live in\nthe shared",
+    "\nDoes backoff double",
     "The key rotates weekly.",
     "The staging host is blue.",
 ];
@@ -3584,41 +3589,49 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
         assert_eq!(decision.evidence_id, None);
         assert_eq!(decision.sensitivity, "normal");
     }
-    let admissions: Vec<(String, String, String, String, i64)> = kernel_db(dir.path())
-        .prepare(
-            "SELECT a.source_class,a.taint_class,a.maturity,a.effective_maturity,a.elevated_support
-             FROM admission_decisions a JOIN object_registry r ON r.object_id=a.subject_object_id
-             WHERE r.source_id='memory_capture' AND r.object_kind='decision'",
-        )
-        .unwrap()
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+    let admissions: BTreeMap<String, (String, String, String, String, i64)> =
+        kernel_db(dir.path())
+            .prepare(
+                "SELECT r.object_id,a.source_class,a.taint_class,a.maturity,a.effective_maturity,
+                        a.elevated_support
+                 FROM admission_decisions a JOIN object_registry r ON r.object_id=a.subject_object_id
+                 WHERE r.source_id='memory_capture' AND r.object_kind='decision'",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    (
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
     assert_eq!(admissions.len(), 6, "{admissions:?}");
-    assert!(
-        admissions
-            .iter()
-            .all(|admission| *admission == admissions[0]),
-        "{admissions:?}"
-    );
-    let (source, taint, ..) = admissions[0].clone();
-    assert_eq!(
-        (source.as_str(), taint.as_str()),
-        ("model_inference", "assistant_inference")
-    );
-    let object_ids: Vec<&str> = decisions
-        .values()
-        .map(|decision| decision.object_id.as_str())
-        .collect();
+    let fragments = ["pi-span", "pi-edge"];
+    let admission = |maturity: &str, elevated: i64| {
+        (
+            "model_inference".to_owned(),
+            "assistant_inference".to_owned(),
+            maturity.to_owned(),
+            maturity.to_owned(),
+            elevated,
+        )
+    };
+    for (message, decision) in &decisions {
+        let expected = if fragments.contains(&message.as_str()) {
+            admission("candidate", 0)
+        } else {
+            admission("approved", 1)
+        };
+        assert_eq!(admissions[&decision.object_id], expected, "{message}");
+    }
     let served = store
         .commit(
             kernel::CommitIntent {
@@ -3629,15 +3642,23 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
                 cause: "read".into(),
             },
             |envelope| {
-                let rows = envelope.served_rows_for(&object_ids, None)?;
-                let visibility: BTreeSet<String> = rows
+                let ids: Vec<&str> = decisions
                     .values()
-                    .map(|row| {
-                        format!(
-                            "{:?}/{:?}/{:?}",
-                            row.visibility(Surface::AutoInject),
-                            row.visibility(Surface::ExplicitSearch),
-                            row.object.sensitivity
+                    .map(|decision| decision.object_id.as_str())
+                    .collect();
+                let rows = envelope.served_rows_for(&ids, None)?;
+                let visibility: BTreeMap<String, String> = decisions
+                    .iter()
+                    .map(|(message, decision)| {
+                        let row = &rows[&decision.object_id];
+                        (
+                            message.clone(),
+                            format!(
+                                "{:?}/{:?}/{:?}",
+                                row.visibility(Surface::AutoInject),
+                                row.visibility(Surface::ExplicitSearch),
+                                row.object.sensitivity
+                            ),
                         )
                     })
                     .collect();
@@ -3645,12 +3666,18 @@ async fn captured_memories_cite_the_blocks_holding_their_quotes_and_anchor_at_he
             },
         )
         .unwrap();
-    let visibility: BTreeSet<String> = serde_json::from_str(&served.result).unwrap();
-    assert_eq!(
-        visibility.into_iter().collect::<Vec<_>>(),
-        vec!["Hidden/Labeled/Normal".to_owned()],
-        "cited and uncited memories serve alike"
-    );
+    let visibility: BTreeMap<String, String> = serde_json::from_str(&served.result).unwrap();
+    for (message, served) in &visibility {
+        let expected = if fragments.contains(&message.as_str()) {
+            "Hidden/Labeled/Normal"
+        } else {
+            "Visible/Visible/Normal"
+        };
+        assert_eq!(
+            served, expected,
+            "{message}: cited and uncited memories serve alike"
+        );
+    }
 
     assert_eq!(counter(&handler, "decisions_cited"), 5);
     assert_eq!(counter(&handler, "decisions_descriptor_not_found"), 1);
@@ -4481,14 +4508,15 @@ async fn every_job_end_leaves_an_ended_settlement_and_an_idle_slot() {
         pi_request(&[user_row(SOURCE.0, SOURCE.1, 0)], "base-1"),
     )
     .await;
-    settle(&handler).await;
+    let panicked = Some(Settlement::Ended {
+        outcome: Count::WorkerPanicked,
+    });
+    settle_panicked(&handler, || {
+        settlement(&handler, &project, SESSION) == panicked
+    })
+    .await;
     assert!(handler.source_capture.is_idle());
-    assert_eq!(
-        settlement(&handler, &project, SESSION),
-        Some(Settlement::Ended {
-            outcome: Count::WorkerPanicked
-        })
-    );
+    assert_eq!(settlement(&handler, &project, SESSION), panicked);
     *handler.source_capture.before_publish.lock().unwrap() = None;
     pass(
         &handler,
@@ -4572,4 +4600,16 @@ async fn a_completed_publish_with_a_deferred_unit_reports_descriptor_not_found()
         decisions[&ids[last]].rationale["citation"],
         "descriptor_not_found"
     );
+}
+
+/// [`settle`] for a job that panics, then a wait for `recorded`, the record the caller asserts next. The job frees its slot while it unwinds and leaves its settlement `Discarded`; the join that follows counts `worker_panicked` and then rewrites the settlement, so the slot is idle before either record exists.
+async fn settle_panicked(handler: &Handler, recorded: impl Fn() -> bool) {
+    settle(handler).await;
+    for _ in 0..500 {
+        if recorded() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the panicking job's end was never recorded");
 }

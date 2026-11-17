@@ -58,12 +58,12 @@ than redirected to different checks after test consolidation.
 | [Memory budget][memory-budget-test] | Budget-excluded rows are neither injected nor digested. | unaudited |
 | [Withheld read][withheld-test] | The verdict is recorded with no injected rows. | unaudited |
 | [Production transform composition][transform-memory-test] | The integration path observes canonical memory and its removal. | unaudited |
-| [Lag and acknowledgement][lag-test] | Consumer lag withholds the block; acknowledgement restores serving. | unaudited |
+| [Stalled consumer][lag-test] | A consumer stalled past the lag thresholds leaves the block served from the canonical rows at the tip. | unaudited |
 | [Disabled memory][disabled-test] | A disabled pass takes no canonical read. | unaudited |
 | [Configured memory budget][configured-budget-test] | The reader drops rows beyond the configured budget. | unaudited |
-| [Generic row cap][row-cap-test] | Newest rows survive and truncation is reported. | unaudited |
+| [Generic row cap][row-cap-test] | Newest rows survive and truncation is reported. The read is `kernel.read` with no `object_ids`, which `newest_page` serves. | unaudited |
 | [bounded_selection_matches_a_full_sort_and_truncate][selection-reference] | Generated keys and caps compare selected rows and dropped status against an independent full sort/truncate. | unaudited |
-| [Generic byte cap][byte-cap-test] | The result is nonempty, truncated, shorter than the input, and a contiguous newest prefix; exact byte usage and maximal fit are not asserted. | unaudited |
+| [Generic byte cap][byte-cap-test] | The result is nonempty, truncated, shorter than the input, and a contiguous newest prefix; exact byte usage and maximal fit are not asserted. The read is `kernel.read` with no `object_ids`, which `newest_page` serves. | unaudited |
 | [Render category boundary][render-category] | Nonpositive and unknown categories are excluded at rendering. | unaudited |
 | [Memory markup escaping][render-markup] | Object IDs cannot forge block structure through markup or newlines. | unaudited |
 | [Memory content cap][render-content-cap] | UTF-8 content is cut before the 64 KiB boundary. | unaudited |
@@ -458,19 +458,19 @@ Production guards go to
 above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
-[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L163-L258
-[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L282
-[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L315
-[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L373
-[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L390
-[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L412
-[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L457
-[transform-memory-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L43
-[lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L230
-[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L309
-[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L345
-[row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2002
-[byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2156
+[read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L383-L550
+[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L676
+[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L748
+[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L806
+[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L823
+[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L845
+[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L896
+[transform-memory-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L46
+[lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L242
+[disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L349
+[configured-budget-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L385
+[row-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L1958
+[byte-cap-test]: ../../../crates/daemon/tests/kernel_routes.rs#L2112
 [permits]: ../../../crates/host-runtime/src/dispatch.rs#L981-L1008
 [handler-fence]: ../../../crates/host-runtime/src/dispatch.rs#L1028-L1184
 [close-gate]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1649
@@ -516,12 +516,12 @@ that no related check exists anywhere in the repository.
 [identity-test]: ../../../crates/memory-store/src/lib.rs#L16042
 [json-identity-test]: ../../../crates/memory-store/src/lib.rs#L15899
 [trace-identity-test]: ../../../crates/memory-store/src/lib.rs#L16109
-[served-columns]: ../../../crates/kernel/src/admission.rs#L4049
-[cross-project]: ../../../crates/daemon/tests/kernel_routes.rs#L1354
-[project-scope]: ../../../crates/daemon/tests/kernel_routes.rs#L1847
-[historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1919
-[object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2060
-[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2031
+[served-columns]: ../../../crates/kernel/src/admission.rs#L4407
+[cross-project]: ../../../crates/daemon/tests/kernel_routes.rs#L1366
+[project-scope]: ../../../crates/daemon/tests/kernel_routes.rs#L1803
+[historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1875
+[object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2016
+[selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2080
 [render-category]: ../../../crates/daemon/src/memory_render.rs#L257
 [render-markup]: ../../../crates/daemon/src/memory_render.rs#L284
 [render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
@@ -544,10 +544,10 @@ that no related check exists anywhere in the repository.
 [egress-exhaustion]: ../../../crates/host-runtime/tests/dispatch.rs#L1034
 [reserved-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1262
 [general-isolation]: ../../../crates/host-runtime/tests/dispatch.rs#L1384
-[request-cap]: ../../../crates/daemon/src/lib.rs#L19899
-[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20631-L20637
-[parse-copies]: ../../../crates/daemon/src/lib.rs#L20638-L20647
-[parse-dense]: ../../../crates/daemon/src/lib.rs#L20648-L20659
+[request-cap]: ../../../crates/daemon/src/lib.rs#L19898
+[parse-nodes]: ../../../crates/daemon/src/lib.rs#L20630-L20636
+[parse-copies]: ../../../crates/daemon/src/lib.rs#L20637-L20646
+[parse-dense]: ../../../crates/daemon/src/lib.rs#L20647-L20658
 [upload-restore]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1130
 [upload-begin]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1203
 [upload-replace]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L1258
@@ -616,7 +616,7 @@ that no related check exists anywhere in the repository.
 [resource-pragma-test]: ../../../crates/storage/src/lib.rs#L5233
 [eviction-probe]: ../../../crates/storage/src/lib.rs#L5277
 [profile-test]: ../../../crates/memory-store/src/lib.rs#L16020
-[pass-probe]: ../../../crates/daemon/src/lib.rs#L25999
+[pass-probe]: ../../../crates/daemon/src/lib.rs#L26035
 [t-host-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1956
 [t-secondary-work]: ../../../crates/host-runtime/src/handler.rs#L943
 [t-cooperative-work]: ../../../crates/host-runtime/tests/dispatch.rs#L1542

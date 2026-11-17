@@ -56,8 +56,8 @@ pub struct M0ComposeInputs<'a> {
     pub history_budget_tokens: f64,
     /// System-role content covered by the current fold.
     pub covered_system_messages: &'a [String],
-    /// Disabled memory removes both project memories and the user-profile memory block.
-    pub memory_enabled: bool,
+    /// The project-memory and user-profile blocks in m0 require `inject_memory` to be true.
+    pub inject_memory: bool,
     pub user_profile_budget_tokens: f64,
     /// `inject_docs` matches whether the TypeScript materializer includes the project-docs block.
     pub inject_docs: bool,
@@ -210,9 +210,9 @@ pub fn compose_m0(
             _ => (String::new(), None, None, 0),
         };
 
-    let selected_memories: &[CanonicalMemory] = if inputs.memory_enabled { memories } else { &[] };
+    let selected_memories: &[CanonicalMemory] = if inputs.inject_memory { memories } else { &[] };
 
-    let user_profile = if inputs.memory_enabled {
+    let user_profile = if inputs.inject_memory {
         store.load_active_user_memories()?
     } else {
         Vec::new()
@@ -389,7 +389,7 @@ mod bounded_read_tests {
             now_ms: 0,
             history_budget_tokens: budget,
             covered_system_messages: &[],
-            memory_enabled: false,
+            inject_memory: false,
             user_profile_budget_tokens: 0.0,
             inject_docs: false,
             project_doc_files: &[],
@@ -1115,7 +1115,7 @@ mod correction_compose_tests {
                 now_ms: 0,
                 history_budget_tokens: budget,
                 covered_system_messages: &[],
-                memory_enabled: false,
+                inject_memory: false,
                 user_profile_budget_tokens: 0.0,
                 inject_docs: false,
                 project_doc_files: &[],

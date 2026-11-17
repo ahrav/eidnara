@@ -2968,9 +2968,9 @@ fn exposure_is_credited_only_within_the_annotated_block() {
         ]
     );
 
-    // msg_cf_c6_02's tool output repeats the summary line its text block quotes. The presenter
-    // shows tool output only as the digest's two excerpts, so a span annotated on the tool block is
-    // Absent although the text block beside it carries the same bytes.
+    // msg_cf_c6_02's tool output repeats the summary line its text block quotes. The exposure
+    // model scores text blocks only, so a span annotated on the tool block is Absent although the
+    // text block beside it carries the same bytes.
     let text_span = &case.obligations[0].evidence[0];
     assert_eq!(text_span.message_id, m2.info.id);
     assert_eq!(text_span.block_index, 1);

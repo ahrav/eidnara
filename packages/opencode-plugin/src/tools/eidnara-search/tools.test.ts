@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import { resolveSessionDirectory } from "../../hooks/context/session-directory";
 import { KernelClient, MAX_READ_OBJECT_IDS } from "../../shared/kernel-client";
 import { renderAntiMemoryContent } from "../../shared/kernel-client/anti-memory";
@@ -269,6 +269,30 @@ describe("createEidnaraSearchTools", () => {
         expect(result).toContain(`id=${OBJECT_A}`);
     });
 
+    it("pages past the daemon's row cap to find the oldest memory", async () => {
+        const harness = kernelHarness();
+        seed(harness.kernel, OBJECT_A, "Release tags are signed with the team's hardware key.");
+        seedMany(
+            harness.kernel,
+            250,
+            (index) => `Release notes for build ${index} list the fixed issues.`,
+        );
+        harness.kernel.readRowCap = 100;
+        const tools = createEidnaraSearchTools(harness.deps);
+
+        const result = await tools.eidnara_search.execute(
+            { query: "how are release tags signed", sources: ["memory"] },
+            toolContext(),
+        );
+
+        expect(result).toContain(`[1] [memory]`);
+        expect(result.split("\n").find((line) => line.startsWith("[1] "))).toContain(
+            `id=${OBJECT_A}`,
+        );
+        expect(result).not.toContain("the memory read was truncated");
+        expect(kernelReads(harness)).toHaveLength(3);
+    });
+
     it("resolves an object-id query through the filtered read", async () => {
         const harness = kernelHarness();
         seed(harness.kernel, OBJECT_A, "Direct id hit.");
@@ -524,5 +548,111 @@ describe("executeEidnaraSearch", () => {
         expect(execution.text).toStartWith(`${LEGACY_NOTE}\nMemory: the memory read was truncated`);
         expect(execution.tokenCount).toBe(estimateTokens(execution.text));
         expect(execution.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
+    });
+});
+
+describe("eidnara_search expiry across the legacy scan", () => {
+    const START = 1_700_000_000_000;
+    const QUERY = "session caching store";
+
+    /** Moves the wall clock ten seconds forward when the scan's read returns. */
+    class ClockAdvancingTransport extends FakeKernelTransport {
+        override async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+            const reply = await super.call(args);
+            if (args.method === "kernel.read") setSystemTime(new Date(START + 10_000));
+            return reply;
+        }
+    }
+
+    function seedAntiMemory(kernel: FakeKernel, objectId: string, expiresAt: number): void {
+        seed(
+            kernel,
+            objectId,
+            renderAntiMemoryContent({
+                trigger: QUERY,
+                rejectedStrategy: "Redis",
+                rejectionReason: "it creates split ownership",
+                expiresAt,
+            }),
+            "REJECTED_APPROACH",
+        );
+    }
+
+    /** Searches at `START` over the rows `seedRows` writes; `advanceClock` moves the clock past `START + 5_000` during the scan. */
+    async function search(
+        seedRows: (kernel: FakeKernel) => void,
+        options: { advanceClock?: boolean; limit?: number } = {},
+    ) {
+        const kernel = new FakeKernel();
+        seedRows(kernel);
+        const wire = options.advanceClock
+            ? new ClockAdvancingTransport(kernel)
+            : new FakeKernelTransport(kernel);
+        const tools = createEidnaraSearchTools({
+            kernelClient: ({ sessionId, projectRoot }) =>
+                new KernelClient({ transport: wire, enabled: true, sessionId, projectRoot }),
+            resolveProjectPath: () => "git:repo-project",
+        });
+        setSystemTime(new Date(START));
+        try {
+            return await tools.eidnara_search.execute(
+                {
+                    query: QUERY,
+                    sources: ["memory"],
+                    ...(options.limit === undefined ? {} : { limit: options.limit }),
+                },
+                toolContext(),
+            );
+        } finally {
+            setSystemTime();
+        }
+    }
+
+    /** A memory, and a newer anti-memory that matches as well and so ranks ahead of it. */
+    const memoryBehindAntiMemory = (expiresAt: number) => (kernel: FakeKernel) => {
+        seed(kernel, OBJECT_A, "Session caching uses the embedded store.");
+        seedAntiMemory(kernel, OBJECT_B, expiresAt);
+    };
+
+    it("returns an anti-memory that is live when the scan completes", async () => {
+        const result = await search(memoryBehindAntiMemory(START + 5_000));
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).toContain(`id=${OBJECT_B}`);
+    });
+
+    it("leaves out an anti-memory that expires while the scan reads", async () => {
+        const result = await search(memoryBehindAntiMemory(START + 5_000), { advanceClock: true });
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).not.toContain(`id=${OBJECT_B}`);
+    });
+
+    it("gives the single result slot to the anti-memory while it is live", async () => {
+        const result = await search(memoryBehindAntiMemory(START + 5_000), { limit: 1 });
+        expect(result).toContain(`id=${OBJECT_B}`);
+        expect(result).not.toContain(`id=${OBJECT_A}`);
+    });
+
+    it("gives the single result slot to the live memory when the anti-memory ahead of it expires while the scan reads", async () => {
+        const result = await search(memoryBehindAntiMemory(START + 5_000), {
+            advanceClock: true,
+            limit: 1,
+        });
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).not.toContain(`id=${OBJECT_B}`);
+    });
+
+    it("gives the single result slot to a live anti-memory over a newer one that expired before the scan", async () => {
+        const twoAntiMemories = (newerExpiresAt: number) => (kernel: FakeKernel) => {
+            seedAntiMemory(kernel, OBJECT_A, START + 3_600_000);
+            seedAntiMemory(kernel, OBJECT_B, newerExpiresAt);
+        };
+        // While both are live, the newer anti-memory holds the slot.
+        const bothLive = await search(twoAntiMemories(START + 5_000), { limit: 1 });
+        expect(bothLive).toContain(OBJECT_B);
+        expect(bothLive).not.toContain(OBJECT_A);
+
+        const newerExpired = await search(twoAntiMemories(START - 1), { limit: 1 });
+        expect(newerExpired).toContain(OBJECT_A);
+        expect(newerExpired).not.toContain(OBJECT_B);
     });
 });

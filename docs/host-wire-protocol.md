@@ -667,7 +667,9 @@ object describing source capture (Section 7.9), the background publication of
 consented message text, tool results, and configured repository documents as
 Kernel source descriptors. The block also counts the memory-capture
 decisions each committed capture publish wrote, by citation reason and by
-anchor reason; a replayed publish adds nothing. The
+anchor reason, and the user statements a publish stored labeled after the
+Kernel's admission policy refused their approval; a replayed publish adds
+nothing. The
 counters are process-local and start at zero when the daemon starts. The block
 is sanitized field by field: any object survives, a non-object drops the block
 whole, and every field is kept or dropped on its own. Every field is
@@ -688,6 +690,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record; every user statement of that plan is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -863,17 +866,17 @@ A **context** is `{"context_revision": string, "representation": string, "spans"
 
 Receipt state is in memory and cleared by a daemon restart or by uninstalling the limit set; either retires the incarnation, so the earlier keys are `unknown`. It is bounded per project by a key count enforced when a key is minted or a read-back is recorded, and store-wide by a retention measured from creation that MUST be at least twice the 30 s request deadline of Section 11 so one request plus one full-length retry never meets an expired key. The key count has a fixed ceiling; a limit set above it or below the retention floor is refused at installation. A limits change keeps the receipts and applies the new bounds to them at the next access: a narrower count evicts the excess settled receipts at the next mint, and a shorter retention expires the receipts already past it.
 
-**Search lifecycle operations.** `search.lifecycle.status`, `search.lifecycle.rebuild`, `search.lifecycle.disable`, `search.lifecycle.recover`, and `search.lifecycle.abandon` are the operator surface for the search projection's lifecycle record. `eidnara-host search` sends them over a route bound with harness `cli`. The connection key is the operator's authority, as for `host.shutdown` (Section 2), so any route holding it may call them; the harness grants nothing. Bodies are parsed strictly after the envelope keys are removed; any unknown field is `invalid_params`. A route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel its kernel state, as every kernel route does. A daemon with no search lifecycle owner answers `{"kind":"terminal","terminal":"unavailable"}`. A request the owner refuses answers `{"kind":"terminal","terminal":"refused","reason": string}`, the reason bounded to 512 characters.
+**Search lifecycle operations.** `search.lifecycle.status`, `search.lifecycle.rebuild`, `search.lifecycle.disable`, `search.lifecycle.recover`, and `search.lifecycle.abandon` are the operator surface for the search projection's lifecycle record. `eidnara-host search` sends them over a route bound with harness `cli`. The connection key is the operator's authority, as for `host.shutdown` (Section 2), so any route holding it may call them; the harness grants nothing. Bodies are parsed strictly after the envelope keys are removed; any unknown field is `invalid_params`. A route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel its kernel state, as every kernel route does. A daemon with no search lifecycle owner, and a `search.lifecycle.status` whose progress read ended abnormally, answer `{"kind":"terminal","terminal":"unavailable"}`. A request the owner refuses answers `{"kind":"terminal","terminal":"refused","reason": string}`, the reason bounded to 512 characters.
 
 | Method | Body | Answer |
 | --- | --- | --- |
-| `search.lifecycle.status` | none | `{"kind":"status","record": R,"admission": {"state":"admitted"} \| {"state":"refused","reason": code}}` |
+| `search.lifecycle.status` | none | `{"kind":"status","record": R,"admission": {"state":"admitted"} \| {"state":"refused","reason": code},"progress": P}` |
 | `search.lifecycle.rebuild` | none | `{"kind":"recorded","attempt_id","replayed"}`, with `replayed: true` when an operator rebuild is already recorded, or terminal `not_current` when the record is neither Current nor that rebuild |
 | `search.lifecycle.disable` | none | `{"kind":"disabled","record": R}` once the disable closed admission and reconciled its consumer |
 | `search.lifecycle.recover` | `authorization_ref` | `{"kind":"recorded","attempt_id","replayed"}`, with `replayed: true` when a recovery under the same reference is already recorded, or terminal `not_disabled` when the record is neither Disabled nor that recovery |
 | `search.lifecycle.abandon` | `operator_id`, `reason` | `{"kind":"abandoned","consumer_id","record": R}`, or terminal `nothing_to_abandon` when the record is not Disabled, its disable has not released the local family and recorded `through`, or it is already deregistered |
 
-`R` is `{"state":"absent"}`; `{"state":"intent"|"current","transition","cause","attempt_id","consumer_id","generation_id","recovery_target": i64 | null,"episodes":{"allowance","consumed","deadline"}}`; `{"state":"disabled","consumer_id": string | null,"through": i64 | null,"deregistered": bool}`; or `{"state":"unavailable","reason": string}`. A rebuild names the Current seed and reads through the next consumer under cause `OperatorRequest`. A recovery is a new `AuthorizedRecovery` operation under cause `DisabledRecovery` over the current selection. It reads through the consumer that an unfinished construction in the disabled record registered, and otherwise through the consumer after the disabled one. A replayed recovery that finds admission still latched reconciles the recorded recovery before it answers. `authorization_ref` follows the authorization-reference rule (1–128 ASCII letters, digits, `-`, `_`, `.`, `:`). A disable's cleanup runs within the cleanup envelope its record fixes, the shorter of `physical_drain_ms` and `B_recovery_ms` measured from when the disable was recorded, and within the request budget, whichever ends first. An abandonment records the kernel's audited `ConsumerAbandonment` with `operator_id` and `reason`, each 1–512 bytes and redacted before storage, and then runs the disable's cleanup again under the same request budget. It commits only while more than one second of the cleanup envelope remains, and otherwise answers `refused` with the consumer still registered, so an authorized recovery remains available. Its kernel commit is keyed by the consumer, so a retry with the same fields replays it, and a retry that finds the consumer already released runs the cleanup again. A default disable never abandons a consumer.
+`R` is `{"state":"absent"}`; `{"state":"intent"|"current","transition","cause","attempt_id","consumer_id","generation_id","recovery_target": i64 | null,"episodes":{"allowance","consumed","deadline"}}`; `{"state":"disabled","consumer_id": string | null,"through": i64 | null,"deregistered": bool}`; or `{"state":"unavailable","reason": string}`. A rebuild names the Current seed and reads through the next consumer under cause `OperatorRequest`. A recovery is a new `AuthorizedRecovery` operation under cause `DisabledRecovery` over the current selection. It reads through the consumer that an unfinished construction in the disabled record registered, and otherwise through the consumer after the disabled one. A replayed recovery that finds admission still latched reconciles the recorded recovery before it answers. `authorization_ref` follows the authorization-reference rule (1–128 ASCII letters, digits, `-`, `_`, `.`, `:`). A disable's cleanup runs within the cleanup envelope its record fixes, the shorter of `physical_drain_ms` and `B_recovery_ms` measured from when the disable was recorded, and within the request budget, whichever ends first. An abandonment records the kernel's audited `ConsumerAbandonment` with `operator_id` and `reason`, each 1–512 bytes and redacted before storage, and then runs the disable's cleanup again under the same request budget. It commits only while more than one second of the cleanup envelope remains, and otherwise answers `refused` with the consumer still registered, so an authorized recovery remains available. Its kernel commit is keyed by the consumer, so a retry with the same fields replays it, and a retry that finds the consumer already released runs the cleanup again. A default disable never abandons a consumer. `P` is `{"tip": i64 | null,"checkpoint": i64 | null,"lag_commits": i64 | null,"rebuilds":{"recorded": u64,"completed": u64,"renewed": u64},"blocked": string | null}`. `tip` is the Kernel tip read for this answer, `null` when the Kernel could not be read within the operation's budget. `checkpoint` is the commit the selected family had applied when the owner last observed it, `null` until a selected family is observed, after an observation that could not read one, and after a slice that found the record disabled, a disable reconciling, or the owner shut down. `lag_commits` is `tip - checkpoint` floored at zero, `null` when either is. The `rebuilds` counters count, since the daemon started, the first builds and rebuilds its slice loop recorded, the builds that reached Current, and the renewals of a lapsed rebuild. `blocked` is the reason the last slice gave for leaving the record or its Current family where it was (a record that did not advance, closed admission, a blocked catch-up episode, a required rebuild, or an expired rebuild), with `; coverage: <reason>` appended when the last observation of the selected family failed, or the refusal of the recording that slice asked for; it is `null` after a slice that advanced the record, found the family current or caught it up, or found the home unregistered or disabled, and from the time the loop writes the recording a slice asked for until the next slice ends; a slice that hands a supervisor back for joining leaves the earlier value when that supervisor drains, whatever its catch-up episode found, and reports `did not advance: maintenance did not drain: <reason>` when it does not. Its text before `; coverage:` is the reason the daemon logs for that slice, and the value is bounded to 512 characters; it is written for a person, and a program reads only whether it is `null`.
 
 ### 7.9 Native automatic memory capture
 
@@ -895,6 +898,13 @@ IDs are distinct, nonempty, at most 256 UTF-8 bytes, and contain no control
 characters. Role is `user` or `assistant`. Text is nonblank and its aggregate
 size is at most 65,536 bytes. Clients split larger native text on UTF-8
 boundaries. Reasoning, tool output, and synthetic summaries are excluded.
+A `pi` transform also checkpoints the text of its window. Pi gives the wire
+role `user` to bash executions, extension messages, and branch and compaction
+summaries; a window message is a source only when its own native row's role
+is `user` or `assistant`. A transform of another serializer profile, one that
+carries no native rows, and one whose native rows and messages differ in
+number each yield no source. The native role names the kind of Pi entry; it
+does not show who composed the text of a `user` entry.
 Optional `model` is a nonempty provider/model identifier of at most 512 bytes
 without control characters. A checkpoint never invokes a model, with or
 without this hint.
@@ -911,9 +921,18 @@ and 8,192 overall.
 
 A connected harness requests work with the common envelope and
 `method: "memory.capture.next"`; optional `model` supplies the current native
-model when no history-summarizer model chain is configured. The host first
-attempts already-frozen commits, which need no model. It then reserves at most
-one batch per project/harness pair, with at most 16 reservations overall.
+model when no history-summarizer model chain is configured. The host reserves
+at most one batch per project/harness pair, with at most 16 reservations
+overall, and then attempts already-frozen commits, which need no model.
+Each call reads two windows of the pair's ripe sources, oldest first: at
+most 32 frozen plans awaiting a commit, within 1 MiB of retained text and plan
+bytes, and at most 32 sources awaiting extraction, within 64 KiB of source
+text. The windows are independent, so frozen plans take no place in the
+extraction window. The frozen commits of one call share a 10 s budget; a plan
+the budget does not reach stays queued for the next call. A source in the
+extraction window is issued when the call holds the reservation, a model is
+configured, the batch fits the prompt ceiling, and the source is at the
+failure stage of the window's oldest source.
 
 A `work` response contains:
 
@@ -932,10 +951,13 @@ A stale reply cannot remove or publish against a successor reservation.
 Leases are process-local; source jobs and frozen plans are durable. Capture
 queues and leases key on the same canonical project identity the kernel scope
 uses, so a symlinked spelling of one root is the same project and two roots
-that differ only in raw path bytes stay distinct. A dispatch is recorded only
-when work is issued; a `next` request cancelled during preparation records
-none, except that a source whose prompt exceeds the ceiling even alone is
-failed as soon as it is discovered, whatever becomes of the request.
+that differ only in raw path bytes stay distinct. A model dispatch is recorded
+only when work is issued; a `next` request cancelled during preparation
+records none, except that a source whose prompt exceeds the ceiling even alone
+is failed as soon as it is discovered, whatever becomes of the request. A
+frozen plan whose commit the Kernel refuses also records one dispatch per
+refused publication, including in a `next` request that is later cancelled; a
+publication the labeled commit recovers records none.
 
 Other `next` states are `ready`, `pending`, `stale`, `disabled`,
 `store_failed`, and `unavailable`. `ready` means the project has no pending
@@ -969,17 +991,67 @@ content-free `error`: `cancelled`, `provider_unavailable`, `model_failed`, or
 
 `processed` acknowledges processing the proposal, not successful capture of
 every source. Malformed or source-local invalid proposals leave sources
-pending with failures recorded. Valid decisions from other sources may still
+pending with failures recorded; a proposal whose only defect is a link to a
+reference memory keeps its fact and loses that link. Valid decisions from other sources may still
 commit. Clients must request `next` again and see `ready` before reporting
 completion. Other submission states include `stale`, `pending`, `disabled`,
 and `store_failed`; mismatched models and malformed envelopes are errors.
 
-Before freezing, each memory's text becomes its exact supporting quotation,
-prefixed with `User stated:` or `Assistant reported:` from the native role.
-The model's paraphrase is not published. Memories of one source that share a
+Before freezing, each memory's text begins with its exact supporting quotation,
+prefixed with `User stated:` for a user source and `Assistant reported:` for
+any other; a Pi row under the reserved `eidnara:` id space is an assistant
+source whatever role it carries.
+The model's paraphrase is not published. A cut quotation of a user source that
+reaches capture under its own message id and lies inside one plain-prose
+paragraph is first widened to the whole sentence of that paragraph that
+contains it, or the sentences when the quotation itself spans more than one,
+when the widened text meets the statement rule below and fits one
+memory's 2,048 bytes: a quotation that leaves out a lead-in clause, a
+negation, or a condition is stored as the user's whole sentence. The widened
+text is approved as the user's statement, so words are added only up to a
+plain sentence edge. An edge of the quotation that the statement rule accepts
+as a sentence edge is kept. Otherwise the statement runs back to the
+paragraph's start or the word after an exclamation or question mark, and on
+to the paragraph's end or the next exclamation or question mark. A period
+before whitespace may end a sentence or an abbreviation, so it is no plain
+edge. A quotation is stored as proposed when it already meets the statement
+rule; when the widened sentence does not qualify; when the words widening
+would add hold a character other than a letter or digit of any script, an
+ASCII space or tab, ASCII punctuation, the apostrophe `’` between two
+letters, and the dashes `–` and `—`, where a `.`, `!`, or `?` counts as
+ASCII punctuation only between two ASCII letters or digits, as in `v1.2`
+(so a line break, a terminator or closing mark of another script, a symbol,
+and a period after a letter of another script each keep the quotation as
+proposed; the statement's own closing marks are not counted);
+when the quotation's own first or last word, at an edge that is widened,
+holds a character outside that set (so a quotation that ends in `.)`,
+`.</b>`, or `.[1]` before more words, or begins with the period of the
+sentence before it, is kept as proposed); when the quotation ends in a
+terminator behind marks and spaces that are no letter or digit, and its
+sentence goes on (a terminator is `.`, `!`, a question mark of the statement
+rule's list, or one of `。`, `｡`, `．`, `！`, `।`, `॥`, `۔`, `…`, `։`, `።`,
+`၊`, `။`, `។`, `‼`, `﹒`, `․`, `﹗`); when the
+occurrences the search yields lie in qualifying sentences that differ; and
+when it and a proposal of another category name one sentence. A proposal that
+names `replaces`, `also_replaces`, or `contests`, and one whose replacement
+the parser released as a contest, is stored as proposed, so only a
+correction the extractor quoted whole meets the statement rule and replaces a
+fact served on `auto_inject`, and a contest shows the clause the extractor
+judged. A widened quotation whose `duplicate_of` names
+a fact served on `auto_inject` with another text drops that link and is
+stored as the user's own statement: the extractor matched the clause it
+quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
+colon, such as `My teammate wrote: always rebase.`, is the user's sentence
+and is stored whole with that clause. 
+Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. A quotation that capture approves as the user's own statement keeps its exact text and takes no failure lines. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the quotation capture stored, the model's quote or the sentence it was widened to; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
-among them; distinct replacement targets keep one memory each, since a
-memory supersedes exactly one predecessor. Relevant and sufficiently complete quote selection still depends
+among them; distinct replacement targets
+keep one memory each, since a memory supersedes exactly one predecessor. The
+frozen memory names `duplicate_of` only when every memory it joins names the
+same target, and a frozen memory that names under `duplicate_of` a reference
+memory not served on `auto_inject`, and whose stored text equals a reference
+memory that is, is a duplicate of the served one; a named target that is
+served on `auto_inject` is kept. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
 target may be replaced once per batch whichever source claims it. User intent
@@ -1000,8 +1072,26 @@ source alone; other sources in the batch still commit. A source whose prompt
 exceeds the prompt ceiling even alone is likewise a recorded dispatch and
 model/output failure of that source, so later sources are not held behind it.
 Dispatches are capped at nine per source across owners: a model/output failure
-on or after the ninth dispatch abandons the source. An abandoned source keeps
-its replay identity and its last error, releases its text, no longer counts
+on or after the ninth dispatch abandons the source. A frozen plan the Kernel
+refuses on admission policy, invalid input, or a missing object, and a frozen
+plan the host cannot decode, records one dispatch per refused publication: the
+retry delay doubles with the count, and the refusal that reaches the ninth
+dispatch abandons the source with the error `kernel_write_refused` or
+`invalid_preparation`. A Kernel conflict, which means a target moved under the
+plan or the Kernel holds another receipt for the source, releases the plan
+with the error `reconciliation_conflict`; the source is extracted again after
+the delay of its count, and the conflict met on the ninth dispatch abandons
+it. Any other Kernel failure keeps the plan, records `kernel_write_failed`,
+and retries after the delay of the current count. Each of the three
+recoveries applies to the freeze of the plan the commit read, which the plan
+bytes and the dispatch count read beside them name, so a late answer about an
+earlier plan, or about an earlier freeze of the same bytes, leaves the newer
+one as it is. A publication waits for the capture gate and the Kernel writer
+inside the allowance of its call, 10 seconds for the frozen plans of one
+`memory.capture.next` and 10 seconds for the plans one submission froze; a
+plan the allowance does not reach stays frozen for the next call. An
+abandoned source keeps
+its replay identity and its last error, releases its text and frozen plan, no longer counts
 toward the pending quota or the `pending` status count, is never returned as
 work, and is not revived by a new store owner. The native drain processes at
 most 32 batches per invocation. No model work runs in the daemon after a
@@ -1030,8 +1120,274 @@ reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
 `memory.auto_promote` gate only model-extracted facts from redacted text.
-Captured facts remain labeled model inference for explicit
-search, not human approval or automatic-context eligibility. Session deletion
+A captured fact is the user's statement when its source message has the user
+role and reaches capture under its own message id (a source id of the form
+`<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
+and hashed ids, never qualifies, and neither does a `pi` source whose id is
+in the `eidnara:` space Pi reserves for the rows it derives or whose text has
+the form Pi gives a bash execution: `Ran`, the command between backticks, and
+on the next line a fence of three backticks or `(no output)`); its stored text is `User stated: ` followed
+by a verbatim quotation of that message; and the quotation is one or more
+whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
+(closed by a run of the opener's character at least as long), each block a
+line holding only a markup tag opens through the last line closing that tag
+(such as `<context_researcher-augmentation>`), every paragraph holding a list
+item (a line whose first word is a bullet, one character that is no letter
+or digit such as `-`, `*`, `+`, `•`, or a dash; an ordinal, digits or numeric
+letters of any script closed by `.` or `)` or wrapped in parentheses, or one
+letter closed by `)` or wrapped; or an enclosed numeral such as `①`), a heading, a blockquote, an indented code line (one that begins with four spaces, or with a tab after at most three spaces), a double quotation mark
+of any script, a single opening quotation mark that starts a word, or a line
+ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
+after such a line, every paragraph after one whose quotations do not close
+in it or that holds an unclosed inline code span, every paragraph after the first one that holds a double quotation mark or a single opening mark when the quotations of any paragraph of the message do not close in it, and
+every paragraph that a fence or tag line borders without a blank
+line. An inline code span runs from a run of backticks through the next run
+of the same length in its paragraph; an odd number of backslashes directly
+before an opening run makes its first backtick literal text, and an opening
+run that no later run of its paragraph closes is unclosed and spans to the
+paragraph's end. A double quotation mark inside an inline code span is code to the pairing rules that follow: it opens and closes no quotation, and a mark beside it reads it as any other character. Its paragraph still holds a double quotation mark, so the paragraph is left out and can be the first such paragraph of the message. A paragraph's double quotations close in it when every mark of each
+style (straight, curly, angle, corner, or ornamental), read in order, takes
+its turn and none is left open: a mark after the line start, whitespace, an
+opening bracket, or a mark that opened, and before a character that is not
+whitespace, opens, and its style has no quotation open; a mark after a
+letter, one of `.`, `,`, `!`, `?`, `;`, `)`, `]`, or a mark that closed, with
+no letter or digit after it, closes, and its style has one open. A glyph
+every script writes on one side of a quotation, such as `「` or `」`, takes
+that side only. A mark of one style closes no
+quotation of another. A second opening mark inside an open quotation, a mark
+in any other place, and a mark after a number or a letter that is a number,
+which may be an inch or seconds sign, leave the paragraph's quotations
+unknown. A paragraph that holds a carriage return inside a line, a vertical
+tab, a form feed, or a Unicode next-line, line, or paragraph separator is
+left out with every paragraph after it, since its lines cannot be told apart
+and a fence, a tag, or a colon line may hide in it. A quotation that
+crosses paragraphs is not tracked to its end: every paragraph after the one
+that leaves it open or unknown is left out. A paragraph
+that opens a single quotation with no closing single mark leaves out every
+later paragraph. A single mark closes a quotation of one word when it ends a
+word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
+after `s`, a number, or a letter that is a number, which may be a plural
+possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
+word-final mark inside a quotation of several words, which may be an elision,
+close nothing, so such a quotation stays open. A closing mark inside quoted text passes these rules as the mark that closes its quotation, and the mark that closes the quotation then fails them in a later paragraph. So when any paragraph of the message leaves a double or single quotation open or unknown, every paragraph after the first one that holds a double quotation mark or a single opening mark is left out.
+The rule reads marks by their place and cannot tell every arrangement of
+symmetric marks apart; where it cannot, the text is left out. The quotation starts the
+paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
+that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
+or `!`, directly before one, or at the paragraph's end, and no lowercase word
+follows it past any punctuation; the paragraph's indentation and trailing
+spaces border its sentences as its edges do; neither boundary falls, at a
+period,
+at a dotted abbreviation, a word of two or more one- or two-letter segments
+such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
+`Prof`, `Sr`, `Jr`, `St`), or at `No`, `Nos`, `Fig`, `Vol`, `Ch`, `Sec`, `Eq`,
+or `Approx` in any letter case before a number, which may follow one character that is no letter, digit, whitespace, or period and then a decimal point, as in `No. 2`, `approx. -5`, or `approx. .5`; a quotation's closing period that ends its paragraph ends the sentence at any of these words; these lists are a heuristic
+for an edge the extractor chose, and the words widening adds hold no period
+except between two ASCII letters or digits; neither boundary falls inside
+an inline code span, so a quotation may hold a whole span; and its trimmed text contains
+no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
+finite), contains no double
+quotation mark, does not start with a backtick, and neither starts nor closes
+a single quotation. The rule reads sentence ends in `.` and `!` only, so text
+in a script that ends sentences otherwise is judged a paragraph at a time. Capture records each such fact with a statement record in the
+`user-statements` domain, an `adr_accepted` decision admitted as explicit user
+text, and admits the fact on that approval, so the Kernel serves it on
+automatic surfaces. Capture alone writes the `user-statements` domain: a
+`kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
+quotes: source kind `user`, source id `memory_capture_statement:` followed by
+the first 32 hexadecimal digits of the capture source's identity, revision 1.
+The Kernel bounds the authority-bearing accepted decisions of one source
+lineage at 64 and one batch proposes at most 64 memories, so the statements of
+one message fit its lineage and the number of live statements in a project has
+no ceiling; a statement leaves when a correction supersedes or retires it.
+When the Kernel's admission policy refuses a statement record, or the
+admission that rests on it, the same frozen plan commits with each of its user
+statements as a labeled memory for explicit search, and
+`decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
+as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and the labeled commit supersedes
+or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
+for explicit search, not human approval or automatic-context eligibility; the
+one text of such a fact that reaches automatic context is the bounded, quoted
+excerpt on a contested statement's line (below).
+Each reference memory offered to the extractor carries `user_statement`, true
+when the Kernel serves it on automatic surfaces, which a user's recorded
+statement is. A proposal that names
+`duplicate_of` writes no fact, with one exception, may still record a
+contest through the fact it duplicates, and settles a contest when it is the
+user's own statement of a contested fact (both below): a user's statement that
+duplicates a memory the Kernel does not serve as approved, such as
+an assistant's report or a memory the host memory tool wrote, is recorded as
+its own fact with its statement record, the duplicated memory stays, and the
+new fact's rationale names it under `restates`; the name records which memory
+the extractor matched and carries no Kernel dependency. A memory is served as
+approved when it is visible, not labeled, on `explicit_search`; a fact
+reclassified as sensitive stays approved there while `auto_inject` hides it,
+so a repeat of it writes nothing; a labeled memory is unapproved whatever its class, so a user's statement of one served as sensitive is recorded. A stored plan of a user source that
+names `duplicate_of` beside `replaces` or `also_replaces`, or `also_replaces`
+beside no `replaces`, is refused as invalid input; a stored plan of another
+source that names a replacement meets a conflict and is planned again. The
+`<project-memory>` block of a session's m0 holds the live, project-scoped,
+positive-category facts visible on `auto_inject`, selected newest first until
+`memory.injection_budget_tokens` is spent and rendered grouped by category,
+and leaves out facts captured from that session's own messages. Those facts
+are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
+they take no place from another session's facts. The read loads at most
+eight pages of that size, the payloads of up to 64 MiB of a session's own
+newer facts; past that it stops, keeps the facts it had selected, and
+leaves the older facts out of the block. A fact whose stored payload alone
+passes 8 MiB is left unloaded and ends the read the same way. The extractor's reference memories are ranked from two bounded reads
+at one snapshot: the newest facts on `explicit_search`, and the facts served
+on `auto_inject` in the plain newest window and in the delivery of each
+session whose messages the batch holds; a fact older than every window is
+not offered. A user message may correct earlier facts, and only
+the user's statement may replace a fact served on `auto_inject`: its fact
+supersedes the captured fact it `replaces` (which must share its category
+and at least one content word), retires each further fact it names
+in `also_replaces` (each must share the replaced fact's category and at
+least half of its distinct content words, of which it must have at least
+one; a content word is a run of letters and digits of three or more
+characters, or of two that hold a digit, other than common English function
+words) and a replaced
+memory the host memory tool wrote, and
+retires the statement record of each fact it removes; no surface serves a
+superseded or retired fact. When a capture-owned fact that a correction
+supersedes or retires, as its `replaces` target or one of its `also_replaces`
+targets, names a memory under `restates`, that memory is retired with it if it
+is live, belongs to the project, was written by capture or the host memory
+tool, is not served on `auto_inject`, and states the replaced fact: each of
+the two holds at least half of the other's distinct content words. A memory that holds the
+fact among several others is kept, and one with a few more words is retired
+whole. The extractor is offered at most 64 reference memories. Up to
+32 are ranked by BM25 (k1 1.2, b 0.75, over the project's memory summaries)
+against each message of the batch on its own, a memory taking its best
+score, so the short statement a correction or an observation names ranks
+ahead of long memories that share common words with the batch. The first 16
+of those places go to facts served on `auto_inject`, ranked among themselves,
+so the reports of one topic cannot fill the share a statement needs; the rest
+of the 64 are the memories sharing the most of the whole batch's words,
+newest first among ties; a summary's attribution label counts for neither
+ranking. A reference memory carries `contested: true` when an observation
+contests it. A proposal from any
+role may name `contests`: at most four reference memories whose value its observation
+contradicts without the user changing the fact, each sharing at least one
+content word with the quotation. Proposals that capture stores as one fact
+contest the first four targets they name between them. A `contests` or `also_replaces` array given
+as `null` names no target. A user quotation that does not meet the
+statement rule replaces no fact served on `auto_inject` and takes no
+replacement claim: each such target
+named in `replaces` or `also_replaces` becomes a contest, and when the
+`replaces` target is one, every target of the proposal does. A user statement
+whose `replaces` target is released contests that target when the Kernel
+serves it on `auto_inject`, so the two values are shown as a disagreement. A
+user source's contests are kept when the source reaches capture under its
+own message id and its quotation is one or more whole sentences of the
+message, such as a question; a clause cut out of a sentence can say the
+opposite of that sentence and contests nothing, and a fragment of a long
+message has edges the user did not write. A link from a
+proposed fact to a reference memory that fails its check is released and the
+fact is still stored: a `replaces` target that is unprovided, protected,
+already claimed by an earlier fact of the same source, of another category,
+or shares no content word with the quotation is released with its
+`also_replaces` targets; a user's replacement of a target an earlier source
+of the batch already replaces is refused with its source, which is extracted
+again in the next drain against the committed replacement, so two corrections
+of one fact are stored in order; an
+`also_replaces` target that is unprovided, protected, claimed, or no
+restatement of the replaced fact is released alone; a `duplicate_of` target
+that is unprovided, that a user source names beside `replaces`, or that
+shares no content word with the quotation of a proposal that also names
+`contests`, is released; a `contests`
+target that is unprovided, shares no content word with the quotation, is
+also replaced, is the proposal's `duplicate_of` target, or is past the fourth is released; and the `replaces` and `also_replaces` targets an
+assistant source names become contests under the contest check. After
+quotations collapse, the facts of one source name each target for one
+purpose: a target one of them replaces or retires is contested by none, a
+fact that only duplicates such a target is dropped, since its text is the
+value the sibling replaces, and each target is contested by the first fact
+that names it. The contests of one batch are then settled across its sources
+before any plan is frozen: a target any source of the batch replaces or
+retires is contested by none of them, and a target is contested by the first
+source that names it, so a question and the correction that follows it commit
+in one pass. A contested fact
+stays live, and the contesting fact's rationale lists what it contests under
+`contests`. A
+proposal that names `duplicate_of` and `contests` and writes no fact records
+the fact it duplicates as the contesting fact, so an observation the store
+already holds, such as a note the agent wrote in the same turn, contests what
+the message contradicts. The contests of a commit are recorded after its
+other writes, and a target the commit replaced, retired, or settled is passed
+over. A contest recorded through a duplicated fact that the commit retires as
+a restated memory is dropped, and its target keeps its row. When the contested fact is a capture-owned fact that the Kernel serves as
+approved, the commit supersedes it with a fact of the same
+text, category, and approval whose rationale holds `contested_by`, an object
+with `memory` (the contesting fact's id),
+`stated_seq` (the commit that first recorded the statement), and `session`
+(the session whose message recorded the contest). The record names the
+contesting fact and holds none of its text. The statement record stays
+live, and the new fact cites again, in order, each piece of evidence the fact
+it supersedes cites that is still live; a `span` citation, whose blocks hold
+the quotation only together, cites again only while every block is live.
+When it cited evidence and none is
+live, its `citation` reads `descriptor_not_found`, and a fact recorded with
+no citation keeps the reason it was recorded with. When one commit contests
+a statement and also contests the fact that contests it, the first names the
+row that superseded the second; contests that name each other in a ring are
+left unrecorded, and a contest that names a fact of such a ring records that
+fact's unchanged row. A stored plan whose fact names more than four contests
+is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
+sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
+fact supersedes the statement again and names that newer fact, and a contest
+by the fact already named writes nothing. The `<project-memory>` block renders
+a contested statement as
+`<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
+the dates being the UTC days on which the statement's first commit and the
+newest contest's commit were recorded, `unknown date` when the commit log
+holds none. The fact id is shown as written when it is 1 to 128 characters of
+ASCII letters, digits, `_`, `-`, `.`, and `:`, which the ids capture and the
+host memory tool derive are; an object id is text its writer chose, so any
+other id is shown in the excerpt's bounded, quoted form. The excerpt is the contesting text with runs of Unicode
+whitespace (the `White_Space` property) folded to
+single spaces, cut to 240 characters with an ellipsis, and to fewer when the
+quoted form would pass 1,024 bytes, as a JSON string, so
+text an assistant wrote stays inside its quotation marks; 240 characters hold
+the observed value and where it was seen, and the fact id leads to the full
+text through `eidnara_search`. A reader takes the contesting text from the
+contesting fact's own row, read by id on `explicit_search` in the project at
+the store state of the statements it renders, and shows the contest only
+while that read serves the fact: live, not hidden, and of normal sensitivity.
+A labeled fact, such as an assistant's report, is served there; a fact a
+disposition hides, a retired fact, and a fact of another project contest
+nothing a reader is shown. The block shows the stored statement alone in
+those cases, and a pass whose contest read fails is withheld as any failed
+read of the pass is. Every session whose block holds the statement is shown
+the contest, the one whose message recorded it included: the excerpt is the
+one text from a session's own messages that its block carries, because that
+session's observation of the newer value can leave its conversation at a
+fold while the statement, which came from another session, stays in its
+block. The session whose message made the statement is delivered neither the
+statement nor its contest, as with every fact captured from its own messages.
+`eidnara_search` renders a contested statement with a line
+`Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
+contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
+of that fact's served text; when the contesting fact cannot be read, the line
+is `Contested by <fact id>` and a note says so. A later statement of the user
+settles a contest: a user statement that replaces the contested fact ends it,
+and a user statement that repeats the contested fact word for word, up to
+edge whitespace and its closing `.` or `!`, which names it under
+`duplicate_of` and writes no fact, supersedes it with a fact of the same
+text and approval whose rationale holds no `contested_by` and keeps the
+record's `stated_seq` as its own `stated_seq`, so a later contest dates the
+statement from its first commit. A user statement
+of another text that names a contested fact under `duplicate_of` is stored as
+its own fact and the contest stays. The extractor is
+told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
+decision admitted as explicit user text, or one admitted on an approval,
+answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
+and defaults to true; the daemon ignores a project-tier value with a warning,
+and each plugin strips it from the project tier. False composes m0 with
+neither the `<project-memory>` nor the user-profile block and m1 with no
+`<new-user-profile>` delta, and turning it off rebuilds m0, while explicit
+search, capture, and the history summarizer's memory read are unchanged. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes
@@ -1257,6 +1613,15 @@ Consumer liveness uses pure-header `Ping`/`Pong`, not a channel-0 JSON health op
 Managed Rust and TypeScript readers own Ping/Pong independently of application waits and stream consumption. A Ping during a unary or streaming request MUST produce Pong without settling, cancelling, or delaying the application request. Stream queue saturation MUST NOT block this liveness path.
 
 Handler health is host-internal. Host invokes `Handler::health` on a dedicated control task, never as an ordinary routed request and never while holding handler/store locks. Current handler health is atomics-only and returns `ok`, `degraded`, or `failing` plus optional detail and metrics. Waiting for a predecessor's storage lease reports `degraded` without making transport unready.
+
+Host bounds the handler callbacks `initialize`, `bind`, `route_gone`, and `health`, and the `shutdown` of an incarnation that recorded `running`, by `lifecycle_callback_deadline` (default 30 s); expiry is host-fatal for that incarnation. The `shutdown` of an incarnation that stops before that point (a failed or abandoned `initialize`, a shutdown request before publication, or a failed setup-socket bind or registration, publication, or `running` record write) runs without this deadline, and the instance lock stays held until it returns. `activate` also runs without this deadline: a pending activation keeps running until it returns or shutdown abandons it. The wait charges the deadline in steps of at most 1 s:
+
+- A step's lateness is the delay of its wake past the step's length, less the thread CPU time the callback's polls used in the step.
+- A step at most 1 s late charges its elapsed time.
+- A step more than 1 s late charges that CPU time, capped at the step's length plus 1 s.
+- A step more than 1 s late that follows another such step charges at least its scheduled length.
+
+A host process that the system stops, freezes, or stalls (job control, a cgroup freeze, a paused virtual machine, a host-wide I/O stall) is therefore charged at most the callback's poll CPU time for a stall that delays one step's wake by more than 1 s, however long the stall lasts. Stalls that make two consecutive steps more than 1 s late charge at least the second step's scheduled length. A stall that delays a step's wake by at most 1 s is charged as elapsed time, so a deadline configured below 1 s can expire across it. The `bind`, `route_gone`, and `health` callbacks each run under two waits with separate steps, one on the callback and one on the task that runs it, so one stall can be charged as elapsed time by one wait and not by the other; the health probe continues after the process resumes when both waits keep budget. A callback that stays pending expires after `deadline` of charged time and within `2 × ⌈deadline / 1 s⌉` steps. The wait has no wall-clock bound: each late step adds its own length. The `initialize` and `shutdown` waits read the callback's poll CPU time when a poll returns, so a stall in the step in which a poll of several CPU-seconds returns is charged up to that poll's length. The 1 s limit separates a stall from scheduling latency: host timers resolve to 1 ms, a runnable task on a scheduled process is polled within milliseconds of its timer, and 1 s is one thirtieth of the default deadline, so one forgiven step withholds at most that share of the budget.
 
 ### 9.4 Route and connection `Goodbye`
 

@@ -13,10 +13,33 @@ type LeaseKey = (String, String);
 #[derive(Default)]
 pub(crate) struct NativeCaptureState {
     leases: HashMap<LeaseKey, NativeLease>,
+    waits: CaptureWaits,
+}
+
+/// How long capture publication waits: one call's shared allowance for
+/// committing frozen plans, and the longest one publication waits for the
+/// capture gate and the Kernel writer.
+#[derive(Clone, Copy)]
+pub(crate) struct CaptureWaits {
+    pub(crate) plan_commit_budget: Duration,
+    pub(crate) commit_wait: Duration,
+}
+
+impl Default for CaptureWaits {
+    fn default() -> Self {
+        Self {
+            plan_commit_budget: super::PLAN_COMMIT_BUDGET,
+            commit_wait: super::COMMIT_WAIT,
+        }
+    }
 }
 
 #[cfg(test)]
 impl NativeCaptureState {
+    pub(crate) fn set_waits_for_test(&mut self, waits: CaptureWaits) {
+        self.waits = waits;
+    }
+
     pub(crate) fn expire_ready_for_test(&mut self) {
         for lease in self.leases.values_mut() {
             if lease.plan.is_some() {
@@ -87,12 +110,13 @@ fn messages_for(jobs: &[CaptureJob]) -> Vec<CaptureMessage> {
         .enumerate()
         .map(|(index, job)| CaptureMessage {
             id: format!("source_{}", index + 1),
-            role: if job.role == "user" {
+            role: if super::is_user_source(job) {
                 CaptureRole::User
             } else {
                 CaptureRole::Assistant
             },
             text: job.text.clone(),
+            own_id: !super::cite::is_hashed_source_id(&job.message_id),
         })
         .collect()
 }
@@ -150,6 +174,11 @@ impl HandlerCore {
     }
 
     fn native_capture_work(&self, store: Arc<MemoryStore>, binding: SessionBinding) -> CaptureWork {
+        let waits = self
+            .native_capture
+            .lock()
+            .expect("native capture mutex")
+            .waits;
         CaptureWork {
             store,
             kernel: Arc::clone(&self.kernel),
@@ -158,6 +187,8 @@ impl HandlerCore {
             cancel: self.cancel.clone(),
             commit_gate: Arc::clone(&self.capture_commit_gate),
             source_capture: Arc::clone(&self.source_capture),
+            plan_commit_budget: waits.plan_commit_budget,
+            commit_wait: waits.commit_wait,
         }
     }
 
@@ -238,7 +269,9 @@ impl HandlerCore {
         let state = Arc::clone(&self.native_capture);
         // The guard travels with the blocking work: a request future dropped
         // mid-claim keeps the reservation until that work has finished, and
-        // the dispatch is recorded only once the work is issued.
+        // the batch's model dispatch is recorded only once the work is
+        // issued. A frozen plan the claim commits and the Kernel refuses
+        // records its own dispatch during the claim and keeps it.
         kernel_routes::blocking(move || {
             let mut guard = guard;
             let (plan, prompt) = match work.claim(primary.as_deref()) {
@@ -420,7 +453,10 @@ impl HandlerCore {
 /// Memories of one source sharing a category and quotation freeze as one.
 /// A replacement target survives the collapse so the correction it carries
 /// is not lost; one quotation superseding two memories keeps one entry per
-/// target, since a decision supersedes exactly one predecessor.
+/// target, since a decision supersedes exactly one predecessor. The
+/// collapsed memory is a duplicate only when every memory it joins names
+/// the same duplicate target: a memory that names none carries a fact the
+/// store does not hold, and that fact is written.
 pub(super) fn collapse_quotations(
     attribution: &str,
     proposed: Vec<CapturedMemory>,
@@ -436,17 +472,153 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                if kept.replaces.is_none()
-                    && (kept.duplicate_of.is_none() || memory.replaces.is_some())
-                {
+                if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
-                    kept.duplicate_of = memory.duplicate_of;
+                    kept.also_replaces = memory.also_replaces;
+                    kept.duplicate_of = None;
+                } else if kept.duplicate_of != memory.duplicate_of {
+                    kept.duplicate_of = None;
+                }
+                for target in memory.contests {
+                    if !kept.contests.contains(&target) {
+                        kept.contests.push(target);
+                    }
                 }
             }
             None => memories.push(memory),
         }
     }
     memories
+}
+
+/// Settles the links of one source's memories after collapse and conversion
+/// have joined or moved them, so the frozen plan names each target for one
+/// purpose. A memory contests no memory it replaces, retires, or duplicates,
+/// and names each contest once. A target some memory of the source replaces
+/// or retires is contested by none of them, and a memory that only
+/// duplicates such a target is dropped: its fact is the one the sibling
+/// replaces. A duplicate of such a target that also contests other memories
+/// is kept for its contests and written as its own memory. Each target is
+/// contested by the first memory that names it.
+///
+/// Returns, for each memory kept, whether it is such a duplicate kept for
+/// its contests; the batch pass drops it when it strips them.
+pub(super) fn settle_links(memories: &mut Vec<CapturedMemory>) -> Vec<bool> {
+    let removed: Vec<String> = memories
+        .iter()
+        .flat_map(|memory| memory.replaces.iter().chain(&memory.also_replaces))
+        .cloned()
+        .collect();
+    let mut contested: Vec<String> = Vec::new();
+    let mut kept_for_contests = Vec::new();
+    memories.retain_mut(|memory| {
+        let replaced_duplicate = memory
+            .duplicate_of
+            .as_ref()
+            .is_some_and(|target| removed.contains(target));
+        if replaced_duplicate {
+            memory.duplicate_of = None;
+        }
+        let duplicate = memory.duplicate_of.clone();
+        // Collapse and conversion can join the contests of several
+        // proposals; the joined memory keeps the first
+        // `MAX_CONTESTS_PER_MEMORY` it may name.
+        let mut named = 0;
+        memory.contests.retain(|target| {
+            let kept = named < super::MAX_CONTESTS_PER_MEMORY
+                && !removed.contains(target)
+                && duplicate.as_ref() != Some(target)
+                && !contested.contains(target);
+            if kept {
+                named += 1;
+                contested.push(target.clone());
+            }
+            kept
+        });
+        let kept = !replaced_duplicate || !memory.contests.is_empty();
+        if kept {
+            kept_for_contests.push(replaced_duplicate);
+        }
+        kept
+    });
+    kept_for_contests
+}
+
+/// Settles the contests of one batch across its sources, after each source
+/// settled its own links. A target any source of the batch replaces or
+/// retires is contested by none of them, so the replacement commits against
+/// the row the plan named. A target is contested by the first source that
+/// names it, so two sources leave one record on it. A memory its source
+/// kept only for its contests (see [`settle_links`]) is dropped when this
+/// pass strips them; every other memory is still written.
+pub(super) fn settle_batch_contests(batch: &mut [(Vec<CapturedMemory>, Vec<bool>)]) {
+    let removed: Vec<String> = batch
+        .iter()
+        .flat_map(|(memories, _)| memories)
+        .flat_map(|memory| memory.replaces.iter().chain(&memory.also_replaces))
+        .cloned()
+        .collect();
+    let mut contested: Vec<String> = Vec::new();
+    for (memories, kept_for_contests) in batch {
+        let mut named = Vec::new();
+        let mut flags = std::mem::take(kept_for_contests).into_iter();
+        memories.retain_mut(|memory| {
+            memory.contests.retain(|target| {
+                let kept = !removed.contains(target) && !contested.contains(target);
+                if kept {
+                    named.push(target.clone());
+                }
+                kept
+            });
+            !(flags.next().unwrap_or(false) && memory.contests.is_empty())
+        });
+        contested.append(&mut named);
+    }
+}
+
+/// Widens each cut quotation of a user message to the whole sentence that
+/// holds it, so the stored statement keeps a lead-in, a negation, or a
+/// condition the extractor left out.
+///
+/// A proposal that replaces, retires, or contests memories keeps its
+/// quotation: the extractor judged that relation from the clause it quoted,
+/// and only a correction quoted whole replaces a memory served
+/// automatically. A replacement the parser released as a contest is such a
+/// proposal. Two
+/// proposals of different categories that name one sentence keep their own
+/// quotations, so one sentence is stored once per category at most and each
+/// clause stays its own memory.
+///
+/// Returns the widened quotations.
+fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) -> Vec<String> {
+    let widened: Vec<Option<&str>> = proposed
+        .iter()
+        .map(|memory| {
+            if memory.replaces.is_some()
+                || !memory.also_replaces.is_empty()
+                || !memory.contests.is_empty()
+            {
+                None
+            } else {
+                enclosing_statement(prose, &memory.quote)
+            }
+        })
+        .collect();
+    let mut quotations = Vec::new();
+    for index in 0..proposed.len() {
+        let Some(statement) = widened[index] else {
+            continue;
+        };
+        let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
+            other.category != proposed[index].category
+                && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
+        });
+        if !shared {
+            proposed[index].quote = statement.to_owned();
+            quotations.push(statement.to_owned());
+        }
+    }
+    quotations
 }
 
 impl CaptureWork {
@@ -528,16 +700,21 @@ impl CaptureWork {
             .pending_memory_captures(&project, &self.binding.harness, now_ms())
             .map_err(|_| "store_failed")?;
         let mut unprepared = Vec::new();
+        // The frozen plans share one budget, so a busy Kernel writer delays
+        // the extraction window by that budget at most. A plan the budget
+        // does not reach stays ripe for the next call.
+        let budget = Instant::now() + self.plan_commit_budget;
         for job in jobs {
-            if job.prepared.is_some() {
+            if job.prepared.is_none() {
+                unprepared.push(job);
+            } else if Instant::now() < budget {
                 // A replayed plan reads its session's record without waiting.
                 let settlement = super::cite::settlement_key(&job)
                     .map_or(SettlementOutcome::Settled, |key| {
                         self.source_capture.settlement_now(&key)
                     });
-                self.publish_or_recover(&job, settlement)?;
-            } else {
-                unprepared.push(job);
+                let deadline = budget.min(Instant::now() + self.commit_wait);
+                self.publish_or_recover(&job, settlement, deadline)?;
             }
         }
         if unprepared.is_empty() {
@@ -561,7 +738,7 @@ impl CaptureWork {
             return Err("invalid_model_configuration");
         }
         let mut messages = messages_for(&unprepared);
-        let mut existing = self.existing_memories(&messages)?;
+        let mut existing = self.existing_memories(&messages, &unprepared)?;
         let prompt = loop {
             let prompt = render_capture_prompt_with_existing(&messages, &existing)?;
             if prompt.len() <= MAX_NATIVE_PROMPT_BYTES {
@@ -603,45 +780,153 @@ impl CaptureWork {
         now: i64,
         settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
-        let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing) {
+        // Whether a memory of the message at `index` that names a target is
+        // the user's own statement: a whole statement as quoted. Freezing
+        // keeps the quotation of such a memory, so this is the judgment
+        // publication makes of it.
+        let proses: Vec<super::Prose<'_>> = plan
+            .jobs
+            .iter()
+            .map(|job| super::Prose::of(&job.text))
+            .collect();
+        let states = |index: usize, memory: &CapturedMemory| {
+            let (job, prose) = (&plan.jobs[index], &proses[index]);
+            super::is_user_source(job)
+                && !super::cite::is_hashed_source_id(&job.message_id)
+                && super::quotes_whole_statements(prose, &memory.quote)
+        };
+        let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
             Ok(decisions) => decisions,
             Err(reason) => {
                 eprintln!("daemon: native memory capture output rejected: {reason}");
                 return self.failed(&plan.jobs, "extraction_failed", now);
             }
         };
-        // One read per submission, so every plan it freezes names one HEAD.
-        let head = observe_head(self.binding.kernel_project.root());
-        for (mut job, decision) in plan.jobs.into_iter().zip(decisions) {
+        // Each source's memories are settled first, then the batch's
+        // contests across sources, and only then is any plan frozen.
+        let mut accepted = Vec::new();
+        let mut settled = Vec::new();
+        for (index, (job, decision)) in plan.jobs.iter().zip(decisions).enumerate() {
             let decision = match decision {
                 Ok(decision) => decision,
                 Err(reason) => {
                     eprintln!("daemon: native memory capture source rejected: {reason}");
-                    self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
+                    self.failed(std::slice::from_ref(job), "extraction_failed", now)?;
                     continue;
                 }
             };
-            let attribution = if job.role == "user" {
-                "User stated"
+            let attribution = if super::is_user_source(job) {
+                USER_STATED
             } else {
-                "Assistant reported"
+                super::ASSISTANT_REPORTED
+            };
+            let prose = &proses[index];
+            let states_whole = super::states_whole_message(job);
+            let mut proposed = decision.memories;
+            let widened = if super::is_user_source(job)
+                && !super::cite::is_hashed_source_id(&job.message_id)
+            {
+                widen_cut_quotations(prose, &mut proposed)
+            } else {
+                Vec::new()
             };
             // The stored text is the attributed quotation, so two facts citing
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
-            let memories = collapse_quotations(attribution, decision.memories);
+            let mut memories = collapse_quotations(attribution, proposed);
+            // A user's statement that repeats an approved memory word for
+            // word duplicates that memory when the extractor named a copy
+            // that is not served automatically, such as an agent's note. A
+            // named copy that is served automatically is kept, so a repeat
+            // of a contested statement reaches that statement.
+            for memory in &mut memories {
+                let Some(named) = memory
+                    .duplicate_of
+                    .as_ref()
+                    .map(|target| plan.existing.iter().find(|previous| previous.id == *target))
+                else {
+                    continue;
+                };
+                if named.is_none_or(|previous| !previous.automatic)
+                    && let Some(approved) = plan
+                        .existing
+                        .iter()
+                        .find(|previous| previous.automatic && previous.content == memory.content)
+                {
+                    memory.duplicate_of = Some(approved.id.clone());
+                } else if widened.contains(&memory.quote)
+                    && named.is_some_and(|previous| {
+                        previous.automatic
+                            && super::statement_text(&previous.content)
+                                != super::statement_text(&memory.content)
+                    })
+                {
+                    // The extractor matched the clause it quoted to an
+                    // approved statement. The widened sentence is another
+                    // text, such as that clause negated, so it is written
+                    // as the user's own statement, or names the approved
+                    // statement that holds it word for word.
+                    memory.duplicate_of = plan
+                        .existing
+                        .iter()
+                        .find(|previous| previous.automatic && previous.content == memory.content)
+                        .map(|approved| approved.id.clone());
+                }
+                // A statement that names a contested statement as the memory
+                // that already holds it settles the contest only word for
+                // word. Another text is the user's own new statement.
+                else if named.is_some_and(|previous| {
+                    previous.automatic
+                        && previous.contested
+                        && super::statement_text(&previous.content)
+                            != super::statement_text(&memory.content)
+                }) && user_attributed(states_whole, prose, memory)
+                {
+                    memory.duplicate_of = None;
+                }
+            }
+            // A user's contest shows the user's own words beside the
+            // statement, so it is kept for a quotation that is whole
+            // sentences, such as a question. A clause cut out of a sentence
+            // can say the opposite of that sentence and contests nothing.
+            // A fragment of a long message has edges the user did not
+            // write, so no quotation of it is known to be whole.
+            if super::is_user_source(job) {
+                let fragment = super::cite::is_hashed_source_id(&job.message_id);
+                for memory in &mut memories {
+                    if !memory.contests.is_empty()
+                        && (fragment || !super::quotes_whole_sentences(prose, &memory.quote))
+                    {
+                        memory.contests.clear();
+                    }
+                }
+            }
+            let kept_for_contests = settle_links(&mut memories);
+            accepted.push((index, job.clone()));
+            settled.push((memories, kept_for_contests));
+        }
+        settle_batch_contests(&mut settled);
+        // One read per submission, so every plan it freezes names one HEAD.
+        let head = observe_head(self.binding.kernel_project.root());
+        let budget = Instant::now() + self.plan_commit_budget;
+        for ((index, mut job), (quoted, _)) in accepted.into_iter().zip(settled) {
+            let mut memories = quoted.clone();
+            failure_evidence::attach(&job.text, &mut memories);
+            let attached = keep_statement_text(&job, &proses[index], &quoted, &mut memories);
             let existing = plan
                 .existing
                 .iter()
                 .filter(|previous| {
                     memories.iter().any(|memory| {
                         memory.replaces.as_deref() == Some(&previous.id)
+                            || memory.also_replaces.contains(&previous.id)
                             || memory.duplicate_of.as_deref() == Some(&previous.id)
+                            || memory.contests.contains(&previous.id)
                     })
                 })
                 .cloned()
                 .collect();
-            let output = PreparedCapture {
+            let mut output = PreparedCapture {
                 version: CAPTURE_SCHEMA_VERSION,
                 model: plan.model.clone(),
                 existing,
@@ -649,24 +934,74 @@ impl CaptureWork {
                 head: head.clone(),
             };
             let frozen = serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
-            let prepared =
-                match self
+            let mut prepared =
+                self.store
+                    .prepare_memory_capture(&job.project, &job.job_id, &frozen);
+            // Appended lines sit beside text they were not beside in the redacted
+            // source, so the store's secret scan or size bound may refuse a plan its
+            // quotations alone pass; that plan freezes without the appended lines.
+            if attached
+                && matches!(
+                    prepared,
+                    Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_))
+                )
+            {
+                output.memories = quoted;
+                let frozen =
+                    serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
+                prepared = self
                     .store
-                    .prepare_memory_capture(&job.project, &job.job_id, &frozen)
-                {
-                    Ok(prepared) => prepared,
-                    Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
-                        eprintln!("daemon: native memory capture plan refused by the store");
-                        self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
-                        continue;
-                    }
-                    Err(_) => return Err("store_failed"),
-                };
+                    .prepare_memory_capture(&job.project, &job.job_id, &frozen);
+            }
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(MemoryStoreError::Serde(_) | MemoryStoreError::Redaction(_)) => {
+                    eprintln!("daemon: native memory capture plan refused by the store");
+                    self.failed(std::slice::from_ref(&job), "extraction_failed", now)?;
+                    continue;
+                }
+                Err(_) => return Err("store_failed"),
+            };
             if let Some(frozen) = prepared {
                 job.prepared = Some(frozen);
-                self.publish_or_recover(&job, job_settlement(settlements, &job))?;
+                // The plan's copy of the job predates the dispatch that
+                // produced this output; the backoff counts that dispatch.
+                job.attempts += 1;
+                // The batch shares one budget: every plan is frozen, and a
+                // plan the budget does not reach is committed by the next
+                // drain's plan window.
+                if Instant::now() < budget {
+                    self.publish_or_recover(
+                        &job,
+                        job_settlement(settlements, &job),
+                        budget.min(Instant::now() + self.commit_wait),
+                    )?;
+                }
             }
         }
         Ok(())
     }
 }
+
+/// Restores the quoted text of each memory that is the user's own
+/// statement. A statement is approved as the sentence the user wrote, so it
+/// keeps its exact text and failure lines stay on the other memories of the
+/// source. Returns whether any memory still holds an appended line.
+pub(super) fn keep_statement_text(
+    job: &CaptureJob,
+    prose: &super::Prose<'_>,
+    quoted: &[CapturedMemory],
+    memories: &mut [CapturedMemory],
+) -> bool {
+    let mut attached = false;
+    let states_whole = super::states_whole_message(job);
+    for (memory, quoted) in memories.iter_mut().zip(quoted) {
+        if user_attributed(states_whole, prose, quoted) {
+            memory.content.clone_from(&quoted.content);
+        }
+        attached |= memory.content != quoted.content;
+    }
+    attached
+}
+
+mod failure_evidence;

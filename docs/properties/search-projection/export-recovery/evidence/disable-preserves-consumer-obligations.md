@@ -26,8 +26,9 @@ lagging. D R6 is a lead; its prose is not imported as an implemented contract.
   an unconstrained pruning horizon.
 - `crates/kernel/src/facts.rs:203-223` counts published positions after the
   minimum checkpoint and ages all unconsumed rows, including unpublished rows.
-- `crates/daemon/src/kernel_routes/serving.rs:41-63` distinguishes no-consumer
-  gated reads from daemon-internal direct canonical tip reads.
+- `crates/daemon/src/kernel_routes/serving.rs:41-52` judges no-consumer gated
+  reads unavailable; the daemon's canonical memory tip read takes no serving
+  decision and is served at any consumer count and lag.
 - `crates/kernel/tests/kernel_outbox.rs:247-330` checks pending refusal and
   durable abandonment facts. Status: unaudited.
 - `crates/kernel/tests/kernel_deletion.rs:212-292` checks recorded-consumer
@@ -64,8 +65,9 @@ consumer identity even if a replacement consumer is registered later.
    state before any retry or enablement.
 6. Record `search_projection_disable_pending_consumer`, `search_projection_disable_last_consumer`, and
    `search_projection_abandon_request_with_barrier` independently of transition success.
-7. Reuse the transform catalog's withheld-versus-empty property and its real
-   daemon test at `crates/daemon/tests/transform_canonical_memory.rs:230-302`.
+7. Reuse the transform catalog's withheld-versus-empty property, which its
+   injected-seam unit test witnesses, and its real-daemon served control at
+   `crates/daemon/tests/transform_canonical_memory.rs:240-343`.
 
 ## Investigation log
 

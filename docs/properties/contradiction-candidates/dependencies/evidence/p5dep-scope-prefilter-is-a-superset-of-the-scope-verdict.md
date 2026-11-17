@@ -1,10 +1,11 @@
 # p5dep-scope-prefilter-is-a-superset-of-the-scope-verdict
 
-HEAD `3a3b916b7`. Surface S2.
+HEAD `3a3b916b7`; the `admission.rs`, `project.rs`, and `read.rs` references
+are re-verified at the #1209 branch tip. Surface S2.
 
 ## Discovery trigger
 
-Plan R2 relies on the `ScopeTermFilter` prefilter (`admission.rs:3138-3144`)
+Plan R2 relies on the `ScopeTermFilter` prefilter (`admission.rs:3220-3225`)
 to restrict the candidate set to the project. The doc comment claims the
 restriction "is a superset of the scope algebra's verdict: a scope with no
 term on the dimension, a term whose operator the query cannot evaluate, and a
@@ -14,15 +15,15 @@ D5.
 
 ## Evidence trail
 
-- `admission.rs:3473-3476` `ScopeTermFilter<'a> { dimension: Dimension,
+- `admission.rs:3581-3584` `ScopeTermFilter<'a> { dimension: Dimension,
   value: &'a str }`.
-- `admission.rs:3565-3574`: redaction placeholders. `exact_redacted` on
+- `admission.rs:3834-3841`: redaction placeholders. `exact_redacted` on
   `t.exact_value`, `set_redacted` on each `json_each(t.set_values)` value,
-  `filter_redacted` on `:scope_value`. Comments at `:3567-3573`: a redacted
+  `filter_redacted` on `:scope_value`. Comments at `:3834-3840`: a redacted
   stored value "decodes to `MatchOutcome::Uncertain`" and a redacted filter
   value "decodes to `Uncertain` against every exact or set term", so both
   are kept.
-- `admission.rs:3650-3664` the `WHERE` tail:
+- `admission.rs:3938-3952` the `WHERE` tail:
   `(:scope_dimension IS NULL OR scope_expr IN (SELECT t.scope_id FROM
   scope_term t WHERE t.dimension=:scope_dimension AND (t.operator NOT IN
   ('exact','set') OR filter_redacted OR t.exact_value=:scope_value OR
@@ -34,15 +35,16 @@ D5.
   redacted, or a set contains the value; when the scope is NULL; or when the
   scope has no term on the dimension. A row is dropped only when every term
   on the dimension is a decodable `exact`/`set` that excludes the value.
-- `admission.rs:3582-3593`: for `DomainDecisions`, `scope_expr` is
+- `admission.rs:3870-3875`: for `DomainDecisions`, `scope_expr` is
   `dec.scope_id`.
 - Daemon side: `crates/daemon/src/kernel_routes/project.rs:106-111`
   `scope_term()` = `{ Project, &self.digest }`; `:186-213` `ScopeFilter`
   judges each row with `ProjectScope::names_project` and memoizes per scope
-  id; `:204-206` returns `Ok(false)` for a `None` scope id.
-- `read.rs:170-188` comment: "The kernel keeps rows whose scope names another
-  project out of the snapshot"; `:189`: the row bound "cannot be a SQL
-  `LIMIT`" because the filter runs after SQL.
+  id; `:212-213` returns `Ok(false)` for a `None` scope id.
+- `read.rs:461-464` comment: "The kernel keeps rows whose scope names another
+  project out of the snapshot" (`newest_page` says the same of each chunk at
+  `:300`); `:479` and `:302`: the row bound "cannot be a SQL `LIMIT`" because
+  the filter runs after SQL.
 - Test: `crates/kernel/tests/kernel_scope.rs:235-388`: four scopes (branch
   `main`, branch `release`, branch redacted, project only); filter `branch =
   main` keeps `scope-1`, `scope-3`, `scope-4` and drops `scope-2`; a redacted
@@ -82,7 +84,8 @@ read is a benign race (the terms are append-only per scope revision).
 
 - Sources examined: `project.rs:85-104` `scope_spec` (route-written rows
   always get a project scope), `kernel_scope.rs` fixtures (fixtures use
-  `scope_id: Some(..)`), `read.rs:204-206`.
+  `scope_id: Some(..)`), `read.rs:481-488` and `:329` passing the row's optional scope to
+  `ScopeFilter::matches`, which answers `false` for no scope (`project.rs:207-214`).
 - Findings: route-written memory decisions carry a scope; the daemon filter
   drops a NULL-scope row. Other writers (history summarizer promotion,
   reviewer acceptance) were not audited in this pass.

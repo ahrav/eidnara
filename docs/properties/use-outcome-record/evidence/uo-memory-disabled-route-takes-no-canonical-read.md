@@ -12,7 +12,7 @@ re-verified at this branch tip.
 References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
-- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5554`); the pass calls
+- Gate: `project_memory_read` (`crates/daemon/src/lib.rs:5590`); the pass calls
   it with the route-frozen config.
 - With `None`, `project_memory_composition()` is `None`, so meta and the
   response carry no composition.
@@ -22,7 +22,7 @@ revision.
 - Guarantee under test: A route bound with `memory.enabled` off takes no Kernel
   read, so the pass has no composition.
 - Existing check: `a_memory_disabled_pass_takes_no_canonical_read`
-  (`crates/daemon/tests/transform_canonical_memory.rs:320`). Status: unaudited.
+  (`crates/daemon/tests/transform_canonical_memory.rs:349`). Status: unaudited.
 
 ## Failure scenario
 

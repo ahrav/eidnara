@@ -546,6 +546,28 @@ fn each_invalid_evidence_dimension_denies_on_its_own() {
         }),
         "a checkpoint past the observed tip is not a fresh observation"
     );
+    // The lifecycle owner's work applies the commits a trailing family lacks or replaces the family, so it is admitted past the limit while every other gate still judges it; a checkpoint past the observed tip is refused for it too.
+    assert_eq!(stale.judge_lifecycle_work(hook), Ok(()));
+    assert_eq!(
+        ahead.judge_lifecycle_work(hook),
+        Err(Denial::Stale {
+            lag: -1,
+            max: u64::MAX
+        })
+    );
+    let mut stale_unmeasured = stale.clone();
+    stale_unmeasured.evidence.resource = None;
+    assert_eq!(
+        stale_unmeasured.judge_lifecycle_work(hook),
+        Err(Denial::Missing(Gate::Resource)),
+        "lifecycle work over a trailing family is still judged on the gates after freshness"
+    );
+    let mut stale_disabled = stale.clone();
+    stale_disabled.manifest.enabled.insert(hook, false);
+    assert_eq!(
+        stale_disabled.judge_lifecycle_work(hook),
+        Err(Denial::Disabled(hook))
+    );
 
     let mut charge_observer = passing();
     charge_observer.evidence.resource.as_mut().unwrap().observer =

@@ -4,3 +4,11 @@ nextest-version = { required = "0.9.127", recommended = "0.9.143" }
 # One failure must not hide the others in a run nobody is watching.
 [profile.ci]
 fail-fast = false
+
+# The projection soak commits to a kernel for minutes while it searches and steps
+# the wall clock. It takes every test thread, so it runs with no other test beside
+# it: its own freshness bounds are measured on an unloaded runner, and tests with
+# short deadlines elsewhere keep theirs.
+[[profile.default.overrides]]
+filter = 'binary(search_projection_soak)'
+threads-required = 'num-test-threads'

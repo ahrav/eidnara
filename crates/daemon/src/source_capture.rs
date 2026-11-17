@@ -127,11 +127,13 @@ counts! {
     DecisionsDescriptorNotFound => "decisions_descriptor_not_found",
     DecisionsAnchored => "decisions_anchored",
     DecisionsHeadUnavailable => "decisions_head_unavailable",
+    DecisionsApprovalRefused => "decisions_approval_refused",
 }
 
-/// The memory-capture decision reasons: five citation reasons, then two
-/// anchor reasons.
-const DECISION_COUNTS: [Count; 7] = [
+/// The memory-capture decision reasons: five citation reasons, two anchor
+/// reasons, then the count of user statements stored without the approval
+/// the Kernel refused.
+const DECISION_COUNTS: [Count; 8] = [
     Count::DecisionsCited,
     Count::DecisionsSourceCaptureOff,
     Count::DecisionsSourceIdUnjoinable,
@@ -139,6 +141,7 @@ const DECISION_COUNTS: [Count; 7] = [
     Count::DecisionsDescriptorNotFound,
     Count::DecisionsAnchored,
     Count::DecisionsHeadUnavailable,
+    Count::DecisionsApprovalRefused,
 ];
 
 struct Counters([AtomicU64; Count::ALL.len()]);
@@ -668,8 +671,11 @@ impl SourceCapture {
         self.counters.add(Count::ExpiryRetained, expiry.retained);
     }
 
-    /// Adds one committed memory-capture publish's decisions, one citation
-    /// reason and one anchor reason each, and logs each reason's count.
+    /// Adds one committed memory-capture publish's capture decisions, one
+    /// citation reason and one anchor reason each, and one approval-refused
+    /// count for each user statement the publish stored labeled after the
+    /// Kernel's admission policy refused its approval. Logs each reason's
+    /// count.
     pub(crate) fn record_capture_decisions(&self, reasons: &[Count]) {
         debug_assert!(
             reasons
