@@ -805,7 +805,7 @@ fn a_bounded_read_lifts_a_constraint_through_a_row_it_loads_without_text() {
     let lift_claim = serde_json::to_string(&[memory_store::Claim {
         key: "policy.baseline-fixes".into(),
         value: LIFT.into(),
-        ordinal: 705,
+        ordinal: 139,
         anchor: Some(LIFTED_LINE.into()),
     }])
     .unwrap();
