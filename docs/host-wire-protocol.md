@@ -1069,8 +1069,9 @@ and `content` as proposed refuse the source, before the join as after it; a join
 `duplicate_of` names a fact served on `auto_inject` with another text names
 the served fact that holds the joined text word for word, or drops the link.
 The joined memories then freeze under the rule below for memories that share
-a category and quotation, as one memory: a later replacement of it
-supersedes the whole joined statement, every sentence of it. A sentence
+a category and quotation, as one memory, or as one per `replaces` target
+when two of them name different targets: a later replacement of a joined
+memory supersedes the whole joined statement, every sentence of it. A sentence
 after a colon that the extractor quotes alone joins nothing; it is stored
 for explicit search, and a `replaces` it names becomes a contest of the
 named statement (below), so the block shows that statement with the
@@ -1197,11 +1198,12 @@ crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
 later paragraph. The single marks inside an inline code span are code to this
-rule when they pair up as the marks of string literals do, as in
+rule when they pair up as the marks of one-word string literals do, as in
 `` `''` `` or `` `.get('id')` ``: counting each mark that is not between two
 letters or digits, the marks open and close in turn, one that opens follows
 the span's start or a character that is no letter or digit, one that closes
-precedes the span's end or such a character, and none is left open. A span
+precedes the span's end or such a character with no whitespace since the mark
+that opened, and none is left open. A span
 whose marks stand otherwise may hold a mark that opens or closes a quotation
 of the prose, so it leaves its paragraph's quotations unknown: that paragraph
 and every paragraph after the first one that holds a quotation mark are left

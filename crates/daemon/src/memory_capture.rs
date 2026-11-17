@@ -19,7 +19,7 @@ pub(crate) use native::CaptureWaits;
 pub(crate) use native::LEASE_DURATION;
 pub(crate) use native::NativeCaptureState;
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -407,86 +407,80 @@ fn join_sentence_runs(
         return Vec::new();
     }
     let prose = Prose::of(text);
-    // Each quotation with one place: its span, its index, and whether it is
-    // a statement on its own.
-    let mut spans: Vec<(usize, usize, usize, bool)> = memories
-        .iter()
-        .enumerate()
-        .filter_map(|(index, memory)| {
-            let quote = memory.quote.as_str();
-            let trimmed = quote.trim();
-            // The last copy, overlapping copies included, is the first one
-            // only when the quotation occurs once.
-            let at = text.find(quote).filter(|_| !trimmed.is_empty())?;
-            if text.rfind(quote) != Some(at) {
-                return None;
-            }
-            let start = at + (quote.len() - quote.trim_start().len());
-            // A quotation that stops directly before its sentence's closing
-            // mark is that sentence, as the statement rule reads it; its
-            // place runs through the mark, so the next sentence follows it.
-            let end = start + trimmed.len();
-            let closes = !trimmed.ends_with(['.', '!']) && text[end..].starts_with(['.', '!']);
-            let end = end + usize::from(closes);
-            if quotes_whole_statements(&prose, quote) {
-                return Some((start, end, index, true));
-            }
-            let widened = if keeps_quotation(memory) {
-                None
-            } else {
-                enclosing_statement(&prose, quote)
-            };
-            match widened {
-                // The statement is a slice of the message, so its address
-                // gives its place.
-                Some(statement) => {
-                    let from = statement.as_ptr().addr() - text.as_ptr().addr();
-                    Some((from, from + statement.len(), index, true))
-                }
-                // Whole sentences that are statements but for a colon
-                // before them can continue a run. Any other quotation
-                // starts and joins nothing.
-                None => (reads_as_statement(trimmed) && quotes_sentences_of_prose(&prose, quote))
-                    .then_some((start, end, index, false)),
-            }
-        })
-        .collect();
-    spans.sort_unstable();
-    // Each run: its span, its members, and whether a later sentence joined
-    // it. A run that only holds proposals of its first statement changes
-    // nothing.
-    let mut runs: Vec<(usize, usize, Vec<usize>, bool)> = Vec::new();
-    // The span judged last, and whether its quotation is in the last run.
-    // Proposals that quote one span are judged once and share the outcome.
-    let mut judged: Option<(usize, usize, bool)> = None;
-    for (start, end, index, alone) in spans {
-        if let Some((_, _, member)) = judged.filter(|&(from, to, _)| (from, to) == (start, end)) {
-            if member && let Some((_, _, members, _)) = runs.last_mut() {
-                members.push(index);
-            }
+    // Each place a quotation holds in the message, in message order: whether
+    // it is a statement on its own, and the proposals that quote it.
+    let mut places: BTreeMap<(usize, usize), (bool, Vec<usize>)> = BTreeMap::new();
+    for (index, memory) in memories.iter().enumerate() {
+        let quote = memory.quote.as_str();
+        let trimmed = quote.trim();
+        // The last copy, overlapping copies included, is the first one only
+        // when the quotation occurs once.
+        let Some(at) = text.find(quote).filter(|_| !trimmed.is_empty()) else {
+            continue;
+        };
+        if text.rfind(quote) != Some(at) {
             continue;
         }
-        let joins = !alone
-            && runs.last().is_some_and(|&(from, to, _, _)| {
-                to < start
-                    && text[to..start].chars().all(char::is_whitespace)
-                    && end - from <= MAX_CAPTURE_MEMORY_BYTES
-                    && quotes_whole_statements(&prose, &text[from..end])
-            });
-        if joins && let Some((_, to, members, joined)) = runs.last_mut() {
-            *to = end;
-            members.push(index);
-            *joined = true;
-        } else if alone {
-            runs.push((start, end, vec![index], false));
+        let start = at + (quote.len() - quote.trim_start().len());
+        // A quotation that stops directly before its sentence's closing mark
+        // is that sentence, as the statement rule reads it; its place runs
+        // through the mark, so the next sentence follows it.
+        let end = start + trimmed.len();
+        let closes = !trimmed.ends_with(['.', '!']) && text[end..].starts_with(['.', '!']);
+        let end = end + usize::from(closes);
+        let place = if quotes_whole_statements(&prose, quote) {
+            Some((start, end, true))
+        } else if let Some(statement) =
+            enclosing_statement(&prose, quote).filter(|_| !keeps_quotation(memory))
+        {
+            // The statement is a slice of the message, so its address gives
+            // its place.
+            let from = statement.as_ptr().addr() - text.as_ptr().addr();
+            Some((from, from + statement.len(), true))
+        } else {
+            // Whole sentences that are statements but for a colon before
+            // them can continue a run. Any other quotation starts and joins
+            // nothing.
+            (reads_as_statement(trimmed) && whole_sentences(&prose, quote, true))
+                .then_some((start, end, false))
+        };
+        if let Some((start, end, alone)) = place {
+            places
+                .entry((start, end))
+                .or_insert((alone, Vec::new()))
+                .1
+                .push(index);
         }
-        judged = Some((start, end, joins || alone));
     }
-    runs.retain(|&(_, _, _, joined)| joined);
-    for (from, to, members, _) in &runs {
-        let joined = &text[*from..*to];
+    let mut runs: Vec<SentenceRun> = Vec::new();
+    for ((start, end), (alone, quoting)) in places {
+        let joins = !alone
+            && runs.last().is_some_and(|run| {
+                run.to < start
+                    && text[run.to..start].chars().all(char::is_whitespace)
+                    && end - run.from <= MAX_CAPTURE_MEMORY_BYTES
+                    && quotes_whole_statements(&prose, &text[run.from..end])
+            });
+        if joins && let Some(run) = runs.last_mut() {
+            run.to = end;
+            run.members.extend(quoting);
+            run.joined = true;
+        } else if alone {
+            runs.push(SentenceRun {
+                from: start,
+                to: end,
+                members: quoting,
+                joined: false,
+            });
+        }
+    }
+    // A run that only holds proposals of its first statement changes
+    // nothing.
+    runs.retain(|run| run.joined);
+    for run in &runs {
+        let joined = &text[run.from..run.to];
         let content = format!("{USER_STATED}: {joined}");
-        for &member in members {
+        for &member in &run.members {
             let memory = &mut memories[member];
             memory.quote = joined.to_owned();
             if names_another_approved_text(existing, memory.duplicate_of.as_deref(), &content) {
@@ -494,7 +488,17 @@ fn join_sentence_runs(
             }
         }
     }
-    runs.into_iter().map(|(_, _, members, _)| members).collect()
+    runs.into_iter().map(|run| run.members).collect()
+}
+
+/// One statement of a message and the quoted sentences that follow it.
+struct SentenceRun {
+    from: usize,
+    to: usize,
+    /// The proposals that quote a place of the run, in message order.
+    members: Vec<usize>,
+    /// Whether a later sentence joined the first statement.
+    joined: bool,
 }
 
 /// Gives the members of each run [`join_sentence_runs`] returned one
@@ -2076,29 +2080,18 @@ fn retire_statement(
 }
 
 /// Whether `quote` is one or more whole sentences of a plain-prose paragraph
-/// of the message, each of them a statement.
-fn quotes_whole_statements(prose: &Prose<'_>, quote: &str) -> bool {
-    reads_as_statement(quote.trim()) && quotes_whole_sentences(prose, quote)
-}
-
-/// Whether `quote` is one or more whole sentences of a plain-prose paragraph
-/// of the message, statements or questions, with no colon earlier in the
+/// of the message, each of them a statement, with no colon earlier in the
 /// paragraph.
-pub(super) fn quotes_whole_sentences(prose: &Prose<'_>, quote: &str) -> bool {
-    whole_sentences(prose, quote, Some(prose.colons()))
+fn quotes_whole_statements(prose: &Prose<'_>, quote: &str) -> bool {
+    reads_as_statement(quote.trim()) && whole_sentences(prose, quote, false)
 }
 
 /// Whether `quote` is one or more whole sentences of a plain-prose paragraph
-/// of the message, wherever a colon stands before them. The sentences are
-/// the user's or text a colon of the user's introduces, so they are shown
-/// beside a statement they contest and are approved as no statement.
-pub(super) fn quotes_sentences_of_prose(prose: &Prose<'_>, quote: &str) -> bool {
-    whole_sentences(prose, quote, None)
-}
-
-/// `colons` holds each paragraph's first colon when a colon before the
-/// quotation refuses it (see [`Prose::colons`]).
-fn whole_sentences(prose: &Prose<'_>, quote: &str, colons: Option<&[usize]>) -> bool {
+/// of the message, statements or questions. `after_colon` admits sentences
+/// that follow a colon in their paragraph: they are the user's or text a
+/// colon of the user's introduces, so they are shown beside a statement
+/// they contest and are approved as no statement on their own.
+pub(super) fn whole_sentences(prose: &Prose<'_>, quote: &str, after_colon: bool) -> bool {
     let text = prose.text;
     let trimmed = quote.trim();
     if trimmed.is_empty() {
@@ -2125,7 +2118,11 @@ fn whole_sentences(prose: &Prose<'_>, quote: &str, colons: Option<&[usize]>) -> 
                         &text[first..last],
                         start - first,
                         end - first,
-                        colons.map_or(last, |colons| colons[index]) - first,
+                        if after_colon {
+                            last
+                        } else {
+                            prose.colons()[index]
+                        } - first,
                         |skip| {
                             letters
                                 .at_or_after(end + skip)
@@ -2843,15 +2840,16 @@ fn joins_suffix_to_code(place: CodePlace, ch: char, next: Option<char>) -> bool 
 }
 
 /// Whether the single marks of an inline code span pair up, as the marks of
-/// string literals do: `` `''` ``, `` `'utf-8'` ``, `` `.get('id')` ``. The
-/// marks outside words open and close in turn: one that opens follows the
-/// span's start or a character that is no letter or digit, the next closes
-/// before the span's end or such a character, and none is left open. An
-/// apostrophe between two letters or digits belongs to its word. Any other
-/// arrangement may hold a mark that opens or closes a quotation of the
-/// prose: a backtick of the user's can pair with one inside quoted text,
-/// and a span inside a quotation can end in an elision. Its paragraph's
-/// quotations are then unknown.
+/// string literals of one word do: `` `''` ``, `` `'utf-8'` ``,
+/// `` `.get('id')` ``. The marks outside words open and close in turn: one
+/// that opens follows the span's start or a character that is no letter or
+/// digit, the next closes before the span's end or such a character with no
+/// whitespace between the two, and none is left open. An apostrophe between
+/// two letters or digits belongs to its word. Any other arrangement may
+/// hold a mark that opens or closes a quotation of the prose: a backtick of
+/// the user's can pair with one inside quoted text, and a span inside a
+/// quotation can end in an elision. Its paragraph's quotations are then
+/// unknown.
 fn single_marks_pair(code: &str) -> bool {
     let mut previous: Option<char> = None;
     let mut chars = code.chars().peekable();
@@ -2866,6 +2864,8 @@ fn single_marks_pair(code: &str) -> bool {
                 return false;
             }
             open = !open;
+        } else if open && ch.is_whitespace() {
+            return false;
         }
         previous = Some(ch);
     }
@@ -6908,6 +6908,18 @@ mod tests {
                 release,
                 false,
             ),
+            // Marks that pair around several words can be a quotation of
+            // the prose whose opening mark a backtick hides.
+            (
+                "The key ` is broken, so Bob wrote 'Use the dogs' bowl with the `-key instead.\n\nWe deploy from the release branch.\n\nThanks'.",
+                release,
+                false,
+            ),
+            (
+                "Log `print('two words')` there.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
             // A lone mark in a span inside a quotation closes nothing: the
             // paragraph's quotations are unknown.
             (
@@ -7406,6 +7418,18 @@ mod tests {
                 &[OPEN_TASKS, RETRY_COUNTER]
             ),
             [OPEN_TASKS, RETRY_COUNTER]
+        );
+        // Sentences whose second copy overlaps the first have no one
+        // place either.
+        let overlapping = "Note for the drill: start slowly. Go now. Go now. Go now.";
+        assert_eq!(
+            quotes(
+                overlapping,
+                CaptureRole::User,
+                true,
+                &["Note for the drill: start slowly.", "Go now. Go now."]
+            ),
+            ["Note for the drill: start slowly.", "Go now. Go now."]
         );
         // A sentence that occurs twice has no one place.
         let twice = format!("{OPEN_TASKS} {RETRY_COUNTER}\n\nAs I said: note it. {RETRY_COUNTER}");

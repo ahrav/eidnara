@@ -886,7 +886,7 @@ impl CaptureWork {
                 let fragment = super::cite::is_hashed_source_id(&job.message_id);
                 for memory in &mut memories {
                     if !memory.contests.is_empty()
-                        && (fragment || !super::quotes_sentences_of_prose(prose, &memory.quote))
+                        && (fragment || !super::whole_sentences(prose, &memory.quote, true))
                     {
                         memory.contests.clear();
                     }
