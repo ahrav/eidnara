@@ -679,6 +679,44 @@ async fn restart_preflights_the_successor_before_committing_the_stop() {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+async fn module_status(client: &host_runtime::Client, root: &Path) -> Value {
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).expect("project root");
+    let route = client
+        .open_route(
+            host_runtime::RouteTarget {
+                module_id: "context".to_owned(),
+                kind: host_runtime::TargetKind::ToolProvider,
+            },
+            host_runtime::RouteIdentity {
+                project_root: project,
+                harness: "opencode".to_owned(),
+                session: "module-status".to_owned(),
+                consumer_module_id: None,
+                consumer_launch_nonce: None,
+                consumer_capabilities: Vec::new(),
+                admission_facts: None,
+                credential_fingerprints: std::collections::BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("context route opens");
+    let response = client
+        .request(
+            route,
+            br#"{"kind":"status"}"#.to_vec(),
+            host_runtime::RequestOptions {
+                timeout: BUDGET,
+                ..host_runtime::RequestOptions::default()
+            },
+        )
+        .await
+        .expect("module status");
+    client.close_route(route).await.expect("route closes");
+    serde_json::from_slice(&response.body).expect("status JSON")
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_dev_mode_lifecycle_roundtrip() {
     require_debug_build();
@@ -740,6 +778,11 @@ async fn full_dev_mode_lifecycle_roundtrip() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert_eq!(
+        module_status(&client, root.path()).await["process_memory"]["c_heap_arena_limit"],
+        daemon::process_memory::C_HEAP_ARENAS,
+        "the serve entry point sets the arena limit before it starts threads"
+    );
     client.close().await.expect("client closes");
     // The daemon's store sits under the contract layout, at the file the direct-host development descriptor opens.
     let contract = release_contract();

@@ -1206,6 +1206,7 @@ fn local_embeddings_from_manifest(
 /// The Tokio runtime uses four worker threads. SIGTERM or SIGINT cancels the
 /// host. Initialization, signal setup, and host failures return stable errors.
 pub fn run() -> Result<(), &'static str> {
+    daemon::process_memory::limit_c_heap_arenas();
     let envelope = read_envelope()?;
     let root = envelope.data_dir.clone();
 
