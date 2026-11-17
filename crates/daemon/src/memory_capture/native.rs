@@ -851,13 +851,15 @@ impl CaptureWork {
                     memory.duplicate_of = None;
                 }
             }
-            // A user's contest shows the user's own words beside the
-            // statement, so it is kept for a quotation that is whole
-            // sentences, such as a question or a correction in a sentence
-            // after a colon. A clause cut out of a sentence can say the
-            // opposite of that sentence and contests nothing. A fragment
-            // of a long message has edges the user did not write, so no
-            // quotation of it is known to be whole.
+            // A user's contest shows whole sentences of the user's message
+            // beside the statement, such as a question or a correction in a
+            // sentence after a colon. A colon can introduce another
+            // author's words, so the excerpt may be reported text, and
+            // keeping the contest approves the quotation as no statement.
+            // A clause cut out of a sentence can say the opposite of that
+            // sentence and contests nothing. A fragment of a long message
+            // has edges the user did not write, so no quotation of it is
+            // known to be whole.
             if super::is_user_source(job) {
                 let fragment = super::cite::is_hashed_source_id(&job.message_id);
                 for memory in &mut memories {

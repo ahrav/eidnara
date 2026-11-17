@@ -2670,6 +2670,141 @@ async fn a_correction_quoted_alone_after_a_colon_contests_the_statement_it_names
     );
 }
 
+/// A colon can introduce another author's words. A later sentence of such
+/// a paragraph that the extractor quotes alone, naming a statement as
+/// replaced or as contested, is approved as no statement and replaces
+/// nothing. The block shows the statement, still approved, with the
+/// sentence beside it as an excerpt of a user message.
+#[tokio::test]
+async fn a_sentence_after_a_reporting_clause_is_shown_as_a_contest_and_approved_as_no_statement() {
+    for replaces in [true, false] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY)],
+            |_, _| vec![fact(THURSDAY)],
+        )
+        .await;
+        let message = format!("Bob replied in the thread: the calendar is out of date. {TUESDAY}");
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", &message)],
+            |_, existing| {
+                let named = ids_containing(existing, "Thursday");
+                vec![Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: if replaces { named.clone() } else { Vec::new() },
+                    contests: if replaces { Vec::new() } else { named },
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        assert_eq!(
+            rows,
+            [
+                (stated(THURSDAY), "visible".to_string()),
+                (stated(TUESDAY), "labeled".to_string()),
+            ],
+            "replaces {replaces}: the sentence is a labeled observation"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(THURSDAY)],
+            "replaces {replaces}: the statement keeps its approval"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the contested statement is delivered");
+        let (stated_day, contested_day) = contest_days(&handler, &project, &stated(THURSDAY));
+        let line = block
+            .lines()
+            .find(|line| line.contains(&stated(THURSDAY)))
+            .expect("the statement has a line");
+        let (id, rest) = line.split_once(": ").unwrap();
+        assert!(id.starts_with("mem_"), "{line}");
+        let (shown, contest) = rest.split_once(" (stated ").unwrap();
+        assert_eq!(shown, stated(THURSDAY));
+        let observation = contest
+            .strip_prefix(&format!("{stated_day}; contested {contested_day} by mem_"))
+            .expect("the contest names its days and the contesting fact");
+        assert_eq!(
+            observation.split_once(": ").unwrap().1,
+            format!("\"{}\")", stated(TUESDAY)),
+            "replaces {replaces}: {line}"
+        );
+    }
+}
+
+/// The block shows a contesting sentence as a bounded excerpt. A correcting
+/// sentence quoted alone after a colon whose new value lies past the
+/// excerpt's length reaches the block without that value, and explicit
+/// search holds the sentence whole.
+#[tokio::test]
+async fn a_long_correction_quoted_alone_after_a_colon_is_shown_as_a_bounded_excerpt() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let long = format!(
+        "For release branches, {}we moved the release cut from Thursday to Tuesday.",
+        "after checking the staging evidence, ".repeat(10)
+    );
+    assert!(long.find("Tuesday").unwrap() > crate::canonical_memory::CONTEST_EXCERPT_CHARS);
+    let message = format!("Correction on the release schedule: the plan changed. {long}");
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", &message)],
+        |_, existing| {
+            vec![Extracted {
+                quote: long.clone(),
+                replaces: ids_containing(existing, "Thursday"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(&long), "labeled".to_string()),
+            (stated(THURSDAY), "visible".to_string()),
+        ],
+        "explicit search holds the whole sentence"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the contested statement is delivered");
+    let line = block
+        .lines()
+        .find(|line| line.contains(&stated(THURSDAY)))
+        .expect("the statement has a line");
+    assert!(line.contains("; contested "), "{line}");
+    assert!(
+        line.contains("User stated: For release branches, after checking"),
+        "{line}"
+    );
+    assert!(
+        line.ends_with("\u{2026}\")") && !line.contains("Tuesday"),
+        "the excerpt stops before the new value: {line}"
+    );
+}
+
 /// A joined statement is one memory. A later correction that replaces it
 /// replaces every sentence of it, the sentence the correction leaves as it
 /// was included.
