@@ -382,8 +382,9 @@ fn parse_capture_batch(
 /// as one memory under the collapse rule. They take one category: that of
 /// the first member that names a replacement, which a correction shares
 /// with the memory it replaces, or else that of the run's first sentence. A
-/// member that names a replacement of its own keeps its category. The
-/// joined text is new, so a member that named an approved statement with
+/// member that names a replacement of its own keeps its category, and so
+/// does a member whose content another memory of the source already holds
+/// under the run's category. The joined text is new, so a member that named an approved statement with
 /// another text as the memory already holding its sentence names the
 /// approved statement that holds the joined text word for word, or none
 /// (see [`names_another_approved_text`]).
@@ -479,9 +480,17 @@ fn join_sentence_runs(
             .map_or(members[0], |&member| member);
         let category = memories[category].category.clone();
         for member in members {
+            // Validation tells the memories of a source apart by category
+            // and content, so a member takes the run's category only where
+            // that keeps it distinct.
+            let distinct = !memories.iter().enumerate().any(|(other, memory)| {
+                other != member
+                    && memory.category == category
+                    && memory.content == memories[member].content
+            });
             let memory = &mut memories[member];
             memory.quote = joined.to_owned();
-            if memory.replaces.is_none() {
+            if memory.replaces.is_none() && distinct {
                 memory.category.clone_from(&category);
             }
             if names_another_approved_text(existing, memory.duplicate_of.as_deref(), &content) {
@@ -7113,6 +7122,35 @@ mod tests {
             [
                 (first_two.clone(), "PROJECT_RULES".to_string(), None),
                 (first_two.clone(), "PROJECT_RULES".to_string(), None),
+            ]
+        );
+        // Two proposals whose content texts are equal stay distinct to
+        // validation: the second keeps its own category.
+        let same_content: Vec<Value> = [(OPEN_TASKS, "PROJECT_RULES"), (RETRY_COUNTER, "ARCHITECTURE")]
+            .iter()
+            .map(|(quote, category)| json!({"category": category, "content": "the open tasks", "quote": quote}))
+            .collect();
+        let response =
+            json!({"version": 1, "decisions": [{"message_id": "m", "memories": same_content}]});
+        let message = [CaptureMessage {
+            id: "m".into(),
+            role: CaptureRole::User,
+            text: paragraph.clone(),
+            own_id: true,
+        }];
+        let parsed = parse_batch(&response.to_string(), &message, &[])
+            .unwrap()
+            .remove(0)
+            .expect("the source stays valid");
+        assert_eq!(
+            parsed
+                .memories
+                .iter()
+                .map(|memory| (memory.quote.as_str(), memory.category.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (first_two.as_str(), "PROJECT_RULES"),
+                (first_two.as_str(), "ARCHITECTURE")
             ]
         );
         // A first sentence that names a replacement and is cut is kept as
