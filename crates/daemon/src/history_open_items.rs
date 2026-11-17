@@ -336,9 +336,8 @@ pub(crate) fn owned_rows(
         .map(|(row, retired)| retire(row, retired))
 }
 
-/// `corrections`, aligned with `segments`, with each one whose anchor touches an open line of
-/// its row's stored tiers listed on the footer: the line stays as written beside the key's live
-/// value, or leaves through retirement, and the correction lists on the footer either way.
+/// `beside_open_lines` clears the anchor of each correction, aligned with `segments`, whose
+/// anchor touches an open line of its row.
 pub(crate) fn beside_open_lines(
     segments: &[StoredHistorySegment],
     mut corrections: Vec<Vec<Correction>>,
@@ -356,15 +355,29 @@ pub(crate) fn beside_open_lines(
                 .any(|line| status_line(line).is_some_and(|(status, _)| status.is_open()))
         })
     };
-    for (segment, corrections) in segments.iter().zip(&mut corrections) {
+    let mut retired: Option<Vec<Option<Retired>>> = None;
+    for (at, (segment, corrections)) in segments.iter().zip(&mut corrections).enumerate() {
+        let tiers = [&segment.p1, &segment.p2, &segment.p3, &segment.p4];
         for correction in corrections {
-            let anchored_on_open_line = correction.anchor.as_deref().is_some_and(|anchor| {
-                [&segment.p1, &segment.p2, &segment.p3, &segment.p4]
-                    .into_iter()
-                    .flatten()
-                    .any(|text| in_open_line(text, anchor))
-            });
-            if anchored_on_open_line {
+            let Some(anchor) = correction.anchor.as_deref() else {
+                continue;
+            };
+            let stored = tiers
+                .into_iter()
+                .flatten()
+                .any(|text| in_open_line(text, anchor));
+            let can_move = anchor.contains('\n') || anchor.trim() != anchor;
+            let beside = stored
+                || (can_move
+                    && retired.get_or_insert_with(|| retirements(segments))[at]
+                        .as_ref()
+                        .is_some_and(|retired| {
+                            tiers.into_iter().flatten().any(|text| {
+                                retire_lines(text, retired)
+                                    .is_some_and(|left| in_open_line(&left, anchor))
+                            })
+                        }));
+            if beside {
                 correction.anchor = None;
             }
         }
@@ -703,7 +716,18 @@ mod tests {
             Some("The user took the lift back."),
         );
         assert_eq!(
-            p1s(&[set, lifted, later(vec![superseding.clone()])])[0],
+            p1s(&[
+                set.clone(),
+                lifted.clone(),
+                later(vec![superseding.clone()])
+            ])[0],
+            format!("Measured.\n{CONSTRAINT}")
+        );
+        // A newer claim with `anchor: None` supersedes the lift too. Validation stores a
+        // `Lifted` line's claim that cites an assistant message in this form.
+        let restated = later(vec![claim("policy.measurement-fixes", None)]);
+        assert_eq!(
+            p1s(&[set, lifted, restated])[0],
             format!("Measured.\n{CONSTRAINT}")
         );
         // The same holds for a segment that lifts its own constraint.
@@ -1036,6 +1060,48 @@ mod tests {
         assert_eq!(
             render_history_segment_at_tier(&corrected([&indented, "", "", ""], "  port 5432"), 1),
             format!("{heading}\n{}\n{footer}", indented.trim())
+        );
+    }
+
+    #[test]
+    fn a_correction_whose_first_occurrence_moves_into_an_open_line_after_retirement_lists_on_the_footer()
+     {
+        let heading = "## 10-19 \u{b7} row 1";
+        let footer = "[corrections: db.port = v @21]";
+        let asked = "Waiting on user (release.step): Proceed?";
+        let schema = "Constraint (policy.schema): No edits.";
+        // Row 1 stores a claim anchored on `anchor`, and row 2 supersedes it and ages the
+        // waiting line of row 1.
+        let corrected = |p1: &str, anchor: &str| {
+            let port = |ordinal| Claim {
+                ordinal,
+                ..claim("db.port", Some(anchor))
+            };
+            let first = row(1, [p1, "", "", ""], vec![port(1)]);
+            render_rows(&[first, same(2, "Port moved.", vec![port(21)])], false).remove(0)
+        };
+
+        // The stored tier first holds the anchor in its narrative. Once the waiting line
+        // leaves, the lines around it meet and hold the anchor across the start of the
+        // constraint line.
+        let p1 = format!(
+            "Setup on 5432.\n{asked}\n{schema}\nSetup on 5432.\nConstraint notes recorded."
+        );
+        assert_eq!(
+            render_history_segment_at_tier(&corrected(&p1, "Setup on 5432.\nConstraint"), 1),
+            format!(
+                "{heading}\nSetup on 5432.\n{schema}\nSetup on 5432.\nConstraint notes recorded.\n\
+                 {footer}"
+            )
+        );
+
+        // The stored tier first holds the anchor in an indented narrative line. Once the
+        // waiting line above it leaves, the renderer trims that indent, and the first
+        // occurrence is the one inside the constraint line.
+        let p1 = format!("{asked}\n  port 5432 ok.\nConstraint (policy.db): Keep  port 5432");
+        assert_eq!(
+            render_history_segment_at_tier(&corrected(&p1, "  port 5432"), 1),
+            format!("{heading}\nport 5432 ok.\nConstraint (policy.db): Keep  port 5432\n{footer}")
         );
     }
 

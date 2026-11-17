@@ -672,6 +672,126 @@ fn a_lift_claim_that_cites_words_no_user_wrote_leaves_the_constraint_standing() 
 }
 
 #[test]
+fn a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_other_text() {
+    let said = |text: String| BlockKind::Text { text };
+    let returned = || BlockKind::ToolResult {
+        id: "call-1".into(),
+        tool_name: "read".into(),
+        output: memory_store::ToolOutput::bare(memory_store::OutputKind::Text {
+            text: LIFT.into(),
+        }),
+        provider_executed: false,
+    };
+    let attachment = || {
+        BlockKind::Media(memory_store::MediaBlock {
+            kind: memory_store::MediaKind::File,
+            media_type: "text/plain".into(),
+            filename: Some(format!("{LIFT}.txt")),
+            source: json!({"type": "data_base64", "data": "stable-bytes"}),
+        })
+    };
+    let message = |ordinal: u64, role: &str, blocks: Vec<BlockKind>| {
+        let mid = format!("open-items-{ordinal}");
+        IngressMessage {
+            mid: mid.clone(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                role,
+                blocks.into_iter().map(WireBlock::bare).collect(),
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some(mid),
+                    ..Default::default()
+                },
+            ),
+        }
+    };
+    let own = || said(format!("So {LIFT}."));
+    let other = || said("Carry on with the write-up.".into());
+    type CitedSpan = fn(&str) -> (usize, usize);
+    let first: CitedSpan = |part| {
+        let start = part.find(LIFT).unwrap();
+        (start, start + LIFT.len())
+    };
+    let last: CitedSpan = |part| {
+        let start = part.rfind(LIFT).unwrap();
+        (start, start + LIFT.len())
+    };
+    let whole: CitedSpan = |part| (0, part.len());
+    let cases: [(Vec<BlockKind>, CitedSpan, bool); 8] = [
+        // The user's text holds the words, and so does the tool result after it.
+        (vec![own(), returned()], first, true),
+        (vec![own(), returned()], last, false),
+        (vec![own(), returned()], whole, true),
+        // The tool result alone holds the words.
+        (vec![other(), returned()], first, false),
+        (vec![other(), returned()], whole, false),
+        // The attachment's file name holds the words, alone and after the user's text.
+        (vec![other(), attachment()], first, false),
+        (vec![own(), attachment()], last, false),
+        // The user's text holds marker brackets before the words.
+        (
+            vec![said(format!("\u{ab}Done\u{bb}, so {LIFT}.")), returned()],
+            first,
+            true,
+        ),
+    ];
+    for (at, (blocks, cited, lifts)) in cases.into_iter().enumerate() {
+        // The tool call, the user's message that holds its result, and the reply fold together.
+        let mut messages = constraint_session();
+        messages.truncate(4);
+        messages.extend([
+            message(
+                5,
+                "assistant",
+                vec![
+                    said("I am reading the notes file.".into()),
+                    BlockKind::ToolCall {
+                        id: "call-1".into(),
+                        name: "read".into(),
+                        input: json!({ "filePath": "notes.md" }),
+                        provider_executed: false,
+                    },
+                ],
+            ),
+            message(6, "user", blocks),
+            assistant(7, "I opened two pull requests, one per parser fix."),
+        ]);
+        let mut stored = constraint_then_other_work(&messages);
+        let chunk = chunk_of(&messages, 5, 8);
+        let part = chunk
+            .aliases
+            .aliases
+            .iter()
+            .find(|part| part.ordinal == 6)
+            .unwrap();
+        let (start, end) = cited(&part.presented);
+        let p1 = format!("{LIFTED_LINE}\nI opened two pull requests.");
+        let text = output(
+            &[segment_xml(5, 7, [&p1, &p1, &p1, ""])],
+            &[claim(
+                "policy.baseline-fixes",
+                &format!("[{}:{start}-{end}]", part.alias),
+                LIFT,
+                LIFTED_LINE,
+            )],
+            8,
+        );
+        let rows = fold(&mut stored, &text, &chunk);
+        let shown = format!("case {at}: {start}-{end} of {}", part.presented);
+        assert_eq!(rows[0].claims[0].value, LIFT, "{shown}");
+        assert_eq!(rows[0].claims[0].anchor.is_some(), lifts, "{shown}");
+        let standing = if lifts { vec![] } else { vec![CONSTRAINT_LINE] };
+        assert_eq!(
+            open_lines(&rendered_tiers(&stored)[0][0]),
+            standing,
+            "{shown}"
+        );
+    }
+}
+
+#[test]
 fn an_answer_and_a_lift_under_other_keys_leave_the_constraint_standing() {
     let case = &ANSWERED[0];
     let messages = vec![

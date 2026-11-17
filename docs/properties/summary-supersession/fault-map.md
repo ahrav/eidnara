@@ -29,7 +29,7 @@
 | Record | Required faults | Constructed by |
 | --- | --- | --- |
 | `claims-block-failure-never-fails-publish` | truncated, repeated, stray, nine claims, outside cite | `a_claims_block_never_changes_what_publishes_or_the_facts_outcome`, `claims_attach_to_the_accepted_segment_their_cite_names` |
-| `accepted-claim-satisfies-contract-grammar` | each rule's violation, unescaped bound, duplicates | `each_claim_rule_drops_only_its_own_claim`, `the_value_bound_counts_unescaped_bytes`, `a_segment_keeps_the_last_claim_per_key_then_the_first_eight` |
+| `accepted-claim-satisfies-contract-grammar` | each rule's violation, unescaped bound, duplicates; a `Lifted` anchor on a claim that cites an assistant message, words no user wrote, a tool-result digest or an attachment placeholder beside user text, an empty value, a form inside a sentence, or part of a line | `each_claim_rule_drops_only_its_own_claim`, `the_value_bound_counts_unescaped_bytes`, `a_segment_keeps_the_last_claim_per_key_then_the_first_eight`, `a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message`, `a_lift_claim_that_cites_words_no_user_wrote_leaves_the_constraint_standing`, `a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_other_text` |
 | `claims-constants-match-prompt-fixture` | a constant changed alone | `claims_constants_match_the_prompt_fixture` |
 | `anchor-is-substring-of-stored-p1` | secret inside, across each edge, outside; rewritten lineage `p1` | `history_segment_content_redacts_and_new_message_identities_reject`, the lineage descent test |
 | `malformed-stored-claims-blob-reads-as-empty` | four malformed cells, NULL at the mapper | `claims_round_trip_and_a_malformed_cell_reads_as_no_claims` |

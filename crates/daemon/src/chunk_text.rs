@@ -231,8 +231,33 @@ fn system_reminder_tag_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)</?system-reminder>").unwrap())
 }
 
-pub(crate) fn is_user_written((text, cleaned_text): &(String, bool)) -> bool {
+fn is_user_written((text, cleaned_text): &(String, bool)) -> bool {
     *cleaned_text && !is_system_directive(text) && !system_reminder_tag_regex().is_match(text)
+}
+
+/// The byte range each user-written part of `parts` takes in the text the chunk builder presents
+/// for a message: the parts joined by `" / "`, with alias marker characters escaped. A message
+/// with another role than `user`, or with a reserved id, has no such range.
+pub(crate) fn user_text_ranges(
+    role: &str,
+    mid: &str,
+    parts: &[(String, bool)],
+) -> Vec<std::ops::Range<usize>> {
+    if role != "user" || crate::codec::pi::is_reserved_id(mid) {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for part in parts {
+        let text = &part.0;
+        let escaped = crate::history_summarizer_chunk::escape_markers(text);
+        let end = start + escaped.map_or(text.len(), |escaped| escaped.len());
+        if is_user_written(part) {
+            ranges.push(start..end);
+        }
+        start = end + " / ".len();
+    }
+    ranges
 }
 
 #[cfg(test)]

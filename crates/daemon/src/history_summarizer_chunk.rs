@@ -2,7 +2,7 @@
 
 use crate::chunk_text::{
     clean_user_text, compact_role, compact_text_for_summary, extract_key_arg, format_block_line,
-    is_system_directive, is_user_written, merge_commit_hashes, normalize_text,
+    is_system_directive, merge_commit_hashes, normalize_text, user_text_ranges,
 };
 use std::collections::BTreeMap;
 
@@ -199,7 +199,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
-    fn part(message: &FlatMessage<'_>, text: String, transformed: bool, user: bool) -> FrozenAlias {
+    fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
         let escaped = escape_markers(&text);
         FrozenAlias {
             alias: String::new(),
@@ -221,7 +221,7 @@ impl<'a> Builder<'a> {
                 .collect(),
             transformed: transformed || escaped.is_some(),
             presented: escaped.unwrap_or(text),
-            user: user && message.role == "user" && !crate::codec::pi::is_reserved_id(message.mid),
+            user_text: Vec::new(),
         }
     }
 
@@ -1193,12 +1193,12 @@ fn message_part(
         if summaries.is_empty() {
             return MessagePart::Noise;
         }
-        return MessagePart::ToolOnly(Builder::part(message, summaries.join(" / "), true, false));
+        return MessagePart::ToolOnly(Builder::part(message, summaries.join(" / "), true));
     }
 
-    let role = compact_role(message.role);
-    let text_parts = text_parts(message);
-    let (narrative_parts, user) = (text_parts.len(), text_parts.iter().any(is_user_written));
+    let (role, text_parts) = (compact_role(message.role), text_parts(message));
+    let narrative_parts = text_parts.len();
+    let user_text = user_text_ranges(message.role, message.mid, &text_parts);
     // A message with narrative shows the digests of the tool results it holds; one without also shows its calls that have no result here. Digests follow the compacted narrative and bare calls.
     let (calls, digests): (Vec<_>, Vec<_>) =
         tool_parts(message, pairs, narrative_parts == 0, outcome)
@@ -1220,7 +1220,7 @@ fn message_part(
         && matches!(message.blocks[0].wire.kind(), BlockKind::Text { text } if *text == compacted.text);
     MessagePart::Text {
         role,
-        part: Builder::part(message, compacted.text, !verbatim, user),
+        part: Builder::part(message, compacted.text, !verbatim).with_user_text(user_text),
         commit_hashes: compacted.commit_hashes,
         has_narrative: narrative_parts > 0,
     }
@@ -3736,7 +3736,9 @@ mod digest_chunk_tests {
 
     /// A part is marked user only when it renders the text of a user message: an assistant
     /// message, a tool result under the tool role, and a user-role message that carries a tool
-    /// result alone are all unmarked.
+    /// result alone are all unmarked. The mark is the byte range of each text block the user
+    /// wrote, so a tool-result digest and an attachment placeholder beside that text lie
+    /// outside it.
     #[test]
     fn a_part_is_marked_user_only_when_it_renders_a_user_messages_text() {
         let said = |text: &str| BlockKind::Text {
@@ -3781,9 +3783,28 @@ mod digest_chunk_tests {
             msg("u11", 11, "user", vec![said(nested_reminder)]),
             msg("u12", 12, "user", vec![said(unclosed_reminder)]),
             msg("eidnara:custom:13", 13, "user", vec![said("lift the rule")]),
+            // Two text blocks, the first with marker brackets, beside a tool result.
+            msg("a14", 14, "assistant", vec![call("c4")]),
+            msg(
+                "u15",
+                15,
+                "user",
+                vec![
+                    said("\u{ab}now\u{bb} lift the rule"),
+                    said("then stop"),
+                    result("c4", output()),
+                ],
+            ),
         ];
         let built = build(&messages, 10_000);
-        assert_eq!(marked_user(&built), [1, 8, 10], "{}", built.text);
+        assert_eq!(marked_user(&built), [1, 8, 10, 15], "{}", built.text);
+        for ordinal in [1, 8, 10] {
+            assert_eq!(user_text(&built, ordinal), ["lift the rule"], "{ordinal}");
+        }
+        assert_eq!(
+            user_text(&built, 15),
+            ["\"now\" lift the rule", "then stop"]
+        );
         let presented = |ordinal: u64| {
             built
                 .chunk
@@ -3805,13 +3826,24 @@ mod digest_chunk_tests {
         }
     }
 
+    /// The text each user-written range of the part of message `ordinal` holds.
+    fn user_text(built: &HistorySummarizerBuiltChunk, ordinal: u64) -> Vec<&str> {
+        let aliases = &built.chunk.aliases.aliases;
+        let alias = aliases.iter().find(|alias| alias.ordinal == ordinal);
+        let alias = alias.unwrap();
+        let ranges = alias.user_text.iter();
+        ranges
+            .map(|range| &alias.presented[range.clone()])
+            .collect()
+    }
+
     fn marked_user(built: &HistorySummarizerBuiltChunk) -> Vec<u64> {
         built
             .chunk
             .aliases
             .aliases
             .iter()
-            .filter(|alias| alias.user)
+            .filter(|alias| !alias.user_text.is_empty())
             .map(|alias| alias.ordinal)
             .collect()
     }
@@ -3860,6 +3892,9 @@ mod digest_chunk_tests {
             .collect();
         assert_eq!(presenting, [1, 2, 3, 4, 5], "{}", built.text);
         assert_eq!(marked_user(&built), [1, 2], "{}", built.text);
+        // The command and its output are one text block, so one range holds both.
+        let command = &built.chunk.aliases.aliases[1];
+        assert_eq!(user_text(&built, 2), [command.presented.as_str()]);
     }
 
     #[test]
