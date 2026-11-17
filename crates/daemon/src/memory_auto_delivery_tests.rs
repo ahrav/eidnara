@@ -2550,6 +2550,180 @@ async fn a_reporting_clause_before_a_colon_stays_in_the_stored_statement() {
     );
 }
 
+/// A user corrects an earlier statement over several sentences: a clause
+/// before a colon, then the new state one sentence at a time. The extractor
+/// quotes each sentence as its own memory and names the earlier statement
+/// as replaced by the first. A later session is delivered the correction
+/// as one statement that holds every sentence, and the earlier statement
+/// leaves the block.
+#[tokio::test]
+async fn a_correction_given_over_several_sentences_is_delivered_whole_in_place_of_the_earlier_statement()
+ {
+    let earlier = "One task is open for the next release, the audit log export.";
+    let sentences = [
+        "Correction on the open work: two tasks are open now and their order is undecided.",
+        "One is a retry counter for the upload client.",
+        "The other is a dry-run flag for the migrate command.",
+    ];
+    let correction = sentences.join(" ");
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", earlier)], |_, _| {
+        vec![fact(earlier)]
+    })
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", &correction)],
+        |_, existing| {
+            let mut memories: Vec<Extracted> = sentences.iter().map(|quote| fact(quote)).collect();
+            memories[0].replaces = ids_containing(existing, "audit log export");
+            assert_eq!(memories[0].replaces.len(), 1, "{existing:?}");
+            memories
+        },
+    )
+    .await;
+
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the correction is delivered");
+    assert_eq!(block.matches(&stated(&correction)).count(), 1, "{block}");
+    assert!(
+        !block.contains("audit log export"),
+        "the replaced statement leaves the block: {block}"
+    );
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(&correction), "visible".to_string())],
+        "the sentences are one approved row"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(&correction)]
+    );
+}
+
+/// A user message often refers to code before it states a fact: a string
+/// literal inside an inline code span, or a possessive after one. The
+/// statement in the next paragraph is the user's own, so a correction there
+/// replaces the earlier statement and is delivered in its place.
+#[tokio::test]
+async fn a_correction_after_a_paragraph_that_quotes_code_replaces_the_earlier_statement() {
+    for reference in [
+        "Before you change the router, check that the two `''` tests assert the root path.",
+        "Before you change the router, look at `Router`'s error path.",
+        "Before you change the router, read how `.get('id', None)` falls back.",
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY)],
+            |_, _| vec![fact(THURSDAY)],
+        )
+        .await;
+        let message = format!("{reference}\n\n{TUESDAY}");
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", &message)],
+            |_, existing| {
+                vec![Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: ids_containing(existing, "Thursday"),
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the correction is delivered");
+        assert!(block.contains(&stated(TUESDAY)), "{reference:?}: {block}");
+        assert!(
+            !block.contains(&stated(THURSDAY)),
+            "{reference:?}: the replaced statement leaves the block: {block}"
+        );
+        assert_eq!(
+            explicit_search(&handler, (THIRD, "s3"), &project).await,
+            [(stated(TUESDAY), "visible".to_string())],
+            "{reference:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(TUESDAY)],
+            "{reference:?}"
+        );
+    }
+}
+
+/// The agent notes the user's fact with the host memory tool during the
+/// turn, and the user's message refers to code in the paragraph before the
+/// fact. The extractor names the note as the memory that already holds the
+/// fact. The user's own sentence is recorded beside the note and delivered.
+#[tokio::test]
+async fn a_statement_beside_an_agents_note_is_recorded_after_a_paragraph_that_quotes_code() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let written = body(
+        handler
+            .dispatch_value_for_test(
+                test_route(FIRST),
+                kernel_route_fixtures::commit_request(
+                    &project,
+                    "s1",
+                    "agent-write",
+                    vec![json!({"op": "insert_decision", "spec": {
+                        "decision_id": "dec-agent",
+                        "object_id": "mem-agent",
+                        "domain_id": "memory",
+                        "decision_kind": "PROJECT_RULES",
+                        "payload": {"summary": "Release branches are cut from main on Thursdays.", "rationale": ""},
+                        "source_id": "eidnara_memory",
+                        "source_revision": 1,
+                    }})],
+                    Vec::new(),
+                ),
+            )
+            .await,
+    );
+    assert_eq!(written["state"]["kind"], "available", "{written}");
+    let message =
+        format!("Check that the two `''` cases still pass before you tag anything.\n\n{THURSDAY}");
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", &message)],
+        |_, existing| {
+            vec![Extracted {
+                quote: THURSDAY.to_string(),
+                duplicate_of: Some(existing[0]["id"].as_str().unwrap().to_string()),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (
+                "Release branches are cut from main on Thursdays.".to_string(),
+                "labeled".to_string()
+            ),
+            (stated(THURSDAY), "visible".to_string()),
+        ],
+        "the user's statement is recorded beside the agent's note"
+    );
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the user's statement is delivered");
+    assert!(block.contains(&stated(THURSDAY)), "{block}");
+}
+
 /// One row of the capture queue: dispatches, retry deadline, last error,
 /// abandonment time, stored text, and frozen plan.
 type QueueRow = (

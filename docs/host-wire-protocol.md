@@ -1042,7 +1042,27 @@ a fact served on `auto_inject` with another text drops that link and is
 stored as the user's own statement: the extractor matched the clause it
 quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
 colon, such as `My teammate wrote: always rebase.`, is the user's sentence
-and is stored whole with that clause. 
+and is stored whole with that clause. Quotations of one user message that
+follow one another in a paragraph are joined into one quotation before any
+link of the proposals is judged, when the later one is no whole statement on
+its own, starts where the statement before it ends with only whitespace
+between, and the joined text is whole statements under the statement rule
+below and fits 2,048 bytes. Sentences after a colon are the case: of
+`Correction: two tasks are open. One is the retry counter. The other is the
+dry-run flag.`, quoted one sentence per memory, the first sentence is a whole
+statement and each later one follows the colon, so the three are stored as
+the one statement from `Correction` through `flag.`. A run starts at a
+quotation that is a whole statement as proposed, or at one that names no
+`replaces`, `also_replaces`, or `contests` and widens to one, counted from
+that sentence's first word. Only quoted sentences are joined, a quotation
+that occurs more than once in the message joins nothing, and a source under a
+hashed id is left as proposed. The joined memories take the category of the
+first of them that names `replaces`, or else of the run's first sentence, and
+a memory that names `replaces` keeps its own; a joined memory whose
+`duplicate_of` names a fact served on `auto_inject` with another text names
+the served fact that holds the joined text word for word, or drops the link.
+The joined memories then freeze under the rule below for memories that share
+a category and quotation.
 Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. A quotation that capture approves as the user's own statement keeps its exact text and takes no failure lines. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the quotation capture stored, the model's quote or the sentence it was widened to; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
 among them; distinct replacement targets
@@ -1164,7 +1184,14 @@ and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
-later paragraph. A single mark closes a quotation of one word when it ends a
+later paragraph. A single mark inside an inline code span is code to this
+rule, as in `` `''` `` or `` `.get('id')` ``, and a single mark between a
+span's closing run and a letter joins a suffix to the span, as in
+`` `Parser`'s ``: neither opens or closes a quotation, and the suffix mark
+starts no word, so it does not make its paragraph one that holds a single
+opening mark. A single mark that starts a word inside a span still makes its
+paragraph one that holds a single opening mark, so that paragraph is left out
+as one with a double mark inside a span is. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
 after `s`, a number, or a letter that is a number, which may be a plural
 possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
