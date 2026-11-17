@@ -2911,7 +2911,9 @@ fn joins_suffix_to_code(place: CodePlace, ch: char, next: Option<char>) -> bool 
 /// Two ASCII apostrophes with nothing between them and no letter or digit
 /// beside them inside an inline code span are an empty string literal, as
 /// in `` `''` `` or `` `.get('', 0)` ``, and a mark that
-/// [`joins_suffix_to_code`] accepts is an apostrophe. Each
+/// [`joins_suffix_to_code`] accepts is an apostrophe. A pair a letter
+/// touches, a prefixed literal such as `b''` included, is read as marks of
+/// the prose. Each
 /// keeps the quotation state and counts as an ordinary character beside the
 /// marks around it. Every other single mark inside a span is read as a mark
 /// of the prose: a backtick of the user's can pair with one inside quoted
@@ -6963,6 +6965,16 @@ mod tests {
                 false,
             ),
             (
+                "The key ` is broken, so Bob wrote ''Use the `-key instead.\n\nWe deploy from the release branch.\n\nThanks.''",
+                release,
+                false,
+            ),
+            (
+                "The key ` is broken, so Bob wrote ''tis the `-key.\n\nWe deploy from the release branch.",
+                release,
+                false,
+            ),
+            (
                 "Bob wrote 'the `end'' of the list` first.\n\nWe deploy from the release branch.",
                 release,
                 false,
@@ -7036,6 +7048,21 @@ mod tests {
         own_id: bool,
         quotes: &[(&str, &str, Option<&str>)],
     ) -> Vec<(String, String, Option<String>)> {
+        parsed_memories(text, role, own_id, quotes)
+            .into_iter()
+            .map(|memory| (memory.quote, memory.category, memory.replaces))
+            .collect()
+    }
+
+    /// The memories `parse_capture_batch` keeps for one message whose
+    /// proposals quote `quotes`, beside two approved statements the
+    /// proposals may name.
+    fn parsed_memories(
+        text: &str,
+        role: CaptureRole,
+        own_id: bool,
+        quotes: &[(&str, &str, Option<&str>)],
+    ) -> Vec<CapturedMemory> {
         let approved = |id: &str, category: &str, content: &str| ExistingCaptureMemory {
             id: id.into(),
             category: category.into(),
@@ -7085,9 +7112,6 @@ mod tests {
         .remove(0)
         .unwrap()
         .memories
-        .into_iter()
-        .map(|memory| (memory.quote, memory.category, memory.replaces))
-        .collect()
     }
 
     /// A paragraph that opens with a clause before a colon and gives its
@@ -7240,18 +7264,42 @@ mod tests {
         // two memories stay as proposed: the first sentence is a statement,
         // and each later one follows a colon, so its replacement becomes a
         // contest of the memory it names.
-        assert_eq!(
-            own(&[
-                (OPEN_TASKS, "PROJECT_RULES", None),
-                (RETRY_COUNTER, "CONSTRAINTS", Some("mem_tasks")),
-                (DRY_RUN, "ARCHITECTURE", Some("mem_flag")),
-            ]),
-            [
-                (OPEN_TASKS.to_string(), "PROJECT_RULES".to_string(), None),
-                (RETRY_COUNTER.to_string(), "CONSTRAINTS".to_string(), None),
-                (DRY_RUN.to_string(), "ARCHITECTURE".to_string(), None),
-            ]
-        );
+        // The targets are counted as the extractor named them, so a second
+        // target of another category than its sentence keeps the run apart
+        // as well.
+        for flag_category in ["ARCHITECTURE", "CONSTRAINTS"] {
+            let two_targets = parsed_memories(
+                &paragraph,
+                CaptureRole::User,
+                true,
+                &[
+                    (OPEN_TASKS, "PROJECT_RULES", None),
+                    (RETRY_COUNTER, "CONSTRAINTS", Some("mem_tasks")),
+                    (DRY_RUN, flag_category, Some("mem_flag")),
+                ],
+            );
+            let kept: Vec<_> = two_targets
+                .iter()
+                .map(|memory| {
+                    (
+                        memory.quote.as_str(),
+                        memory.category.as_str(),
+                        memory.replaces.as_deref(),
+                        memory.contests.iter().map(String::as_str).collect(),
+                    )
+                })
+                .collect();
+            let contests = |targets: &[&'static str]| -> Vec<&str> { targets.to_vec() };
+            assert_eq!(
+                kept,
+                [
+                    (OPEN_TASKS, "PROJECT_RULES", None, contests(&[])),
+                    (RETRY_COUNTER, "CONSTRAINTS", None, contests(&["mem_tasks"])),
+                    (DRY_RUN, flag_category, None, contests(&["mem_flag"])),
+                ],
+                "{flag_category}"
+            );
+        }
         // Two sentences that correct one memory share the run.
         assert_eq!(
             own(&[
@@ -7389,24 +7437,35 @@ mod tests {
             );
         }
         // The copies share that decision when one of them adds a space or
-        // leaves out the closing mark.
+        // leaves out the closing mark, whichever of them names the link and
+        // whichever comes first.
         for copy in [
             " two tasks are open and their order is undecided.",
+            "two tasks are open and their order is undecided. ",
             "two tasks are open and their order is undecided",
         ] {
-            let proposals = [
-                (cut, "CONSTRAINTS", Some("mem_tasks")),
-                (copy, "CONSTRAINTS", None),
-                (RETRY_COUNTER, "CONSTRAINTS", None),
-            ];
-            assert_eq!(
-                own(&proposals)
-                    .into_iter()
-                    .map(|(quote, _, _)| quote)
-                    .collect::<Vec<_>>(),
-                [cut, copy, RETRY_COUNTER],
-                "{copy:?}"
-            );
+            for (first, second, linked) in [
+                (cut, copy, 0),
+                (cut, copy, 1),
+                (copy, cut, 0),
+                (copy, cut, 1),
+            ] {
+                let mut proposals = [
+                    (first, "CONSTRAINTS", None),
+                    (second, "CONSTRAINTS", None),
+                    (RETRY_COUNTER, "CONSTRAINTS", None),
+                ];
+                proposals[linked].2 = Some("mem_tasks");
+                assert_eq!(
+                    own(&proposals),
+                    [
+                        (first.to_string(), "CONSTRAINTS".to_string(), None),
+                        (second.to_string(), "CONSTRAINTS".to_string(), None),
+                        (RETRY_COUNTER.to_string(), "CONSTRAINTS".to_string(), None),
+                    ],
+                    "{first:?} then {second:?}, the proposal at {linked} names the replacement"
+                );
+            }
         }
         // A first sentence that names a replacement and is cut is kept as
         // quoted, so no run starts at it.

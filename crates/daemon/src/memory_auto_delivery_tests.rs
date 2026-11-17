@@ -2670,6 +2670,119 @@ async fn a_correction_quoted_alone_after_a_colon_contests_the_statement_it_names
     );
 }
 
+/// One paragraph corrects two earlier statements after a colon, and the
+/// extractor quotes each sentence as its own memory with the statement it
+/// replaces. A memory supersedes one predecessor, so the sentences stay
+/// three memories: the first is a statement, and each correcting sentence
+/// contests the statement it names. A later whole statement of one new
+/// value replaces the statement it corrects, and the other stays contested.
+#[tokio::test]
+async fn sentences_that_correct_two_statements_each_contest_the_statement_they_name() {
+    const BUN: &str = "Use bun for installs in this repository.";
+    const FOURTH: u16 = 26;
+    for installs in [None, Some("CONSTRAINTS")] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY), ("m2", "user", PNPM)],
+            |text, _| {
+                vec![Extracted {
+                    quote: text.to_string(),
+                    category: installs.filter(|_| text == PNPM),
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+        let lead = "Two things changed this week: the plan is new.";
+        let message = format!("{lead} {TUESDAY} {BUN}");
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m3", "user", &message)],
+            |_, existing| {
+                vec![
+                    fact(lead),
+                    Extracted {
+                        quote: TUESDAY.to_string(),
+                        replaces: ids_containing(existing, "Thursday"),
+                        ..Extracted::default()
+                    },
+                    Extracted {
+                        quote: BUN.to_string(),
+                        replaces: ids_containing(existing, "pnpm"),
+                        category: installs,
+                        ..Extracted::default()
+                    },
+                ]
+            },
+        )
+        .await;
+
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let mut expected = vec![
+            (stated(THURSDAY), "visible".to_string()),
+            (stated(PNPM), "visible".to_string()),
+            (stated(lead), "visible".to_string()),
+            (stated(TUESDAY), "labeled".to_string()),
+            (stated(BUN), "labeled".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected, "{installs:?}: the sentences stay apart");
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the contested statements are delivered");
+        for (earlier, correcting) in [(THURSDAY, TUESDAY), (PNPM, BUN)] {
+            let (stated_day, contested_day) = contest_days(&handler, &project, &stated(earlier));
+            assert!(
+                block.contains(&format!(
+                    "{} (stated {stated_day}; contested {contested_day} by mem_",
+                    stated(earlier)
+                )),
+                "{installs:?}: {block}"
+            );
+            assert!(
+                block.contains(&format!(": \"{}\")", stated(correcting))),
+                "{installs:?}: {block}"
+            );
+        }
+
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m4", "user", BUN)],
+            |_, existing| {
+                vec![Extracted {
+                    quote: BUN.to_string(),
+                    replaces: ids_containing(existing, "pnpm"),
+                    category: installs,
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+        let mut live = live_statement_records(&handler, &project);
+        live.sort();
+        let mut expected = vec![stated(THURSDAY), stated(lead), stated(BUN)];
+        expected.sort();
+        assert_eq!(live, expected, "{installs:?}");
+        bind(&handler, FOURTH, &project, "s4", capture_config());
+        let settled = project_memory_block(&serve(&handler, FOURTH, "s4").await).unwrap();
+        assert!(
+            !settled.contains("pnpm") && settled.contains(&stated(BUN)),
+            "{installs:?}: the corrected statement leaves the block: {settled}"
+        );
+        assert!(
+            settled.contains(&format!(": \"{}\")", stated(TUESDAY))),
+            "{installs:?}: the other statement stays contested: {settled}"
+        );
+    }
+}
+
 /// A colon can introduce another author's words. A later sentence of such
 /// a paragraph that the extractor quotes alone, naming a statement as
 /// replaced or as contested, is approved as no statement and replaces
@@ -2931,7 +3044,16 @@ async fn a_correction_after_a_paragraph_that_quotes_code_replaces_the_earlier_st
 /// nothing, and stays out of the block.
 #[tokio::test]
 async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_no_statement() {
-    for closing in ["Thanks.'", "Thanks'.", "Thanks."] {
+    // Two marks directly before a word open a quotation inside a
+    // quotation.
+    for closing in [
+        "'Thanks.'",
+        "'Thanks'.",
+        "'Thanks.",
+        "''Thanks.''",
+        "''Thanks.",
+    ] {
+        let (opening, closing) = closing.split_at(closing.find('T').unwrap());
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
         capture(
             &handler,
@@ -2942,7 +3064,7 @@ async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_
         )
         .await;
         let message = format!(
-            "The key ` is broken, so Bob wrote 'Use the `-key instead.\n\n{TUESDAY}\n\n{closing}"
+            "The key ` is broken, so Bob wrote {opening}Use the `-key instead.\n\n{TUESDAY}\n\n{closing}"
         );
         capture(
             &handler,
@@ -2967,19 +3089,22 @@ async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_
                 (stated(THURSDAY), "visible".to_string()),
                 (stated(TUESDAY), "labeled".to_string()),
             ],
-            "{closing:?}"
+            "{opening}{closing:?}"
         );
         assert_eq!(
             live_statement_records(&handler, &project),
             [stated(THURSDAY)],
-            "{closing:?}"
+            "{opening}{closing:?}"
         );
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the user's statement is delivered");
-        assert!(block.contains(&stated(THURSDAY)), "{closing:?}: {block}");
+        assert!(
+            block.contains(&stated(THURSDAY)),
+            "{opening}{closing:?}: {block}"
+        );
         assert!(
             !block.contains("Tuesday") && !block.contains("contested"),
-            "{closing:?}: the quoted sentence stays out of the block: {block}"
+            "{opening}{closing:?}: the quoted sentence stays out of the block: {block}"
         );
     }
 }
