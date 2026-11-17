@@ -1061,17 +1061,19 @@ quotation that is a whole statement as proposed, or at one that widening
 above stores as its whole sentence, counted from that sentence's first word. Only quoted sentences are joined, proposals that
 quote one span share its place in the run, a quotation with a second copy in
 the message, overlapping or apart, joins nothing, and a source under a
-hashed id is left as proposed. Once the links of the source are judged, the joined
-memories take the category of the first of them whose `replaces` passed its
-checks, or else of the run's first sentence, and a memory that names
-`replaces` keeps its own; two memories of one source that share a category
-and `content` as proposed refuse the source, before the join as after it; a joined memory whose
+hashed id is left as proposed. A joined statement supersedes one fact: the run carries
+the first `replaces` target its memories name, and a memory that names
+another target keeps its own quotation, so its replacement is judged as that
+of a sentence after a colon (below). Once the links of the source are judged,
+the joined memories take the category of the first of them whose `replaces`
+passed its checks, or else of the run's first sentence; two memories of one
+source that share a category and `content` as proposed refuse the source,
+before the join as after it; a joined memory whose
 `duplicate_of` names a fact served on `auto_inject` with another text names
 the served fact that holds the joined text word for word, or drops the link.
 The joined memories then freeze under the rule below for memories that share
-a category and quotation, as one memory, or as one per `replaces` target
-when two of them name different targets: a later replacement of a joined
-memory supersedes the whole joined statement, every sentence of it. A sentence
+a category and quotation, as one memory: a later replacement of it
+supersedes the whole joined statement, every sentence of it. A sentence
 after a colon that the extractor quotes alone joins nothing; it is stored
 for explicit search, and a `replaces` it names becomes a contest of the
 named statement (below), so the block shows that statement with the
@@ -1199,19 +1201,14 @@ and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
-later paragraph. The single marks inside an inline code span are code to this
-rule when they pair up as the marks of one-word string literals do, as in
-`` `''` `` or `` `.get('id')` ``: counting each mark that is not between two
-letters or digits, the marks open and close in turn, one that opens follows
-the span's start or a character that is no letter or digit, one that closes
-precedes the span's end or such a character with no whitespace since the mark
-that opened, and none is left open. A span
-whose marks stand otherwise may hold a mark that opens or closes a quotation
-of the prose, so it leaves its paragraph's quotations unknown: that paragraph
-and every paragraph after the first one that holds a quotation mark are left
-out. An apostrophe, `'` or `’`, between a span's
+later paragraph. Two ASCII apostrophes with nothing between them inside an
+inline code span are an empty string literal, as in `` `''` `` or
+`` `.get('', 0)` ``, and are code to this rule; every other single mark
+inside a span is read as a mark of the prose, since a backtick of the user's
+can pair with one inside quoted text and the span can then hold the mark
+that opens or closes a quotation. An apostrophe, `'` or `’`, between a span's
 closing run and a letter joins a suffix to the span, as in
-`` `Parser`'s ``. A mark that is code and a suffix apostrophe open and close
+`` `Parser`'s ``. An empty literal and a suffix apostrophe open and close
 no quotation, and the suffix apostrophe starts no word, so it leaves its
 paragraph free of a single opening mark. A single mark that starts a word
 inside a span still makes its paragraph one that holds a single opening

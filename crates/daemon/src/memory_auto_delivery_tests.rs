@@ -2924,6 +2924,66 @@ async fn a_correction_after_a_paragraph_that_quotes_code_replaces_the_earlier_st
     }
 }
 
+/// A backtick of the user's can pair with one inside text the user quotes,
+/// so an inline code span holds the mark that opens the quotation. The
+/// paragraphs inside that quotation are another author's words: a sentence
+/// of them is stored for explicit search, replaces nothing, contests
+/// nothing, and stays out of the block.
+#[tokio::test]
+async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_no_statement() {
+    for closing in ["Thanks.'", "Thanks'.", "Thanks."] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY)],
+            |_, _| vec![fact(THURSDAY)],
+        )
+        .await;
+        let message = format!(
+            "The key ` is broken, so Bob wrote 'Use the `-key instead.\n\n{TUESDAY}\n\n{closing}"
+        );
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", &message)],
+            |_, existing| {
+                vec![Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: ids_containing(existing, "Thursday"),
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        assert_eq!(
+            rows,
+            [
+                (stated(THURSDAY), "visible".to_string()),
+                (stated(TUESDAY), "labeled".to_string()),
+            ],
+            "{closing:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(THURSDAY)],
+            "{closing:?}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the user's statement is delivered");
+        assert!(block.contains(&stated(THURSDAY)), "{closing:?}: {block}");
+        assert!(
+            !block.contains("Tuesday") && !block.contains("contested"),
+            "{closing:?}: the quoted sentence stays out of the block: {block}"
+        );
+    }
+}
+
 /// The agent notes the user's fact with the host memory tool during the
 /// turn, and the user's message refers to code in the paragraph before the
 /// fact. The extractor names the note as the memory that already holds the

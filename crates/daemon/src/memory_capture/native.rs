@@ -824,11 +824,9 @@ impl CaptureWork {
                 {
                     memory.duplicate_of = Some(approved);
                 } else if widened.contains(&memory.quote)
-                    && super::names_another_approved_text(
-                        &plan.existing,
-                        memory.duplicate_of.as_deref(),
-                        &memory.content,
-                    )
+                    && named.is_some_and(|previous| {
+                        super::is_another_approved_text(previous, &memory.content)
+                    })
                 {
                     // The extractor matched the clause it quoted to an
                     // approved statement. The widened sentence is another
@@ -840,13 +838,9 @@ impl CaptureWork {
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for
                 // word. Another text is the user's own new statement.
-                else if named.is_some_and(|previous| previous.contested)
-                    && super::names_another_approved_text(
-                        &plan.existing,
-                        memory.duplicate_of.as_deref(),
-                        &memory.content,
-                    )
-                    && user_attributed(states_whole, prose, memory)
+                else if named.is_some_and(|previous| {
+                    previous.contested && super::is_another_approved_text(previous, &memory.content)
+                }) && user_attributed(states_whole, prose, memory)
                 {
                     memory.duplicate_of = None;
                 }
