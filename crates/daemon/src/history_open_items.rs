@@ -104,6 +104,22 @@ pub(crate) fn status_line(line: &str) -> Option<(Status, &str)> {
     (is_claim_key(key) && !text.trim().is_empty()).then_some((status, key))
 }
 
+/// `memchr_lines` preserves [`str::lines`] semantics.
+fn memchr_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut start = 0;
+    memchr::memchr_iter(b'\n', text.as_bytes())
+        .map(Some)
+        .chain(std::iter::once(None))
+        .filter_map(move |end| match end {
+            Some(end) => {
+                let line = &text[start..end];
+                start = end + 1;
+                Some(line.strip_suffix('\r').unwrap_or(line))
+            }
+            None => (start < text.len()).then(|| &text[start..]),
+        })
+}
+
 /// Whether `text` reads as a `Lifted` status line.
 pub(crate) fn is_lifted_line(text: &str) -> bool {
     matches!(status_line(text), Some((Status::Lifted, _)))
@@ -159,8 +175,7 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
             .collect();
         if session_segment && let Some(p1) = segment.p1.as_deref().filter(|p1| !p1.is_empty()) {
             // Each key's last status line in `p1`.
-            let last: BTreeMap<&str, Status> = p1
-                .lines()
+            let last: BTreeMap<&str, Status> = memchr_lines(p1)
                 .filter_map(status_line)
                 .map(|(status, key)| (key, status))
                 .collect();
@@ -170,7 +185,11 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
                 .into_iter()
                 .flatten()
             {
-                keys.extend(tier.lines().filter_map(status_line).map(|(_, key)| key));
+                keys.extend(
+                    memchr_lines(tier)
+                        .filter_map(status_line)
+                        .map(|(_, key)| key),
+                );
             }
             if !keys.is_empty() {
                 out[at] = Some(Retired {
@@ -206,7 +225,7 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
 /// leaves at the start or the end of the text, or next to another blank line, goes with the
 /// removed line.
 fn retire_lines(text: &str, retired: &Retired) -> Option<String> {
-    let lines: Vec<&str> = text.lines().collect();
+    let lines: Vec<&str> = memchr_lines(text).collect();
     let parsed: Vec<Option<(Status, &str)>> = lines.iter().map(|line| status_line(line)).collect();
     let mut last_settling: BTreeMap<&str, usize> = BTreeMap::new();
     for (at, status) in parsed.iter().enumerate() {
@@ -1232,7 +1251,38 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn memchr_lines_splits_each_line_ending_as_str_lines_does() {
+        for text in [
+            "",
+            "\n",
+            "\r",
+            "a",
+            "a\n",
+            "a\r",
+            "a\r\n",
+            "a\r\r\n",
+            "a\n\nb",
+            "\r\n\r\n",
+            "\u{e9}\r\nb\r",
+        ] {
+            assert_eq!(
+                memchr_lines(text).collect::<Vec<_>>(),
+                text.lines().collect::<Vec<_>>(),
+                "{text:?}"
+            );
+        }
+    }
+
     proptest! {
+        #[test]
+        fn memchr_lines_yields_what_str_lines_yields(text in "[a \u{e9}\r\n]{0,24}") {
+            prop_assert_eq!(
+                memchr_lines(&text).collect::<Vec<_>>(),
+                text.lines().collect::<Vec<_>>()
+            );
+        }
+
         /// Every tier renders the lines a line-by-line reading of the rules keeps, in order,
         /// and the owned rows equal the borrowed rows.
         #[test]
