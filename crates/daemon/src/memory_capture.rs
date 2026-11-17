@@ -429,8 +429,18 @@ fn join_sentence_runs(
     // decision, whatever whitespace or closing mark their quotations add:
     // a copy of an unplaced one takes no place.
     type Stretch = (usize, usize);
+    // A quotation that stops directly before its sentence's closing mark
+    // is that sentence, as the statement rule reads it; its stretch runs
+    // through the mark, so the next sentence follows it.
+    let stretch_at = |quote: &str, at: usize| -> Stretch {
+        let trimmed = quote.trim();
+        let start = at + (quote.len() - quote.trim_start().len());
+        let end = start + trimmed.len();
+        (start, end + closing_mark_len(trimmed, &text[end..]))
+    };
     let mut places: BTreeMap<Stretch, (bool, Vec<(usize, Stretch)>)> = BTreeMap::new();
     let mut unplaced: HashSet<Stretch> = HashSet::new();
+    let mut repeated: Vec<&str> = Vec::new();
     for (index, memory) in memories.iter().enumerate() {
         let quote = memory.quote.as_str();
         let trimmed = quote.trim();
@@ -440,14 +450,10 @@ fn join_sentence_runs(
             continue;
         };
         if text.rfind(quote) != Some(at) {
+            repeated.push(quote);
             continue;
         }
-        let start = at + (quote.len() - quote.trim_start().len());
-        // A quotation that stops directly before its sentence's closing mark
-        // is that sentence, as the statement rule reads it; its place runs
-        // through the mark, so the next sentence follows it.
-        let end = start + trimmed.len();
-        let end = end + closing_mark_len(trimmed, &text[end..]);
+        let (start, end) = stretch_at(quote, at);
         let place = if quotes_whole_statements(&prose, quote) {
             Some((start, end, true))
         } else if let Some(statement) = widened[index] {
@@ -473,8 +479,19 @@ fn join_sentence_runs(
             }
         }
     }
+    // Repeated quotations disqualify proposals quoting any of their
+    // normalized stretches.
+    let repeats = |stretch: &Stretch| {
+        repeated.iter().any(|quote| {
+            let lead = quote.len() - quote.trim_start().len();
+            stretch.0.checked_sub(lead).is_some_and(|at| {
+                text.get(at..).is_some_and(|rest| rest.starts_with(quote))
+                    && stretch_at(quote, at) == *stretch
+            })
+        })
+    };
     for (_, quoting) in places.values_mut() {
-        quoting.retain(|(_, stretch)| !unplaced.contains(stretch));
+        quoting.retain(|(_, stretch)| !unplaced.contains(stretch) && !repeats(stretch));
     }
     places.retain(|_, (_, quoting)| !quoting.is_empty());
     let mut runs: Vec<SentenceRun> = Vec::new();
@@ -483,13 +500,14 @@ fn join_sentence_runs(
         // Merging a proposal whose sentences start inside the run preserves
         // an overlapping longer quotation's extent and its links when the
         // extractor also proposes one of those sentences alone.
-        let joins = !alone
-            && runs.last().is_some_and(|run| {
-                (start < run.to
-                    || (run.to < start && text[run.to..start].chars().all(char::is_whitespace)))
-                    && end - run.from <= MAX_CAPTURE_MEMORY_BYTES
-                    && quotes_whole_statements(&prose, &text[run.from..end])
-            });
+        let joins = runs.last().is_some_and(|run| {
+            (start < run.to
+                || (!alone
+                    && run.to < start
+                    && text[run.to..start].chars().all(char::is_whitespace)))
+                && end - run.from <= MAX_CAPTURE_MEMORY_BYTES
+                && quotes_whole_statements(&prose, &text[run.from..end])
+        });
         if joins && let Some(run) = runs.last_mut() {
             run.to = run.to.max(end);
             run.members.extend(quoting);
@@ -7358,6 +7376,97 @@ mod tests {
             ],
             "a correcting middle sentence beside a quotation of the whole paragraph"
         );
+        // A quotation that is a whole statement as proposed joins the run
+        // it starts inside as well: the first sentence beside the whole
+        // paragraph, and two quotations that start at the first word.
+        for overlapping in [
+            [OPEN_TASKS, paragraph.as_str()],
+            [paragraph.as_str(), OPEN_TASKS],
+            [first_two.as_str(), paragraph.as_str()],
+        ] {
+            assert_eq!(
+                plain(&overlapping),
+                [paragraph.as_str(); 2],
+                "{overlapping:?}"
+            );
+        }
+        assert_eq!(
+            plain(&[OPEN_TASKS, first_two.as_str(), DRY_RUN]),
+            [paragraph.as_str(); 3],
+            "the first sentence beside a run of two statements that start there"
+        );
+        // The correction on the shorter quotation keeps its target, and the
+        // two proposals freeze as one memory.
+        let corrected = parsed_memories(
+            &paragraph,
+            CaptureRole::User,
+            true,
+            &[
+                (OPEN_TASKS, "CONSTRAINTS", Some("mem_tasks")),
+                (paragraph.as_str(), "CONSTRAINTS", None),
+            ],
+        );
+        let frozen = native::collapse_quotations(USER_STATED, corrected);
+        assert_eq!(
+            frozen
+                .iter()
+                .map(|memory| (memory.quote.as_str(), memory.replaces.as_deref()))
+                .collect::<Vec<_>>(),
+            [(paragraph.as_str(), Some("mem_tasks"))]
+        );
+        // The first sentence shares the run of the two quotations that
+        // hold it, so a second target among the three leaves each as
+        // proposed, and the sentence after the colon contests its target.
+        let two_targets = parsed_memories(
+            &paragraph,
+            CaptureRole::User,
+            true,
+            &[
+                (OPEN_TASKS, "CONSTRAINTS", Some("mem_tasks")),
+                (first_two.as_str(), "CONSTRAINTS", None),
+                (DRY_RUN, "ARCHITECTURE", Some("mem_flag")),
+            ],
+        );
+        assert_eq!(
+            two_targets
+                .iter()
+                .map(|memory| (
+                    memory.quote.as_str(),
+                    memory.replaces.as_deref(),
+                    memory.contests.iter().map(String::as_str).collect()
+                ))
+                .collect::<Vec<(&str, Option<&str>, Vec<&str>)>>(),
+            [
+                (OPEN_TASKS, Some("mem_tasks"), vec![]),
+                (first_two.as_str(), None, vec![]),
+                (DRY_RUN, None, vec!["mem_flag"]),
+            ]
+        );
+        // The rule reads no colon: two whole-statement quotations of a
+        // paragraph without one join where they overlap, the shorter one
+        // first or inside the longer one.
+        let no_colon = "Two tasks are open. One is a retry counter for the upload client.";
+        for shorter in [
+            "Two tasks are open.",
+            "One is a retry counter for the upload client.",
+        ] {
+            assert_eq!(
+                parsed_quotes(
+                    no_colon,
+                    CaptureRole::User,
+                    true,
+                    &[
+                        (shorter, "CONSTRAINTS", None),
+                        (no_colon, "CONSTRAINTS", None)
+                    ]
+                )
+                .into_iter()
+                .map(|(quote, _, _)| quote)
+                .collect::<Vec<_>>(),
+                [no_colon; 2],
+                "{shorter:?}"
+            );
+        }
         // A sentence the extractor left out stays out: the last sentence
         // does not follow the first.
         assert_eq!(plain(&[OPEN_TASKS, DRY_RUN]), [OPEN_TASKS, DRY_RUN]);
@@ -7844,6 +7953,93 @@ mod tests {
             ),
             [OPEN_TASKS, RETRY_COUNTER]
         );
+        // A proposal that quotes a stretch where such a sentence stands
+        // shares its decision: one that adds a space or the closing mark
+        // occurs once, and takes no place beside the copy that occurs
+        // twice, at the first copy or a later one, in either order.
+        let padded = format!("{RETRY_COUNTER} ");
+        let unmarked = RETRY_COUNTER.trim_end_matches('.');
+        let later = format!("{paragraph}\n\n{RETRY_COUNTER}");
+        let earlier = format!("Background: {RETRY_COUNTER}\n\n{paragraph}");
+        let exclaimed = format!("{paragraph}\n\nAs I said: {unmarked}!");
+        for (text, twice, once) in [
+            (&later, RETRY_COUNTER, padded.as_str()),
+            (&earlier, RETRY_COUNTER, padded.as_str()),
+            (&exclaimed, unmarked, RETRY_COUNTER),
+        ] {
+            for proposals in [[OPEN_TASKS, twice, once], [OPEN_TASKS, once, twice]] {
+                assert_eq!(
+                    quotes(text, CaptureRole::User, true, &proposals),
+                    proposals,
+                    "{text:?}"
+                );
+            }
+        }
+        // The copy that shares the stretch can overlap the first copy, after
+        // a character of several bytes.
+        let overlapped = "Note: keep tracing. \u{c9}lan. \u{c9}lan. \u{c9}lan.  ";
+        let proposals = [
+            "Note: keep tracing. \u{c9}lan.",
+            "\u{c9}lan. \u{c9}lan.",
+            "\u{c9}lan. \u{c9}lan.  ",
+        ];
+        assert_eq!(
+            quotes(overlapped, CaptureRole::User, true, &proposals),
+            proposals
+        );
+        // With no proposal of the sentence that occurs twice, the padded
+        // quotation has one copy and joins.
+        let first_two = format!("{OPEN_TASKS} {RETRY_COUNTER}");
+        assert_eq!(
+            quotes(&later, CaptureRole::User, true, &[OPEN_TASKS, &padded]),
+            [first_two.as_str(); 2]
+        );
+        // A quotation with a second copy decides only for the stretches a
+        // copy of it stands at, edge whitespace included. The sentence in
+        // the last paragraph has no tab after it and no space before it, so
+        // the quotation of it joins.
+        for (text, twice, once, joined) in [
+            (
+                "Read logs.\t\n\nRead logs.\t\n\nNote: keep tracing. Read logs. Done.",
+                "Read logs.\t",
+                " Read logs.",
+                "Note: keep tracing. Read logs.",
+            ),
+            (
+                " Read logs.\t\n\n Read logs.\t\n\nNote: keep tracing.\u{2003}Read logs. Done.",
+                " Read logs.\t",
+                "Read logs. ",
+                "Note: keep tracing.\u{2003}Read logs.",
+            ),
+        ] {
+            assert_eq!(
+                quotes(
+                    text,
+                    CaptureRole::User,
+                    true,
+                    &["Note: keep tracing.", twice, once]
+                ),
+                [joined, twice, joined],
+                "{text:?}"
+            );
+        }
+        // A cut quotation with a second copy quotes a shorter stretch than
+        // the whole sentence that starts where it does, and the sentence
+        // joins.
+        let cut_twice = format!("{paragraph}\n\nAgain: One is a retry counter today.");
+        assert_eq!(
+            quotes(
+                &cut_twice,
+                CaptureRole::User,
+                true,
+                &[OPEN_TASKS, "One is a retry counter", RETRY_COUNTER]
+            ),
+            [
+                first_two.as_str(),
+                "One is a retry counter",
+                first_two.as_str()
+            ]
+        );
         // A statement of exactly the bytes one memory holds is joined, and
         // one byte more leaves the quotations as proposed.
         for (extra, joined) in [(0, true), (1, false)] {
@@ -7858,6 +8054,29 @@ mod tests {
             };
             assert_eq!(
                 quotes(&long, CaptureRole::User, true, &[OPEN_TASKS, &tail]),
+                expected
+            );
+            // The same limit holds for two whole-statement quotations
+            // that overlap: each fits one memory, and they join only when
+            // the statement they make together does.
+            let plain = format!(
+                "Two tasks are open. One waits. The other is {}.",
+                "x".repeat(
+                    MAX_CAPTURE_MEMORY_BYTES
+                        - "Two tasks are open. One waits. The other is .".len()
+                        + extra
+                )
+            );
+            assert_eq!(plain.len(), MAX_CAPTURE_MEMORY_BYTES + extra);
+            let head = "Two tasks are open. One waits.";
+            let rest = &plain["Two tasks are open. ".len()..];
+            let expected = if joined {
+                [plain.as_str(), plain.as_str()]
+            } else {
+                [head, rest]
+            };
+            assert_eq!(
+                quotes(&plain, CaptureRole::User, true, &[head, rest]),
                 expected
             );
         }

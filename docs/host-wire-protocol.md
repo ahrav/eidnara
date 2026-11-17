@@ -1049,9 +1049,9 @@ colon, such as `My teammate wrote: always rebase.`, is the user's sentence
 and is stored whole with that clause. Quotations of one user message that
 follow one another in a paragraph are joined into one quotation before any
 link of the proposals is judged, when the later one is whole statements under
-the statement rule below but for a colon earlier in its paragraph, starts
-where the statement before it ends with only whitespace between or inside
-that statement, and the
+the statement rule below, or is but for a colon earlier in its paragraph, and starts
+inside the statement before it, or is whole statements but for such a colon and starts
+where that statement ends with only whitespace between, and the
 joined text is whole statements under that rule and fits 2,048 bytes. A quotation that stops directly before its
 sentence's closing `.` or `!` ends after that mark for this rule. Of
 `Correction: two tasks are open. One is the retry counter. The other is the
@@ -1072,8 +1072,8 @@ quote one span share its place in the run, a quotation of sentences the run
 already holds shares the run, and one that starts inside the run and ends
 past it extends the run through its last sentence, so quotations that
 overlap are stored as the one statement their sentences make, in either
-proposal order; a quotation with a second copy in
-the message, overlapping or apart, joins nothing, and a source under a
+proposal order, in a paragraph with a colon and in one with none, while statements that follow one another without overlapping stay separate memories; a quotation with a second copy in
+the message, overlapping or apart, joins nothing, a proposal that quotes a stretch where one of its copies stands, edge whitespace of the quotation included, joins nothing with it, and a source under a
 hashed id is left as proposed. A joined statement supersedes one fact: a run whose
 memories name two `replaces` targets is left as proposed, so each later
 sentence's replacement is judged as that of a sentence after a colon
