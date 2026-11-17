@@ -1728,7 +1728,7 @@ pub(super) fn is_user_source(job: &CaptureJob) -> bool {
 /// backticks, and on the next line the output's fence or `(no output)`. A
 /// command may hold a backtick before a line break, so the match tests each
 /// such position as the command's end.
-fn is_pi_bash_execution_text(text: &str) -> bool {
+pub(crate) fn is_pi_bash_execution_text(text: &str) -> bool {
     text.strip_prefix("Ran `").is_some_and(|rest| {
         rest.match_indices("`\n").any(|(at, close)| {
             let body = &rest[at + close.len()..];

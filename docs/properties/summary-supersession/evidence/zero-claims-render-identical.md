@@ -29,6 +29,13 @@ The legacy branch does not call `apply_corrections`.
 string when the rows carry no claims, and `compose_m1` passes that to the
 `memory_updates` slot of `assemble_m1`, which was empty before M2.
 
+`crates/daemon/src/history_open_items.rs::rows` and `owned_rows` project the
+stored rows for `render_rows` and `render_owned_rows`. `retire` returns a row
+unchanged when it states no key, and `retire_lines` returns `None` when every
+line stays, so a row's `content` and tiers are rewritten only when one of its
+open-item lines is retired. The guarantee therefore also needs every loaded
+row to keep its open-item lines.
+
 Tests:
 
 - `crates/daemon/src/decay_render.rs::tests::apply_corrections_splices_disjoint_first_hits_and_footers_the_rest`
@@ -46,13 +53,20 @@ Tests:
   only added lines to `render-golden.json` (cases 7 and 8 carry
   corrections; cases 0 to 6 carry none, and `corrections` defaults to empty
   in the fixture struct) and changed no other file under
-  `crates/daemon/testdata`. No later commit touches that directory.
+  `crates/daemon/testdata`. No later commit touches the two render goldens.
+
+- `crates/daemon/src/history_open_items.rs::tests::rows_that_retire_no_line_keep_their_tiers_byte_for_byte`
+  projects rows that hold a status form in running text, blank runs, a
+  constraint with no lift, and a waiting line in the newest row, and asserts
+  `content` and all four tiers equal the plain projection of the stored row,
+  through `rows` and through `owned_rows`.
 
 ## Failure scenario
 
-An allocation or a trailing newline added on the empty path, or a footer
-emitted for claims that supersede nothing, changes the served bytes of every
-session on upgrade and costs each one its prompt cache.
+An allocation or a trailing newline added on the empty path, a footer
+emitted for claims that supersede nothing, or a tier rewritten by open-item
+retirement when no line leaves, changes the served bytes of every session on
+upgrade and costs each one its prompt cache.
 
 ## Timing windows and dependencies
 
@@ -63,7 +77,8 @@ claims, which is `live-claim-is-max-seq-per-key-in-rendered-set`.
 
 The pre-change render goldens run unchanged; one store without claims and
 one with claims on distinct keys, composed through `compose_m0`; an m1
-compose over claim-free rows; the empty-corrections call checked by pointer.
+compose over claim-free rows; the empty-corrections call checked by pointer;
+rows whose status lines all stay, projected borrowed and owned.
 
 ## Investigation log
 
@@ -78,7 +93,7 @@ compose over claim-free rows; the empty-corrections call checked by pointer.
 - Missing evidence: none for the narrowed clause.
 - Conclusion: resolved with answer; m1 is identical only when the new rows
   carry no claims, per A7. m0 is identical whenever no loaded claim is
-  superseded.
+  superseded and no loaded row retires an open-item line.
 
 ### Q: Is the m1 comparison against literal pre-change bytes?
 
@@ -96,5 +111,14 @@ compose over claim-free rows; the empty-corrections call checked by pointer.
 - Sources examined: `cargo +1.98 nextest run -p daemon --all-features --locked --lib -E 'test(decay_render::) | test(correction) | test(every_loaded_claim)'`
   at `c38af85a`.
 - Findings: 28 passed, including both render goldens and the compose test.
+- Missing evidence: none.
+- Conclusion: resolved with answer.
+
+### Q: Do the checks pass with open-item retirement in the row projection?
+
+- Sources examined: `cargo test --locked -p daemon --lib -- decay_render:: correction every_loaded_claim history_open_items`
+  on the branch that adds `crates/daemon/src/history_open_items.rs`.
+- Findings: every selected test passes, including both render goldens, the
+  compose test, and `rows_that_retire_no_line_keep_their_tiers_byte_for_byte`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

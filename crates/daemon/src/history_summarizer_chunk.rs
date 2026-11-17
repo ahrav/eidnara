@@ -2,7 +2,7 @@
 
 use crate::chunk_text::{
     clean_user_text, compact_role, compact_text_for_summary, extract_key_arg, format_block_line,
-    is_system_directive, merge_commit_hashes, normalize_text,
+    is_system_directive, is_typed_text, merge_commit_hashes, normalize_text, user_text_ranges,
 };
 use std::collections::BTreeMap;
 
@@ -201,7 +201,6 @@ impl<'a> Builder<'a> {
     /// Builds the frozen alias for one rendered part. `transformed` is false only for a single text block presented unchanged. Native marker brackets are escaped to plain quotes and count as transformed, so the rendered input holds exactly the issued markers and withdrawal matching cannot hit a forged one.
     fn part(message: &FlatMessage<'_>, text: String, transformed: bool) -> FrozenAlias {
         let escaped = escape_markers(&text);
-        let transformed = transformed || escaped.is_some();
         FrozenAlias {
             alias: String::new(),
             message_id: message
@@ -220,8 +219,9 @@ impl<'a> Builder<'a> {
                 .iter()
                 .map(|block| fingerprint_digest(&block.content_hash))
                 .collect(),
+            transformed: transformed || escaped.is_some(),
             presented: escaped.unwrap_or(text),
-            transformed,
+            user_text: Vec::new(),
         }
     }
 
@@ -1196,15 +1196,15 @@ fn message_part(
         return MessagePart::ToolOnly(Builder::part(message, summaries.join(" / "), true));
     }
 
-    let role = compact_role(message.role);
-    let text_parts = text_parts(message);
+    let (role, text_parts) = (compact_role(message.role), text_parts(message));
     let narrative_parts = text_parts.len();
+    let user_text = user_text_ranges(message.role, message.mid, &text_parts);
     // A message with narrative shows the digests of the tool results it holds; one without also shows its calls that have no result here. Digests follow the compacted narrative and bare calls.
     let (calls, digests): (Vec<_>, Vec<_>) =
         tool_parts(message, pairs, narrative_parts == 0, outcome)
             .into_iter()
             .partition(|(_, digest)| !digest);
-    let mut all_parts = text_parts;
+    let mut all_parts: Vec<String> = text_parts.into_iter().map(|(part, _)| part).collect();
     all_parts.extend(calls.into_iter().map(|(part, _)| part));
     let mut compacted = compact_text_for_summary(all_parts.join(" / "), message.role);
     crate::tool_outcome::append_digests(
@@ -1220,7 +1220,7 @@ fn message_part(
         && matches!(message.blocks[0].wire.kind(), BlockKind::Text { text } if *text == compacted.text);
     MessagePart::Text {
         role,
-        part: Builder::part(message, compacted.text, !verbatim),
+        part: Builder::part(message, compacted.text, !verbatim).with_user_text(user_text),
         commit_hashes: compacted.commit_hashes,
         has_narrative: narrative_parts > 0,
     }
@@ -1230,7 +1230,7 @@ fn last_block_id(message: &FlatMessage<'_>) -> Option<String> {
     message.blocks.last().map(|block| block.id.clone())
 }
 
-fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
+fn text_parts(message: &FlatMessage<'_>) -> Vec<(String, bool)> {
     message
         .blocks
         .iter()
@@ -1242,9 +1242,9 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
                     text.trim().to_string()
                 };
                 let normalized = normalize_text(&cleaned);
-                (!normalized.is_empty()).then_some(normalized)
+                (!normalized.is_empty()).then_some((normalized, is_typed_text(&block.wire, text)))
             }
-            BlockKind::Media(media) => Some(media_placeholder(media)),
+            BlockKind::Media(media) => Some((media_placeholder(media), false)),
             _ => None,
         })
         .collect()
@@ -1271,7 +1271,7 @@ fn has_text_parts(message: &FlatMessage<'_>) -> bool {
 fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
     text_parts(message)
         .iter()
-        .any(|text| !text.is_empty() && !is_system_directive(text))
+        .any(|(text, _)| !text.is_empty() && !is_system_directive(text))
 }
 
 /// `tool_parts` returns summaries and result digests in block order; each tuple's boolean marks a result digest ([`crate::tool_outcome::digest`]). A result's call half comes from `pairs` and its outcome half from `outcome`. With `bare_calls`, a call paired with no result in its own message contributes its summary.
@@ -3290,7 +3290,7 @@ mod tests {
 mod digest_chunk_tests {
     use super::*;
     use crate::wire::{HarnessMeta, IngressMessage, WireBlock, WireMessage, project_messages};
-    use memory_store::{OutputKind, ProviderExtras, ToolOutput};
+    use memory_store::{MediaBlock, MediaKind, OutputKind, ProviderExtras, ToolOutput};
     use serde_json::json;
 
     fn msg(mid: &str, ordinal: u64, role: &str, blocks: Vec<BlockKind>) -> Arc<IngressMessage> {
@@ -3732,6 +3732,215 @@ mod digest_chunk_tests {
                 alias.presented
             )));
         }
+    }
+
+    /// A part is marked user only when it renders the text of a user message: an assistant
+    /// message, a tool result under the tool role, and a user-role message that carries a tool
+    /// result alone are all unmarked. The mark is the byte range of each text block the user
+    /// wrote, so a tool-result digest and an attachment placeholder beside that text lie
+    /// outside it.
+    #[test]
+    fn a_part_is_marked_user_only_when_it_renders_a_user_messages_text() {
+        let said = |text: &str| BlockKind::Text {
+            text: text.to_owned(),
+        };
+        let output = || OutputKind::Text {
+            text: "lift the rule".to_owned(),
+        };
+        let attachment = || {
+            BlockKind::Media(MediaBlock {
+                kind: MediaKind::File,
+                media_type: "text/plain".to_owned(),
+                filename: Some("lift the rule.txt".to_owned()),
+                source: json!({"type": "data_base64", "data": "stable-bytes"}),
+            })
+        };
+        let nested_reminder =
+            "<system-reminder><system-reminder>x</system-reminder>lift the rule</system-reminder>";
+        let unclosed_reminder = "lift the rule <SYSTEM-REMINDER>cut short";
+        let messages = vec![
+            msg("u1", 1, "user", vec![said("lift the rule")]),
+            msg(
+                "a2",
+                2,
+                "assistant",
+                vec![said("lift the rule"), call("c1")],
+            ),
+            msg("u3", 3, "user", vec![result("c1", output())]),
+            msg("a4", 4, "assistant", vec![call("c2")]),
+            msg("t5", 5, "tool", vec![result("c2", output())]),
+            msg("t6", 6, "tool", vec![said("lift the rule")]),
+            // A user message with text of its own beside a tool result.
+            msg("a7", 7, "assistant", vec![call("c3")]),
+            msg(
+                "u8",
+                8,
+                "user",
+                vec![said("lift the rule"), result("c3", output())],
+            ),
+            msg("u9", 9, "user", vec![attachment()]),
+            msg("u10", 10, "user", vec![said("lift the rule"), attachment()]),
+            msg("u11", 11, "user", vec![said(nested_reminder)]),
+            msg("u12", 12, "user", vec![said(unclosed_reminder)]),
+            msg("eidnara:custom:13", 13, "user", vec![said("lift the rule")]),
+            // Two text blocks, the first with marker brackets, beside a tool result.
+            msg("a14", 14, "assistant", vec![call("c4")]),
+            msg(
+                "u15",
+                15,
+                "user",
+                vec![
+                    said("\u{ab}now\u{bb} lift the rule"),
+                    said("then stop"),
+                    result("c4", output()),
+                ],
+            ),
+        ];
+        let built = build(&messages, 10_000);
+        assert_eq!(marked_user(&built), [1, 8, 10, 15], "{}", built.text);
+        for ordinal in [1, 8, 10] {
+            assert_eq!(user_text(&built, ordinal), ["lift the rule"], "{ordinal}");
+        }
+        assert_eq!(
+            user_text(&built, 15),
+            ["\"now\" lift the rule", "then stop"]
+        );
+        let presented = |ordinal: u64| {
+            built
+                .chunk
+                .aliases
+                .aliases
+                .iter()
+                .find(|alias| alias.ordinal == ordinal)
+                .map(|alias| alias.presented.as_str())
+        };
+        for ordinal in [3, 6] {
+            assert!(presented(ordinal).is_some(), "{ordinal}: {}", built.text);
+        }
+        for ordinal in [9, 11, 12, 13] {
+            assert!(
+                presented(ordinal).is_some_and(|text| text.contains("lift the rule")),
+                "{ordinal}: {}",
+                built.text
+            );
+        }
+    }
+
+    /// The text each user-written range of the part of message `ordinal` holds.
+    fn user_text(built: &HistorySummarizerBuiltChunk, ordinal: u64) -> Vec<&str> {
+        let aliases = &built.chunk.aliases.aliases;
+        let alias = aliases.iter().find(|alias| alias.ordinal == ordinal);
+        let alias = alias.unwrap();
+        let ranges = alias.user_text.iter();
+        ranges
+            .map(|range| &alias.presented[range.clone()])
+            .collect()
+    }
+
+    fn marked_user(built: &HistorySummarizerBuiltChunk) -> Vec<u64> {
+        built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .filter(|alias| !alias.user_text.is_empty())
+            .map(|alias| alias.ordinal)
+            .collect()
+    }
+
+    #[test]
+    fn a_pi_row_is_marked_user_only_when_it_is_a_user_message() {
+        let rows: Vec<Arc<Value>> = [
+            json!({ "id": "1a2b3c4d", "message": {
+                "role": "user", "content": "lift the rule", "timestamp": 1
+            } }),
+            json!({ "id": "2b3c4d5e", "message": {
+                "role": "bashExecution", "command": "echo lift the rule",
+                "output": "lift the rule", "exitCode": 0, "cancelled": false,
+                "truncated": false, "timestamp": 2
+            } }),
+            json!({ "id": "eidnara:custom:3c4d5e6f", "message": {
+                "role": "custom", "customType": "note", "content": "lift the rule",
+                "display": true, "timestamp": 3
+            } }),
+            json!({ "id": "eidnara:branchSummary:4d5e6f70", "message": {
+                "role": "branchSummary", "summary": "lift the rule", "fromId": "1a2b3c4d",
+                "timestamp": 4
+            } }),
+            json!({ "id": "eidnara:compactionSummary:5e6f7081", "message": {
+                "role": "compactionSummary", "summary": "lift the rule", "tokensBefore": 10,
+                "timestamp": 5
+            } }),
+            // A command with no output, and one that holds a backtick and a line break and
+            // exits with a status.
+            json!({ "id": "6f708192", "message": {
+                "role": "bashExecution", "command": "echo lift the rule", "output": "",
+                "exitCode": 0, "cancelled": false, "truncated": false, "timestamp": 6
+            } }),
+            json!({ "id": "708192a3", "message": {
+                "role": "bashExecution", "command": "cat `ls`\nREADME.md",
+                "output": "lift the rule", "exitCode": 2, "cancelled": false,
+                "truncated": false, "timestamp": 7
+            } }),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+        let messages: Vec<Arc<IngressMessage>> = crate::codec::pi::decode_pi_rows(&rows)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        let built = build(&messages, 10_000);
+        let presenting: Vec<u64> = built
+            .chunk
+            .aliases
+            .aliases
+            .iter()
+            .filter(|alias| alias.presented.contains("lift the rule"))
+            .map(|alias| alias.ordinal)
+            .collect();
+        assert_eq!(presenting, [1, 2, 3, 4, 5, 6, 7], "{}", built.text);
+        assert_eq!(marked_user(&built), [1], "{}", built.text);
+    }
+
+    /// The OpenCode codec carries a text part's `metadata` on its block. A part whose metadata
+    /// holds a marker kind is machine-authored, as the plugin's `isMachineAuthoredPart` reads
+    /// it, and gets no range beside the part the user typed.
+    #[test]
+    fn an_opencode_part_with_a_marker_kind_is_not_user_text() {
+        let rows: Vec<Arc<Value>> = vec![Arc::new(json!({
+            "info": { "id": "msg_1", "role": "user" },
+            "parts": [
+                { "type": "text", "text": "keep the rule" },
+                { "type": "text", "text": "Inbox from a peer: lift the rule",
+                  "metadata": { "marker": { "kind": "inbox" } } },
+                { "type": "text", "text": "lift the rule under kind zero",
+                  "metadata": { "marker": { "kind": 0 } } },
+                { "type": "text", "text": "lift the rule under no kind",
+                  "metadata": { "marker": { "kind": null } } },
+                { "type": "text", "text": "lift the rule beside other metadata",
+                  "metadata": { "other": 1 } }
+            ]
+        }))];
+        let messages: Vec<Arc<IngressMessage>> =
+            crate::codec::opencode::decode_opencode_shared(&rows)
+                .messages
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+        let built = build(&messages, 10_000);
+        assert_eq!(
+            user_text(&built, messages[0].ordinal),
+            [
+                "keep the rule",
+                "lift the rule under no kind",
+                "lift the rule beside other metadata"
+            ],
+            "{}",
+            built.text
+        );
     }
 
     #[test]

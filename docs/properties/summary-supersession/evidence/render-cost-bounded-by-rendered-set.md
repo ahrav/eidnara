@@ -75,6 +75,23 @@ The committed tests do not check these spec clauses directly:
   source reading: `check_claim_set` keeps at most 8 claims per segment, and
   `apply_corrections` emits one marker or entry per correction.
 - At most 8 x |R| entries in the m1 block, one entry per claim on its rows.
+- The open-item retirement clause. This holds by source reading of
+  `crates/daemon/src/history_open_items.rs`: per call `retirements` reads
+  each row's claims twice, once for its lifts and once for its claimed keys,
+  and its tier lines once, and `retire_lines` reads the tier lines of a row
+  that states a key once more. Beyond those passes,
+  `beside_open_lines` runs one `find` per anchored correction in each stored
+  tier of its row, stops at the first tier whose occurrence touches an open
+  line, and parses the lines each found occurrence touches. A row holds at
+  most 8 corrections (`CLAIMS_PER_SEGMENT`), so a tier line is parsed at most
+  8 more times. For an anchor that spans lines or has outer whitespace it
+  calls `retirements` a second time and, for that correction, runs
+  `retire_lines` and one `find` on each tier of its row. Only such an anchor
+  needs the second read: retirement removes whole lines and the renderer
+  trims the ends of the tier, so an anchor inside one line with no outer
+  whitespace first occurs in the same line before and after. The `find` calls of
+  `beside_open_lines` are outside `ANCHOR_SEARCHES`. None of the three
+  functions issues a store statement.
 
 `crates/daemon/src/decay_render.rs::render_rows` runs `corrections_for` once
 per compose over R. `crates/daemon/src/m1_compose.rs::compose_m1` and
