@@ -417,15 +417,15 @@ fn a_question_raised_again_after_its_key_was_settled_stays_open_until_its_next_a
             } else {
                 vec![]
             };
-            assert_eq!(open_lines(&tiers[0]), open, "fold {at} row {row}");
-            assert_eq!(open_lines(&tiers[1]), open, "fold {at} row {row}");
-        }
-    }
-    // Each settling line stays in its own segment as the record of what the user said there.
-    let history = rendered_tiers(&stored);
-    for (row, settled) in [(1, &put_off), (4, &case.decided_line())] {
-        for tier in &history[row] {
-            assert!(tier.contains(settled.as_str()), "{tier}");
+            let stated = status_of_each_exchange[row];
+            for tier in tiers {
+                assert_eq!(open_lines(tier), open, "fold {at} row {row}");
+                // A settling line stays in its segment while a newer segment has the key open.
+                assert!(
+                    *stated == waiting || tier.contains(stated.as_str()),
+                    "fold {at} row {row}: {tier}"
+                );
+            }
         }
     }
 }
