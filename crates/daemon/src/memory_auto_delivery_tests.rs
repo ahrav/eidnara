@@ -3044,14 +3044,17 @@ async fn a_correction_after_a_paragraph_that_quotes_code_replaces_the_earlier_st
 /// nothing, and stays out of the block.
 #[tokio::test]
 async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_no_statement() {
-    // Two marks directly before a word open a quotation inside a
-    // quotation.
+    // Two marks directly before a word, a bracket, or an emphasis mark
+    // open a quotation inside a quotation.
     for closing in [
         "'Thanks.'",
         "'Thanks'.",
         "'Thanks.",
         "''Thanks.''",
         "''Thanks.",
+        "''(Thanks.)''",
+        "''(Thanks.",
+        "''*Thanks.",
     ] {
         let (opening, closing) = closing.split_at(closing.find('T').unwrap());
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
