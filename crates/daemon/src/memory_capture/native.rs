@@ -578,43 +578,15 @@ pub(super) fn settle_batch_contests(batch: &mut [(Vec<CapturedMemory>, Vec<bool>
 
 /// Widens each cut quotation of a user message to the whole sentence that
 /// holds it, so the stored statement keeps a lead-in, a negation, or a
-/// condition the extractor left out.
-///
-/// A proposal that replaces, retires, or contests memories keeps its
-/// quotation: the extractor judged that relation from the clause it quoted,
-/// and only a correction quoted whole replaces a memory served
-/// automatically. A replacement the parser released as a contest is such a
-/// proposal. Two
-/// proposals of different categories that name one sentence keep their own
-/// quotations, so one sentence is stored once per category at most and each
-/// clause stays its own memory.
+/// condition the extractor left out (see [`super::widened_statements`]).
 ///
 /// Returns the widened quotations.
 fn widen_cut_quotations(prose: &super::Prose<'_>, proposed: &mut [CapturedMemory]) -> Vec<String> {
-    let widened: Vec<Option<&str>> = proposed
-        .iter()
-        .map(|memory| {
-            if memory.replaces.is_some()
-                || !memory.also_replaces.is_empty()
-                || !memory.contests.is_empty()
-            {
-                None
-            } else {
-                enclosing_statement(prose, &memory.quote)
-            }
-        })
-        .collect();
+    let widened = super::widened_statements(prose, proposed);
     let mut quotations = Vec::new();
-    for index in 0..proposed.len() {
-        let Some(statement) = widened[index] else {
-            continue;
-        };
-        let shared = proposed.iter().zip(&widened).any(|(other, other_widened)| {
-            other.category != proposed[index].category
-                && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
-        });
-        if !shared {
-            proposed[index].quote = statement.to_owned();
+    for (memory, statement) in proposed.iter_mut().zip(widened) {
+        if let Some(statement) = statement {
+            memory.quote = statement.to_owned();
             quotations.push(statement.to_owned());
         }
     }
@@ -848,17 +820,12 @@ impl CaptureWork {
                     continue;
                 };
                 if named.is_none_or(|previous| !previous.automatic)
-                    && let Some(approved) = plan
-                        .existing
-                        .iter()
-                        .find(|previous| previous.automatic && previous.content == memory.content)
+                    && let Some(approved) = super::approved_copy(&plan.existing, &memory.content)
                 {
-                    memory.duplicate_of = Some(approved.id.clone());
+                    memory.duplicate_of = Some(approved);
                 } else if widened.contains(&memory.quote)
                     && named.is_some_and(|previous| {
-                        previous.automatic
-                            && super::statement_text(&previous.content)
-                                != super::statement_text(&memory.content)
+                        super::is_another_approved_text(previous, &memory.content)
                     })
                 {
                     // The extractor matched the clause it quoted to an
@@ -866,36 +833,32 @@ impl CaptureWork {
                     // text, such as that clause negated, so it is written
                     // as the user's own statement, or names the approved
                     // statement that holds it word for word.
-                    memory.duplicate_of = plan
-                        .existing
-                        .iter()
-                        .find(|previous| previous.automatic && previous.content == memory.content)
-                        .map(|approved| approved.id.clone());
+                    memory.duplicate_of = super::approved_copy(&plan.existing, &memory.content);
                 }
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for
                 // word. Another text is the user's own new statement.
                 else if named.is_some_and(|previous| {
-                    previous.automatic
-                        && previous.contested
-                        && super::statement_text(&previous.content)
-                            != super::statement_text(&memory.content)
+                    previous.contested && super::is_another_approved_text(previous, &memory.content)
                 }) && user_attributed(states_whole, prose, memory)
                 {
                     memory.duplicate_of = None;
                 }
             }
-            // A user's contest shows the user's own words beside the
-            // statement, so it is kept for a quotation that is whole
-            // sentences, such as a question. A clause cut out of a sentence
-            // can say the opposite of that sentence and contests nothing.
-            // A fragment of a long message has edges the user did not
-            // write, so no quotation of it is known to be whole.
+            // A user's contest shows whole sentences of the user's message
+            // beside the statement, such as a question or a correction in a
+            // sentence after a colon. A colon can introduce another
+            // author's words, so the excerpt may be reported text, and
+            // keeping the contest approves the quotation as no statement.
+            // A clause cut out of a sentence can say the opposite of that
+            // sentence and contests nothing. A fragment of a long message
+            // has edges the user did not write, so no quotation of it is
+            // known to be whole.
             if super::is_user_source(job) {
                 let fragment = super::cite::is_hashed_source_id(&job.message_id);
                 for memory in &mut memories {
                     if !memory.contests.is_empty()
-                        && (fragment || !super::quotes_whole_sentences(prose, &memory.quote))
+                        && (fragment || !super::whole_sentences(prose, &memory.quote, true))
                     {
                         memory.contests.clear();
                     }

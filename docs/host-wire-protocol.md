@@ -1014,7 +1014,7 @@ as a sentence edge is kept. Otherwise the statement runs back to the
 paragraph's start or the word after an exclamation or question mark, and on
 to the paragraph's end or the next exclamation or question mark. A period
 before whitespace may end a sentence or an abbreviation, so it is no plain
-edge. A quotation is stored as proposed when it already meets the statement
+edge. Widening leaves a quotation as it is when it already meets the statement
 rule; when the widened sentence does not qualify; when the words widening
 would add hold a character other than a letter or digit of any script, an
 ASCII space or tab, ASCII punctuation, the apostrophe `’` between two
@@ -1034,23 +1034,71 @@ rule's list, or one of `。`, `｡`, `．`, `！`, `।`, `॥`, `۔`, `…`, `�
 occurrences the search yields lie in qualifying sentences that differ; and
 when it and a proposal of another category name one sentence. A proposal that
 names `replaces`, `also_replaces`, or `contests`, and one whose replacement
-the parser released as a contest, is stored as proposed, so only a
-correction the extractor quoted whole meets the statement rule and replaces a
-fact served on `auto_inject`, and a contest shows the clause the extractor
-judged. A widened quotation whose `duplicate_of` names
-a fact served on `auto_inject` with another text drops that link and is
+the parser released as a contest, is stored as proposed or, when its
+quotation joins a run (below), with the joined text, so only a
+correction the extractor quoted in whole sentences meets the statement rule
+and replaces a fact served on `auto_inject`, and a contest shows the
+quotation the extractor judged: a clause of an assistant source, whole
+sentences of a user source. A widened quotation whose `duplicate_of` names
+a fact served on `auto_inject` with another text names the served fact that
+holds the widened sentence, up to its attribution label, edge whitespace,
+and closing `.` or `!`, or drops that link and is
 stored as the user's own statement: the extractor matched the clause it
 quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
 colon, such as `My teammate wrote: always rebase.`, is the user's sentence
-and is stored whole with that clause. 
-Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. A quotation that capture approves as the user's own statement keeps its exact text and takes no failure lines. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the quotation capture stored, the model's quote or the sentence it was widened to; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
+and is stored whole with that clause. Quotations of one user message that
+follow one another in a paragraph are joined into one quotation before any
+link of the proposals is judged, when the later one is whole statements under
+the statement rule below but for a colon earlier in its paragraph, starts
+where the statement before it ends with only whitespace between, and the
+joined text is whole statements under that rule and fits 2,048 bytes. A quotation that stops directly before its
+sentence's closing `.` or `!` ends after that mark for this rule. Of
+`Correction: two tasks are open. One is the retry counter. The other is the
+dry-run flag.`, quoted one sentence per memory, the first sentence is a whole
+statement and each later one follows the colon, so the three are stored as
+the one statement from `Correction` through `flag.`. A later sentence the
+statement rule refuses for another reason, such as one that starts with an
+inline code span, is stored as proposed. A run starts at a
+quotation that is a whole statement as proposed, or at one that the widening
+rule above stores as its whole sentence when it is applied to the links and
+categories as proposed, before any link is released, counted from that
+sentence's first word; proposals that quote one stretch of the message,
+whatever edge whitespace or closing mark each adds, take a place in a run
+only when each of them has one, so a cut quotation that names `replaces`,
+`also_replaces`, or `contests` starts no run and keeps a copy of it that
+names none from starting one. Only quoted sentences are joined, proposals that
+quote one span share its place in the run, a quotation with a second copy in
+the message, overlapping or apart, joins nothing, and a source under a
+hashed id is left as proposed. A joined statement supersedes one fact: a run whose
+memories name two `replaces` targets is left as proposed, so each later
+sentence's replacement is judged as that of a sentence after a colon
+(below). Once the links of the source are judged,
+the joined memories take the category of the first of them whose `replaces`
+passed its checks, or else of the run's first sentence; two memories of one
+source that share a category and `content` as proposed refuse the source,
+before the join as after it; a joined memory whose
+`duplicate_of` names a fact served on `auto_inject` with another text names
+the served fact that holds the joined text word for word, up to its
+attribution label, edge whitespace, and closing `.` or `!`, or drops the
+link.
+The joined memories then freeze under the rule below for memories that share
+a category and quotation, as one memory: a later replacement of it
+supersedes the whole joined statement, every sentence of it. A sentence
+after a colon that the extractor quotes alone joins nothing; it is stored
+for explicit search, and a `replaces` it names becomes a contest of the
+named statement (below), so the block shows that statement with the
+contesting fact's id and a bounded excerpt of the sentence beside it. The
+excerpt is text of a user message, labeled as such, and may be words the
+colon introduces: keeping the contest approves the sentence as no statement.
+Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. A quotation that capture approves as the user's own statement keeps its exact text and takes no failure lines. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the quotation capture stored, the model's quote, the sentence it was widened to, or the run of quoted sentences it was joined into; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
 category and quotation freeze as one memory, keeping any replacement target
 among them; distinct replacement targets
 keep one memory each, since a memory supersedes exactly one predecessor. The
 frozen memory names `duplicate_of` only when every memory it joins names the
 same target, and a frozen memory that names under `duplicate_of` a reference
-memory not served on `auto_inject`, and whose stored text equals a reference
-memory that is, is a duplicate of the served one; a named target that is
+memory not served on `auto_inject`, and whose stored text equals that of a
+reference memory that is, up to its attribution label, edge whitespace, and
+closing `.` or `!`, is a duplicate of the served one; a named target that is
 served on `auto_inject` is kept. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
@@ -1164,7 +1212,24 @@ and a fence, a tag, or a colon line may hide in it. A quotation that
 crosses paragraphs is not tracked to its end: every paragraph after the one
 that leaves it open or unknown is left out. A paragraph
 that opens a single quotation with no closing single mark leaves out every
-later paragraph. A single mark closes a quotation of one word when it ends a
+later paragraph. Two ASCII apostrophes with nothing between them inside an
+inline code span are an empty string literal when they are the span's whole
+content between its opening and closing runs, as in `` `''` ``, or when a
+`,`, `)`, `]`, or `}` follows them and
+a character other than a letter or digit precedes them, as in
+`` `.get('', 0)` ``, and are code to this rule; every other single mark
+inside a span is read as a mark of the prose, since a backtick of the user's
+can pair with one inside quoted text and the span can then hold the mark
+that opens or closes a quotation. An apostrophe, `'` or `’`, between a span's
+closing run and a letter joins a suffix to the span, as in
+`` `Parser`'s ``. An empty literal and a suffix apostrophe open and close
+no quotation, and the suffix apostrophe starts no word, so it leaves its
+paragraph free of a single opening mark. A single mark inside a span that
+follows a character other than a letter or digit, the first mark of an
+empty literal included, still makes its own paragraph one that holds a
+single opening mark, so that paragraph is left out as one with a double
+mark inside a span is; the empty literal keeps the paragraphs after it in
+prose. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
 after `s`, a number, or a letter that is a number, which may be a plural
 possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
@@ -1280,9 +1345,12 @@ named in `replaces` or `also_replaces` becomes a contest, and when the
 whose `replaces` target is released contests that target when the Kernel
 serves it on `auto_inject`, so the two values are shown as a disagreement. A
 user source's contests are kept when the source reaches capture under its
-own message id and its quotation is one or more whole sentences of the
-message, such as a question; a clause cut out of a sentence can say the
-opposite of that sentence and contests nothing, and a fragment of a long
+own message id and its quotation is one or more whole sentences of a
+plain-prose paragraph of the message, wherever a colon stands before them,
+such as a question or a correcting sentence quoted alone after a colon,
+whose excerpt may then be text the colon introduces; a
+clause cut out of a sentence can say the opposite of that sentence and
+contests nothing, and a fragment of a long
 message has edges the user did not write. A link from a
 proposed fact to a reference memory that fails its check is released and the
 fact is still stored: a `replaces` target that is unprovided, protected,
@@ -1350,8 +1418,9 @@ whitespace (the `White_Space` property) folded to
 single spaces, cut to 240 characters with an ellipsis, and to fewer when the
 quoted form would pass 1,024 bytes, as a JSON string, so
 text an assistant wrote stays inside its quotation marks; 240 characters hold
-the observed value and where it was seen, and the fact id leads to the full
-text through `eidnara_search`. A reader takes the contesting text from the
+the observed value and where it was seen for a short observation, a longer
+one, such as a long correcting sentence, can be cut before its value, and the
+fact id leads to the full text through `eidnara_search`. A reader takes the contesting text from the
 contesting fact's own row, read by id on `explicit_search` in the project at
 the store state of the statements it renders, and shows the contest only
 while that read serves the fact: live, not hidden, and of normal sensitivity.
