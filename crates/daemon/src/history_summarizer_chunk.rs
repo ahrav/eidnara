@@ -2,7 +2,7 @@
 
 use crate::chunk_text::{
     clean_user_text, compact_role, compact_text_for_summary, extract_key_arg, format_block_line,
-    is_system_directive, merge_commit_hashes, normalize_text, user_text_ranges,
+    is_system_directive, is_typed_text, merge_commit_hashes, normalize_text, user_text_ranges,
 };
 use std::collections::BTreeMap;
 
@@ -1242,7 +1242,7 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<(String, bool)> {
                     text.trim().to_string()
                 };
                 let normalized = normalize_text(&cleaned);
-                (!normalized.is_empty()).then_some((normalized, true))
+                (!normalized.is_empty()).then_some((normalized, is_typed_text(text)))
             }
             BlockKind::Media(media) => Some((media_placeholder(media), false)),
             _ => None,
@@ -3849,7 +3849,7 @@ mod digest_chunk_tests {
     }
 
     #[test]
-    fn a_pi_row_is_marked_user_only_when_the_user_typed_into_it() {
+    fn a_pi_row_is_marked_user_only_when_it_is_a_user_message() {
         let rows: Vec<Arc<Value>> = [
             json!({ "id": "1a2b3c4d", "message": {
                 "role": "user", "content": "lift the rule", "timestamp": 1
@@ -3871,6 +3871,17 @@ mod digest_chunk_tests {
                 "role": "compactionSummary", "summary": "lift the rule", "tokensBefore": 10,
                 "timestamp": 5
             } }),
+            // A command with no output, and one that holds a backtick and a line break and
+            // exits with a status.
+            json!({ "id": "6f708192", "message": {
+                "role": "bashExecution", "command": "echo lift the rule", "output": "",
+                "exitCode": 0, "cancelled": false, "truncated": false, "timestamp": 6
+            } }),
+            json!({ "id": "708192a3", "message": {
+                "role": "bashExecution", "command": "cat `ls`\nREADME.md",
+                "output": "lift the rule", "exitCode": 2, "cancelled": false,
+                "truncated": false, "timestamp": 7
+            } }),
         ]
         .into_iter()
         .map(Arc::new)
@@ -3890,11 +3901,8 @@ mod digest_chunk_tests {
             .filter(|alias| alias.presented.contains("lift the rule"))
             .map(|alias| alias.ordinal)
             .collect();
-        assert_eq!(presenting, [1, 2, 3, 4, 5], "{}", built.text);
-        assert_eq!(marked_user(&built), [1, 2], "{}", built.text);
-        // The command and its output are one text block, so one range holds both.
-        let command = &built.chunk.aliases.aliases[1];
-        assert_eq!(user_text(&built, 2), [command.presented.as_str()]);
+        assert_eq!(presenting, [1, 2, 3, 4, 5, 6, 7], "{}", built.text);
+        assert_eq!(marked_user(&built), [1], "{}", built.text);
     }
 
     #[test]

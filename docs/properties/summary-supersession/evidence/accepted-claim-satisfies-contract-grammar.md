@@ -38,9 +38,13 @@ the index.
 range of the presented part per text block of a user-role message outside
 the reserved `eidnara:` id space whose cleaned text passes
 `is_user_written`. Attachment placeholders and tool-result digests lie
-outside every range. A Pi `bashExecution` row decodes to one text block
-(`crates/daemon/src/codec/pi.rs::bash_execution_text`), so its range holds
-the command and its output.
+outside every range. `text_parts` flags a text block through
+`chunk_text::is_typed_text`, which leaves out native text in the form
+`crates/daemon/src/codec/pi.rs::bash_execution_text` writes, read by
+`crates/daemon/src/memory_capture.rs::is_pi_bash_execution_text`. A Pi
+`bashExecution` row decodes to one such text block, so it has no range.
+The chunk builder holds no harness name, so the form is left out for every
+harness, where memory capture leaves it out for `pi` sources.
 
 `crates/daemon/src/history_summarizer_validate.rs::parse_claims` unescapes
 each child element before the checks, so the bounds count unescaped bytes.
@@ -57,7 +61,7 @@ Tests for the `Lifted` anchor rule:
 a_lift_claim_that_cites_words_no_user_wrote_leaves_the_constraint_standing,
 a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_other_text}`
 and `crates/daemon/src/history_summarizer_chunk.rs::digest_chunk_tests::{a_part_is_marked_user_only_when_it_renders_a_user_messages_text,
-a_pi_row_is_marked_user_only_when_the_user_typed_into_it}`.
+a_pi_row_is_marked_user_only_when_it_is_a_user_message}`.
 
 Tests: `crates/daemon/src/history_summarizer_citations.rs::tests::each_claim_rule_drops_only_its_own_claim`
 checks eleven candidates and asserts five kept with the exact anchors and

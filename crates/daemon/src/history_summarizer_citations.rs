@@ -38,7 +38,7 @@ pub struct FrozenAlias {
     pub presented: String,
     /// Whether the presented text is a transformation of the native text (compaction, truncation, tool summary, marker escaping) rather than a verbatim copy.
     pub transformed: bool,
-    /// The byte ranges of `presented` that hold text a user wrote, one per text block of a user message. A text block counts when the message id is outside the reserved id space and the cleaned text is free of system directives and `<system-reminder>` tags. A stored table without this member reads as an empty list.
+    /// The byte ranges of `presented` that hold text a user wrote, one per text block of a user message. A text block counts when the message id is outside the reserved id space, the native text is outside the form the Pi codec gives a bash execution, and the cleaned text is free of system directives and `<system-reminder>` tags. A stored table without this member reads as an empty list.
     #[serde(default)]
     pub user_text: Vec<Range<usize>>,
 }

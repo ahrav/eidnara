@@ -231,6 +231,13 @@ fn system_reminder_tag_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)</?system-reminder>").unwrap())
 }
 
+/// Whether `text`, the native text of a text block, is text someone typed to the assistant.
+/// The text the Pi codec gives a bash execution holds a command and its output, so it is the
+/// one form that is left out, for every harness, as memory capture leaves it out for `pi`.
+pub(crate) fn is_typed_text(text: &str) -> bool {
+    !crate::memory_capture::is_pi_bash_execution_text(text)
+}
+
 fn is_user_written((text, cleaned_text): &(String, bool)) -> bool {
     *cleaned_text && !is_system_directive(text) && !system_reminder_tag_regex().is_match(text)
 }

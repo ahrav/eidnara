@@ -719,7 +719,7 @@ fn a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_othe
         (start, start + LIFT.len())
     };
     let whole: CitedSpan = |part| (0, part.len());
-    let cases: [(Vec<BlockKind>, CitedSpan, bool); 8] = [
+    let cases: [(Vec<BlockKind>, CitedSpan, bool); 11] = [
         // The user's text holds the words, and so does the tool result after it.
         (vec![own(), returned()], first, true),
         (vec![own(), returned()], last, false),
@@ -733,6 +733,24 @@ fn a_lift_claim_takes_its_words_from_the_users_text_of_a_part_that_presents_othe
         // The user's text holds marker brackets before the words.
         (
             vec![said(format!("\u{ab}Done\u{bb}, so {LIFT}.")), returned()],
+            first,
+            true,
+        ),
+        // The output of a command the user ran and the command itself, in the text the Pi
+        // codec gives a bash execution.
+        (
+            vec![said(format!("Ran `cat notes.md`\n```\n{LIFT}\n```"))],
+            first,
+            false,
+        ),
+        (
+            vec![said(format!("Ran `echo {LIFT}`\n(no output)"))],
+            first,
+            false,
+        ),
+        // A sentence that opens as that text does and goes on as prose.
+        (
+            vec![said(format!("Ran `cargo test` and it passed, so {LIFT}."))],
             first,
             true,
         ),
