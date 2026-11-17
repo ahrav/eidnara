@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:851`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:879`). The object id of each decision a job's extraction writes is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:4052`). A contested or settled statement's revision takes its id from the statement it supersedes and the contesting fact or the settling job (`crates/daemon/src/memory_capture.rs:3592`).
+`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:851`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:879`). The object id of each decision a job's extraction writes is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:4066`). A contested or settled statement's revision takes its id from the statement it supersedes and the contesting fact or the settling job (`crates/daemon/src/memory_capture.rs:3606`).
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ The same source enqueued twice; a secret-bearing source; an out-of-grammar id; a
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:7667`, `:7716`, `:8432`, `:8454`, `:8722`; `crates/daemon/src/lib.rs:24943`, `:26403`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:7681`, `:7730`, `:8446`, `:8468`, `:8736`; `crates/daemon/src/lib.rs:24943`, `:26403`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
