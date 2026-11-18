@@ -397,18 +397,22 @@ async fn run_pi(
         Err(terminal) => return terminal,
     };
 
-    let mut create = std::pin::pin!(PrivateDir::create_async(
+    let mut create = std::pin::pin!(PrivateDir::create_with_work_dir_async(
         state_root.clone(),
         "model_execution-pi"
     ));
-    let dir = match subprocess::race_setup(&cancel, setup_deadline, &mut create).await {
-        Ok(Ok(dir)) => dir,
+    let (dir, working_dir) = match subprocess::race_setup(&cancel, setup_deadline, &mut create)
+        .await
+    {
+        Ok(Ok(created)) => created,
         Ok(Err(err)) => return subprocess::spawn_failure(Harness::Pi, &err),
         Err(abort) => {
             // The in-flight creation gets a grace period to return its directory for cleanup.
             // A creation still pending after the grace is reported as unproven cleanup; its `Drop` removes the directory best-effort.
             let cleanup = match tokio::time::timeout(limits.termination_grace, &mut create).await {
-                Ok(Ok(dir)) => subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+                Ok(Ok((dir, _))) => {
+                    subprocess::bounded_cleanup(dir, limits.termination_grace).await
+                }
                 Ok(Err(_)) => Ok(()),
                 Err(_) => Err(subprocess::cleanup_unproven()),
             };
@@ -524,7 +528,8 @@ async fn run_pi(
         executable: interpreter.path().to_path_buf(),
         args,
         env: child_env,
-        working_dir: dir.path().to_path_buf(),
+        // Pi names its working directory in the system prompt, so every run starts in the state root's one working directory.
+        working_dir,
         // The runner moves the prompt because no code reads it after spec construction.
         stdin: Zeroizing::new(request.prompt.into_bytes()),
         // The child does not inherit the closure directory descriptor because no argument references it.

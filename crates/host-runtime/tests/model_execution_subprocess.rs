@@ -150,6 +150,10 @@ fn main() {
         ("pi_argv_privacy_contract", pi_argv_privacy_contract),
         ("pi_provider_alias_mapping", pi_provider_alias_mapping),
         (
+            "pi_runs_share_one_working_directory",
+            pi_runs_share_one_working_directory,
+        ),
+        (
             "pi_alias_credential_failure_retries_canonical_provider",
             pi_alias_credential_failure_retries_canonical_provider,
         ),
@@ -1747,13 +1751,54 @@ fn pi_argv_privacy_contract() {
         .parent()
         .expect("dir")
         .to_path_buf();
+    // The child starts in the state root's shared working directory, so the system prompt Pi builds names one path on every run.
     let cwd = fs::read_to_string(setup.out.path().join("cwd.txt")).expect("cwd");
-    assert_eq!(PathBuf::from(cwd), private_dir);
+    let work_dir = state_root().work_dir().expect("work dir");
+    assert_eq!(PathBuf::from(cwd), work_dir);
+    assert_eq!(
+        fs::read_dir(&work_dir).expect("work dir lists").count(),
+        0,
+        "the shared working directory stays empty"
+    );
     assert_eq!(
         env.get("HOME").map(PathBuf::from).as_deref(),
         Some(private_dir.as_path())
     );
     assert!(!private_dir.exists());
+}
+
+/// Two Pi runs start in the same working directory and keep separate private directories.
+fn pi_runs_share_one_working_directory() {
+    let mut observed = Vec::new();
+    for _ in 0..2 {
+        let setup = RunSetup::new();
+        let transcript = write_transcript(
+            setup.scratch.path(),
+            "success.ndjson",
+            &pi_success_lines("hi", "stop"),
+        );
+        let backend = pi_backend(
+            &setup,
+            &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+            Vec::new(),
+            None,
+        );
+        let request = request(
+            setup.project.path(),
+            Harness::Pi,
+            "anthropic/claude",
+            Some(SYSTEM_SENTINEL),
+        );
+        let (terminal, _) = execute(&backend, request);
+        assert!(matches!(terminal, BackendTerminal::Completed { .. }));
+        let cwd = fs::read_to_string(setup.out.path().join("cwd.txt")).expect("cwd");
+        let home = setup.env().get("HOME").cloned().expect("HOME");
+        observed.push((PathBuf::from(cwd), PathBuf::from(home)));
+    }
+    assert_eq!(observed[0].0, observed[1].0);
+    assert_eq!(observed[0].0, state_root().work_dir().expect("work dir"));
+    assert_ne!(observed[0].1, observed[1].1);
+    assert_ne!(observed[0].0, observed[0].1);
 }
 
 fn pi_provider_alias_mapping() {

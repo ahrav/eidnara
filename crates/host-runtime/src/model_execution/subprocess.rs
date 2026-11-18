@@ -1354,6 +1354,19 @@ impl PrivateDir {
         off_runtime(move || Self::create(&root, prefix)).await?
     }
 
+    /// A fresh private directory together with the shared working directory of `root`, resolved in one hop on the blocking pool.
+    pub async fn create_with_work_dir_async(
+        root: group_registry::StateRoot,
+        prefix: &'static str,
+    ) -> io::Result<(Self, PathBuf)> {
+        off_runtime(move || {
+            let dir = Self::create(&root, prefix)?;
+            let work_dir = root.work_dir()?;
+            Ok((dir, work_dir))
+        })
+        .await?
+    }
+
     /// Creates `name` as a fresh regular file forced to `0600` regardless of the inherited umask.
     pub fn write_private(&self, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         Self::write_private_at(self.path(), name, bytes)
@@ -2472,6 +2485,17 @@ pub mod group_registry {
             let root = self.registry_dir()?.join("runs");
             secure_dir(&root)?;
             Ok(root)
+        }
+
+        /// The working directory every Pi run starts in: an empty directory beside `runs/`.
+        ///
+        /// Pi ends the system prompt it sends with its working directory.
+        /// One path for all runs keeps a caller's system prompt byte-identical from run to run, so a provider prompt cache serves it on the next run.
+        /// A run's hook, system prompt file, and `HOME` stay in its private run directory.
+        pub fn work_dir(&self) -> io::Result<PathBuf> {
+            let dir = self.registry_dir()?.join("cwd");
+            secure_dir(&dir)?;
+            Ok(dir)
         }
     }
 
