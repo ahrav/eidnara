@@ -566,6 +566,9 @@ mod fixture {
             stats.insert("hook_file_mode".into(), mode_bits(&hook).into());
             stats.insert("hook_file_symlink".into(), is_symlink(&hook).into());
         }
+        let core = rustix::process::getrlimit(rustix::process::Resource::Core);
+        stats.insert("core_limit_soft".into(), core.current.into());
+        stats.insert("core_limit_hard".into(), core.maximum.into());
         fs::write(
             out.join("stats.json"),
             serde_json::to_vec(&serde_json::Value::Object(stats)).expect("stats serialize"),
@@ -1525,6 +1528,12 @@ fn opencode_argv_env_stdin_contract() {
         env.get("HOME").map(PathBuf::from).as_deref(),
         Some(private_dir)
     );
+    // An OpenCode child keeps the host's core-file limit, which shows the fixture reports the limit a child inherits.
+    let inherited = rustix::process::getrlimit(rustix::process::Resource::Core).maximum;
+    assert_eq!(
+        setup.stats()["core_limit_hard"],
+        serde_json::Value::from(inherited)
+    );
 }
 
 fn closed_dispatch_sink_prevents_spawn() {
@@ -1760,6 +1769,10 @@ fn pi_argv_privacy_contract() {
     let work_dir = state_root().path().join("cwd");
     assert_eq!(PathBuf::from(cwd), work_dir);
     assert_eq!(state_root().work_dir().expect("work dir"), work_dir);
+    // A crashing child writes no core file into the directory later runs start in.
+    let stats = setup.stats();
+    assert_eq!(stats["core_limit_soft"], 0);
+    assert_eq!(stats["core_limit_hard"], 0);
     assert_eq!(
         env.get("HOME").map(PathBuf::from).as_deref(),
         Some(private_dir.as_path())
@@ -1833,25 +1846,19 @@ fn pi_refuses_a_working_directory_that_is_a_symlink() {
         Some(SYSTEM_SENTINEL),
     );
     let (terminal, _) = execute(&backend, request);
-    assert!(matches!(terminal, BackendTerminal::Failed { .. }));
+    let error = failed(&terminal);
+    assert_eq!(error.class, ErrorClass::Permanent);
+    assert!(
+        error.message.contains("could not start"),
+        "{}",
+        error.message
+    );
     assert!(
         !setup.out.path().join("cwd.txt").exists(),
         "the child never started"
     );
-    assert_eq!(
-        fs::read_dir(root.run_root().expect("run root"))
-            .expect("run root lists")
-            .count(),
-        0,
-        "the refused run left no private directory"
-    );
-    assert_eq!(
-        fs::read_dir(elsewhere.path())
-            .expect("link target lists")
-            .count(),
-        0,
-        "nothing was written through the link"
-    );
+    // Only a run's private directory creates `runs/`, so its absence shows the refusal came first.
+    assert!(!root.path().join("runs").exists());
 }
 
 fn pi_provider_alias_mapping() {

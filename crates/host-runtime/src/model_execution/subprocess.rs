@@ -2488,7 +2488,7 @@ pub mod group_registry {
             Ok(root)
         }
 
-        /// The working directory every Pi run starts in: `cwd/`, an empty directory beside `runs/` that persists across runs and restarts.
+        /// The working directory every Pi run starts in: `cwd/`, a directory created empty beside `runs/` that persists across runs and restarts.
         ///
         /// Pi ends the system prompt it sends with the current date and its working directory.
         /// One path for all runs keeps a caller's system prompt byte-identical from run to run within a day, so a provider prompt cache serves it on the next run.
