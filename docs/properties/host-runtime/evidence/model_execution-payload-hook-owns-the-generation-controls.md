@@ -27,14 +27,14 @@ model's native decoding policy, so the hook can receive a bound with no
 temperature.
 
 Delivery. `run_pi` writes `PI_MODEL_EXECUTION_EXTENSION_BYTES` to a 0600 file in the
-per-run 0700 directory through `PrivateDir::write_private_async` (`pi.rs:423-426`;
-`subprocess.rs:1313-1326`, `create_new` refuses an existing path or symlink), so
+per-run 0700 directory through `PrivateDir::write_private_async` (`pi.rs:427-430`;
+`subprocess.rs:1382-1390`, `create_new` refuses an existing path or symlink), so
 no installed hook can be swapped under the daemon. The argv disables
-extension discovery with `--no-approve --no-extensions` (`pi.rs:490-491`),
-pushes each trusted closure extension (`:493-496`), and pushes the hook last
-(`:497-498`). The admitted bound reaches the child as
-`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS` (`:511-514`); `EIDNARA_MODEL_EXECUTION_TEMPERATURE` is
-set only when the request admitted a temperature (`:515-520`).
+extension discovery with `--no-approve --no-extensions` (`pi.rs:494-495`),
+pushes each trusted closure extension (`:497-500`), and pushes the hook last
+(`:501-502`). The admitted bound reaches the child as
+`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS` (`:515-518`); `EIDNARA_MODEL_EXECUTION_TEMPERATURE` is
+set only when the request admitted a temperature (`:519-524`).
 
 The hook. `requiredNumber` (`pi-model_execution-extension.mjs:28`) throws when a
 variable is present but empty or not finite; the bound is always required
@@ -55,7 +55,7 @@ writes nor removes a `temperature` field, so an earlier handler's value or the
 provider default survives.
 
 Check. `pi_model_execution_hook_owns_generation_controls`
-(`tests/model_execution_subprocess.rs:1831`) writes the compiled-in bytes to a
+(`tests/model_execution_subprocess.rs:1954`) writes the compiled-in bytes to a
 scratch file, registers a handler ahead of the hook that sets `temperature: 9`
 and adds `providerTouched`, and drives the payloads under Node or Bun with the
 two environment variables set to `32000` and `0.25`. It asserts the OpenAI-style
@@ -66,10 +66,10 @@ fields; the Gemini-style payload carries the rewritten `generationConfig` with
 `inferenceConfig` is rejected; a payload with both `max_completion_tokens` and
 `max_tokens` has both rewritten; and `{ foo: "bar" }` is rejected. It then
 deletes `EIDNARA_MODEL_EXECUTION_TEMPERATURE` and drops the tampering handler
-(`:1857`) to model revision 2: an OpenAI-style payload gains
-`max_output_tokens == 32000` and no `temperature` (`:1923`), and a Bedrock-style
+(`:1979-1980`) to model revision 2: an OpenAI-style payload gains
+`max_output_tokens == 32000` and no `temperature` (`:2045-2046`), and a Bedrock-style
 payload keeps its own `inferenceConfig.temperature == 1` beside the rewritten
-bound (`:1927`). The binary is `harness = false`.
+bound (`:2049-2050`). The binary is `harness = false`.
 
 ## Reachability
 
@@ -110,7 +110,7 @@ array both assume.
 
 ### Q: Can a project-owned extension run after the hook?
 
-- Sources examined: `pi.rs:486-498`; `tests/model_execution_subprocess.rs:1777-1827`.
+- Sources examined: `pi.rs:490-502`; `tests/model_execution_subprocess.rs:1900-1950`.
 - Findings: `--no-extensions` disables discovery, only closure extensions and
   the hook are passed with `--extension`, and the hook is pushed last;
   `pi_project_pi_resources_ignored` asserts exactly one `--extension` ending in
@@ -120,7 +120,7 @@ array both assume.
 
 ### Q: Does the hook trust the environment values?
 
-- Sources examined: `pi-model_execution-extension.mjs:28-35`; `pi.rs:511-520`;
+- Sources examined: `pi-model_execution-extension.mjs:28-35`; `pi.rs:515-524`;
   `model_execution/protocol.rs:262-277`.
 - Findings: the values are formatted from the admitted request. The hook fails
   the request rather than defaulting when the bound is absent or either value is
@@ -148,7 +148,7 @@ array both assume.
   `crates/host-runtime/src/model_execution/pi.rs` still covers models the
   registry does not mark.
   `pi_model_execution_hook_omits_temperature_for_registry_refusing_models`
-  (`tests/model_execution_subprocess.rs:1931`) drives refusing, accepting,
+  (`tests/model_execution_subprocess.rs:2054`) drives refusing, accepting,
   unmarked, throwing, and absent contexts, and refusing contexts whose payloads
   already carry a `temperature` in each of the three places.
 - Missing evidence: the driver passes a context object; no test runs the hook
