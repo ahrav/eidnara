@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`parse_capture_batch` (`crates/daemon/src/memory_capture.rs:266`) refuses the batch when a row's `message_id` names no batch message or repeats one. `validate_capture_memories` (`:812`) refuses a memory whose quote is empty, over `MAX_CAPTURE_MEMORY_BYTES`, or not contained in its own source's text (`:825`). The system prompt states the rule at `:180`. A refusal fails only the affected source's jobs. For a user message under its own id, `join_sentence_runs` (`:414`) runs before that validation and gives quotations that follow one another the slice of the same message that spans them, so validation checks the joined quotation.
+`parse_capture_batch` (`crates/daemon/src/memory_capture.rs:308`) refuses the batch when a row's `message_id` names no batch message or repeats one. `validate_capture_memories` (`:868`) refuses a memory whose quote is empty, over `MAX_CAPTURE_MEMORY_BYTES`, or not contained in its own source's text (`:881`). The system prompt states the rule at `:221`. A refusal fails only the affected source's jobs. For a user message under its own id, `join_sentence_runs` (`:456`) runs before that validation and gives quotations that follow one another the slice of the same message that spans them, so validation checks the joined quotation.
 
 ## Failure scenario
 
@@ -24,14 +24,14 @@ A batch where one memory quotes another message; an invented `message_id`; a dup
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:4566`, `:4599`, `:4631`, `:4771`, `:8402`; `crates/daemon/src/lib.rs:24876`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/memory_capture.rs:4626`, `:4659`, `:4691`, `:4831`, `:8541`; `crates/daemon/src/lib.rs:24876`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
 ### Q: Does a test construct quotations that join?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:7265` (`sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow`), read at the branch that adds `join_sentence_runs`.
+- Sources examined: `crates/daemon/src/memory_capture.rs:7325` (`sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow`), read at the branch that adds `join_sentence_runs`.
 - Findings: The test parses proposals whose quotations follow one another in a paragraph and compares each stored quotation with the paragraph's text. It is a parse-level check against the source text; it reads no frozen plan.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
