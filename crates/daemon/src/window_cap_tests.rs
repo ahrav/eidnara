@@ -347,6 +347,8 @@ async fn a_stalled_summarizer_archives_the_window_to_half_the_cap_through_the_ne
         );
         tokio::time::sleep(TEST_WAIT_POLL).await;
     }
+    // The pass reports a firing when it spawns the task; the task records the firing in the store.
+    wait_for_phase(&store, HistorySummarizerPhase::AwaitingProducer).await;
     let next = store.load("ses").unwrap().meta.history_summarizer;
     assert!(next.firing_seq > stalled.firing_seq);
     assert_eq!(
