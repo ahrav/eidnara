@@ -1248,8 +1248,30 @@ The rule reads marks by their place and cannot tell every arrangement of
 symmetric marks apart; where it cannot, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
-or `!`, directly before one, or at the paragraph's end, and no lowercase word
-follows it past any punctuation; the paragraph's indentation and trailing
+or `!`, directly before one, or at the paragraph's end, whitespace or the
+paragraph's end follows that mark, and no lowercase word
+follows it past any punctuation; a paragraph whose first letter is lowercase
+with no `<` before it, and in which no sentence start is capitalized, is
+written without sentence capitals. A sentence start is capitalized when
+a `<` stands after a `.`, `!`, or question mark with no letter or digit
+between them, with or without whitespace before it and whether or not a
+letter follows it, or when the next
+letter or digit after such a mark follows whitespace and is a letter that is not lowercase (an
+uppercase or titlecase letter, or a letter of a script with no letter case);
+other marks may stand between the closing mark and the whitespace and
+between the whitespace and that character. In a paragraph written without
+sentence capitals a quotation whose first character is lowercase starts a
+sentence when it directly follows a `.`, `!`, or question mark and
+whitespace, and a lowercase word that directly follows the
+quotation's closing mark and whitespace starts the next sentence, while a
+word behind another mark there, such as a bracket or a dash, is asked the
+question of a capitalized paragraph; one capitalized sentence start anywhere
+in the paragraph keeps the rule for capitalized text, since its lowercase
+first letter may be a tool name; in such a lowercase paragraph a period
+stays inside its sentence after a run of periods, after a title of the list
+below in any letter case, and after `etc`, `vs`, `cf`, `approx`, `incl`, or
+`esp`; the casing is a cue to how the writer types and proves nothing about
+one period; the paragraph's indentation and trailing
 spaces border its sentences as its edges do; neither boundary falls, at a
 period,
 at a dotted abbreviation, a word of two or more one- or two-letter segments
@@ -1258,7 +1280,7 @@ such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 or `Approx` in any letter case before a number, which may follow one character that is no letter, digit, whitespace, or period and then a decimal point, as in `No. 2`, `approx. -5`, or `approx. .5`; a quotation's closing period that ends its paragraph ends the sentence at any of these words; these lists are a heuristic
 for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
-an inline code span, so a quotation may hold a whole span; and its trimmed text contains
+an inline code span, so a quotation may hold a whole span; and its trimmed text holds a letter or digit and contains
 no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
 finite), contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes

@@ -2006,6 +2006,7 @@ pub(super) struct Prose<'a> {
     text: &'a str,
     layout: std::cell::OnceCell<ProseLayout>,
     colons: std::cell::OnceCell<Vec<usize>>,
+    lowercase: std::cell::OnceCell<Vec<bool>>,
 }
 
 /// Byte ranges of one message, each list ascending and disjoint.
@@ -2021,6 +2022,7 @@ impl<'a> Prose<'a> {
             text,
             layout: std::cell::OnceCell::new(),
             colons: std::cell::OnceCell::new(),
+            lowercase: std::cell::OnceCell::new(),
         }
     }
 
@@ -2035,6 +2037,18 @@ impl<'a> Prose<'a> {
 
     fn code_spans(&self) -> &[(usize, usize)] {
         &self.layout().code_spans
+    }
+
+    /// For each paragraph, whether it is written without sentence capitals
+    /// ([`writes_lowercase_sentences`]). Each paragraph is scanned once for
+    /// the message, however many quotations are judged against it.
+    fn lowercase_sentences(&self) -> &[bool] {
+        self.lowercase.get_or_init(|| {
+            self.paragraphs()
+                .iter()
+                .map(|&(first, last)| writes_lowercase_sentences(&self.text[first..last]))
+                .collect()
+        })
     }
 
     /// For each paragraph, the offset of its first colon, or its end when it
@@ -2277,6 +2291,7 @@ pub(super) fn whole_sentences(prose: &Prose<'_>, quote: &str, after_colon: bool)
                         } else {
                             prose.colons()[index]
                         } - first,
+                        prose.lowercase_sentences()[index],
                         |skip| {
                             letters
                                 .at_or_after(end + skip)
@@ -2325,22 +2340,24 @@ const QUESTION_MARKS: [char; 8] = [
     '?', '\u{ff1f}', '\u{61f}', '\u{203d}', '\u{2047}', '\u{2048}', '\u{2049}', '\u{fe56}',
 ];
 
-/// Whether trimmed text can be a statement: nonempty, no question mark of
+/// Whether trimmed text can be a statement: it holds a letter or digit, no question mark of
 /// [`QUESTION_MARKS`], no quotation mark of [`QUOTATION_FAMILIES`], no
 /// leading backtick, and neither starting nor closing a single quotation.
 fn reads_as_statement(trimmed: &str) -> bool {
-    !(trimmed.is_empty()
-        || trimmed.contains(QUESTION_MARKS)
-        || trimmed.contains(is_quotation_mark)
-        || trimmed.starts_with(['\'', '\u{2018}', '`'])
-        || [".'", "!'", ",'", ".\u{2019}", "!\u{2019}", ",\u{2019}"]
-            .iter()
-            .any(|close| trimmed.contains(close)))
+    trimmed.contains(char::is_alphanumeric)
+        && !(trimmed.contains(QUESTION_MARKS)
+            || trimmed.contains(is_quotation_mark)
+            || trimmed.starts_with(['\'', '\u{2018}', '`'])
+            || [".'", "!'", ",'", ".\u{2019}", "!\u{2019}", ",\u{2019}"]
+                .iter()
+                .any(|close| trimmed.contains(close)))
 }
 
 /// Whether `paragraph[start..end]` starts and ends on sentence boundaries with
 /// no colon earlier in the paragraph. `colon` is the offset of the
 /// paragraph's first colon, or its length when it holds none.
+/// `lowercase_sentences` tells that the paragraph is written without
+/// sentence capitals ([`writes_lowercase_sentences`]).
 /// `continues_lowercase(skip)` answers whether the first letter or digit
 /// from `skip` bytes past `end` in the paragraph is lowercase.
 fn bounds_sentences(
@@ -2348,18 +2365,98 @@ fn bounds_sentences(
     start: usize,
     end: usize,
     colon: usize,
+    lowercase_sentences: bool,
     continues_lowercase: impl FnMut(usize) -> bool,
 ) -> bool {
     // A paragraph keeps its indentation and trailing spaces, which border
     // its first and last sentence as the paragraph's edges do.
     let statement = &paragraph[start..end];
     colon >= start
-        && sentence_starts_at(preceding_text(&paragraph[..start]), statement)
+        && sentence_starts_at(
+            preceding_text(&paragraph[..start]),
+            statement,
+            lowercase_sentences,
+        )
         && sentence_ends_at(
             statement,
             following_text(&paragraph[end..]),
+            lowercase_sentences,
             continues_lowercase,
         )
+}
+
+/// Whether `ch` closes a sentence for the statement rule: `.`, `!`, or a
+/// question mark of [`QUESTION_MARKS`].
+fn closes_sentence(ch: char) -> bool {
+    matches!(ch, '.' | '!') || QUESTION_MARKS.contains(&ch)
+}
+
+/// Whether a paragraph is written without sentence capitals: its first
+/// letter is lowercase, and after no mark that closes a sentence
+/// ([`closes_sentence`]), any further marks, and whitespace is the next
+/// letter or digit a letter that is not lowercase, whatever marks such as
+/// `(` or `**` stand before it. A writer who types that way opens every
+/// sentence in lowercase, so in such a paragraph a lowercase letter
+/// directly after such a mark and whitespace starts a sentence, as an
+/// uppercase letter or a digit does in every paragraph. One capitalized
+/// sentence start shows that the writer capitalizes, and the paragraph then
+/// reads as any capitalized one: its lowercase first letter may be a tool
+/// name. A titlecase letter and a letter of a script with no letter case
+/// count as capitals here, so a paragraph in such a script reads as
+/// capitalized. A `<` before the first letter of the paragraph, or
+/// after a mark that closes a sentence with no letter or digit between
+/// them, may belong to a tag whose letters are markup, so such a paragraph
+/// reads as capitalized too, whether or not a letter follows the `<`. The casing is a cue to how the
+/// writer types and proves nothing about one period, so the lowercase
+/// reading keeps further periods inside their sentence (see
+/// [`keeps_period_in_lowercase`]).
+fn writes_lowercase_sentences(paragraph: &str) -> bool {
+    #[cfg(test)]
+    CASING_BYTES.with(|bytes| bytes.set(bytes.get() + paragraph.len()));
+    // `first`: no letter has passed. `closed`: a mark that closes a
+    // sentence has passed and only marks follow it. `awaiting`: such a run
+    // and whitespace have passed, and the next letter or digit starts what
+    // follows them.
+    let (mut first, mut closed, mut awaiting) = (true, false, false);
+    for ch in paragraph.chars() {
+        if ch.is_whitespace() {
+            awaiting |= closed;
+        } else if ch.is_alphanumeric() {
+            let capital = ch.is_alphabetic() && !ch.is_lowercase();
+            if capital && (first || awaiting) {
+                return false;
+            }
+            first &= !ch.is_alphabetic();
+            (closed, awaiting) = (false, false);
+        } else if ch == '<' && (first || closed) {
+            return false;
+        } else {
+            closed |= closes_sentence(ch);
+        }
+    }
+    !first
+}
+
+/// Lowercase words whose closing period often stays inside a sentence. In
+/// a paragraph written without sentence capitals nothing tells such a
+/// period from a sentence end, so it is read as no sentence edge.
+const LOWERCASE_ABBREVIATIONS: [&str; 6] = ["etc", "vs", "cf", "approx", "incl", "esp"];
+
+/// Whether the period after `word` stays inside its sentence in a paragraph
+/// written without sentence capitals, beyond what [`is_abbreviation`]
+/// keeps in every paragraph: a title of [`TITLES`] in any letter case, as
+/// in `dr. lee`, one of [`LOWERCASE_ABBREVIATIONS`], or a word that is
+/// only periods, as the last dots of `wait...` are. `word` is read with or
+/// without its period.
+fn keeps_period_in_lowercase(word: &str) -> bool {
+    let word = word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
+    let single = word.trim_end_matches('.');
+    single.is_empty()
+        || word.ends_with("..")
+        || TITLES
+            .iter()
+            .chain(&LOWERCASE_ABBREVIATIONS)
+            .any(|known| single.eq_ignore_ascii_case(known))
 }
 
 /// The text of a paragraph before a quotation, or `""` when only the
@@ -2448,7 +2545,12 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         // in it that may end or hide a sentence keeps the quotation as
         // quoted.
         let quoted = &paragraph[start..end];
-        let from = if sentence_starts_at(preceding_text(&paragraph[..start]), &paragraph[start..]) {
+        let lowercase = prose.lowercase_sentences()[cursor];
+        let from = if sentence_starts_at(
+            preceding_text(&paragraph[..start]),
+            &paragraph[start..],
+            lowercase,
+        ) {
             start
         } else {
             let word = quoted.split(char::is_whitespace).next().unwrap_or(quoted);
@@ -2463,7 +2565,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         };
         // Spaces that trail the paragraph are no part of a sentence.
         let rest = following_text(&paragraph[end..]);
-        let to = if sentence_ends_at(&paragraph[start..end], rest, |skip| {
+        let to = if sentence_ends_at(&paragraph[start..end], rest, lowercase, |skip| {
             letters
                 .at_or_after(first + end + skip)
                 .is_some_and(|(at, ch)| at < last && ch.is_lowercase())
@@ -2514,11 +2616,18 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
             && reads_as_statement(statement)
             && !inside_code_span(code_spans, first + from)
             && !inside_code_span(code_spans, first + to)
-            && bounds_sentences(paragraph, from, to, colons[cursor] - first, |skip| {
-                letters
-                    .at_or_after(first + to + skip)
-                    .is_some_and(|(at, ch)| at < last && ch.is_lowercase())
-            })
+            && bounds_sentences(
+                paragraph,
+                from,
+                to,
+                colons[cursor] - first,
+                lowercase,
+                |skip| {
+                    letters
+                        .at_or_after(first + to + skip)
+                        .is_some_and(|(at, ch)| at < last && ch.is_lowercase())
+                },
+            )
         {
             match found {
                 None => found = Some(statement),
@@ -2552,7 +2661,7 @@ const OTHER_TERMINATORS: [char; 17] = [
 
 /// A character that can end a sentence in some script.
 fn is_terminator(ch: char) -> bool {
-    matches!(ch, '.' | '!') || QUESTION_MARKS.contains(&ch) || OTHER_TERMINATORS.contains(&ch)
+    closes_sentence(ch) || OTHER_TERMINATORS.contains(&ch)
 }
 
 /// A character that breaks a line: the line feed and carriage return a
@@ -2648,6 +2757,8 @@ thread_local! {
     /// `EDGE_BYTES` counts whitespace bytes scanned beside quotations on
     /// this thread to detect paragraph boundaries.
     static EDGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many bytes this thread read to decide a paragraph's casing.
+    static CASING_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn prose_paragraphs(text: &str) -> ProseLayout {
@@ -3199,21 +3310,28 @@ fn tag_name(line: &str) -> Option<(&str, bool)> {
     valid.then_some((name, closing))
 }
 
-fn sentence_starts_at(before: &str, quote: &str) -> bool {
+/// Whether a sentence starts where `quote` does, given the paragraph's text
+/// `before` it. In a paragraph written without sentence capitals
+/// (`lowercase_sentences`) a lowercase letter after a closing mark starts a
+/// sentence; in any other paragraph it continues the sentence the mark
+/// stands in.
+fn sentence_starts_at(before: &str, quote: &str, lowercase_sentences: bool) -> bool {
     if before.is_empty() {
         return true;
     }
     let ended = before.trim_end();
     if !(before.ends_with(char::is_whitespace)
-        && (ended.ends_with(['.', '!']) || ended.ends_with(QUESTION_MARKS))
-        && !quote.starts_with(|ch: char| ch.is_lowercase()))
+        && ended.ends_with(closes_sentence)
+        && (lowercase_sentences || !quote.starts_with(|ch: char| ch.is_lowercase())))
     {
         return false;
     }
     let word = ended.rsplit(char::is_whitespace).next().unwrap_or_default();
     #[cfg(test)]
     BOUNDARY_BYTES.with(|bytes| bytes.set(bytes.get() + word.len()));
-    !(ended.ends_with('.') && is_abbreviation(word, quote))
+    !(ended.ends_with('.')
+        && (is_abbreviation(word, quote)
+            || (lowercase_sentences && keeps_period_in_lowercase(word))))
 }
 
 /// Titles, which English writes capitalized with a closing period before a
@@ -3261,12 +3379,24 @@ fn is_abbreviation(word: &str, following: &str) -> bool {
 }
 
 /// `continues_lowercase(skip)` answers whether the first letter or digit
-/// after the first `skip` bytes of `after` is lowercase.
+/// after the first `skip` bytes of `after` is lowercase. In a paragraph
+/// written without sentence capitals (`lowercase_sentences`) a letter or
+/// digit directly after the closing mark's whitespace starts the next
+/// sentence, so the answer is asked for only when another mark, such as a
+/// bracket or a dash, stands there: what follows it may qualify the
+/// sentence, as in any paragraph.
 fn sentence_ends_at(
     quote: &str,
     after: &str,
+    lowercase_sentences: bool,
     mut continues_lowercase: impl FnMut(usize) -> bool,
 ) -> bool {
+    let mut continues_lowercase = |skip: usize| {
+        let opens_sentence = after[skip..]
+            .trim_start()
+            .starts_with(char::is_alphanumeric);
+        !(lowercase_sentences && opens_sentence) && continues_lowercase(skip)
+    };
     // A question ends where whitespace or the paragraph's end follows it.
     if quote.ends_with(QUESTION_MARKS) {
         return after.is_empty() || after.starts_with(char::is_whitespace);
@@ -3276,14 +3406,17 @@ fn sentence_ends_at(
     // the period that directly follows it. A quotation that ends its
     // paragraph ends its last sentence there.
     let at_period = quote.ends_with('.') || (!quote.ends_with('!') && after.starts_with('.'));
-    if at_period
-        && !after.is_empty()
-        && is_abbreviation(
-            quote.rsplit(char::is_whitespace).next().unwrap_or_default(),
-            after,
-        )
-    {
-        return false;
+    if at_period && !after.is_empty() {
+        let word = quote.rsplit(char::is_whitespace).next().unwrap_or_default();
+        // The periods that close the quotation, its own and the ones that
+        // directly follow it, read with its last word.
+        let dots = after.len() - after.trim_start_matches('.').len();
+        if is_abbreviation(word, after)
+            || (lowercase_sentences
+                && keeps_period_in_lowercase(&format!("{word}{}", &after[..dots])))
+        {
+            return false;
+        }
     }
     if quote.ends_with(['.', '!']) {
         return after.is_empty()
@@ -5929,6 +6062,282 @@ mod tests {
         }
     }
 
+    /// A paragraph written without sentence capitals starts its sentences
+    /// in lowercase after `.`, `!`, or a question mark and whitespace. One
+    /// capitalized sentence start, a caseless script, and a capitalized
+    /// paragraph keep a lowercase word after a period inside its sentence.
+    /// In a lowercase paragraph a run of periods, a title, a listed
+    /// abbreviation, and a mark before the next word keep the sentence
+    /// going, and a dotted abbreviation does in every paragraph.
+    #[test]
+    fn a_paragraph_written_in_lowercase_starts_its_sentences_in_lowercase() {
+        let typed =
+            "use pnpm for installs. keep the lockfile committed. run the linter before each commit";
+        let named = "pnpm is our package manager. Never deploy on Fridays. unless the release manager approves it.";
+        let emphasized = "pnpm is our package manager. **Never** deploy on Fridays. unless the release manager approves it.";
+        let titled = "ask dr. lee before merging. keep the changelog current.";
+        let listed = "run the tests, the linter etc. then push. tag the release.";
+        let trailing = "use tabs... not spaces. keep lines short.";
+        for (text, quote, whole) in [
+            (typed, "keep the lockfile committed.", true),
+            (typed, "use pnpm for installs.", true),
+            (typed, "run the linter before each commit", true),
+            (
+                typed,
+                "use pnpm for installs. keep the lockfile committed.",
+                true,
+            ),
+            // A quotation that stops before its closing mark is its whole
+            // sentence, in a lowercase paragraph before a lowercase one.
+            (typed, "keep the lockfile committed", true),
+            (
+                "Use pnpm for installs. Keep the lockfile committed. run the linter",
+                "Keep the lockfile committed",
+                false,
+            ),
+            (typed, "the lockfile committed.", false),
+            (
+                "Use pnpm for installs. keep the lockfile committed.",
+                "keep the lockfile committed.",
+                false,
+            ),
+            (
+                "Use pnpm for installs. keep the lockfile committed.",
+                "Use pnpm for installs.",
+                false,
+            ),
+            // A capital inside a sentence leaves the paragraph lowercase.
+            (
+                "use the README as the index. keep it short.",
+                "keep it short.",
+                true,
+            ),
+            // A lowercase tool name opens a paragraph that capitalizes its
+            // sentences, so a lowercase word after a period continues the
+            // sentence there: after a period, an exclamation mark, a
+            // question mark, two spaces, and behind an emphasis mark.
+            (named, "Never deploy on Fridays.", false),
+            (named, "unless the release manager approves it.", false),
+            (emphasized, "**Never** deploy on Fridays.", false),
+            (
+                "nice work! Keep the lockfile. run the linter.",
+                "run the linter.",
+                false,
+            ),
+            (
+                "ready? Keep the lockfile. run the linter.",
+                "run the linter.",
+                false,
+            ),
+            (
+                "use tabs.  Keep going. run the linter.",
+                "run the linter.",
+                false,
+            ),
+            (
+                "Never deploy on Fridays. unless the release manager approves it.",
+                "Never deploy on Fridays.",
+                false,
+            ),
+            // Periods that stay inside a lowercase sentence.
+            (trailing, "not spaces.", false),
+            (trailing, "use tabs...", false),
+            (trailing, "use tabs.", false),
+            (trailing, "use tabs", false),
+            (trailing, "keep lines short.", true),
+            (titled, "lee before merging.", false),
+            (titled, "ask dr.", false),
+            (titled, "keep the changelog current.", true),
+            (listed, "then push.", false),
+            (listed, "tag the release.", true),
+            (
+                "avoid heavy tools, e.g. docker for local tests.",
+                "docker for local tests.",
+                false,
+            ),
+            (
+                "avoid heavy tools, e.g. docker for local tests.",
+                "avoid heavy tools, e.g.",
+                false,
+            ),
+            // A mark before the next word may open a qualifier of the
+            // sentence, as in a capitalized paragraph.
+            (
+                "never deploy on fridays. (unless the lead agrees)",
+                "never deploy on fridays.",
+                false,
+            ),
+            (
+                "never deploy on fridays. - unless the lead agrees",
+                "never deploy on fridays.",
+                false,
+            ),
+            (
+                "never deploy on fridays. (unless the lead agrees)",
+                "never deploy on fridays",
+                false,
+            ),
+            (
+                "never deploy on fridays. - unless the lead agrees",
+                "never deploy on fridays",
+                false,
+            ),
+            (
+                "never deploy on fridays. keep the changelog current.",
+                "never deploy on fridays.",
+                true,
+            ),
+            // A capitalized name after a lowercase title is a capitalized
+            // sentence start to the casing scan, so the paragraph reads as
+            // a capitalized one, in which a lowercase word after a period
+            // continues the sentence.
+            (
+                "ask dr. Lee before merging. keep the changelog current.",
+                "ask dr. Lee before merging.",
+                false,
+            ),
+            (
+                "ask dr. Lee before merging. keep the changelog current.",
+                "keep the changelog current.",
+                false,
+            ),
+            // Each paragraph is judged by its own letters.
+            (
+                "thanks for the fix.\n\nDeploys run from main. only the lead tags releases.",
+                "only the lead tags releases.",
+                false,
+            ),
+            (
+                "Deploys run from main.\n\nthanks for the fix. only the lead tags releases.",
+                "only the lead tags releases.",
+                true,
+            ),
+            // A script without letter case reads as capitalized.
+            (
+                "\u{4f7f}\u{7528} pnpm. keep the lockfile committed.",
+                "keep the lockfile committed.",
+                false,
+            ),
+            // A statement holds a word.
+            ("use tabs. ! keep going.", "!", false),
+        ] {
+            assert_eq!(
+                quotes_whole_statements(&Prose::of(text), quote),
+                whole,
+                "{text:?} {quote:?}"
+            );
+        }
+        // The casing scan: a capital after a closing mark and further
+        // marks, a titlecase letter, a letter of a script with no case,
+        // and a `<` where a sentence starts each give the paragraph the
+        // rule for capitalized text. A `<` inside a sentence is a mark.
+        for (paragraph, lowercase) in [
+            (
+                "pnpm returned (done.) Next task is tests. keep going.",
+                false,
+            ),
+            ("<b>Note</b> is ready. keep going.", false),
+            ("use pnpm. (Never deploy on fridays.) keep going.", false),
+            ("use pnpm. <b>Never</b> deploy on fridays.", false),
+            ("use <b>pnpm.</b> Never deploy after noon.", false),
+            ("use pnpm. **<B>never</B>** deploy on fridays.", false),
+            ("try this. `<Example>` is a literal. keep going.", false),
+            ("x<y. Never deploy if z>1. keep going.", false),
+            (
+                "koristi pnpm. \u{01c5}uro owns releases. keep going.",
+                false,
+            ),
+            ("use pnpm. \u{4f7f}\u{7528} works. keep going.", false),
+            ("keep going. run the linter.<", false),
+            ("see config.Json for ports. keep going.", true),
+            ("pass <path> to the script. keep going.", true),
+            ("a < b holds here. keep going.", true),
+            ("3 things matter. keep going.", true),
+            ("3 things matter. Keep going.", false),
+        ] {
+            assert_eq!(
+                writes_lowercase_sentences(paragraph),
+                lowercase,
+                "{paragraph:?}"
+            );
+        }
+        // The same readings through the statement rule: the lowercase
+        // sentence after a capitalized start stays a continuation.
+        for text in [
+            "pnpm returned (done.) Next task is tests. keep the lockfile committed.",
+            "use pnpm. <b>Never</b> deploy on fridays. keep the lockfile committed.",
+            "use <b>pnpm.</b> Never deploy after noon. keep the lockfile committed.",
+            "use pnpm. <a href=docs>never</a> deploy on fridays. keep the lockfile committed.",
+            "try this. `<Example>` is a literal. keep the lockfile committed.",
+            "use pnpm. \u{4f7f}\u{7528} works. keep the lockfile committed.",
+            "x<y. Never deploy if z>1. keep the lockfile committed.",
+            "keep the lockfile committed. run the linter.<",
+        ] {
+            assert!(
+                !quotes_whole_statements(&Prose::of(text), "keep the lockfile committed."),
+                "{text:?}"
+            );
+        }
+        // A `<` inside a sentence and a capital attached to a period leave
+        // the paragraph lowercase.
+        for text in [
+            "pass <path> to the script. keep the lockfile committed.",
+            "see config.Json for ports. keep the lockfile committed.",
+        ] {
+            assert!(
+                quotes_whole_statements(&Prose::of(text), "keep the lockfile committed."),
+                "{text:?}"
+            );
+        }
+        // A cut quotation widens to the lowercase sentence that holds it,
+        // from either edge, and stays as quoted where the paragraph
+        // capitalizes.
+        assert_eq!(
+            enclosing_statement(
+                &Prose::of("nice! from here on keep the lockfile committed. ok"),
+                "keep the lockfile committed.",
+            ),
+            Some("from here on keep the lockfile committed.")
+        );
+        assert_eq!(
+            enclosing_statement(
+                &Prose::of("thanks. from here on keep the lockfile committed! ok"),
+                "from here on keep the lockfile",
+            ),
+            Some("from here on keep the lockfile committed!")
+        );
+        assert_eq!(
+            enclosing_statement(
+                &Prose::of("Nice! from here on keep the lockfile committed. ok"),
+                "keep the lockfile committed.",
+            ),
+            None
+        );
+        assert_eq!(
+            enclosing_statement(
+                &Prose::of("nice! from here on keep the lockfile committed. Ok"),
+                "keep the lockfile committed.",
+            ),
+            None
+        );
+    }
+
+    /// The casing of a paragraph is read once for the message, however
+    /// often a quotation occurs in it and whichever occurrences are refused.
+    #[test]
+    fn a_paragraphs_casing_is_read_once_however_often_the_quote_occurs() {
+        let text = "use tabs. ".repeat(4_096);
+        let prose = Prose::of(&text);
+        let before = CASING_BYTES.with(std::cell::Cell::get);
+        assert!(!quotes_whole_statements(&prose, "tabs"));
+        assert!(quotes_whole_statements(&prose, "use tabs."));
+        assert_eq!(
+            CASING_BYTES.with(std::cell::Cell::get) - before,
+            text.len(),
+            "one scan of the one paragraph"
+        );
+    }
+
     #[test]
     fn only_whole_sentences_of_plain_prose_count_as_whole_statements() {
         let text = "Use pnpm here. Never deploy on Fridays unless the lead agrees.\nKeep logs for 30 days\n\nShould we cache v1.2 builds? Ship on Tuesdays.";
@@ -7435,6 +7844,51 @@ mod tests {
     /// fact over several sentences is one statement of the user. Quoted one
     /// sentence per memory, the sentences are joined to the statement they
     /// follow, and a correction among them keeps its replacement.
+    /// Sentences of a lowercase paragraph quoted one by one after a colon
+    /// join the statement they follow, and a sentence the extractor left
+    /// out stays out.
+    #[test]
+    fn lowercase_sentences_after_a_colon_join_the_statement_they_follow() {
+        let moved = "heads up: the staging database moved.";
+        let port = "it is on port 6432 now.";
+        let paragraph = format!("{moved} {port} the old host is retired.");
+        let joined = format!("{moved} {port}");
+        let quotes: Vec<String> = parsed_quotes(
+            &paragraph,
+            CaptureRole::User,
+            true,
+            &[
+                (moved, "CONFIG_VALUES", None),
+                (port, "CONFIG_VALUES", None),
+            ],
+        )
+        .into_iter()
+        .map(|(quote, _, _)| quote)
+        .collect();
+        assert_eq!(quotes, [joined.as_str(); 2]);
+        // The same sentences in a capitalized paragraph: the second starts
+        // in lowercase after a period and continues the first, so nothing
+        // joins and it stays as proposed.
+        let capitalized = format!("Heads up: the staging database moved. {port}");
+        let quotes: Vec<String> = parsed_quotes(
+            &capitalized,
+            CaptureRole::User,
+            true,
+            &[
+                (
+                    "Heads up: the staging database moved.",
+                    "CONFIG_VALUES",
+                    None,
+                ),
+                (port, "CONFIG_VALUES", None),
+            ],
+        )
+        .into_iter()
+        .map(|(quote, _, _)| quote)
+        .collect();
+        assert_eq!(quotes, ["Heads up: the staging database moved.", port]);
+    }
+
     #[test]
     fn sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow() {
         let paragraph = format!("{OPEN_TASKS} {RETRY_COUNTER} {DRY_RUN}");
