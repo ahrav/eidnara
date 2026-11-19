@@ -2068,6 +2068,11 @@ async fn capture_sources(
     captured
 }
 
+/// The capture deadline of the tests whose producer stays blocked past it. The deadline starts
+/// before the transform that spawns the firing, and a firing spawned after the deadline starts
+/// no run, so the deadline covers that transform on a loaded runner.
+const BLOCKED_RUN_WAIT: Duration = Duration::from_secs(2);
+
 /// The producer bounds one `connect` and one `start` by its 30 s request timeout each; the
 /// budget covers both with a margin for a reconnect.
 const START_QUIESCE: Duration = Duration::from_secs(75);
@@ -2419,7 +2424,7 @@ async fn a_timed_out_capture_cancels_its_started_runs() {
         factory,
         "probe/model",
         "scripted approved example",
-        Duration::from_millis(300),
+        BLOCKED_RUN_WAIT,
     )
     .await;
     assert_eq!(records.len(), sources().count());
@@ -2468,7 +2473,7 @@ async fn a_start_in_flight_at_the_deadline_is_still_cancelled() {
     let release = {
         let producer = Arc::clone(&producer);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(700)).await;
+            tokio::time::sleep(BLOCKED_RUN_WAIT + Duration::from_millis(400)).await;
             producer.block_start.store(false, Ordering::SeqCst);
             producer.notify.notify_waiters();
         })
@@ -2477,7 +2482,7 @@ async fn a_start_in_flight_at_the_deadline_is_still_cancelled() {
         factory,
         "probe/model",
         "scripted approved example",
-        Duration::from_millis(300),
+        BLOCKED_RUN_WAIT,
     )
     .await;
     release.await.unwrap();
@@ -2510,7 +2515,7 @@ async fn a_firing_still_connecting_at_the_deadline_is_still_cancelled() {
     let release = {
         let producer = Arc::clone(&producer);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(700)).await;
+            tokio::time::sleep(BLOCKED_RUN_WAIT + Duration::from_millis(400)).await;
             producer.block_connect.store(false, Ordering::SeqCst);
             producer.notify.notify_waiters();
         })
@@ -2519,7 +2524,7 @@ async fn a_firing_still_connecting_at_the_deadline_is_still_cancelled() {
         factory,
         "probe/model",
         "scripted approved example",
-        Duration::from_millis(300),
+        BLOCKED_RUN_WAIT,
     )
     .await;
     release.await.unwrap();
@@ -2652,7 +2657,7 @@ async fn the_record_includes_what_the_cancel_provoked() {
         factory,
         "probe/model",
         "scripted approved example",
-        Duration::from_millis(300),
+        BLOCKED_RUN_WAIT,
     )
     .await;
     assert_eq!(records.len(), sources().count());
@@ -2698,7 +2703,7 @@ async fn an_unconfirmed_cancellation_stops_the_capture() {
         factory,
         "probe/model",
         "scripted approved example",
-        Duration::from_millis(300),
+        BLOCKED_RUN_WAIT,
     )
     .await;
     assert!(sources().count() > 1);
@@ -2858,7 +2863,7 @@ async fn a_capture_whose_producer_outlasts_the_wait_is_recorded_unsettled_when_i
     let factory = Arc::new(TestProducerFactory {
         state: Arc::clone(&producer),
     });
-    let wait = Duration::from_millis(300);
+    let wait = BLOCKED_RUN_WAIT;
     let began = std::time::Instant::now();
     let records = tokio::time::timeout(
         Duration::from_secs(30),
