@@ -107,7 +107,7 @@ kernel store, budget, units, memo, commit gate mutex (`:811`),
 `MAX_SOURCE_UNIT_BYTES`/`MAX_SOURCE_BATCH_UNITS`/`MAX_SOURCE_BATCH_BYTES`
 (`:614-618`, resolving to 64 KiB, 32, 64 KiB through
 `crates/memory-store/src/memory_capture.rs:19` and
-`crates/daemon/src/memory_capture.rs:36-37`). Screening bounds applied at
+`crates/daemon/src/memory_capture.rs:46-47`). Screening bounds applied at
 `harness_sources.rs:1557`, `:1602-1603`.
 
 S5 memory store baseline. `BASELINE = include_str!("../baseline.sql")`

@@ -104,6 +104,58 @@ pub struct CapturedMemory {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub contests: Vec<String>,
+    /// How long the statement holds, as the extractor judged it from the
+    /// user's wording. A plan frozen before the field existed, and a
+    /// proposal that leaves it out or gives `null`, carry no class: such a
+    /// memory passes the lifetime check as a [`Lifetime::Lasting`] one does
+    /// and its rationale records none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<Lifetime>,
+}
+
+/// How long a user's statement holds. A statement that outlives the task
+/// it was made in passes the lifetime check for approval, and a statement
+/// that ends with its task or reports a passing state is stored for
+/// explicit search. The stored text is the
+/// user's words in every class.
+///
+/// The variants are declared from the class that ends soonest to the one
+/// that holds longest, and the collapse of one source's quotations merges
+/// two classes by that derived order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifetime {
+    /// What happened or is observed now: progress, a result, a symptom.
+    Status,
+    /// An instruction or remark that serves the task in progress and ends
+    /// with it.
+    CurrentWork,
+    /// A matter the user says is undecided. It holds until a decision
+    /// settles it.
+    Unsettled,
+    /// A rule, convention, decision, constraint, or stable fact that holds
+    /// for later work on the project.
+    Lasting,
+}
+
+impl Lifetime {
+    /// Whether a statement of this class passes the lifetime check for
+    /// approval.
+    fn outlives_its_task(self) -> bool {
+        match self {
+            Self::Lasting | Self::Unsettled => true,
+            Self::CurrentWork | Self::Status => false,
+        }
+    }
+}
+
+/// Whether the extractor's class lets the memory be approved for the
+/// automatic surfaces. A memory with no class passes, as every statement
+/// did before the class existed. The check withholds approval and grants
+/// none: the source and whole-statement checks of [`user_attributed`] still
+/// decide.
+fn outlives_its_task(memory: &CapturedMemory) -> bool {
+    memory.lifetime.is_none_or(Lifetime::outlives_its_task)
 }
 
 /// A link array an extractor wrote as `null` names no target, as an absent
@@ -134,8 +186,10 @@ struct ExistingCaptureMemory {
     /// `false`.
     #[serde(default, rename = "user_statement")]
     automatic: bool,
-    /// Whether an observation contests the memory. A user statement that
-    /// confirms either value settles it by replacing it.
+    /// Whether an observation contests the memory. Only a user statement
+    /// that is eligible for approval can settle it, by replacing the
+    /// memory or by repeating it word for word; the wire document states
+    /// the conditions of each.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     contested: bool,
 }
@@ -178,6 +232,7 @@ For each source message, return its exact id and a memories array. Every source 
 - category: one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING.
 - content: a concise, self-contained fact, including scope and qualifications needed to use it correctly in a later session.
 - quote: an exact nonempty substring of that same message supporting the fact. This quotation, not your paraphrase, will be stored as the memory; a quotation cut out of a user's sentence may be stored as that whole sentence, up to the nearest sentence edge on each side, so omit a fact whose sentence also holds content the rules above exclude, such as credentials, personal data, or a request not to retain something. Include the complete statement with its actor, scope, negation, conditions, and qualifications. Never select a positive phrase out of a negated, conditional, or hypothetical statement. Never invent a quote. Use a complete supporting clause rather than a value alone. A sentence that follows a colon in a user's paragraph is stored as the user's statement only together with the text before it in that paragraph: when a fact stands in such a sentence, quote from the paragraph's first word through that sentence, as one quotation or as one sentence per entry with none left out, and omit the fact when that text holds content the rules above exclude. Preserve Markdown backticks, whitespace, and typographic punctuation exactly; do not rewrite the quotation.
+- lifetime: only for a memory of a user source message; it sets delivery and leaves what is saved, from user and assistant messages, unchanged. lasting: still guides a different task in a later session, as a rule or preference for how work is done, a convention or decision beyond the change at hand, a constraint, or a stable fact of the project or its environment. current_work: about the task in progress, as a request, the wanted behaviour, look, or values of the thing being built, which the finished work records, a goal or plan, steering, or an instruction for this occasion. status: what happened or is observed now. unsettled: the user leaves a project matter undecided, even when asking for work meanwhile. When it reads either way: lasting if worded as a rule, constraint, or fact, current_work if worded as a request.
 - replaces: optional id from existing_memories, ONLY for a user source message, when can_replace is true and the user explicitly changes or resolves that same fact in the same scope. Assistant messages may add attributed observations but must never replace memories. Preserve unrelated qualifications. Different environments or hypothetical alternatives do not replace each other. Use each replacement target at most once. A correction uses the category of the memory it replaces. For a correction, quote the whole correcting sentence from its first word to its closing mark, including any lead-in and the old value when the user names it: a quotation cut out of the sentence does not replace a memory whose user_statement is true.
 - also_replaces: optional array of further existing_memories ids, ONLY with replaces, each with can_replace true, that state the same old value of the fact being replaced, such as an earlier duplicate or an assistant's restatement of it. Never list a memory that states a different fact or another scope.
 - contests: optional array of existing_memories ids, from any source message, whose value this message's observation contradicts without the user changing the fact: for example an assistant message that reports what a repository file, a command, or a tool result now shows, when that differs from a stored fact in the same scope. The stored fact stays and is shown as contested beside this observation. A user message that itself changes the fact uses replaces instead. An entry with contested true is a user statement an observation already contradicts: a user statement that settles it replaces it when it gives another value, and names it under duplicate_of when it repeats the stored value. Name at most four entries.
@@ -260,9 +315,10 @@ fn capture_json_text(text: &str) -> Result<&str, &'static str> {
 /// source. Either refusal fails the affected jobs the same way.
 ///
 /// `states(index, memory)` tells whether a memory of the message at `index`
-/// will be stored as the user's own statement. A user quotation that will
-/// not be one replaces no approved memory, so it takes no replacement claim
-/// from a statement that corrects the same memory.
+/// is eligible for approval as the user's own statement: a whole statement
+/// of the user's whose lifetime class outlives the task or is absent. A
+/// user quotation that is not replaces no approved memory, so it takes no
+/// replacement claim from a statement that corrects the same memory.
 fn parse_capture_batch(
     text: &str,
     messages: &[CaptureMessage],
@@ -665,7 +721,9 @@ fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<St
 /// Only a user message replaces, so the replacements an assistant message
 /// names become contests under the contest check. A user quotation that
 /// `states` judges no statement replaces no approved memory: its approved
-/// targets become contests and take no claim. A user statement whose
+/// targets become contests and take no claim. A statement the extractor
+/// classed as ending with its task is such a quotation, so an exception for
+/// one occasion leaves the rule it names approved and shown beside it. A user statement whose
 /// replacement of an approved memory is dropped contests that memory, so
 /// the two values are shown as a disagreement.
 fn release_unsupported_targets(
@@ -2028,10 +2086,22 @@ pub(crate) fn is_pi_bash_execution_text(text: &str) -> bool {
     })
 }
 
-/// A captured memory qualifies as the user's own words when it is an
-/// attributed quotation spanning whole statements of a user message that the
-/// job holds whole. `prose` is the job's text.
+/// A captured memory is eligible for approval as the user's statement
+/// when it is the user's own words ([`user_stated`]) and its lifetime class
+/// outlives the task or is absent. The class withholds approval and grants
+/// none: the approval needs the Kernel to accept the statement record and
+/// the admission that rests on it.
+/// `prose` is the job's text.
 fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
+    outlives_its_task(memory) && user_stated(states_whole, prose, memory)
+}
+
+/// Whether a captured memory is the user's own words whatever its class:
+/// an attributed quotation spanning whole statements of a user message that
+/// the job holds whole. Such a memory is written even beside a memory that
+/// holds its fact; [`user_attributed`] adds the class check that makes it
+/// eligible for approval.
+fn user_stated(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     states_whole
         && memory
             .content
@@ -2052,13 +2122,15 @@ fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
     user_attributed(states_whole_message(job), &Prose::of(&job.text), memory)
 }
 
-/// Whether each memory of the plan, by index, is the user's own statement.
-fn attributions(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
+/// Whether each memory of the plan, by index, is the user's own words
+/// ([`user_stated`]). The writer adds the lifetime check that makes such a
+/// memory eligible for approval.
+fn statements(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
     let prose = Prose::of(&job.text);
     let states_whole = states_whole_message(job);
     memories
         .iter()
-        .map(|memory| user_attributed(states_whole, &prose, memory))
+        .map(|memory| user_stated(states_whole, &prose, memory))
         .collect()
 }
 
@@ -3982,7 +4054,7 @@ fn publish_captured_memories(
         }
     }
     // The job's text is parsed once, before either commit takes the writer.
-    let attributed = attributions(job, &output.memories);
+    let stated = statements(job, &output.memories);
     let approval_refused = std::cell::Cell::new(false);
     let commit = |approval: Approval, reasons: &mut Vec<crate::source_capture::Count>| {
         reasons.clear();
@@ -4001,7 +4073,7 @@ fn publish_captured_memories(
             job,
             output,
             settlement,
-            attributed: &attributed,
+            stated: &stated,
             approval,
             approval_refused: &approval_refused,
             earlier: &earlier,
@@ -4037,8 +4109,8 @@ struct Publication<'a> {
     job: &'a CaptureJob,
     output: &'a PreparedCapture,
     settlement: SettlementOutcome,
-    /// Whether each memory of the plan, by index, is the user's own statement.
-    attributed: &'a [bool],
+    /// Whether each memory of the plan, by index, is the user's own words.
+    stated: &'a [bool],
     approval: Approval,
     /// Set when the Kernel's admission policy refuses a statement record or
     /// the admission that rests on it.
@@ -4062,7 +4134,7 @@ fn write_captured_memories(
         job,
         output,
         settlement,
-        attributed,
+        stated,
         approval,
         approval_refused,
         earlier,
@@ -4089,7 +4161,12 @@ fn write_captured_memories(
         if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !user_source {
             return Err(kernel::KernelError::Conflict);
         }
-        let attributed = attributed[index];
+        let stated = stated[index];
+        // The user's own words are eligible for approval when their
+        // lifetime class outlives the task or is absent. The approval
+        // needs the Kernel to accept the statement record and the
+        // admission that rests on it.
+        let attributed = stated && outlives_its_task(memory);
         // Validation at extraction refuses a duplicate that also replaces
         // and further targets beside no replacement; a stored plan of either
         // shape is refused here the same way.
@@ -4100,17 +4177,21 @@ fn write_captured_memories(
             checked_capture_target(envelope, project, output, target, false)?;
             // A fact the store already holds is written again only as the
             // user's own statement of it, beside a memory that is not one.
+            // A statement that ends with its task is written there too,
+            // labeled, so the user's words are on explicit search.
             // The memory that holds it is then the observation that
             // contests what the message contradicts.
-            if !attributed || approved(envelope, target)? {
+            if !stated || approved(envelope, target)? {
                 if earlier.contains_key(target) {
                     pending.push(PendingContest {
                         targets: &memory.contests,
                         observation: target.clone(),
                     });
                 }
-                // The user's own statement of a fact the store holds as
-                // their approved statement settles a contest of it.
+                // Only the user's own statement that is eligible for
+                // approval is queued to settle a contest of the fact it
+                // repeats; the settlement below decides whether it does.
+                // One that ends with its task leaves the contest as it is.
                 if attributed {
                     reaffirmed.push((target, &memory.content));
                 }
@@ -4194,6 +4275,9 @@ fn write_captured_memories(
         }
         if !memory.contests.is_empty() {
             rationale.insert("contests".to_owned(), json!(memory.contests));
+        }
+        if let Some(lifetime) = memory.lifetime {
+            rationale.insert("lifetime".to_owned(), json!(lifetime));
         }
         anchor_reason.record(&mut rationale, reasons);
         let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
@@ -4285,8 +4369,10 @@ fn write_captured_memories(
         if removed.contains(target) {
             continue;
         }
-        // The user settles a contest by stating the contested statement
-        // again, word for word.
+        // A queued repeat settles a contest only when the target is still
+        // contested, its text equals the repeat's under `statement_text`,
+        // and the rewrite succeeds, which needs the target live and served
+        // as approved at normal sensitivity.
         if let Some(statement) = earlier.get(target)
             && capture_rationale(statement).contested_by.is_some()
             && statement_text(&statement.payload.summary) == statement_text(text)
@@ -6861,6 +6947,94 @@ mod tests {
         assert_eq!(parsed[0].contests, ["mem_0", "mem_1", "mem_2", "mem_3"]);
     }
 
+    /// A statement that ends with its task replaces no approved memory.
+    /// With a labeled memory as its replacement, each approved further
+    /// target becomes a contest and each labeled one is retired with the
+    /// replaced memory. With the approved memory as its replacement, every
+    /// target becomes a contest and nothing is retired.
+    #[test]
+    fn a_short_lived_statement_replaces_labeled_memories_and_contests_approved_ones() {
+        let copy = |id: &str, attribution: &str, automatic: bool| ExistingCaptureMemory {
+            id: id.into(),
+            category: "CONFIG_VALUES".into(),
+            content: format!("{attribution}: The staging port is 1234."),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic,
+            contested: false,
+        };
+        let existing = [
+            copy("mem_note", ASSISTANT_REPORTED, false),
+            copy("mem_rule", USER_STATED, true),
+            copy("mem_echo", ASSISTANT_REPORTED, false),
+        ];
+        let messages = [CaptureMessage {
+            id: "m".into(),
+            role: CaptureRole::User,
+            text: "Use port 4321 for staging.".into(),
+            own_id: true,
+        }];
+        let parse = |lifetime: &str, replaces: &str, also_replaces: [&str; 2]| {
+            let output = json!({"version": 1, "decisions": [{"message_id": "m", "memories": [{
+                "category": "CONFIG_VALUES",
+                "content": "Staging uses port 4321 for now.",
+                "quote": "Use port 4321 for staging.",
+                "lifetime": lifetime,
+                "replaces": replaces,
+                "also_replaces": also_replaces,
+            }]}]});
+            let states = |_: usize, memory: &CapturedMemory| -> bool { outlives_its_task(memory) };
+            parse_capture_batch(&output.to_string(), &messages, &existing, &states)
+                .unwrap()
+                .into_iter()
+                .flat_map(|message| message.unwrap().memories)
+                .next()
+                .unwrap()
+        };
+        for lifetime in ["current_work", "status"] {
+            let labeled_primary = parse(lifetime, "mem_note", ["mem_rule", "mem_echo"]);
+            assert_eq!(
+                (
+                    labeled_primary.replaces.as_deref(),
+                    labeled_primary.also_replaces.as_slice(),
+                    labeled_primary.contests.as_slice(),
+                ),
+                (
+                    Some("mem_note"),
+                    ["mem_echo".to_string()].as_slice(),
+                    ["mem_rule".to_string()].as_slice(),
+                ),
+                "{lifetime}"
+            );
+            let approved_primary = parse(lifetime, "mem_rule", ["mem_note", "mem_echo"]);
+            assert_eq!(
+                (
+                    approved_primary.replaces.as_deref(),
+                    approved_primary.also_replaces.as_slice(),
+                    approved_primary.contests.as_slice(),
+                ),
+                (
+                    None,
+                    [].as_slice(),
+                    [
+                        "mem_rule".to_string(),
+                        "mem_note".to_string(),
+                        "mem_echo".to_string()
+                    ]
+                    .as_slice(),
+                ),
+                "{lifetime}"
+            );
+        }
+        // The same statement classed lasting keeps its replacement and
+        // both further targets.
+        let lasting = parse("lasting", "mem_rule", ["mem_note", "mem_echo"]);
+        assert_eq!(lasting.replaces.as_deref(), Some("mem_rule"));
+        assert_eq!(lasting.also_replaces, ["mem_note", "mem_echo"]);
+        assert!(lasting.contests.is_empty());
+    }
+
     /// A question that names a statement as replaced takes no claim on it,
     /// so the correction of the same statement later in the batch keeps its
     /// replacement.
@@ -8222,6 +8396,130 @@ mod tests {
         assert_eq!(collapsed[0].contests, ["mem_a", "mem_b"]);
     }
 
+    /// One quotation proposed under two classes freezes as one memory with
+    /// the class that holds longer, and a proposal with no class beside it
+    /// leaves the memory unclassed, which is eligible for approval.
+    #[test]
+    fn memories_that_collapse_keep_the_lifetime_that_holds_longest() {
+        let classed = |lifetime: Option<Lifetime>| CapturedMemory {
+            lifetime,
+            ..memory("Run the integration suite before every merge.")
+        };
+        for (proposed, kept) in [
+            (
+                vec![Some(Lifetime::CurrentWork), Some(Lifetime::Lasting)],
+                Some(Lifetime::Lasting),
+            ),
+            (
+                vec![Some(Lifetime::Unsettled), Some(Lifetime::Status)],
+                Some(Lifetime::Unsettled),
+            ),
+            (
+                vec![Some(Lifetime::Status), Some(Lifetime::CurrentWork)],
+                Some(Lifetime::CurrentWork),
+            ),
+            (
+                vec![Some(Lifetime::CurrentWork), Some(Lifetime::Unsettled)],
+                Some(Lifetime::Unsettled),
+            ),
+            (
+                vec![Some(Lifetime::Lasting), Some(Lifetime::Unsettled)],
+                Some(Lifetime::Lasting),
+            ),
+            (vec![Some(Lifetime::Status), None], None),
+            (vec![None, Some(Lifetime::Lasting)], None),
+        ] {
+            let collapsed = native::collapse_quotations(
+                USER_STATED,
+                proposed.iter().copied().map(classed).collect(),
+            );
+            assert_eq!(collapsed.len(), 1, "{proposed:?}");
+            assert_eq!(collapsed[0].lifetime, kept, "{proposed:?}");
+        }
+    }
+
+    /// A whole user statement is eligible for approval when its class
+    /// outlives the task or is absent, and a labeled quotation when its
+    /// class ends with the task.
+    #[test]
+    fn only_a_statement_that_outlives_its_task_is_user_attributed() {
+        let job = CaptureJob {
+            text: "Run the integration suite before every merge.".into(),
+            ..job("m1")
+        };
+        for (lifetime, attributed) in [
+            (None, true),
+            (Some(Lifetime::Lasting), true),
+            (Some(Lifetime::Unsettled), true),
+            (Some(Lifetime::CurrentWork), false),
+            (Some(Lifetime::Status), false),
+        ] {
+            let stated = CapturedMemory {
+                content: format!("{USER_STATED}: Run the integration suite before every merge."),
+                lifetime,
+                ..memory("Run the integration suite before every merge.")
+            };
+            assert_eq!(
+                user_attributed_alone(&job, &stated),
+                attributed,
+                "{lifetime:?}"
+            );
+        }
+        let proposal: CapturedMemory = serde_json::from_value(json!({
+            "category": "PROJECT_RULES",
+            "content": "Run the suite.",
+            "quote": "Run the integration suite before every merge.",
+            "lifetime": "current_work",
+        }))
+        .unwrap();
+        assert_eq!(proposal.lifetime, Some(Lifetime::CurrentWork));
+        assert!(
+            serde_json::from_value::<CapturedMemory>(json!({
+                "category": "PROJECT_RULES",
+                "content": "Run the suite.",
+                "quote": "Run the integration suite before every merge.",
+                "lifetime": "forever",
+            }))
+            .is_err()
+        );
+        // A `null` class reads as a proposal that leaves the class out.
+        let unclassed: CapturedMemory = serde_json::from_value(json!({
+            "category": "PROJECT_RULES",
+            "content": "Run the suite.",
+            "quote": "Run the integration suite before every merge.",
+            "lifetime": null,
+        }))
+        .unwrap();
+        assert_eq!(unclassed.lifetime, None);
+    }
+
+    /// The capture prompt defines each class under the name the parser
+    /// accepts for it.
+    #[test]
+    fn the_capture_prompt_defines_every_lifetime_under_its_wire_name() {
+        for lifetime in [
+            Lifetime::Status,
+            Lifetime::CurrentWork,
+            Lifetime::Unsettled,
+            Lifetime::Lasting,
+        ] {
+            // A new class fails to compile here, which sends whoever adds
+            // it to the list above.
+            match lifetime {
+                Lifetime::Status
+                | Lifetime::CurrentWork
+                | Lifetime::Unsettled
+                | Lifetime::Lasting => {}
+            }
+            let name = serde_json::to_value(lifetime).unwrap();
+            let label = format!(" {}: ", name.as_str().unwrap());
+            assert!(
+                CAPTURE_SYSTEM_PROMPT.contains(&label),
+                "the prompt defines {label:?}"
+            );
+        }
+    }
+
     #[test]
     fn sentence_boundaries_are_read_once_however_often_the_quote_occurs() {
         let unbroken = "x".repeat(16_384);
@@ -8571,6 +8869,7 @@ mod tests {
             also_replaces: Vec::new(),
             duplicate_of: None,
             contests: Vec::new(),
+            lifetime: None,
         }
     }
 

@@ -472,6 +472,13 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
+                // One quotation proposed under two classes is stored under
+                // the one that holds longer, so a statement the extractor
+                // read both ways stays eligible for approval.
+                kept.lifetime = match (kept.lifetime, memory.lifetime) {
+                    (Some(kept), Some(joined)) => Some(kept.max(joined)),
+                    _ => None,
+                };
                 if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
@@ -753,9 +760,10 @@ impl CaptureWork {
         settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
         // Whether a memory of the message at `index` that names a target is
-        // the user's own statement: a whole statement as quoted. Freezing
-        // keeps the quotation of such a memory, so this is the judgment
-        // publication makes of it.
+        // eligible for approval as the user's own statement: a whole
+        // statement as quoted whose lifetime class outlives the task or is
+        // absent. Freezing keeps the quotation of such a memory, so this is
+        // the judgment publication makes of it.
         let proses: Vec<super::Prose<'_>> = plan
             .jobs
             .iter()
@@ -765,6 +773,7 @@ impl CaptureWork {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
             super::is_user_source(job)
                 && !super::cite::is_hashed_source_id(&job.message_id)
+                && super::outlives_its_task(memory)
                 && super::quotes_whole_statements(prose, &memory.quote)
         };
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
@@ -837,10 +846,11 @@ impl CaptureWork {
                 }
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for
-                // word. Another text is the user's own new statement.
+                // word. Another text is the user's own new statement, of
+                // any lifetime class, and is written.
                 else if named.is_some_and(|previous| {
                     previous.contested && super::is_another_approved_text(previous, &memory.content)
-                }) && user_attributed(states_whole, prose, memory)
+                }) && super::user_stated(states_whole, prose, memory)
                 {
                     memory.duplicate_of = None;
                 }
@@ -946,10 +956,12 @@ impl CaptureWork {
     }
 }
 
-/// Restores the quoted text of each memory that is the user's own
-/// statement. A statement is approved as the sentence the user wrote, so it
-/// keeps its exact text and failure lines stay on the other memories of the
-/// source. Returns whether any memory still holds an appended line.
+/// Restores the quoted text of each memory that is eligible for approval
+/// as the user's own statement: a whole statement whose lifetime class
+/// outlives the task or is absent. A statement is approved as the sentence
+/// the user wrote, so it keeps its exact text and failure lines stay on the
+/// other memories of the source. Returns whether any memory still holds an
+/// appended line.
 pub(super) fn keep_statement_text(
     job: &CaptureJob,
     prose: &super::Prose<'_>,
