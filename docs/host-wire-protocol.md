@@ -1472,9 +1472,9 @@ statement nor its contest, as with every fact captured from its own messages.
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
 contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
 of that fact's served text; when the contesting fact cannot be read, the line
-is `Contested by <fact id>` and a note says so. A later approved statement of the user, one whose `lifetime` is `lasting`,
-`unsettled`, or absent,
-settles a contest: a user statement that replaces the contested fact ends it,
+is `Contested by <fact id>` and a note says so. A later statement of the user that is eligible for approval, one whose
+`lifetime` is `lasting`, `unsettled`, or absent,
+can settle a contest: a user statement that replaces the contested fact ends it,
 and a user statement that repeats the contested fact word for word, up to
 edge whitespace and its closing `.` or `!`, which names it under
 `duplicate_of` and writes no fact, supersedes it with a fact of the same

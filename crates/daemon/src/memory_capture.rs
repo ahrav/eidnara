@@ -114,9 +114,9 @@ pub struct CapturedMemory {
 }
 
 /// How long a user's statement holds. The class decides delivery: a
-/// statement that outlives the task it was made in is approved for the
-/// automatic surfaces, and a statement that ends with its task or reports a
-/// passing state is stored for explicit search. The stored text is the
+/// statement that outlives the task it was made in is eligible for approval
+/// and the automatic surfaces, and a statement that ends with its task or
+/// reports a passing state is stored for explicit search. The stored text is the
 /// user's words in every class.
 ///
 /// The variants are declared from the class that ends soonest to the one
@@ -187,8 +187,10 @@ struct ExistingCaptureMemory {
     #[serde(default, rename = "user_statement")]
     automatic: bool,
     /// Whether an observation contests the memory. A user statement that
-    /// is eligible for approval and confirms either value settles it by
-    /// replacing it.
+    /// is eligible for approval can settle it: a correction replaces the
+    /// memory once the Kernel accepts its statement record, and a
+    /// word-for-word repeat clears the contest while the memory is live,
+    /// approved, and contested.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     contested: bool,
 }
@@ -2097,8 +2099,8 @@ fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemor
 /// Whether a captured memory is the user's own words whatever its class:
 /// an attributed quotation spanning whole statements of a user message that
 /// the job holds whole. Such a memory is written even beside a memory that
-/// holds its fact; [`user_attributed`] adds the class check that approves
-/// it.
+/// holds its fact; [`user_attributed`] adds the class check that makes it
+/// eligible for approval.
 fn user_stated(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     states_whole
         && memory
@@ -4186,9 +4188,10 @@ fn write_captured_memories(
                     });
                 }
                 // The user's own statement of a fact the store holds as
-                // their approved statement settles a contest of it when it
-                // is eligible for approval itself. One that ends with its
-                // task leaves the contest as it is.
+                // their approved statement can settle a contest of it when
+                // it is eligible for approval itself; the settlement below
+                // adds its own conditions. One that ends with its task
+                // leaves the contest as it is.
                 if attributed {
                     reaffirmed.push((target, &memory.content));
                 }
@@ -4367,7 +4370,8 @@ fn write_captured_memories(
             continue;
         }
         // The user settles a contest by stating the contested statement
-        // again, word for word, in a statement eligible for approval.
+        // again, word for word, in a statement eligible for approval,
+        // while the statement is still live, approved, and contested.
         if let Some(statement) = earlier.get(target)
             && capture_rationale(statement).contested_by.is_some()
             && statement_text(&statement.payload.summary) == statement_text(text)
@@ -8391,7 +8395,7 @@ mod tests {
 
     /// One quotation proposed under two classes freezes as one memory with
     /// the class that holds longer, and a proposal with no class beside it
-    /// leaves the memory unclassed, which is approved.
+    /// leaves the memory unclassed, which is eligible for approval.
     #[test]
     fn memories_that_collapse_keep_the_lifetime_that_holds_longest() {
         let classed = |lifetime: Option<Lifetime>| CapturedMemory {
@@ -8431,9 +8435,9 @@ mod tests {
         }
     }
 
-    /// A whole user statement is the user's approved statement when its
-    /// class outlives the task or is absent, and a labeled quotation when
-    /// its class ends with the task.
+    /// A whole user statement is eligible for approval when its class
+    /// outlives the task or is absent, and a labeled quotation when its
+    /// class ends with the task.
     #[test]
     fn only_a_statement_that_outlives_its_task_is_user_attributed() {
         let job = CaptureJob {
