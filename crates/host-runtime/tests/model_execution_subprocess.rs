@@ -1995,7 +1995,7 @@ console.log(JSON.stringify(handler({ payload: {
   modelId: "bedrock-profile",
   inferenceConfig: { maxTokens: 999 },
   system: [{ text: "static instructions" }, { cachePoint: { type: "default" } }],
-  messages: [{ role: "user", content: [{ text: "one-off input" }, { cachePoint: { type: "default" } }] }],
+  messages: [{ role: "user", content: [{ text: "one-off input" }, { cachePoint: { type: "default" } }, { text: "second block" }] }],
 } })));
 console.log(JSON.stringify(handler({ payload: {
   model: "claude",
@@ -2008,6 +2008,7 @@ console.log(JSON.stringify(handler({ payload: {
   max_completion_tokens: 999,
   messages: [
     { role: "system", content: [{ type: "text", text: "static instructions", cache_control: marker }] },
+    { role: "assistant", content: [{ type: "text", text: "earlier answer", cache_control: marker }] },
     { role: "user", content: [{ type: "text", text: "one-off input", cache_control: marker }] },
   ],
 } })));
@@ -2036,7 +2037,7 @@ console.log(JSON.stringify(handler({ payload: { model: "m", max_tokens: 999, mes
     );
     assert_eq!(
         bedrock["messages"],
-        serde_json::json!([{"role": "user", "content": [{"text": "one-off input"}]}])
+        serde_json::json!([{"role": "user", "content": [{"text": "one-off input"}, {"text": "second block"}]}])
     );
     assert_eq!(bedrock["inferenceConfig"]["maxTokens"], 32_000);
 
@@ -2050,12 +2051,13 @@ console.log(JSON.stringify(handler({ payload: { model: "m", max_tokens: 999, mes
         serde_json::json!([{"role": "user", "content": [{"type": "text", "text": "one-off input"}]}])
     );
 
-    // The OpenAI-completions shape carries the system prompt as a message; its marker stays.
+    // The OpenAI-completions shape carries the system prompt as a message; its marker stays, as does an assistant message's.
     let completions = next("completions");
     assert_eq!(
         completions["messages"],
         serde_json::json!([
             {"role": "system", "content": [{"type": "text", "text": "static instructions", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "earlier answer", "cache_control": {"type": "ephemeral"}}]},
             {"role": "user", "content": [{"type": "text", "text": "one-off input"}]},
         ])
     );
