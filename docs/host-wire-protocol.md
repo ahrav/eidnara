@@ -1294,8 +1294,8 @@ When the Kernel's admission policy refuses a statement record, or the
 admission that rests on it, the same frozen plan commits again with each eligible statement it writes
 as a labeled memory for explicit search and with no statement record, and
 `decisions_approval_refused` counts each statement so written. An eligible
-statement that duplicates an approved fact writes no fact in either attempt
-and stays uncounted. A labeled correction replaces no approved fact: each approved fact the plan names
+statement that duplicates an approved fact adds no fact of its own in either
+attempt and stays uncounted. A labeled correction replaces no approved fact: each approved fact the plan names
 as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and the labeled commit supersedes
 or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility; the

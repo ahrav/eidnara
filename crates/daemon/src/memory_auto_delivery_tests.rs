@@ -1446,6 +1446,53 @@ async fn a_correction_whose_approval_is_refused_leaves_the_approved_statement_li
     );
 }
 
+/// A message whose approval the Kernel refuses repeats an approved statement
+/// beside a new one. The repeat writes no fact and stays uncounted, and the
+/// new statement is stored labeled and counted once.
+#[tokio::test]
+async fn a_refused_plan_counts_the_statements_it_writes_and_skips_an_approved_repeat() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let both = format!("{THURSDAY} {PNPM}");
+    let messages = [("m2", "user", both.as_str())];
+    let jobs = enqueue(&handler, SECOND, "s2", &messages).await;
+    fill_statement_lineage(&handler, &project, &jobs[0]);
+    drain(&handler, SECOND, "s2", &messages, |_, existing| {
+        let approved = ids_containing(existing, "Thursday");
+        assert_eq!(approved.len(), 1, "{existing:?}");
+        vec![
+            Extracted {
+                quote: THURSDAY.to_string(),
+                duplicate_of: approved.into_iter().next(),
+                ..Extracted::default()
+            },
+            fact(PNPM),
+        ]
+    })
+    .await;
+    let committed = published(&handler, &project).await;
+    assert_eq!(
+        committed.0,
+        [
+            (stated(THURSDAY), "visible".to_string()),
+            (stated(PNPM), "labeled".to_string()),
+        ],
+        "the approved statement keeps its one row; the new statement is stored for explicit search"
+    );
+    assert_eq!(committed.1, [stated(THURSDAY)]);
+    assert_eq!(
+        committed.2, 1,
+        "the one statement the labeled commit writes"
+    );
+}
+
 const CITATION_COUNTERS: [&str; 5] = [
     "decisions_cited",
     "decisions_source_capture_off",
