@@ -1297,7 +1297,7 @@ as a labeled memory for explicit search and with no statement record, and
 statement that duplicates an approved fact adds no fact of its own in either
 attempt and stays uncounted. A labeled correction replaces no approved fact: each approved fact the plan names
 as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and as a replacement the labeled commit supersedes
-or retires only a named fact that is itself labeled; recording or settling a contest (below) rewrites an approved statement as a successor that keeps its approval, in either attempt. Every other captured fact remains labeled model inference
+or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility; the
 one text of such a fact that reaches automatic context is the bounded, quoted
 excerpt on a contested statement's line (below).
