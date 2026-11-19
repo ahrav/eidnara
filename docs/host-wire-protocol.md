@@ -1250,11 +1250,19 @@ paragraph, or follows a `.`, `!`, or question mark and whitespace with a first c
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, whitespace or the
 paragraph's end follows that mark, and no lowercase word
-follows it past any punctuation; a paragraph whose first letter is lowercase,
-and in which the next letter or digit after a `.`, `!`, or question mark and
-whitespace is nowhere an uppercase letter, is written without sentence
-capitals: in it a lowercase first character starts a sentence after such a
-mark and whitespace, and a lowercase word that directly follows the
+follows it past any punctuation; a paragraph whose first letter is lowercase
+with no `<` before it, and in which no sentence start is capitalized, is
+written without sentence capitals. A sentence start is capitalized when
+a `<` stands after a `.`, `!`, or question mark with no letter or digit
+between them, with or without whitespace before it and whether or not a
+letter follows it, or when the next
+letter or digit after such a mark follows whitespace and is a letter that is not lowercase (an
+uppercase or titlecase letter, or a letter of a script with no letter case);
+other marks may stand between the closing mark and the whitespace and
+between the whitespace and that character. In a paragraph written without
+sentence capitals a quotation whose first character is lowercase starts a
+sentence when it directly follows a `.`, `!`, or question mark and
+whitespace, and a lowercase word that directly follows the
 quotation's closing mark and whitespace starts the next sentence, while a
 word behind another mark there, such as a bracket or a dash, is asked the
 question of a capitalized paragraph; one capitalized sentence start anywhere

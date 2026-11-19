@@ -2393,45 +2393,48 @@ fn closes_sentence(ch: char) -> bool {
 
 /// Whether a paragraph is written without sentence capitals: its first
 /// letter is lowercase, and after no mark that closes a sentence
-/// ([`closes_sentence`]) and whitespace is the next letter or digit an
-/// uppercase letter, whatever marks such as `(` or `**` stand before it. A
-/// writer who types that way opens every sentence in lowercase, so in such
-/// a paragraph a lowercase letter directly after such a mark and whitespace
-/// starts a sentence, as an uppercase letter or a digit does in every
-/// paragraph. One capitalized sentence start shows that the writer
-/// capitalizes, and the paragraph then reads as any capitalized one: its
-/// lowercase first letter may be a tool name. A paragraph whose script has
-/// no letter case reads as capitalized. The casing is a cue to how the
+/// ([`closes_sentence`]), any further marks, and whitespace is the next
+/// letter or digit a letter that is not lowercase, whatever marks such as
+/// `(` or `**` stand before it. A writer who types that way opens every
+/// sentence in lowercase, so in such a paragraph a lowercase letter
+/// directly after such a mark and whitespace starts a sentence, as an
+/// uppercase letter or a digit does in every paragraph. One capitalized
+/// sentence start shows that the writer capitalizes, and the paragraph then
+/// reads as any capitalized one: its lowercase first letter may be a tool
+/// name. A titlecase letter and a letter of a script with no letter case
+/// count as capitals here, so a paragraph in such a script reads as
+/// capitalized. A `<` before the first letter of the paragraph, or
+/// after a mark that closes a sentence with no letter or digit between
+/// them, may belong to a tag whose letters are markup, so such a paragraph
+/// reads as capitalized too, whether or not a letter follows the `<`. The casing is a cue to how the
 /// writer types and proves nothing about one period, so the lowercase
 /// reading keeps further periods inside their sentence (see
 /// [`keeps_period_in_lowercase`]).
 fn writes_lowercase_sentences(paragraph: &str) -> bool {
     #[cfg(test)]
     CASING_BYTES.with(|bytes| bytes.set(bytes.get() + paragraph.len()));
-    if !paragraph
-        .chars()
-        .find(|ch| ch.is_alphabetic())
-        .is_some_and(char::is_lowercase)
-    {
-        return false;
-    }
-    // `closed`: the last character that is no whitespace closes a
-    // sentence. `awaiting`: such a mark and whitespace have passed, and the
-    // next letter or digit starts what follows them.
-    let (mut closed, mut awaiting) = (false, false);
+    // `first`: no letter has passed. `closed`: a mark that closes a
+    // sentence has passed and only marks follow it. `awaiting`: such a run
+    // and whitespace have passed, and the next letter or digit starts what
+    // follows them.
+    let (mut first, mut closed, mut awaiting) = (true, false, false);
     for ch in paragraph.chars() {
         if ch.is_whitespace() {
             awaiting |= closed;
         } else if ch.is_alphanumeric() {
-            if awaiting && ch.is_uppercase() {
+            let capital = ch.is_alphabetic() && !ch.is_lowercase();
+            if capital && (first || awaiting) {
                 return false;
             }
+            first &= !ch.is_alphabetic();
             (closed, awaiting) = (false, false);
+        } else if ch == '<' && (first || closed) {
+            return false;
         } else {
-            closed = closes_sentence(ch);
+            closed |= closes_sentence(ch);
         }
     }
-    true
+    !first
 }
 
 /// Lowercase words whose closing period often stays inside a sentence. In
@@ -6222,6 +6225,68 @@ mod tests {
                 quotes_whole_statements(&Prose::of(text), quote),
                 whole,
                 "{text:?} {quote:?}"
+            );
+        }
+        // The casing scan: a capital after a closing mark and further
+        // marks, a titlecase letter, a letter of a script with no case,
+        // and a `<` where a sentence starts each give the paragraph the
+        // rule for capitalized text. A `<` inside a sentence is a mark.
+        for (paragraph, lowercase) in [
+            (
+                "pnpm returned (done.) Next task is tests. keep going.",
+                false,
+            ),
+            ("<b>Note</b> is ready. keep going.", false),
+            ("use pnpm. (Never deploy on fridays.) keep going.", false),
+            ("use pnpm. <b>Never</b> deploy on fridays.", false),
+            ("use <b>pnpm.</b> Never deploy after noon.", false),
+            ("use pnpm. **<B>never</B>** deploy on fridays.", false),
+            ("try this. `<Example>` is a literal. keep going.", false),
+            ("x<y. Never deploy if z>1. keep going.", false),
+            (
+                "koristi pnpm. \u{01c5}uro owns releases. keep going.",
+                false,
+            ),
+            ("use pnpm. \u{4f7f}\u{7528} works. keep going.", false),
+            ("keep going. run the linter.<", false),
+            ("see config.Json for ports. keep going.", true),
+            ("pass <path> to the script. keep going.", true),
+            ("a < b holds here. keep going.", true),
+            ("3 things matter. keep going.", true),
+            ("3 things matter. Keep going.", false),
+        ] {
+            assert_eq!(
+                writes_lowercase_sentences(paragraph),
+                lowercase,
+                "{paragraph:?}"
+            );
+        }
+        // The same readings through the statement rule: the lowercase
+        // sentence after a capitalized start stays a continuation.
+        for text in [
+            "pnpm returned (done.) Next task is tests. keep the lockfile committed.",
+            "use pnpm. <b>Never</b> deploy on fridays. keep the lockfile committed.",
+            "use <b>pnpm.</b> Never deploy after noon. keep the lockfile committed.",
+            "use pnpm. <a href=docs>never</a> deploy on fridays. keep the lockfile committed.",
+            "try this. `<Example>` is a literal. keep the lockfile committed.",
+            "use pnpm. \u{4f7f}\u{7528} works. keep the lockfile committed.",
+            "x<y. Never deploy if z>1. keep the lockfile committed.",
+            "keep the lockfile committed. run the linter.<",
+        ] {
+            assert!(
+                !quotes_whole_statements(&Prose::of(text), "keep the lockfile committed."),
+                "{text:?}"
+            );
+        }
+        // A `<` inside a sentence and a capital attached to a period leave
+        // the paragraph lowercase.
+        for text in [
+            "pass <path> to the script. keep the lockfile committed.",
+            "see config.Json for ports. keep the lockfile committed.",
+        ] {
+            assert!(
+                quotes_whole_statements(&Prose::of(text), "keep the lockfile committed."),
+                "{text:?}"
             );
         }
         // A cut quotation widens to the lowercase sentence that holds it,
