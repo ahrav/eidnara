@@ -120,8 +120,8 @@ pub struct CapturedMemory {
 /// user's words in every class.
 ///
 /// The variants are declared from the class that ends soonest to the one
-/// that holds longest, and [`native::collapse_quotations`] merges two
-/// classes by that derived order.
+/// that holds longest, and the collapse of one source's quotations merges
+/// two classes by that derived order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lifetime {
