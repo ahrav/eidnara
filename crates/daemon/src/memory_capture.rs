@@ -2658,7 +2658,7 @@ const OTHER_TERMINATORS: [char; 17] = [
 
 /// A character that can end a sentence in some script.
 fn is_terminator(ch: char) -> bool {
-    matches!(ch, '.' | '!') || QUESTION_MARKS.contains(&ch) || OTHER_TERMINATORS.contains(&ch)
+    closes_sentence(ch) || OTHER_TERMINATORS.contains(&ch)
 }
 
 /// A character that breaks a line: the line feed and carriage return a
@@ -6170,9 +6170,33 @@ mod tests {
                 false,
             ),
             (
+                "never deploy on fridays. (unless the lead agrees)",
+                "never deploy on fridays",
+                false,
+            ),
+            (
+                "never deploy on fridays. - unless the lead agrees",
+                "never deploy on fridays",
+                false,
+            ),
+            (
                 "never deploy on fridays. keep the changelog current.",
                 "never deploy on fridays.",
                 true,
+            ),
+            // A capitalized name after a lowercase title is a capitalized
+            // sentence start to the casing scan, so the paragraph reads as
+            // a capitalized one, in which a lowercase word after a period
+            // continues the sentence.
+            (
+                "ask dr. Lee before merging. keep the changelog current.",
+                "ask dr. Lee before merging.",
+                false,
+            ),
+            (
+                "ask dr. Lee before merging. keep the changelog current.",
+                "keep the changelog current.",
+                false,
             ),
             // Each paragraph is judged by its own letters.
             (
@@ -7755,6 +7779,51 @@ mod tests {
     /// fact over several sentences is one statement of the user. Quoted one
     /// sentence per memory, the sentences are joined to the statement they
     /// follow, and a correction among them keeps its replacement.
+    /// Sentences of a lowercase paragraph quoted one by one after a colon
+    /// join the statement they follow, and a sentence the extractor left
+    /// out stays out.
+    #[test]
+    fn lowercase_sentences_after_a_colon_join_the_statement_they_follow() {
+        let moved = "heads up: the staging database moved.";
+        let port = "it is on port 6432 now.";
+        let paragraph = format!("{moved} {port} the old host is retired.");
+        let joined = format!("{moved} {port}");
+        let quotes: Vec<String> = parsed_quotes(
+            &paragraph,
+            CaptureRole::User,
+            true,
+            &[
+                (moved, "CONFIG_VALUES", None),
+                (port, "CONFIG_VALUES", None),
+            ],
+        )
+        .into_iter()
+        .map(|(quote, _, _)| quote)
+        .collect();
+        assert_eq!(quotes, [joined.as_str(); 2]);
+        // The same sentences in a capitalized paragraph: the second starts
+        // in lowercase after a period and continues the first, so nothing
+        // joins and it stays as proposed.
+        let capitalized = format!("Heads up: the staging database moved. {port}");
+        let quotes: Vec<String> = parsed_quotes(
+            &capitalized,
+            CaptureRole::User,
+            true,
+            &[
+                (
+                    "Heads up: the staging database moved.",
+                    "CONFIG_VALUES",
+                    None,
+                ),
+                (port, "CONFIG_VALUES", None),
+            ],
+        )
+        .into_iter()
+        .map(|(quote, _, _)| quote)
+        .collect();
+        assert_eq!(quotes, ["Heads up: the staging database moved.", port]);
+    }
+
     #[test]
     fn sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow() {
         let paragraph = format!("{OPEN_TASKS} {RETRY_COUNTER} {DRY_RUN}");

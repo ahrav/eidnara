@@ -1248,7 +1248,8 @@ The rule reads marks by their place and cannot tell every arrangement of
 symmetric marks apart; where it cannot, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
-or `!`, directly before one, or at the paragraph's end, and no lowercase word
+or `!`, directly before one, or at the paragraph's end, whitespace or the
+paragraph's end follows that mark, and no lowercase word
 follows it past any punctuation; a paragraph whose first letter is lowercase,
 and in which the next letter or digit after a `.`, `!`, or question mark and
 whitespace is nowhere an uppercase letter, is written without sentence
