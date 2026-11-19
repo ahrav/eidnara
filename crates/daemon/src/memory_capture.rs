@@ -732,7 +732,7 @@ fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<St
 /// word with the quotation. A contest is dropped when its target is
 /// unprovided, shares no content word with the quotation, is also replaced,
 /// is the memory the proposal duplicates, or is past the first
-/// [`MAX_CONTESTS_PER_MEMORY`].
+/// [`MAX_CONTESTS_PER_MEMORY`]. The contest check counts the proposal's named contests first, then any targets converted to contests from `replaces`, then any converted from `also_replaces`.
 ///
 /// Only a user message replaces, so the replacements an assistant message
 /// names become contests under the contest check. A user quotation that
@@ -10094,5 +10094,89 @@ mod tests {
         assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].role, CaptureRole::User);
         assert_eq!(decoded[0].text, input[0].text);
+    }
+
+    /// Capture counts a proposal's contests in the order it named them,
+    /// then any targets converted to contests from `replaces` and
+    /// `also_replaces`, in that order, and keeps the first four. Capture
+    /// releases a target past the fourth and still stores the memory.
+    #[test]
+    fn targets_that_become_contests_follow_the_named_contests_under_the_limit() {
+        let copy = |id: &str| ExistingCaptureMemory {
+            id: id.into(),
+            category: "CONFIG_VALUES".into(),
+            content: format!("{USER_STATED}: The staging port is 1234."),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic: true,
+            contested: false,
+        };
+        let existing = ["mem_0", "mem_1", "mem_2", "mem_3", "mem_rule"].map(copy);
+        let others = ["mem_0", "mem_1", "mem_2", "mem_3"];
+        let parse = |role: CaptureRole, extra: Value| {
+            let messages = [CaptureMessage {
+                id: "m".into(),
+                role,
+                text: "Use port 4321 for staging.".into(),
+                own_id: true,
+            }];
+            let mut memory = json!({
+                "category": "CONFIG_VALUES",
+                "content": "Staging uses port 4321 for now.",
+                "quote": "Use port 4321 for staging.",
+                "replaces": "mem_rule",
+            });
+            memory
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let output =
+                json!({"version": 1, "decisions": [{"message_id": "m", "memories": [memory]}]});
+            let states = |_: usize, memory: &CapturedMemory| -> bool { outlives_its_task(memory) };
+            let parsed = parse_capture_batch(&output.to_string(), &messages, &existing, &states)
+                .unwrap()
+                .into_iter()
+                .flat_map(|message| message.unwrap().memories)
+                .next()
+                .unwrap();
+            assert_eq!(parsed.replaces, None);
+            assert!(parsed.also_replaces.is_empty());
+            parsed.contests
+        };
+        let sources = [
+            (CaptureRole::User, json!({"lifetime": "current_work"})),
+            (CaptureRole::User, json!({"lifetime": "status"})),
+            (CaptureRole::Assistant, json!({})),
+        ];
+        for (role, class) in sources {
+            let with = |links: Value| {
+                let mut extra = class.clone();
+                extra
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(links.as_object().unwrap().clone());
+                parse(role, extra)
+            };
+            assert_eq!(
+                with(json!({"contests": others})),
+                others,
+                "{role:?} {class}: the named contests fill the limit and the replaced target is released"
+            );
+            assert_eq!(
+                with(json!({"also_replaces": others})),
+                ["mem_rule", "mem_0", "mem_1", "mem_2"],
+                "{role:?} {class}: the replaced target precedes the further targets"
+            );
+        }
+        // A lasting statement whose replacement is released for its
+        // category contests the approved target after the contests it named.
+        assert_eq!(
+            parse(
+                CaptureRole::User,
+                json!({"lifetime": "lasting", "category": "NAMING", "contests": others}),
+            ),
+            others
+        );
     }
 }

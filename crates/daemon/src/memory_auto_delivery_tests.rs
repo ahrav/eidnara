@@ -2116,24 +2116,29 @@ async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_r
 /// block. A request for the change in progress and a remark on its state
 /// are stored with the user's words for explicit search, hold no statement
 /// record, and stay out of the block.
+/// Capture stores the assistant report's `lasting` class in its rationale and
+/// keeps the report `labeled` for explicit search.
 #[tokio::test]
 async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_otherwise() {
     let rule = "Run the integration suite before every merge.";
     let undecided = "We have not settled whether the importer keeps the legacy CSV path.";
     let request = "Rename the retry helper to backoff_delay in this module.";
     let remark = "The dashboard page loads again after the last change.";
+    let report = "The nightly build publishes its artifacts to the staging bucket.";
+    let reported = format!("Assistant reported: {report}");
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     let messages = [
         ("m1", "user", rule),
         ("m2", "user", undecided),
         ("m3", "user", request),
         ("m4", "user", remark),
+        ("m5", "assistant", report),
     ];
     capture(&handler, FIRST, "s1", &messages, |text, _| {
         vec![classed(
             text,
             match text {
-                text if text == rule => "lasting",
+                text if text == rule || text == report => "lasting",
                 text if text == undecided => "unsettled",
                 text if text == request => "current_work",
                 _ => "status",
@@ -2149,6 +2154,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
         (stated(undecided), "visible".to_string()),
         (stated(request), "labeled".to_string()),
         (stated(remark), "labeled".to_string()),
+        (reported, "labeled".to_string()),
     ];
     expected.sort();
     assert_eq!(rows, expected);
@@ -2163,6 +2169,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     assert!(block.contains(&stated(undecided)), "{block}");
     assert!(!block.contains(request), "{block}");
     assert!(!block.contains(remark), "{block}");
+    assert!(!block.contains(report), "{block}");
 
     // Each stored memory names the class its own statement was given, and a
     // statement stored labeled for its class is no refused approval.
@@ -2182,6 +2189,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
         (undecided.to_string(), "unsettled".to_string()),
         (request.to_string(), "current_work".to_string()),
         (remark.to_string(), "status".to_string()),
+        (report.to_string(), "lasting".to_string()),
     ];
     expected.sort();
     assert_eq!(classes, expected);
