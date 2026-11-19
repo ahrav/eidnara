@@ -54,7 +54,8 @@ with the bound and, when admitted, the temperature, preserving their other keys
 writes nor removes a `temperature` field, so an earlier handler's value or the
 provider default survives.
 
-Cache markers. A run sends one user message and ends. The handler passes a
+Cache markers. A run sends one user message and ends: the argv passes
+`--print`, `--no-session`, and `--no-tools` (`pi.rs:484-492`). The handler passes a
 payload's `messages` array through `withoutConversationCacheMarkers`
 (`pi-model_execution-extension.mjs:129-131`). That function
 (`pi-model_execution-extension.mjs:65-81`) removes a Bedrock Converse
@@ -66,7 +67,7 @@ only cache write of a run. `withoutConversationCacheMarkers` in
 to the plugin's capture call through `onPayload` (`:99`).
 
 Check. `pi_model_execution_hook_owns_generation_controls`
-(`tests/model_execution_subprocess.rs:2083`) writes the compiled-in bytes to a
+(`tests/model_execution_subprocess.rs:2085`) writes the compiled-in bytes to a
 scratch file, registers a handler ahead of the hook that sets `temperature: 9`
 and adds `providerTouched`, and drives the payloads under Node or Bun with the
 two environment variables set to `32000` and `0.25`. It asserts the OpenAI-style
@@ -77,18 +78,18 @@ fields; the Gemini-style payload carries the rewritten `generationConfig` with
 `inferenceConfig` is rejected; a payload with both `max_completion_tokens` and
 `max_tokens` has both rewritten; and `{ foo: "bar" }` is rejected. It then
 deletes `EIDNARA_MODEL_EXECUTION_TEMPERATURE` and drops the tampering handler
-(`:2108-2109`) to model revision 2: an OpenAI-style payload gains
-`max_output_tokens == 32000` and no `temperature` (`:2174-2175`), and a Bedrock-style
+(`:2110-2111`) to model revision 2: an OpenAI-style payload gains
+`max_output_tokens == 32000` and no `temperature` (`:2176-2177`), and a Bedrock-style
 payload keeps its own `inferenceConfig.temperature == 1` beside the rewritten
-bound (`:2178-2179`). The binary is `harness = false`.
+bound (`:2180-2181`). The binary is `harness = false`.
 
 `pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt`
 (`tests/model_execution_subprocess.rs:1989`) drives the hook with a Bedrock
 Converse payload, an Anthropic Messages payload, and OpenAI-completions
 payloads that carry the system prompt as a `system` and as a `developer`
-message. It asserts each user message comes back with its text and no marker,
-each system prompt keeps its marker, and a user message whose content is a
-string is unchanged.
+message. It asserts each user message comes back with its other blocks and no
+marker, each system prompt and an assistant message keep their markers, and a
+user message whose content is a string is unchanged.
 
 ## Reachability
 
@@ -105,14 +106,17 @@ An earlier extension in the load chain, or a provider's default, sets a larger
 output-token limit in a spelling the hook does not rewrite, or a new provider
 wire family arrives with no recognized field. The request runs with a budget
 the caller never admitted, and the byte charge ModelExecution accounted for the run is
-wrong.
+wrong. A Pi release that marks a user message in a third spelling leaves that
+marker in place, and each run then pays the provider's cache-write premium for
+an entry no request reads.
 
 ## Timing windows and dependencies
 
 None. The hook runs synchronously inside Pi's handler chain on every request;
 the property depends on Pi invoking `before_provider_request` handlers in
 registration order, which the runner's argv order and the test's handler
-array both assume.
+array both assume. The cache-marker clause depends on the run staying
+single-turn, which the argv fixes.
 
 ## What a test must construct
 
@@ -168,7 +172,7 @@ array both assume.
   `crates/host-runtime/src/model_execution/pi.rs` still covers models the
   registry does not mark.
   `pi_model_execution_hook_omits_temperature_for_registry_refusing_models`
-  (`tests/model_execution_subprocess.rs:2183`) drives refusing, accepting,
+  (`tests/model_execution_subprocess.rs:2185`) drives refusing, accepting,
   unmarked, throwing, and absent contexts, and refusing contexts whose payloads
   already carry a `temperature` in each of the three places.
 - Missing evidence: the driver passes a context object; no test runs the hook
