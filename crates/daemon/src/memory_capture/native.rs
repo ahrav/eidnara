@@ -760,9 +760,10 @@ impl CaptureWork {
         settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
         // Whether a memory of the message at `index` that names a target is
-        // the user's own statement: a whole statement as quoted. Freezing
-        // keeps the quotation of such a memory, so this is the judgment
-        // publication makes of it.
+        // eligible for approval as the user's own statement: a whole
+        // statement as quoted whose lifetime class outlives the task or is
+        // absent. Freezing keeps the quotation of such a memory, so this is
+        // the judgment publication makes of it.
         let proses: Vec<super::Prose<'_>> = plan
             .jobs
             .iter()
@@ -845,7 +846,8 @@ impl CaptureWork {
                 }
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for
-                // word. Another text is the user's own new statement.
+                // word. Another text is the user's own new statement, of
+                // any lifetime class, and is written.
                 else if named.is_some_and(|previous| {
                     previous.contested && super::is_another_approved_text(previous, &memory.content)
                 }) && super::user_stated(states_whole, prose, memory)
@@ -954,10 +956,12 @@ impl CaptureWork {
     }
 }
 
-/// Restores the quoted text of each memory that is the user's own
-/// statement. A statement is approved as the sentence the user wrote, so it
-/// keeps its exact text and failure lines stay on the other memories of the
-/// source. Returns whether any memory still holds an appended line.
+/// Restores the quoted text of each memory that is eligible for approval
+/// as the user's own statement: a whole statement whose lifetime class
+/// outlives the task or is absent. A statement is approved as the sentence
+/// the user wrote, so it keeps its exact text and failure lines stay on the
+/// other memories of the source. Returns whether any memory still holds an
+/// appended line.
 pub(super) fn keep_statement_text(
     job: &CaptureJob,
     prose: &super::Prose<'_>,

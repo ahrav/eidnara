@@ -1530,6 +1530,16 @@ async fn a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_se
         "each statement of the refused plan that capture would approve is counted once; \
          the status remark is labeled for its class"
     );
+    let classed: Vec<Value> = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .into_iter()
+        .filter(|rationale| !rationale["lifetime"].is_null())
+        .collect();
+    assert_eq!(classed.len(), 1, "{classed:?}");
+    assert_eq!(
+        (&classed[0]["quote"], &classed[0]["lifetime"]),
+        (&json!(remark), &json!("status"))
+    );
     assert_eq!(
         (committed.3, committed.4),
         (4, 4),
@@ -4821,7 +4831,21 @@ async fn a_statement_is_contested_once_per_message_and_shown_while_its_observati
 /// A statement an observation contests, and the observation that contests
 /// it: the handler, the project, and the two memory ids.
 async fn contested_limit() -> (Handler, tempfile::TempDir, PathBuf, String, String) {
-    let (handler, _store, dir, project) = delivery_handler(capture_config()).await;
+    let (handler, _store, dir, project, statement, observation) = contested_limit_store().await;
+    (handler, dir, project, statement, observation)
+}
+
+/// [`contested_limit`] with the memory store, for a test that reads the
+/// capture queue.
+async fn contested_limit_store() -> (
+    Handler,
+    Arc<MemoryStore>,
+    tempfile::TempDir,
+    PathBuf,
+    String,
+    String,
+) {
+    let (handler, store, dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
         FIRST,
@@ -4857,7 +4881,7 @@ async fn contested_limit() -> (Handler, tempfile::TempDir, PathBuf, String, Stri
         block.contains("contested") && block.contains("500 now"),
         "{block}"
     );
-    (handler, dir, project, statement, observation)
+    (handler, store, dir, project, statement, observation)
 }
 
 /// A statement that ends with its task settles no contest. Its
@@ -4870,7 +4894,8 @@ async fn a_statement_that_ends_with_its_task_settles_no_contest() {
     let other = "The gateway admits at most 400 clients at once during this load test.";
     for lifetime in ["status", "current_work"] {
         for repeats in [true, false] {
-            let (handler, _dir, project, _statement, observation) = contested_limit().await;
+            let (handler, store, _dir, project, _statement, observation) =
+                contested_limit_store().await;
             let (text, quote) = if repeats {
                 (
                     format!("To confirm what we agreed. {LIMIT_300}"),
@@ -4894,6 +4919,16 @@ async fn a_statement_that_ends_with_its_task_settles_no_contest() {
                 },
             )
             .await;
+            // The source committed, so the rows below are what its plan
+            // wrote and no refused extraction left the store as it was.
+            let status = store
+                .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+                .unwrap();
+            assert_eq!(
+                (status.pending, status.failed),
+                (0, 0),
+                "{lifetime}, repeats {repeats}"
+            );
 
             let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
             rows.sort();

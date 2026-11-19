@@ -187,7 +187,8 @@ struct ExistingCaptureMemory {
     #[serde(default, rename = "user_statement")]
     automatic: bool,
     /// Whether an observation contests the memory. A user statement that
-    /// confirms either value settles it by replacing it.
+    /// is eligible for approval and confirms either value settles it by
+    /// replacing it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     contested: bool,
 }
@@ -313,9 +314,10 @@ fn capture_json_text(text: &str) -> Result<&str, &'static str> {
 /// source. Either refusal fails the affected jobs the same way.
 ///
 /// `states(index, memory)` tells whether a memory of the message at `index`
-/// will be stored as the user's own statement. A user quotation that will
-/// not be one replaces no approved memory, so it takes no replacement claim
-/// from a statement that corrects the same memory.
+/// is eligible for approval as the user's own statement: a whole statement
+/// of the user's whose lifetime class outlives the task or is absent. A
+/// user quotation that is not replaces no approved memory, so it takes no
+/// replacement claim from a statement that corrects the same memory.
 fn parse_capture_batch(
     text: &str,
     messages: &[CaptureMessage],
@@ -2083,10 +2085,11 @@ pub(crate) fn is_pi_bash_execution_text(text: &str) -> bool {
     })
 }
 
-/// A captured memory is the user's approved statement when it is the
-/// user's own words ([`user_stated`]) and its lifetime class outlives the
-/// task or is absent. The class withholds approval and grants none. `prose`
-/// is the job's text.
+/// A captured memory is eligible for approval as the user's statement
+/// when it is the user's own words ([`user_stated`]) and its lifetime class
+/// outlives the task or is absent. The class withholds approval and grants
+/// none, and the Kernel's acceptance of the statement record grants it.
+/// `prose` is the job's text.
 fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     outlives_its_task(memory) && user_stated(states_whole, prose, memory)
 }
@@ -2119,7 +2122,7 @@ fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
 
 /// Whether each memory of the plan, by index, is the user's own words
 /// ([`user_stated`]). The writer adds the lifetime check that makes such a
-/// memory the user's approved statement.
+/// memory eligible for approval.
 fn statements(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
     let prose = Prose::of(&job.text);
     let states_whole = states_whole_message(job);
@@ -4157,8 +4160,9 @@ fn write_captured_memories(
             return Err(kernel::KernelError::Conflict);
         }
         let stated = stated[index];
-        // The user's own words are the user's approved statement when their
-        // lifetime class outlives the task or is absent.
+        // The user's own words are eligible for approval when their
+        // lifetime class outlives the task or is absent. The Kernel's
+        // acceptance of the statement record grants the approval.
         let attributed = stated && outlives_its_task(memory);
         // Validation at extraction refuses a duplicate that also replaces
         // and further targets beside no replacement; a stored plan of either
@@ -4182,7 +4186,9 @@ fn write_captured_memories(
                     });
                 }
                 // The user's own statement of a fact the store holds as
-                // their approved statement settles a contest of it.
+                // their approved statement settles a contest of it when it
+                // is eligible for approval itself. One that ends with its
+                // task leaves the contest as it is.
                 if attributed {
                     reaffirmed.push((target, &memory.content));
                 }
@@ -4361,7 +4367,7 @@ fn write_captured_memories(
             continue;
         }
         // The user settles a contest by stating the contested statement
-        // again, word for word.
+        // again, word for word, in a statement eligible for approval.
         if let Some(statement) = earlier.get(target)
             && capture_rationale(statement).contested_by.is_some()
             && statement_text(&statement.payload.summary) == statement_text(text)
