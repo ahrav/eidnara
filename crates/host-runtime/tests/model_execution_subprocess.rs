@@ -2000,7 +2000,7 @@ console.log(JSON.stringify(handler({ payload: {
 console.log(JSON.stringify(handler({ payload: {
   model: "claude",
   max_tokens: 999,
-  system: [{ type: "text", text: "static instructions", cache_control: marker }],
+  system: [{ type: "text", text: "identity", cache_control: marker }, { type: "text", text: "static instructions", cache_control: marker }],
   messages: [{ role: "user", content: [{ type: "text", text: "one-off input", cache_control: marker }] }],
 } })));
 console.log(JSON.stringify(handler({ payload: {
@@ -2043,8 +2043,11 @@ console.log(JSON.stringify(handler({ payload: { model: "m", max_tokens: 999, mes
 
     let anthropic = next("anthropic");
     assert_eq!(
-        anthropic["system"][0]["cache_control"],
-        serde_json::json!({"type": "ephemeral"})
+        anthropic["system"],
+        serde_json::json!([
+            {"type": "text", "text": "identity", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "static instructions", "cache_control": {"type": "ephemeral"}},
+        ])
     );
     assert_eq!(
         anthropic["messages"],
