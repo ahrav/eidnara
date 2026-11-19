@@ -2538,6 +2538,42 @@ async fn a_sentence_proposed_under_two_lifetimes_is_lasting_and_contests_the_rul
     );
 }
 
+/// A user who types without capitals states a rule in the second sentence
+/// of a message. The sentence gets a statement record and reaches the next
+/// session's block. The same sentence in a message that capitalizes its
+/// sentences continues the sentence before it and stays labeled.
+#[tokio::test]
+async fn a_sentence_of_a_message_typed_in_lowercase_is_recorded_as_the_users_statement() {
+    let rule = "keep the lockfile committed.";
+    for (message, approved) in [
+        ("thanks, that works. keep the lockfile committed.", true),
+        ("Thanks, that works. keep the lockfile committed.", false),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", message)], |_, _| {
+            vec![fact(rule)]
+        })
+        .await;
+        let visibility = if approved { "visible" } else { "labeled" };
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(rule), visibility.to_string())],
+            "{message:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            if approved { vec![stated(rule)] } else { vec![] },
+            "{message:?}"
+        );
+        let served = serve(&handler, SECOND, "s2").await;
+        assert_eq!(
+            project_memory_block(&served).is_some_and(|block| block.contains(&stated(rule))),
+            approved,
+            "{message:?}"
+        );
+    }
+}
+
 /// Text the user quotes from someone else stays labeled: a sentence inside
 /// quotation marks, a paragraph inside a quotation that spans paragraphs, a
 /// paragraph a colon line introduces, and a question.

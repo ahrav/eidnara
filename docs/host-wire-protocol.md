@@ -1249,7 +1249,14 @@ symmetric marks apart; where it cannot, the text is left out. The quotation star
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
-follows it past any punctuation; the paragraph's indentation and trailing
+follows it past any punctuation; a paragraph whose first letter is lowercase,
+and in which no closing mark and whitespace is followed by an uppercase
+letter, is written without sentence capitals, so in it a lowercase first
+character starts a sentence and a lowercase word may follow the quotation,
+while one capitalized sentence start anywhere in the paragraph keeps the rule
+for capitalized text, since its lowercase first letter may be a tool name;
+the casing is a cue to how the writer types and proves nothing about one
+period; the paragraph's indentation and trailing
 spaces border its sentences as its edges do; neither boundary falls, at a
 period,
 at a dotted abbreviation, a word of two or more one- or two-letter segments
@@ -1258,7 +1265,7 @@ such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 or `Approx` in any letter case before a number, which may follow one character that is no letter, digit, whitespace, or period and then a decimal point, as in `No. 2`, `approx. -5`, or `approx. .5`; a quotation's closing period that ends its paragraph ends the sentence at any of these words; these lists are a heuristic
 for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
-an inline code span, so a quotation may hold a whole span; and its trimmed text contains
+an inline code span, so a quotation may hold a whole span; and its trimmed text holds a letter or digit and contains
 no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
 finite), contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes
