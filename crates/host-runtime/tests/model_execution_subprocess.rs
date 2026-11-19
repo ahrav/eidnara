@@ -190,6 +190,10 @@ fn main() {
             pi_model_execution_hook_owns_generation_controls,
         ),
         (
+            "pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt",
+            pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt,
+        ),
+        (
             "success_transcripts_align_across_harnesses",
             success_transcripts_align_across_harnesses,
         ),
@@ -1946,6 +1950,131 @@ fn pi_project_pi_resources_ignored() {
     assert_eq!(
         setup.env().get(EIDNARA_PI_SUBAGENT_ENV).map(String::as_str),
         Some("1")
+    );
+}
+
+/// Runs `driver` with the bundled hook imported as `hook` and returns its standard output.
+fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let hook_path = scratch.path().join(PI_MODEL_EXECUTION_EXTENSION_FILE);
+    fs::write(&hook_path, PI_MODEL_EXECUTION_EXTENSION_BYTES).expect("materialize hook");
+    let driver_path = scratch.path().join("driver.mjs");
+    fs::write(
+        &driver_path,
+        format!(
+            "import hook from \"file://{}\";\n{driver}",
+            hook_path.to_string_lossy()
+        ),
+    )
+    .expect("driver");
+    let output = ["node", "bun"]
+        .iter()
+        .find_map(|runtime| {
+            std::process::Command::new(runtime)
+                .arg(&driver_path)
+                .envs(envs.iter().copied())
+                .output()
+                .ok()
+        })
+        .expect("a JavaScript runtime (node or bun) is required for the hook fixture");
+    assert!(
+        output.status.success(),
+        "hook driver failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("driver output")
+}
+
+/// The hook removes cache markers from user messages and keeps the system prompt's marker, in the Bedrock Converse, Anthropic Messages, and OpenAI-completions payload shapes.
+fn pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt() {
+    let stdout = run_hook_driver(
+        r#"let handler;
+hook({ on(name, fn) { if (name === "before_provider_request") handler = fn; } });
+const marker = { type: "ephemeral" };
+console.log(JSON.stringify(handler({ payload: {
+  modelId: "bedrock-profile",
+  inferenceConfig: { maxTokens: 999 },
+  system: [{ text: "static instructions" }, { cachePoint: { type: "default" } }],
+  messages: [{ role: "user", content: [{ text: "one-off input" }, { cachePoint: { type: "default" } }] }],
+} })));
+console.log(JSON.stringify(handler({ payload: {
+  model: "claude",
+  max_tokens: 999,
+  system: [{ type: "text", text: "static instructions", cache_control: marker }],
+  messages: [{ role: "user", content: [{ type: "text", text: "one-off input", cache_control: marker }] }],
+} })));
+console.log(JSON.stringify(handler({ payload: {
+  model: "openrouter-claude",
+  max_completion_tokens: 999,
+  messages: [
+    { role: "system", content: [{ type: "text", text: "static instructions", cache_control: marker }] },
+    { role: "user", content: [{ type: "text", text: "one-off input", cache_control: marker }] },
+  ],
+} })));
+console.log(JSON.stringify(handler({ payload: {
+  model: "openrouter-claude-reasoning",
+  max_completion_tokens: 999,
+  messages: [
+    { role: "developer", content: [{ type: "text", text: "static instructions", cache_control: marker }] },
+    { role: "user", content: [{ type: "text", text: "one-off input", cache_control: marker }] },
+  ],
+} })));
+console.log(JSON.stringify(handler({ payload: { model: "m", max_tokens: 999, messages: [{ role: "user", content: "plain string" }] } })));
+"#,
+        &[(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "32000")],
+    );
+    let mut lines = stdout.lines();
+    let mut next = |name: &str| -> serde_json::Value {
+        serde_json::from_str(lines.next().unwrap_or_else(|| panic!("{name} line")))
+            .unwrap_or_else(|_| panic!("{name} json"))
+    };
+
+    let bedrock = next("bedrock");
+    assert_eq!(
+        bedrock["system"],
+        serde_json::json!([{"text": "static instructions"}, {"cachePoint": {"type": "default"}}])
+    );
+    assert_eq!(
+        bedrock["messages"],
+        serde_json::json!([{"role": "user", "content": [{"text": "one-off input"}]}])
+    );
+    assert_eq!(bedrock["inferenceConfig"]["maxTokens"], 32_000);
+
+    let anthropic = next("anthropic");
+    assert_eq!(
+        anthropic["system"][0]["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        anthropic["messages"],
+        serde_json::json!([{"role": "user", "content": [{"type": "text", "text": "one-off input"}]}])
+    );
+
+    // The OpenAI-completions shape carries the system prompt as a message; its marker stays.
+    let completions = next("completions");
+    assert_eq!(
+        completions["messages"],
+        serde_json::json!([
+            {"role": "system", "content": [{"type": "text", "text": "static instructions", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": [{"type": "text", "text": "one-off input"}]},
+        ])
+    );
+    assert_eq!(completions["max_completion_tokens"], 32_000);
+
+    // A reasoning model receives the system prompt as a `developer` message; its marker stays too.
+    let developer = next("developer");
+    assert_eq!(
+        developer["messages"],
+        serde_json::json!([
+            {"role": "developer", "content": [{"type": "text", "text": "static instructions", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": [{"type": "text", "text": "one-off input"}]},
+        ])
+    );
+
+    let plain = next("plain");
+    assert_eq!(
+        plain["messages"],
+        serde_json::json!([{"role": "user", "content": "plain string"}])
     );
 }
 
