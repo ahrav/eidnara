@@ -53,7 +53,7 @@ function modelRefusesTemperature(ctx) {
 }
 
 // A run sends one user message and ends, so the only later request that
-// repeats the message is Pi's retry of a failed attempt. A cache marker on
+// can read its cache entry is Pi's retry of a failed attempt. A marker on
 // it pays the provider's cache-write premium on every run for an entry only
 // such a retry reads. The hook removes cache markers from user messages in
 // the two spellings Pi's providers emit: a Bedrock Converse `cachePoint`
