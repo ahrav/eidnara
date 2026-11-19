@@ -24,14 +24,14 @@ A batch where one memory quotes another message; an invented `message_id`; a dup
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:4650`, `:4683`, `:4715`, `:4855`, `:8696`; `crates/daemon/src/lib.rs:25366` (`automatic_capture_rejection_stays_pending_not_successful_empty_memory`, a route-level check that rejected output stays pending), read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/memory_capture.rs:4652`, `:4685`, `:4717`, `:4857`, `:8700`; `crates/daemon/src/lib.rs:25366` (`automatic_capture_rejection_stays_pending_not_successful_empty_memory`, a route-level check that rejected output stays pending), read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
 ### Q: Does a test construct quotations that join?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:7435` (`sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow`), read at the branch that adds `join_sentence_runs`.
+- Sources examined: `crates/daemon/src/memory_capture.rs:7439` (`sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow`), read at the branch that adds `join_sentence_runs`.
 - Findings: The test parses proposals whose quotations follow one another in a paragraph and compares each stored quotation with the paragraph's text. It is a parse-level check against the source text; it reads no frozen plan.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
