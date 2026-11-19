@@ -154,6 +154,10 @@ fn main() {
             pi_runs_share_one_working_directory,
         ),
         (
+            "pi_refuses_a_working_directory_that_is_a_symlink",
+            pi_refuses_a_working_directory_that_is_a_symlink,
+        ),
+        (
             "pi_alias_credential_failure_retries_canonical_provider",
             pi_alias_credential_failure_retries_canonical_provider,
         ),
@@ -1753,13 +1757,9 @@ fn pi_argv_privacy_contract() {
         .to_path_buf();
     // The child starts in the state root's shared working directory, so the system prompt Pi builds names one path on every run.
     let cwd = fs::read_to_string(setup.out.path().join("cwd.txt")).expect("cwd");
-    let work_dir = state_root().work_dir().expect("work dir");
+    let work_dir = state_root().path().join("cwd");
     assert_eq!(PathBuf::from(cwd), work_dir);
-    assert_eq!(
-        fs::read_dir(&work_dir).expect("work dir lists").count(),
-        0,
-        "the shared working directory stays empty"
-    );
+    assert_eq!(state_root().work_dir().expect("work dir"), work_dir);
     assert_eq!(
         env.get("HOME").map(PathBuf::from).as_deref(),
         Some(private_dir.as_path())
@@ -1796,9 +1796,62 @@ fn pi_runs_share_one_working_directory() {
         observed.push((PathBuf::from(cwd), PathBuf::from(home)));
     }
     assert_eq!(observed[0].0, observed[1].0);
-    assert_eq!(observed[0].0, state_root().work_dir().expect("work dir"));
     assert_ne!(observed[0].1, observed[1].1);
-    assert_ne!(observed[0].0, observed[0].1);
+}
+
+/// A working directory path that another principal could redirect starts no child and leaves no run directory.
+fn pi_refuses_a_working_directory_that_is_a_symlink() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    fs::set_permissions(data_dir.path(), fs::Permissions::from_mode(0o700))
+        .expect("private data dir");
+    let root = StateRoot::resolve(Some(data_dir.path())).expect("state root");
+    let elsewhere = tempfile::tempdir().expect("link target");
+    std::os::unix::fs::symlink(elsewhere.path(), root.path().join("cwd")).expect("planted link");
+
+    let setup = RunSetup::new();
+    let transcript = write_transcript(
+        setup.scratch.path(),
+        "success.ndjson",
+        &pi_success_lines("hi", "stop"),
+    );
+    let backend = PiBackend::with_limits(
+        PiRuntimeDescriptor {
+            closure: fixture_closure(&setup, "pi", &[]),
+            interpreter_node: "bin/runtime".to_owned(),
+            entrypoint_node: "node_modules/pi/entry.mjs".to_owned(),
+            provider_extension_nodes: Vec::new(),
+        },
+        setup.snapshot(&[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())]),
+        root.clone(),
+        None,
+        quick_limits(),
+    );
+    let request = request(
+        setup.project.path(),
+        Harness::Pi,
+        "anthropic/claude",
+        Some(SYSTEM_SENTINEL),
+    );
+    let (terminal, _) = execute(&backend, request);
+    assert!(matches!(terminal, BackendTerminal::Failed { .. }));
+    assert!(
+        !setup.out.path().join("cwd.txt").exists(),
+        "the child never started"
+    );
+    assert_eq!(
+        fs::read_dir(root.run_root().expect("run root"))
+            .expect("run root lists")
+            .count(),
+        0,
+        "the refused run left no private directory"
+    );
+    assert_eq!(
+        fs::read_dir(elsewhere.path())
+            .expect("link target lists")
+            .count(),
+        0,
+        "nothing was written through the link"
+    );
 }
 
 fn pi_provider_alias_mapping() {

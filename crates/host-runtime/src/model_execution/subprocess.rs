@@ -1355,13 +1355,14 @@ impl PrivateDir {
     }
 
     /// A fresh private directory together with the shared working directory of `root`, resolved in one hop on the blocking pool.
-    pub async fn create_with_work_dir_async(
+    /// The working directory is validated first, so a refused one creates no private directory.
+    pub(crate) async fn create_with_work_dir_async(
         root: group_registry::StateRoot,
         prefix: &'static str,
     ) -> io::Result<(Self, PathBuf)> {
         off_runtime(move || {
-            let dir = Self::create(&root, prefix)?;
             let work_dir = root.work_dir()?;
+            let dir = Self::create(&root, prefix)?;
             Ok((dir, work_dir))
         })
         .await?
@@ -2452,7 +2453,7 @@ pub mod group_registry {
         Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
     }
 
-    /// `<managed eidnara dir>/model_execution`: the crash-ownership registry plus the `runs/` root for per-run private directories.
+    /// `<managed eidnara dir>/model_execution`: the crash-ownership registry, the `runs/` root for per-run private directories, and `cwd/`, the working directory Pi runs share.
     ///
     /// The directory is shared by every host incarnation configured with the same data root, so a successor finds its predecessor's records.
     /// The sweep kills groups named by registry files, so no other principal may write the directory or any ancestor; `resolve` enforces that through the hardened traversal.
@@ -2487,11 +2488,11 @@ pub mod group_registry {
             Ok(root)
         }
 
-        /// The working directory every Pi run starts in: an empty directory beside `runs/`.
+        /// The working directory every Pi run starts in: `cwd/`, an empty directory beside `runs/` that persists across runs and restarts.
         ///
-        /// Pi ends the system prompt it sends with its working directory.
-        /// One path for all runs keeps a caller's system prompt byte-identical from run to run, so a provider prompt cache serves it on the next run.
-        /// A run's hook, system prompt file, and `HOME` stay in its private run directory.
+        /// Pi ends the system prompt it sends with the current date and its working directory.
+        /// One path for all runs keeps a caller's system prompt byte-identical from run to run within a day, so a provider prompt cache serves it on the next run.
+        /// A run's hook, system prompt file, and `HOME` stay in its private run directory, and the run's zero core-file limit keeps a crash from writing here.
         pub fn work_dir(&self) -> io::Result<PathBuf> {
             let dir = self.registry_dir()?.join("cwd");
             secure_dir(&dir)?;

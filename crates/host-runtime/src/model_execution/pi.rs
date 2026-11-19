@@ -544,7 +544,8 @@ async fn run_pi(
             )
             .collect(),
         state_root,
-        rlimits: Vec::new(),
+        // The working directory outlives the run, so a crashing child writes no core file: one would hold the prompt and the provider credentials where later runs start.
+        rlimits: vec![(rustix::process::Resource::Core, 0)],
     };
 
     // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one attempt budget for first attempts and retries alike.
