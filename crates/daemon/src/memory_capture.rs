@@ -2459,6 +2459,29 @@ fn keeps_period_in_lowercase(word: &str) -> bool {
             .any(|known| single.eq_ignore_ascii_case(known))
 }
 
+/// When sentences start lowercase, the statement rule uses these openers to
+/// group a rule with its qualifier across a period so approval covers both,
+/// as in `never deploy on fridays. unless the lead agrees.`.
+const QUALIFIER_OPENERS: [&str; 10] = [
+    "unless",
+    "except",
+    "but",
+    "though",
+    "although",
+    "only if",
+    "only when",
+    "only for",
+    "only on",
+    "only in",
+];
+
+fn opens_qualifier(text: &str) -> bool {
+    QUALIFIER_OPENERS.iter().any(|opener| {
+        text.strip_prefix(opener)
+            .is_some_and(|rest| !rest.starts_with(char::is_alphanumeric))
+    })
+}
+
 /// The text of a paragraph before a quotation, or `""` when only the
 /// paragraph's indentation precedes the quotation. The scan runs backward
 /// from the quotation, so a call reads the whitespace run that borders it.
@@ -3313,8 +3336,8 @@ fn tag_name(line: &str) -> Option<(&str, bool)> {
 /// Whether a sentence starts where `quote` does, given the paragraph's text
 /// `before` it. In a paragraph written without sentence capitals
 /// (`lowercase_sentences`) a lowercase letter after a closing mark starts a
-/// sentence; in any other paragraph it continues the sentence the mark
-/// stands in.
+/// sentence, except at a qualifier opener ([`QUALIFIER_OPENERS`]); in any
+/// other paragraph it continues the sentence.
 fn sentence_starts_at(before: &str, quote: &str, lowercase_sentences: bool) -> bool {
     if before.is_empty() {
         return true;
@@ -3322,7 +3345,8 @@ fn sentence_starts_at(before: &str, quote: &str, lowercase_sentences: bool) -> b
     let ended = before.trim_end();
     if !(before.ends_with(char::is_whitespace)
         && ended.ends_with(closes_sentence)
-        && (lowercase_sentences || !quote.starts_with(|ch: char| ch.is_lowercase())))
+        && ((lowercase_sentences && !opens_qualifier(quote))
+            || !quote.starts_with(|ch: char| ch.is_lowercase())))
     {
         return false;
     }
@@ -3382,9 +3406,9 @@ fn is_abbreviation(word: &str, following: &str) -> bool {
 /// after the first `skip` bytes of `after` is lowercase. In a paragraph
 /// written without sentence capitals (`lowercase_sentences`) a letter or
 /// digit directly after the closing mark's whitespace starts the next
-/// sentence, so the answer is asked for only when another mark, such as a
-/// bracket or a dash, stands there: what follows it may qualify the
-/// sentence, as in any paragraph.
+/// sentence, so `continues_lowercase` is called only at another mark or at
+/// an opener from [`QUALIFIER_OPENERS`]. A mark such as a bracket or dash,
+/// or such an opener, can introduce text that qualifies the sentence.
 fn sentence_ends_at(
     quote: &str,
     after: &str,
@@ -3392,10 +3416,11 @@ fn sentence_ends_at(
     mut continues_lowercase: impl FnMut(usize) -> bool,
 ) -> bool {
     let mut continues_lowercase = |skip: usize| {
-        let opens_sentence = after[skip..]
-            .trim_start()
-            .starts_with(char::is_alphanumeric);
-        !(lowercase_sentences && opens_sentence) && continues_lowercase(skip)
+        let opens_sentence = lowercase_sentences && {
+            let next = after[skip..].trim_start();
+            next.starts_with(char::is_alphanumeric) && !opens_qualifier(next)
+        };
+        !opens_sentence && continues_lowercase(skip)
     };
     // A question ends where whitespace or the paragraph's end follows it.
     if quote.ends_with(QUESTION_MARKS) {
@@ -6336,6 +6361,155 @@ mod tests {
             text.len(),
             "one scan of the one paragraph"
         );
+    }
+
+    #[test]
+    fn a_qualifying_clause_after_a_lowercase_rule_stays_in_the_rules_sentence() {
+        let ruled = "never deploy on fridays. unless the release manager approves it.";
+        let listed = "use pnpm. never deploy on fridays. unless the lead agrees. keep the lockfile committed.";
+        for (text, quote, whole) in [
+            (ruled, "never deploy on fridays.", false),
+            (ruled, "never deploy on fridays", false),
+            (ruled, "unless the release manager approves it.", false),
+            (ruled, ruled, true),
+            (listed, "never deploy on fridays.", false),
+            (listed, "unless the lead agrees.", false),
+            (
+                listed,
+                "never deploy on fridays. unless the lead agrees.",
+                true,
+            ),
+            (listed, "use pnpm.", true),
+            (listed, "keep the lockfile committed.", true),
+            (
+                "never deploy on fridays! unless the lead agrees.",
+                "never deploy on fridays!",
+                false,
+            ),
+            (
+                "skip the tests. only on docs branches.",
+                "skip the tests.",
+                false,
+            ),
+            (
+                "skip the tests. only on docs branches.",
+                "only on docs branches.",
+                false,
+            ),
+            (
+                "disable certificate verification. only for local tests.",
+                "disable certificate verification.",
+                false,
+            ),
+            (
+                "force push is fine. but only on your own branch.",
+                "force push is fine.",
+                false,
+            ),
+            (
+                "squash before merging. except on release branches.",
+                "squash before merging.",
+                false,
+            ),
+            (
+                "keep the cache warm. though not in ci.",
+                "keep the cache warm.",
+                false,
+            ),
+            (
+                "rebase before merging. although a merge commit is fine for releases.",
+                "rebase before merging.",
+                false,
+            ),
+            (
+                "run the linter. only if the diff holds rust.",
+                "run the linter.",
+                false,
+            ),
+            (
+                "tag the release. only when ci is green.",
+                "tag the release.",
+                false,
+            ),
+            (
+                "mock the clock. only in unit tests.",
+                "mock the clock.",
+                false,
+            ),
+            // `but` and `except` must match whole words; `button` and
+            // `exceptions` start separate sentences.
+            (
+                "keep the lockfile. button labels stay short.",
+                "keep the lockfile.",
+                true,
+            ),
+            (
+                "keep the lockfile. button labels stay short.",
+                "button labels stay short.",
+                true,
+            ),
+            (
+                "retry twice. exceptions go to the log.",
+                "exceptions go to the log.",
+                true,
+            ),
+            (
+                "thanks for the fix. only the lead tags releases.",
+                "thanks for the fix.",
+                true,
+            ),
+            (
+                "thanks for the fix. only the lead tags releases.",
+                "only the lead tags releases.",
+                true,
+            ),
+            (
+                "unless the lead agrees, never deploy on fridays.",
+                "unless the lead agrees, never deploy on fridays.",
+                true,
+            ),
+            (
+                "Never deploy on Fridays. Unless the release manager approves it.",
+                "Never deploy on Fridays.",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                quotes_whole_statements(&Prose::of(text), quote),
+                whole,
+                "{text:?} {quote:?}"
+            );
+        }
+        for (text, quote) in [
+            (ruled, "deploy on fridays."),
+            (
+                "never deploy on fridays! unless the lead agrees.",
+                "the lead agrees.",
+            ),
+            (
+                "never deploy on fridays! unless the lead agrees.",
+                "deploy on fridays!",
+            ),
+        ] {
+            assert_eq!(
+                enclosing_statement(&Prose::of(text), quote),
+                None,
+                "{text:?} {quote:?}"
+            );
+        }
+        let introduced =
+            "heads up: the database moved. never deploy on fridays. unless the lead agrees.";
+        for (quote, whole) in [
+            ("never deploy on fridays.", false),
+            ("unless the lead agrees.", false),
+            ("never deploy on fridays. unless the lead agrees.", true),
+        ] {
+            assert_eq!(
+                whole_sentences(&Prose::of(introduced), quote, true),
+                whole,
+                "{quote:?}"
+            );
+        }
     }
 
     #[test]

@@ -1270,7 +1270,17 @@ in the paragraph keeps the rule for capitalized text, since its lowercase
 first letter may be a tool name; in such a lowercase paragraph a period
 stays inside its sentence after a run of periods, after a title of the list
 below in any letter case, and after `etc`, `vs`, `cf`, `approx`, `incl`, or
-`esp`; the casing is a cue to how the writer types and proves nothing about
+`esp`; in such a lowercase paragraph a sentence also continues past its
+closing mark and whitespace into `unless`, `except`, `but`, `though`,
+`although`, `only if`, `only when`, `only for`, `only on`, or `only in`,
+written in lowercase with one space between two words and followed by a
+character that is no letter or digit or by the paragraph's end, since such a
+word opens a clause that qualifies the sentence before it: a quotation that
+starts at such a word after a closing mark starts no sentence, and a
+quotation whose closing `.` or `!` and whitespace such a word follows is
+asked the question of a capitalized paragraph, so a rule is a statement
+together with the clause that qualifies it; the casing is a cue to how the
+writer types and proves nothing about
 one period; the paragraph's indentation and trailing
 spaces border its sentences as its edges do; neither boundary falls, at a
 period,

@@ -2574,6 +2574,39 @@ async fn a_sentence_of_a_message_typed_in_lowercase_is_recorded_as_the_users_sta
     }
 }
 
+#[tokio::test]
+async fn a_lowercase_rule_quoted_without_its_condition_stays_labeled() {
+    let message = "never deploy on fridays. unless the release manager approves it.";
+    for (quote, approved) in [("never deploy on fridays.", false), (message, true)] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", message)], |_, _| {
+            vec![fact(quote)]
+        })
+        .await;
+        let visibility = if approved { "visible" } else { "labeled" };
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(quote), visibility.to_string())],
+            "{quote:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            if approved {
+                vec![stated(quote)]
+            } else {
+                vec![]
+            },
+            "{quote:?}"
+        );
+        let served = serve(&handler, SECOND, "s2").await;
+        assert_eq!(
+            project_memory_block(&served).is_some_and(|block| block.contains(&stated(quote))),
+            approved,
+            "{quote:?}"
+        );
+    }
+}
+
 /// Text the user quotes from someone else stays labeled: a sentence inside
 /// quotation marks, a paragraph inside a quotation that spans paragraphs, a
 /// paragraph a colon line introduces, and a question.
