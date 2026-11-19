@@ -512,7 +512,7 @@ Check: `always` - after each publish settles, `counter[reason] == committed(reas
 Fault/timing angle: a publish that rolls back after its reasons were computed; a replayed receipt
 Required faults and enabling state: a replayed publish; a refused commit
 Confidence: high - [evidence](evidence/p2-new-miss-counters-track-rationale.md). Read `record_capture_decisions` at `crates/daemon/src/source_capture.rs:679` and its call in `CaptureWork::publish`
-Existing check: `crates/daemon/src/source_capture_tests.rs:3528`, `:3700`, `:3876`; `a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_search_and_counted` in `crates/daemon/src/memory_auto_delivery_tests.rs`; `crates/host-runtime/src/control.rs:2082` for the wire allowlist (unaudited)
+Existing check: `crates/daemon/src/source_capture_tests.rs:3528`, `:3700`, `:3876`; `a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_search_and_counted` and `a_refused_plan_counts_the_statements_it_writes_and_skips_an_approved_repeat` in `crates/daemon/src/memory_auto_delivery_tests.rs`; `crates/host-runtime/src/control.rs:2082` for the wire allowlist (unaudited)
 Impact: operators tune the budget on numbers that count failures as misses
 Open questions: None.
 
@@ -521,7 +521,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - as above
 Status: active - activated by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
-Exercised: yes - the end-to-end test admits three cited whole-sentence user quotations, one uncited whole-sentence quotation, and two cited fragments in one session and compares their admission rows and served visibility
+Exercised: partial - for proposals that carry no lifetime class, the end-to-end test admits three cited whole-sentence user quotations, one uncited whole-sentence quotation, and two cited fragments in one session and compares their admission rows and served visibility; a cited and an uncited whole-sentence quotation classed `current_work` or `status` remain to be constructed
 Guarantee: A capture decision's admission record carries `ModelInference` and `AssistantInference`, and its maturity and served visibility depend on the writer's eligibility check (`crates/daemon/src/memory_capture.rs:4200`, the predicate `user_attributed` names), whether it is a whole-sentence quotation of a user message whose lifetime class is `lasting`, `unsettled`, or absent, and on whether the Kernel accepted its statement record and the `Approve` admission that rests on it, never on whether it has an anchor or a citation. The lifetime class can only withhold approval. A decision eligible for approval that capture writes is admitted under `Approve` on its statement record; when the Kernel's admission policy refuses that record or the admission that rests on it, the same plan commits it under `Other`, served labeled.
 Check: `always` - capture decisions with one `user_attributed` outcome and one approval outcome that differ only in citation or anchor presence have equal `source_class`, `taint_class`, `maturity`, `effective_maturity`, and `elevated_support`, and equal visibility on every surface
 Fault/timing angle: none

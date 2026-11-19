@@ -20,6 +20,8 @@ None.
 
 Cited and uncited whole-sentence quotations, and cited fragments, in one session, compared on admission columns and served visibility per attribution (`crates/daemon/src/source_capture_tests.rs:3528`).
 
+That test submits every proposal with no lifetime class (`submission_for` at `crates/daemon/src/source_capture_tests.rs:3331`). A cited and an uncited whole-sentence quotation classed `current_work` or `status`, compared on the same columns, remain to be constructed.
+
 ## Investigation log
 
 ### Q: Do the admission rows differ between cited and uncited decisions?
