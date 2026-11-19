@@ -17,6 +17,40 @@ function failureCode(message: string | undefined, signal: AbortSignal): NativeCa
     return PROVIDER_UNAVAILABLE.test(message ?? "") ? "provider_unavailable" : "model_failed";
 }
 
+type Payload = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is Payload =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * A capture call sends one user message and ends, so that message is never the prefix of a
+ * later request. A cache marker on it writes an entry that no request reads, at the provider's
+ * cache-write premium. This removes cache markers from user messages in the two spellings
+ * Pi's providers emit, a Bedrock Converse `cachePoint` block and an Anthropic `cache_control`
+ * member. The system prompt keeps its marker, whether the provider carries it beside
+ * `messages` or as a `system` or `developer` message inside it, since the next capture call
+ * sends that prompt again. The bundled model-execution hook
+ * (`crates/host-runtime/assets/pi-model_execution-extension.mjs`) applies the same rule to
+ * daemon-run calls.
+ */
+export function withoutConversationCacheMarkers(payload: unknown): unknown {
+    if (!isRecord(payload) || !Array.isArray(payload.messages)) return payload;
+    const messages = payload.messages.map((message: unknown) => {
+        if (!isRecord(message) || message.role !== "user" || !Array.isArray(message.content)) {
+            return message;
+        }
+        const content = message.content
+            .filter((block: unknown) => !(isRecord(block) && isRecord(block.cachePoint)))
+            .map((block: unknown) => {
+                if (!isRecord(block) || !("cache_control" in block)) return block;
+                const { cache_control: _marker, ...rest } = block;
+                return rest;
+            });
+        return { ...message, content };
+    });
+    return { ...payload, messages };
+}
+
 /** Resolve auth inside the active harness, including its OAuth refresh and
  * registered custom providers. Neither credentials nor reasoning leave it. */
 export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExecutor {
@@ -62,6 +96,7 @@ export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExe
                     ),
                     timeoutMs: work.maxDurationMs,
                     maxRetries: 0,
+                    onPayload: withoutConversationCacheMarkers,
                 },
             );
             let text = "";
