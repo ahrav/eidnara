@@ -1263,10 +1263,25 @@ no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list 
 finite), contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes
 a single quotation. The rule reads sentence ends in `.` and `!` only, so text
-in a script that ends sentences otherwise is judged a paragraph at a time. Capture records each such fact with a statement record in the
+in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source may carry `lifetime`, the extractor's class of
+how long the statement holds: `lasting`, a rule, preference, convention,
+decision, constraint, or stable fact that still guides a different task in a
+later session; `current_work`, a request, specification, plan, or steering of
+the task in progress, or an instruction for one occasion; `status`, what
+happened or is observed; or `unsettled`, a matter the user leaves undecided.
+A value outside these four is a schema defect of its source's decision. The
+user's statement is approved when its `lifetime` is `lasting`, `unsettled`,
+or absent. Capture records each approved statement with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
-automatic surfaces. Capture alone writes the `user-statements` domain: a
+automatic surfaces. A user's statement whose `lifetime` is `current_work` or
+`status` is stored as a labeled memory for explicit search with the user's
+words as its text; it has no statement record, and
+`decisions_approval_refused` leaves it uncounted. A captured fact's rationale
+holds the class under `lifetime` when its proposal carried one. Proposals of
+one source that share a category and quotation freeze as one fact with the
+class that holds longest, in the order `lasting`, `unsettled`, `current_work`,
+`status`, and with no class when one of them carried none. Capture alone writes the `user-statements` domain: a
 `kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
 quotes: source kind `user`, source id `memory_capture_statement:` followed by
 the first 32 hexadecimal digits of the capture source's identity, revision 1.
@@ -1353,6 +1368,11 @@ named in `replaces` or `also_replaces` becomes a contest, and when the
 `replaces` target is one, every target of the proposal does. A user statement
 whose `replaces` target is released contests that target when the Kernel
 serves it on `auto_inject`, so the two values are shown as a disagreement. A
+user's statement classed `current_work` or `status` ends with its task, as an
+exception for one occasion does, and leaves the rule it names in force: its
+`replaces` and `also_replaces` links to facts served on `auto_inject` are
+released and record no contest, and it keeps its links to labeled facts and
+the `contests` it names. A
 user source's contests are kept when the source reaches capture under its
 own message id and its quotation is one or more whole sentences of a
 plain-prose paragraph of the message, wherever a colon stands before them,

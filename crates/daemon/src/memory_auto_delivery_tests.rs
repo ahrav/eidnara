@@ -50,6 +50,16 @@ struct Extracted {
     contests: Vec<String>,
     /// The memory category; `PROJECT_RULES` when absent.
     category: Option<&'static str>,
+    /// The extractor's lifetime class; left out of the proposal when absent.
+    lifetime: Option<&'static str>,
+}
+
+/// A proposal the extractor classed by how long its statement holds.
+fn classed(quote: &str, lifetime: &'static str) -> Extracted {
+    Extracted {
+        lifetime: Some(lifetime),
+        ..fact(quote)
+    }
 }
 
 fn fact(quote: &str) -> Extracted {
@@ -147,6 +157,9 @@ async fn drain(
                         }
                         if !memory.contests.is_empty() {
                             value["contests"] = json!(memory.contests);
+                        }
+                        if let Some(lifetime) = memory.lifetime {
+                            value["lifetime"] = json!(lifetime);
                         }
                         value
                     })
@@ -2017,6 +2030,146 @@ async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_r
             .expect("the statement is delivered to a later session");
         assert!(block.contains(&stated(statement)), "{block}");
     }
+}
+
+/// The extractor classes each user statement by how long it holds. A rule
+/// and an undecided matter outlive their task and reach the next session's
+/// block. A request for the change in progress and a remark on its state
+/// are stored with the user's words for explicit search, hold no statement
+/// record, and stay out of the block.
+#[tokio::test]
+async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_otherwise() {
+    let rule = "Run the integration suite before every merge.";
+    let undecided = "We have not settled whether the importer keeps the legacy CSV path.";
+    let request = "Rename the retry helper to backoff_delay in this module.";
+    let remark = "The dashboard page loads again after the last change.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let messages = [
+        ("m1", "user", rule),
+        ("m2", "user", undecided),
+        ("m3", "user", request),
+        ("m4", "user", remark),
+    ];
+    capture(&handler, FIRST, "s1", &messages, |text, _| {
+        vec![classed(
+            text,
+            match text {
+                text if text == rule => "lasting",
+                text if text == undecided => "unsettled",
+                text if text == request => "current_work",
+                _ => "status",
+            },
+        )]
+    })
+    .await;
+
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(rule), "visible".to_string()),
+        (stated(undecided), "visible".to_string()),
+        (stated(request), "labeled".to_string()),
+        (stated(remark), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+    let mut records = live_statement_records(&handler, &project);
+    records.sort();
+    let mut approved = vec![stated(rule), stated(undecided)];
+    approved.sort();
+    assert_eq!(records, approved);
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the lasting statements are delivered to a later session");
+    assert!(block.contains(&stated(rule)), "{block}");
+    assert!(block.contains(&stated(undecided)), "{block}");
+    assert!(!block.contains(request), "{block}");
+    assert!(!block.contains(remark), "{block}");
+}
+
+/// A proposal that names no lifetime is approved as every whole user
+/// statement was before the class existed, and a proposal that names an
+/// unknown one is refused with its source.
+#[tokio::test]
+async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_refused() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", PNPM)], |_, _| {
+        vec![fact(PNPM)]
+    })
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(PNPM), "visible".to_string())]
+    );
+
+    enqueue(&handler, FIRST, "s1", &[("m2", "user", THURSDAY)]).await;
+    let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    let work = body(
+        handler
+            .handle_native_capture_next(test_route(FIRST), &next)
+            .await,
+    );
+    assert_eq!(work["state"], "work", "{work}");
+    let output = json!({"version": 1, "decisions": [{"message_id": "m2", "memories": [{
+        "category": "PROJECT_RULES",
+        "content": "Release branches are cut on Thursday.",
+        "quote": THURSDAY,
+        "lifetime": "forever",
+    }]}]});
+    let submission = json!({
+        "method": "memory.capture.submit",
+        "session_id": "s1",
+        "lease": work["lease"],
+        "model": work["model"],
+        "output": output.to_string(),
+    });
+    body(
+        handler
+            .handle_native_capture_submit(test_route(FIRST), &submission)
+            .await,
+    );
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(stated(PNPM), "visible".to_string())],
+        "the refused source wrote nothing"
+    );
+}
+
+/// A correction the extractor classes as serving the task in progress, such
+/// as a one-time exception, is stored for explicit search and leaves the
+/// approved rule it names live and delivered.
+#[tokio::test]
+async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
+    let exception = "Skip the integration suite for this hotfix.";
+    let rule = "Run the integration suite before every merge.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", rule)], |_, _| {
+        vec![classed(rule, "lasting")]
+    })
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", exception)],
+        |_, existing| {
+            vec![Extracted {
+                replaces: ids_containing(existing, "integration suite"),
+                ..classed(exception, "current_work")
+            }]
+        },
+    )
+    .await;
+
+    assert_eq!(live_statement_records(&handler, &project), [stated(rule)]);
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the rule is still delivered");
+    assert!(block.contains(&stated(rule)), "{block}");
+    assert!(!block.contains("contested"), "{block}");
+    let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    assert!(
+        rows.contains(&(stated(exception), "labeled".to_string())),
+        "{rows:?}"
+    );
 }
 
 /// Text the user quotes from someone else stays labeled: a sentence inside

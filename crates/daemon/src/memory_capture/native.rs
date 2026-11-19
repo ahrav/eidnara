@@ -472,6 +472,13 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
+                // One quotation proposed under two classes is stored under
+                // the one that holds longer, so a statement the extractor
+                // read both ways is delivered.
+                kept.lifetime = match (kept.lifetime, memory.lifetime) {
+                    (Some(kept), Some(joined)) => Some(kept.max(joined)),
+                    _ => None,
+                };
                 if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
@@ -765,6 +772,7 @@ impl CaptureWork {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
             super::is_user_source(job)
                 && !super::cite::is_hashed_source_id(&job.message_id)
+                && super::outlives_its_task(memory)
                 && super::quotes_whole_statements(prose, &memory.quote)
         };
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
