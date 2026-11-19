@@ -24,7 +24,7 @@ part.
 | Quote and source validation | `crates/daemon/src/memory_capture.rs:322` (`parse_capture_batch`), `:870` (`validate_capture_memories`) | quotes are substrings of their own batch source | unaudited |
 | Job identity | `crates/memory-store/src/memory_capture.rs:136` (`job_id`) | job id derives from the source tuple and redacted text | unaudited |
 | Hashed fragment id | `crates/daemon/src/memory_capture.rs:1011` (`native_capture_fragments`) | out-of-grammar or oversized ids become `{sha256}:{offset}` | unaudited |
-| Capture commit gate | `crates/daemon/src/memory_capture.rs:1750`; `crates/daemon/src/lib.rs:7052` | publish, checkpoint, source publish, and delete serialize | unaudited |
+| Capture commit gate | `crates/daemon/src/memory_capture.rs:1750`; `crates/daemon/src/lib.rs:7063` | publish, checkpoint, source publish, and delete serialize | unaudited |
 | Message unit identity | `crates/daemon/src/harness_sources.rs:214` (`SessionIdentity::message_unit`) | one unit per text block | unaudited |
 | Evidence id from receipt key | `crates/daemon/src/harness_sources.rs:1056` (`evidence_request`) | `srcev:` plus the unit key | unaudited |
 | Isolated bounded open | `crates/daemon/src/git_sources.rs:131` (`isolated_options`), `:138` (`open`), `:148` (`open_with_slots`) | isolation, replacement refs ignored, allocation limit; `open_with_slots` sizes the pack index slot map and, for a given size, refuses the repositories the default sizing refuses | unaudited |

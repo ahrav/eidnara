@@ -2089,7 +2089,8 @@ pub(crate) fn is_pi_bash_execution_text(text: &str) -> bool {
 /// A captured memory is eligible for approval as the user's statement
 /// when it is the user's own words ([`user_stated`]) and its lifetime class
 /// outlives the task or is absent. The class withholds approval and grants
-/// none, and the Kernel's acceptance of the statement record grants it.
+/// none: the approval needs the Kernel to accept the statement record and
+/// the admission that rests on it.
 /// `prose` is the job's text.
 fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     outlives_its_task(memory) && user_stated(states_whole, prose, memory)
@@ -4162,8 +4163,9 @@ fn write_captured_memories(
         }
         let stated = stated[index];
         // The user's own words are eligible for approval when their
-        // lifetime class outlives the task or is absent. The Kernel's
-        // acceptance of the statement record grants the approval.
+        // lifetime class outlives the task or is absent. The approval
+        // needs the Kernel to accept the statement record and the
+        // admission that rests on it.
         let attributed = stated && outlives_its_task(memory);
         // Validation at extraction refuses a duplicate that also replaces
         // and further targets beside no replacement; a stored plan of either
@@ -7025,9 +7027,11 @@ mod tests {
                 "{lifetime}"
             );
         }
-        // The same statement classed lasting keeps its replacement.
+        // The same statement classed lasting keeps its replacement and
+        // both further targets.
         let lasting = parse("lasting", "mem_rule", ["mem_note", "mem_echo"]);
         assert_eq!(lasting.replaces.as_deref(), Some("mem_rule"));
+        assert_eq!(lasting.also_replaces, ["mem_note", "mem_echo"]);
         assert!(lasting.contests.is_empty());
     }
 

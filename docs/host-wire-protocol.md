@@ -1272,10 +1272,10 @@ happened or is observed; or `unsettled`, a matter the user leaves undecided.
 A value outside these four is a schema defect of its source's decision, and
 a `lifetime` given as `null` reads as absent. The class withholds approval
 and grants none: the user's statement, as the rule above defines it, is
-eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent. Capture records each eligible statement with a statement record in the
+eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent. For each eligible statement capture writes a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
-text, and admits the fact on that approval, so the Kernel serves it on
-automatic surfaces. A user's statement whose `lifetime` is `current_work` or
+text, and admits the fact on that approval; the statement is approved, and the Kernel serves it on
+automatic surfaces, once the Kernel accepts both the record and the admission that rests on it (the refusal rule below covers the other case). A user's statement whose `lifetime` is `current_work` or
 `status` is stored as a labeled memory for explicit search under the rules
 of every labeled memory; it has no statement record, and
 `decisions_approval_refused` leaves it uncounted. A captured fact's rationale
@@ -1303,11 +1303,11 @@ Each reference memory offered to the extractor carries `user_statement`, true
 when the Kernel serves it on automatic surfaces, which a user's recorded
 statement is. A proposal that names
 `duplicate_of` writes no fact, with one exception, may still record a
-contest through the fact it duplicates, and settles a contest when it is the
-user's own statement of a contested fact (both below): a user's statement that
+contest through the fact it duplicates, and can settle a contest when it is the
+user's eligible word-for-word statement of a contested fact, under the conditions below (both below): a user's statement that
 duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
-its own fact with its statement record, or as a labeled fact when its
+its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when its
 `lifetime` is `current_work` or `status`, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; a statement of those two
 classes settles no contest; the name records which memory

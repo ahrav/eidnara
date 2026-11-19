@@ -2287,6 +2287,7 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
             |text, _| vec![config_value(text, None)],
         )
         .await;
+        let approved_id = std::cell::RefCell::new(String::new());
         capture(
             &handler,
             SECOND,
@@ -2298,6 +2299,7 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
                     assert_eq!(ids.len(), 1, "{needle}: {existing:?}");
                     ids.into_iter().next().unwrap()
                 };
+                approved_id.replace(id(&stated(value)));
                 vec![Extracted {
                     replaces: vec![id(report), id(&stated(value)), id(echo)],
                     ..config_value(change, Some(lifetime))
@@ -2305,6 +2307,17 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
             },
         )
         .await;
+        // The correction's own row names the approved statement it
+        // contests.
+        let correction = memory_rows(&handler, &project)
+            .into_iter()
+            .find(|row| row.1 == stated(change))
+            .expect("the correction is stored");
+        assert_eq!(
+            correction.3["contests"],
+            json!([approved_id.borrow().as_str()]),
+            "{lifetime}"
+        );
 
         let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
         rows.sort();
