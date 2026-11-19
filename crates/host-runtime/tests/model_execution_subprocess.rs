@@ -150,6 +150,14 @@ fn main() {
         ("pi_argv_privacy_contract", pi_argv_privacy_contract),
         ("pi_provider_alias_mapping", pi_provider_alias_mapping),
         (
+            "pi_runs_share_one_working_directory",
+            pi_runs_share_one_working_directory,
+        ),
+        (
+            "pi_refuses_a_working_directory_that_is_a_symlink",
+            pi_refuses_a_working_directory_that_is_a_symlink,
+        ),
+        (
             "pi_alias_credential_failure_retries_canonical_provider",
             pi_alias_credential_failure_retries_canonical_provider,
         ),
@@ -558,6 +566,9 @@ mod fixture {
             stats.insert("hook_file_mode".into(), mode_bits(&hook).into());
             stats.insert("hook_file_symlink".into(), is_symlink(&hook).into());
         }
+        let core = rustix::process::getrlimit(rustix::process::Resource::Core);
+        stats.insert("core_limit_soft".into(), core.current.into());
+        stats.insert("core_limit_hard".into(), core.maximum.into());
         fs::write(
             out.join("stats.json"),
             serde_json::to_vec(&serde_json::Value::Object(stats)).expect("stats serialize"),
@@ -1517,6 +1528,12 @@ fn opencode_argv_env_stdin_contract() {
         env.get("HOME").map(PathBuf::from).as_deref(),
         Some(private_dir)
     );
+    // An OpenCode child keeps the host's core-file limit, which shows the fixture reports the limit a child inherits.
+    let inherited = rustix::process::getrlimit(rustix::process::Resource::Core).maximum;
+    assert_eq!(
+        setup.stats()["core_limit_hard"],
+        serde_json::Value::from(inherited)
+    );
 }
 
 fn closed_dispatch_sink_prevents_spawn() {
@@ -1747,13 +1764,98 @@ fn pi_argv_privacy_contract() {
         .parent()
         .expect("dir")
         .to_path_buf();
+    // The child starts in the state root's shared working directory, so the system prompt Pi builds names one path on every run.
     let cwd = fs::read_to_string(setup.out.path().join("cwd.txt")).expect("cwd");
-    assert_eq!(PathBuf::from(cwd), private_dir);
+    assert_eq!(PathBuf::from(cwd), state_root().path().join("cwd"));
+    // A crashing child writes no core file into the directory later runs start in.
+    assert_eq!(stats["core_limit_soft"], 0);
+    assert_eq!(stats["core_limit_hard"], 0);
     assert_eq!(
         env.get("HOME").map(PathBuf::from).as_deref(),
         Some(private_dir.as_path())
     );
     assert!(!private_dir.exists());
+}
+
+/// Two Pi runs start in the same working directory and keep separate private directories.
+fn pi_runs_share_one_working_directory() {
+    let mut observed = Vec::new();
+    for _ in 0..2 {
+        let setup = RunSetup::new();
+        let transcript = write_transcript(
+            setup.scratch.path(),
+            "success.ndjson",
+            &pi_success_lines("hi", "stop"),
+        );
+        let backend = pi_backend(
+            &setup,
+            &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+            Vec::new(),
+            None,
+        );
+        let request = request(
+            setup.project.path(),
+            Harness::Pi,
+            "anthropic/claude",
+            Some(SYSTEM_SENTINEL),
+        );
+        let (terminal, _) = execute(&backend, request);
+        assert!(matches!(terminal, BackendTerminal::Completed { .. }));
+        let cwd = fs::read_to_string(setup.out.path().join("cwd.txt")).expect("cwd");
+        let home = setup.env().get("HOME").cloned().expect("HOME");
+        observed.push((PathBuf::from(cwd), PathBuf::from(home)));
+    }
+    assert_eq!(observed[0].0, observed[1].0);
+    assert_ne!(observed[0].1, observed[1].1);
+}
+
+/// A working directory path that another principal could redirect starts no child and leaves no run directory.
+fn pi_refuses_a_working_directory_that_is_a_symlink() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    fs::set_permissions(data_dir.path(), fs::Permissions::from_mode(0o700))
+        .expect("private data dir");
+    let root = StateRoot::resolve(Some(data_dir.path())).expect("state root");
+    let elsewhere = tempfile::tempdir().expect("link target");
+    std::os::unix::fs::symlink(elsewhere.path(), root.path().join("cwd")).expect("planted link");
+
+    let setup = RunSetup::new();
+    let transcript = write_transcript(
+        setup.scratch.path(),
+        "success.ndjson",
+        &pi_success_lines("hi", "stop"),
+    );
+    let backend = PiBackend::with_limits(
+        PiRuntimeDescriptor {
+            closure: fixture_closure(&setup, "pi", &[]),
+            interpreter_node: "bin/runtime".to_owned(),
+            entrypoint_node: "node_modules/pi/entry.mjs".to_owned(),
+            provider_extension_nodes: Vec::new(),
+        },
+        setup.snapshot(&[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())]),
+        root.clone(),
+        None,
+        quick_limits(),
+    );
+    let request = request(
+        setup.project.path(),
+        Harness::Pi,
+        "anthropic/claude",
+        Some(SYSTEM_SENTINEL),
+    );
+    let (terminal, _) = execute(&backend, request);
+    let error = failed(&terminal);
+    assert_eq!(error.class, ErrorClass::Permanent);
+    assert!(
+        error.message.contains("could not start"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !setup.out.path().join("cwd.txt").exists(),
+        "the child never started"
+    );
+    // Only a run's private directory creates `runs/`, so its absence shows the refusal came first.
+    assert!(!root.path().join("runs").exists());
 }
 
 fn pi_provider_alias_mapping() {
