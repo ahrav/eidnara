@@ -1250,13 +1250,19 @@ paragraph, or follows a `.`, `!`, or question mark and whitespace with a first c
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, and no lowercase word
 follows it past any punctuation; a paragraph whose first letter is lowercase,
-and in which no closing mark and whitespace is followed by an uppercase
-letter, is written without sentence capitals, so in it a lowercase first
-character starts a sentence and a lowercase word may follow the quotation,
-while one capitalized sentence start anywhere in the paragraph keeps the rule
-for capitalized text, since its lowercase first letter may be a tool name;
-the casing is a cue to how the writer types and proves nothing about one
-period; the paragraph's indentation and trailing
+and in which the next letter or digit after a `.`, `!`, or question mark and
+whitespace is nowhere an uppercase letter, is written without sentence
+capitals: in it a lowercase first character starts a sentence after such a
+mark and whitespace, and a lowercase word that directly follows the
+quotation's closing mark and whitespace starts the next sentence, while a
+word behind another mark there, such as a bracket or a dash, is asked the
+question of a capitalized paragraph; one capitalized sentence start anywhere
+in the paragraph keeps the rule for capitalized text, since its lowercase
+first letter may be a tool name; in such a lowercase paragraph a period
+stays inside its sentence after a run of periods, after a title of the list
+below in any letter case, and after `etc`, `vs`, `cf`, `approx`, `incl`, or
+`esp`; the casing is a cue to how the writer types and proves nothing about
+one period; the paragraph's indentation and trailing
 spaces border its sentences as its edges do; neither boundary falls, at a
 period,
 at a dotted abbreviation, a word of two or more one- or two-letter segments
