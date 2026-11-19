@@ -1531,8 +1531,8 @@ fn opencode_argv_env_stdin_contract() {
     // An OpenCode child keeps the host's core-file limit, which shows the fixture reports the limit a child inherits.
     let inherited = rustix::process::getrlimit(rustix::process::Resource::Core).maximum;
     assert_eq!(
-        setup.stats()["core_limit_hard"],
-        serde_json::Value::from(inherited)
+        setup.stats().get("core_limit_hard"),
+        Some(&serde_json::Value::from(inherited))
     );
 }
 
