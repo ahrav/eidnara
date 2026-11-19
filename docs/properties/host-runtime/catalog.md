@@ -10335,7 +10335,7 @@ Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
 Open questions:
 
-- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3595`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
+- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3598`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
 
 ### model_execution-child-environment-carries-only-the-provider-row
 
@@ -10382,7 +10382,7 @@ Fault/timing angle: An earlier trusted extension leaves a larger limit in a seco
 Required faults and enabling state: A payload touched by an earlier handler; a payload carrying two output-token spellings; a payload with no recognized spelling; a revision 2 request that omits temperature.
 Confidence: medium - [evidence](evidence/model_execution-payload-hook-owns-the-generation-controls.md). `pi_model_execution_hook_owns_generation_controls`, `pi_model_execution_hook_omits_temperature_for_registry_refusing_models`, and `pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt` (`crates/host-runtime/tests/model_execution_subprocess.rs`, `harness = false` runner) materialize the hook bytes from `PI_MODEL_EXECUTION_EXTENSION_BYTES` and drive them under Node or Bun.
 Existing check: The check named above; unaudited.
-Impact: A provider request runs with a token budget the caller did not admit, or with a temperature other than the one a request admitted, or a single-turn run pays a cache-write premium for an entry no request reads.
+Impact: A provider request runs with a token budget the caller did not admit, or with a temperature other than the one a request admitted, or a single-turn run pays a cache-write premium for an entry only a Pi retry reads.
 Open questions: None.
 
 ### local_embeddings-admission-boundaries-are-exact
