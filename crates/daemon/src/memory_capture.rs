@@ -109,8 +109,24 @@ pub struct CapturedMemory {
     /// proposal that leaves it out or gives `null`, carry no class: such a
     /// memory passes the lifetime check as a [`Lifetime::Lasting`] one does
     /// and its rationale records none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lifetime_name",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub lifetime: Option<Lifetime>,
+}
+
+/// `null` maps to `None`; a present lifetime must be a string matching one
+/// of the four wire names. The derived enum reader alone also reads the
+/// one-key map `{"lasting": null}` as a class.
+fn lifetime_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Lifetime>, D::Error> {
+    use serde::de::IntoDeserializer;
+    Option::<String>::deserialize(deserializer)?
+        .map(|name| Lifetime::deserialize(name.as_str().into_deserializer()))
+        .transpose()
 }
 
 /// How long a user's statement holds. A statement that outlives the task
@@ -2098,9 +2114,8 @@ fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemor
 
 /// Whether a captured memory is the user's own words whatever its class:
 /// an attributed quotation spanning whole statements of a user message that
-/// the job holds whole. Such a memory is written even beside a memory that
-/// holds its fact; [`user_attributed`] adds the class check that makes it
-/// eligible for approval.
+/// the job holds whole. [`user_attributed`] adds the class check that makes
+/// it eligible for approval.
 fn user_stated(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     states_whole
         && memory
@@ -3988,6 +4003,22 @@ fn approved(envelope: &kernel::Envelope<'_>, target: &str) -> Result<bool, kerne
         }))
 }
 
+/// The rationale's `quote` field identifies the quotation even when capture
+/// appends lines to the summary.
+fn holds_user_quotation(held: &kernel::DecisionRow, quote: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Quoted<'a> {
+        #[serde(borrow)]
+        quote: std::borrow::Cow<'a, str>,
+    }
+    held.payload
+        .summary
+        .strip_prefix(USER_STATED)
+        .is_some_and(|rest| rest.starts_with(": "))
+        && serde_json::from_str::<Quoted<'_>>(&held.payload.rationale)
+            .is_ok_and(|stored| stored.quote == quote)
+}
+
 /// Commits one source's frozen plan. `reasons` receives one citation reason
 /// and one anchor reason per capture decision the commit writes; a statement
 /// record has its own lineage and no anchor and adds neither. A replayed
@@ -4174,14 +4205,21 @@ fn write_captured_memories(
             return Err(kernel::KernelError::InvalidInput);
         }
         if let Some(target) = &memory.duplicate_of {
-            checked_capture_target(envelope, project, output, target, false)?;
+            let captured =
+                checked_capture_target(envelope, project, output, target, false)?.is_some();
+            // Another row for the same quotation would duplicate it in
+            // explicit search results.
+            let repeats_stored_words = stated
+                && !attributed
+                && captured
+                && earlier
+                    .get(target)
+                    .is_some_and(|held| holds_user_quotation(held, &memory.quote));
             // A fact the store already holds is written again only as the
             // user's own statement of it, beside a memory that is not one.
-            // A statement that ends with its task is written there too,
-            // labeled, so the user's words are on explicit search.
             // The memory that holds it is then the observation that
             // contests what the message contradicts.
-            if !stated || approved(envelope, target)? {
+            if !stated || repeats_stored_words || approved(envelope, target)? {
                 if earlier.contains_key(target) {
                     pending.push(PendingContest {
                         targets: &memory.contests,
@@ -8491,6 +8529,25 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(unclassed.lifetime, None);
+        // Serde accepts single-key maps for externally tagged enums.
+        // Extractor answers and frozen plans must reject that form for
+        // `lifetime`.
+        for name in ["lasting", "unsettled", "current_work", "status"] {
+            let keyed = json!({
+                "category": "PROJECT_RULES",
+                "content": "Run the suite.",
+                "quote": "Run the integration suite before every merge.",
+                "lifetime": {name: null},
+            });
+            assert!(
+                serde_json::from_str::<CapturedMemory>(&keyed.to_string()).is_err(),
+                "{name}"
+            );
+            assert!(
+                serde_json::from_value::<CapturedMemory>(keyed).is_err(),
+                "{name}"
+            );
+        }
     }
 
     /// The capture prompt defines each class under the name the parser

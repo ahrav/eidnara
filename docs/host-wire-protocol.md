@@ -1315,7 +1315,10 @@ an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when its
 `lifetime` is `current_work` or `status`, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; a statement of those two
-classes settles no contest; the name records which memory
+classes settles no contest, and writes no fact when the memory it duplicates
+is a fact capture wrote under the `User stated` label whose rationale holds
+the same `quote`, so a repeat of such a statement leaves one fact on
+explicit search; the name records which memory
 the extractor matched and carries no Kernel dependency. A memory is served as
 approved when it is visible, not labeled, on `explicit_search`; a fact
 reclassified as sensitive stays approved there while `auto_inject` hides it,
