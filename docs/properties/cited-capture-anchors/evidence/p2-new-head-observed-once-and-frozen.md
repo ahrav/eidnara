@@ -10,11 +10,11 @@ that each anchor's oid equals its plan's frozen head.
 
 ## Evidence trail
 
-`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:748`)
-parses the submission's output, then calls `observe_head` once (`:873`)
+`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:755`)
+parses the submission's output, then calls `observe_head` once (`:883`)
 on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
-same `head` value (`crates/daemon/src/memory_capture.rs:1608`), serialized
+same `head` value (`crates/daemon/src/memory_capture.rs:1682`), serialized
 as `{"commit":"<40 hex>"}` or `"head_unavailable"`
 (`crates/daemon/src/memory_capture/head.rs:15`). `observe_head` (`:32`)
 resolves HEAD once through `head_id` (`:62`), which follows a branch that
@@ -27,7 +27,7 @@ once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:415`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
-(`crates/daemon/src/memory_capture.rs:3995`), so the receipt covers the head.
+(`crates/daemon/src/memory_capture.rs:4098`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
 handler (`crates/daemon/src/memory_capture/native.rs:440`), before `publish`
@@ -57,7 +57,7 @@ store trigger, so both frozen plans stay readable; a new commit on the
 checked-out branch; a retry while the trigger still refuses completion, after
 which both plans still hold the submit-time head; then the trigger dropped and
 a drain that publishes the frozen plans. `a_submission_freezes_one_checkout_head_in_every_plan_and_a_retry_keeps_it`
-(`crates/daemon/src/lib.rs:25086`) does this for a repository with
+(`crates/daemon/src/lib.rs:25101`) does this for a repository with
 commits, a detached HEAD, an unborn HEAD, a plain directory, and a
 repository declaring SHA-256. The head-observation tests freeze a HEAD
 commit stored whole, as an offset delta, and as an id delta in a pack
@@ -87,7 +87,7 @@ aliased branch loose and in `packed-refs`.
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the version stays 1; `head` is `#[serde(default)]`, so a plan
   without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:9284`).
+  (`crates/daemon/src/memory_capture.rs:9640`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 

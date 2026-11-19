@@ -690,7 +690,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
-| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record; every user statement of that plan is counted |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record or at the admission that rests on it; every eligible user statement that the labeled commit writes, one whose `lifetime` is `lasting`, `unsettled`, or absent, is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -1263,10 +1263,29 @@ no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list 
 finite), contains no double
 quotation mark, does not start with a backtick, and neither starts nor closes
 a single quotation. The rule reads sentence ends in `.` and `!` only, so text
-in a script that ends sentences otherwise is judged a paragraph at a time. Capture records each such fact with a statement record in the
+in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source may carry `lifetime`, the extractor's class of
+how long the statement holds: `lasting`, a rule, preference, convention,
+decision, constraint, or stable fact that still guides a different task in a
+later session; `current_work`, a request, specification, plan, or steering of
+the task in progress, or an instruction for one occasion; `status`, what
+happened or is observed; or `unsettled`, a matter the user leaves undecided.
+A value outside these four is a schema defect of its source's decision, and
+a `lifetime` given as `null` reads as absent. The class withholds approval
+and grants none: the user's statement, as the rule above defines it, is
+eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent. For each eligible statement that capture writes as a fact, the approving attempt writes a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
-text, and admits the fact on that approval, so the Kernel serves it on
-automatic surfaces. Capture alone writes the `user-statements` domain: a
+text, and then admits the fact on that approval; the statement is approved, and the Kernel serves it on
+automatic surfaces, once the Kernel accepts both the record and the admission that rests on it (the refusal rule below covers the other case). A user's statement whose `lifetime` is `current_work` or
+`status` is stored as a labeled memory for explicit search under the rules
+of every labeled memory; it has no statement record, and
+`decisions_approval_refused` leaves it uncounted. A captured fact's rationale
+holds the class under `lifetime` when its proposal carried one. When proposals of
+one source that share a category and quotation freeze as one fact, that fact
+carries the class that holds longest among the proposals joined into it, in
+the order `lasting`, `unsettled`, `current_work`, `status`, and no class when
+one of them carried none. A class on a proposal of an assistant source is
+stored in the same way and changes nothing: such a fact is never the user's
+statement. Capture alone writes the `user-statements` domain: a
 `kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
 quotes: source kind `user`, source id `memory_capture_statement:` followed by
 the first 32 hexadecimal digits of the capture source's identity, revision 1.
@@ -1275,10 +1294,12 @@ lineage at 64 and one batch proposes at most 64 memories, so the statements of
 one message fit its lineage and the number of live statements in a project has
 no ceiling; a statement leaves when a correction supersedes or retires it.
 When the Kernel's admission policy refuses a statement record, or the
-admission that rests on it, the same frozen plan commits with each of its user
-statements as a labeled memory for explicit search, and
-`decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
-as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and the labeled commit supersedes
+admission that rests on it, the same frozen plan commits again with each eligible statement it writes
+as a labeled memory for explicit search and with no statement record, and
+`decisions_approval_refused` counts each statement so written. An eligible
+statement that duplicates an approved fact adds no fact of its own in either
+attempt and stays uncounted. A labeled correction replaces no approved fact: each approved fact the plan names
+as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and as a replacement the labeled commit supersedes
 or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility; the
 one text of such a fact that reaches automatic context is the bounded, quoted
@@ -1287,12 +1308,17 @@ Each reference memory offered to the extractor carries `user_statement`, true
 when the Kernel serves it on automatic surfaces, which a user's recorded
 statement is. A proposal that names
 `duplicate_of` writes no fact, with one exception, may still record a
-contest through the fact it duplicates, and settles a contest when it is the
-user's own statement of a contested fact (both below): a user's statement that
+contest through the fact it duplicates, and can settle a contest when it is the
+user's eligible word-for-word statement of a contested fact, under the conditions below (both below): a user's statement that
 duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
-its own fact with its statement record, the duplicated memory stays, and the
-new fact's rationale names it under `restates`; the name records which memory
+its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when its
+`lifetime` is `current_work` or `status`, the duplicated memory stays, and the
+new fact's rationale names it under `restates`; a statement of those two
+classes settles no contest, and writes no fact when the memory it duplicates
+is a fact capture wrote under the `User stated` label whose rationale holds
+the same `quote`, so a repeat of such a statement leaves one fact on
+explicit search; the name records which memory
 the extractor matched and carries no Kernel dependency. A memory is served as
 approved when it is visible, not labeled, on `explicit_search`; a fact
 reclassified as sensitive stays approved there while `auto_inject` hides it,
@@ -1350,9 +1376,15 @@ as `null` names no target. A user quotation that does not meet the
 statement rule replaces no fact served on `auto_inject` and takes no
 replacement claim: each such target
 named in `replaces` or `also_replaces` becomes a contest, and when the
-`replaces` target is one, every target of the proposal does. A user statement
+`replaces` target is one, every target of the proposal does. Targets that become contests are counted after the contests the proposal names, the `replaces` target before the `also_replaces` targets, and a target past the fourth is released under the rule below: that fact stays as it is served and the proposal records no contest on it. A user statement
 whose `replaces` target is released contests that target when the Kernel
 serves it on `auto_inject`, so the two values are shown as a disagreement. A
+user's statement classed `current_work` or `status` is a user quotation that
+is no approved statement, so it replaces no fact served on `auto_inject`:
+each such target it names in `replaces` or `also_replaces` becomes a contest
+under the rule above. An exception for one occasion that names a rule, and a
+correction the extractor classed as work in progress, leave the rule approved
+and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets. A
 user source's contests are kept when the source reaches capture under its
 own message id and its quotation is one or more whole sentences of a
 plain-prose paragraph of the message, wherever a colon stands before them,
@@ -1376,7 +1408,7 @@ shares no content word with the quotation of a proposal that also names
 `contests`, is released; a `contests`
 target that is unprovided, shares no content word with the quotation, is
 also replaced, is the proposal's `duplicate_of` target, or is past the fourth is released; and the `replaces` and `also_replaces` targets an
-assistant source names become contests under the contest check. After
+assistant source names become contests under the contest check, counted after the contests it names. After
 quotations collapse, the facts of one source name each target for one
 purpose: a target one of them replaces or retires is contested by none, a
 fact that only duplicates such a target is dropped, since its text is the
@@ -1448,16 +1480,23 @@ statement nor its contest, as with every fact captured from its own messages.
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
 contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
 of that fact's served text; when the contesting fact cannot be read, the line
-is `Contested by <fact id>` and a note says so. A later statement of the user
-settles a contest: a user statement that replaces the contested fact ends it,
+is `Contested by <fact id>` and a note says so. Only a later statement of the user that is eligible for approval, one whose
+`lifetime` is `lasting`, `unsettled`, or absent,
+can settle a contest: a user statement that replaces the contested fact ends it
+once the Kernel accepts its statement record and the admission that rests on
+it, while a correction whose approval is refused leaves the fact approved and
+contested beside the labeled correction,
 and a user statement that repeats the contested fact word for word, up to
 edge whitespace and its closing `.` or `!`, which names it under
-`duplicate_of` and writes no fact, supersedes it with a fact of the same
+`duplicate_of` and writes no fact, supersedes it, while it is live and
+served as approved at normal sensitivity, with a fact of the same
 text and approval whose rationale holds no `contested_by` and keeps the
 record's `stated_seq` as its own `stated_seq`, so a later contest dates the
 statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
-its own fact and the contest stays. The extractor is
+its own fact and the contest stays. A statement classed `current_work` or
+`status` settles no contest: its word-for-word repeat writes no fact, and its
+statement of another text is stored labeled. The extractor is
 told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
