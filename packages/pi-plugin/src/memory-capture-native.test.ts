@@ -5,9 +5,10 @@ import {
     createAssistantMessageEventStream,
     type Model,
     registerApiProvider,
+    streamSimple,
     unregisterApiProviders,
 } from "@earendil-works/pi-ai/compat";
-import { piMemoryCaptureExecutor } from "./memory-capture-native";
+import { piMemoryCaptureExecutor, withoutConversationCacheMarkers } from "./memory-capture-native";
 
 const source = "eidnara-capture-test";
 afterEach(() => unregisterApiProviders(source));
@@ -227,4 +228,178 @@ it("reports provider auth and transport failures as provider_unavailable, not mo
     expect(await codeFor("429 Too Many Requests")).toBe("provider_unavailable");
     expect(await codeFor("fetch failed: ECONNREFUSED")).toBe("provider_unavailable");
     expect(await codeFor("invalid_request_error: unsupported parameter")).toBe("model_failed");
+});
+
+const captureModel: Model<Api> = {
+    id: "m",
+    name: "custom",
+    provider: "custom-native",
+    api: source,
+    baseUrl: "http://127.0.0.1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 32000,
+    maxTokens: 16000,
+};
+
+function captureResult(text: string): AssistantMessage {
+    return {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        api: source,
+        provider: captureModel.provider,
+        model: captureModel.id,
+        stopReason: "stop",
+        timestamp: 0,
+        usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+    };
+}
+
+it("sends a capture payload whose only cache marker follows the system prompt", async () => {
+    const result = captureResult("{}");
+    const sent: unknown[] = [];
+    const converse = {
+        system: [{ text: "instructions" }, { cachePoint: { type: "default" } }],
+        messages: [
+            { role: "user", content: [{ text: "sources" }, { cachePoint: { type: "default" } }] },
+        ],
+    };
+    const stream: Parameters<typeof registerApiProvider>[0]["streamSimple"] = (
+        requestModel,
+        _context,
+        options,
+    ) => {
+        const events = createAssistantMessageEventStream();
+        void Promise.resolve(options?.onPayload?.(converse, requestModel)).then((payload) => {
+            sent.push(payload ?? converse);
+            events.push({ type: "text_delta", contentIndex: 0, delta: "{}", partial: result });
+            events.push({ type: "done", reason: "stop", message: result });
+        });
+        return events;
+    };
+    registerApiProvider({ api: source, stream, streamSimple: stream }, source);
+    const executor = piMemoryCaptureExecutor({
+        modelRegistry: {
+            find: () => captureModel,
+            getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key" }),
+        },
+    } as never);
+    await executor(
+        {
+            model: "custom-native/m",
+            system: "instructions",
+            prompt: "sources",
+            maxOutputTokens: 100,
+            maxOutputBytes: 1000,
+            maxDurationMs: 1000,
+        } as never,
+        new AbortController().signal,
+    );
+    expect(sent).toEqual([
+        {
+            system: [{ text: "instructions" }, { cachePoint: { type: "default" } }],
+            messages: [{ role: "user", content: [{ text: "sources" }] }],
+        },
+    ]);
+});
+
+it("removes cache markers from user messages and keeps the system prompt's marker", () => {
+    const marker = { type: "ephemeral" };
+    const anthropic = {
+        system: [{ type: "text", text: "instructions", cache_control: marker }],
+        messages: [
+            { role: "user", content: [{ type: "text", text: "sources", cache_control: marker }] },
+        ],
+    };
+    expect(withoutConversationCacheMarkers(anthropic)).toEqual({
+        system: anthropic.system,
+        messages: [{ role: "user", content: [{ type: "text", text: "sources" }] }],
+    });
+    // An OpenAI-completions payload with Anthropic cache control carries the system prompt as a message.
+    const completions = {
+        max_completion_tokens: 100,
+        messages: [
+            {
+                role: "system",
+                content: [{ type: "text", text: "instructions", cache_control: marker }],
+            },
+            {
+                role: "assistant",
+                content: [{ type: "text", text: "earlier answer", cache_control: marker }],
+            },
+            { role: "user", content: [{ type: "text", text: "sources", cache_control: marker }] },
+        ],
+    };
+    // Only user messages lose their marker: the system and assistant messages come back as sent.
+    expect(withoutConversationCacheMarkers(completions)).toEqual({
+        max_completion_tokens: 100,
+        messages: [
+            completions.messages[0],
+            completions.messages[1],
+            { role: "user", content: [{ type: "text", text: "sources" }] },
+        ],
+    });
+    const developer = {
+        messages: [
+            { role: "developer", content: [{ type: "text", text: "i", cache_control: marker }] },
+        ],
+    };
+    expect(withoutConversationCacheMarkers(developer)).toEqual(developer);
+    const plain = { messages: [{ role: "user", content: "text" }], input: "x" };
+    expect(withoutConversationCacheMarkers(plain)).toEqual(plain);
+    // A payload that carries its conversation outside `messages` is returned as the same object.
+    const responses = { input: [], max_output_tokens: 1 };
+    expect(withoutConversationCacheMarkers(responses)).toBe(responses);
+});
+
+it("leaves the Bedrock payload Pi builds with one cache point, after the system prompt", async () => {
+    const bedrock: Model<Api> = {
+        ...captureModel,
+        id: "anthropic.claude-sonnet-4-5",
+        name: "Claude Sonnet 4.5",
+        provider: "amazon-bedrock",
+        api: "bedrock-converse-stream",
+        baseUrl: "http://127.0.0.1:9",
+    };
+    let built: unknown;
+    let sent: unknown;
+    const stream = streamSimple(
+        bedrock,
+        {
+            systemPrompt: "instructions",
+            messages: [{ role: "user", content: "sources", timestamp: 0 }],
+            tools: [],
+        },
+        {
+            env: {
+                AWS_ACCESS_KEY_ID: "test",
+                AWS_SECRET_ACCESS_KEY: "test",
+                AWS_REGION: "us-west-2",
+            },
+            maxRetries: 0,
+            onPayload: (payload) => {
+                built = structuredClone(payload);
+                sent = withoutConversationCacheMarkers(payload);
+                throw new Error("payload inspected");
+            },
+        },
+    );
+    for await (const _event of stream) void _event;
+    const point = { cachePoint: { type: "default" } };
+    expect(built).toMatchObject({
+        system: [{ text: "instructions" }, point],
+        messages: [{ role: "user", content: [{ text: "sources" }, point] }],
+    });
+    expect(sent).toMatchObject({
+        system: [{ text: "instructions" }, point],
+        messages: [{ role: "user", content: [{ text: "sources" }] }],
+    });
 });
