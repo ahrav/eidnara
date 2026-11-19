@@ -474,7 +474,7 @@ pub(super) fn collapse_quotations(
             Some(kept) => {
                 // One quotation proposed under two classes is stored under
                 // the one that holds longer, so a statement the extractor
-                // read both ways is delivered.
+                // read both ways stays eligible for approval.
                 kept.lifetime = match (kept.lifetime, memory.lifetime) {
                     (Some(kept), Some(joined)) => Some(kept.max(joined)),
                     _ => None,
