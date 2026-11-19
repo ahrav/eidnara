@@ -2256,6 +2256,85 @@ async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
     }
 }
 
+/// A correction the extractor classes as ending with its task names three
+/// copies of the old value: an assistant's report as the fact it replaces,
+/// and the user's approved statement and a second report as further
+/// copies. The two reports leave explicit search, the correction is stored
+/// labeled, and the approved statement stays approved and delivered,
+/// contested by the correction.
+#[tokio::test]
+async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approved_statement() {
+    let value = "The staging port is 1234.";
+    let report = "The staging port is 1234 in deploy.toml.";
+    let echo = "Staging listens on port 1234, the staging port.";
+    let change = "Use port 4321 for the staging port during this migration.";
+    for lifetime in ["current_work", "status"] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        let config_value = |quote: &str, lifetime: Option<&'static str>| Extracted {
+            category: Some("CONFIG_VALUES"),
+            lifetime,
+            ..fact(quote)
+        };
+        capture(&handler, FIRST, "s1", &[("m1", "user", value)], |_, _| {
+            vec![config_value(value, Some("lasting"))]
+        })
+        .await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m2", "assistant", report), ("m3", "assistant", echo)],
+            |text, _| vec![config_value(text, None)],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m4", "user", change)],
+            |_, existing| {
+                let id = |needle: &str| {
+                    let ids = ids_containing(existing, needle);
+                    assert_eq!(ids.len(), 1, "{needle}: {existing:?}");
+                    ids.into_iter().next().unwrap()
+                };
+                vec![Extracted {
+                    replaces: vec![id(report), id(&stated(value)), id(echo)],
+                    ..config_value(change, Some(lifetime))
+                }]
+            },
+        )
+        .await;
+
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let mut expected = vec![
+            (stated(value), "visible".to_string()),
+            (stated(change), "labeled".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            rows, expected,
+            "the two reports are retired and the approved statement stays: {lifetime}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(value)],
+            "{lifetime}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the approved statement is delivered");
+        let line = block
+            .lines()
+            .find(|line| line.contains(value))
+            .expect("the approved statement is delivered");
+        assert!(
+            line.contains("contested") && line.contains("port 4321"),
+            "the approved statement is contested by the correction: {line}"
+        );
+    }
+}
+
 /// The agent stores a fact with the host memory tool, and the user's own
 /// sentence of it is classed as a remark on the state of the work. The
 /// user's words are still recorded beside the note, labeled and with no

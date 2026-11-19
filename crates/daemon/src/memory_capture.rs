@@ -113,10 +113,10 @@ pub struct CapturedMemory {
     pub lifetime: Option<Lifetime>,
 }
 
-/// How long a user's statement holds. The class decides delivery: a
-/// statement that outlives the task it was made in is eligible for approval
-/// and the automatic surfaces, and a statement that ends with its task or
-/// reports a passing state is stored for explicit search. The stored text is the
+/// How long a user's statement holds. A statement that outlives the task
+/// it was made in passes the lifetime check for approval, and a statement
+/// that ends with its task or reports a passing state is stored for
+/// explicit search. The stored text is the
 /// user's words in every class.
 ///
 /// The variants are declared from the class that ends soonest to the one
@@ -139,8 +139,8 @@ pub enum Lifetime {
 }
 
 impl Lifetime {
-    /// Whether a statement of this class is delivered to later sessions
-    /// without a search.
+    /// Whether a statement of this class passes the lifetime check for
+    /// approval.
     fn outlives_its_task(self) -> bool {
         match self {
             Self::Lasting | Self::Unsettled => true,
@@ -186,11 +186,10 @@ struct ExistingCaptureMemory {
     /// `false`.
     #[serde(default, rename = "user_statement")]
     automatic: bool,
-    /// Whether an observation contests the memory. A user statement that
-    /// is eligible for approval can settle it: a correction replaces the
-    /// memory once the Kernel accepts its statement record, and a
-    /// word-for-word repeat clears the contest while the memory is live,
-    /// approved, and contested.
+    /// Whether an observation contests the memory. Only a user statement
+    /// that is eligible for approval can settle it, by replacing the
+    /// memory or by repeating it word for word; the wire document states
+    /// the conditions of each.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     contested: bool,
 }
@@ -4187,11 +4186,10 @@ fn write_captured_memories(
                         observation: target.clone(),
                     });
                 }
-                // The user's own statement of a fact the store holds as
-                // their approved statement can settle a contest of it when
-                // it is eligible for approval itself; the settlement below
-                // adds its own conditions. One that ends with its task
-                // leaves the contest as it is.
+                // Only the user's own statement that is eligible for
+                // approval is queued to settle a contest of the fact it
+                // repeats; the settlement below decides whether it does.
+                // One that ends with its task leaves the contest as it is.
                 if attributed {
                     reaffirmed.push((target, &memory.content));
                 }
@@ -4369,9 +4367,10 @@ fn write_captured_memories(
         if removed.contains(target) {
             continue;
         }
-        // The user settles a contest by stating the contested statement
-        // again, word for word, in a statement eligible for approval,
-        // while the statement is still live, approved, and contested.
+        // A queued repeat settles a contest only when the target is still
+        // contested, its text equals the repeat's under `statement_text`,
+        // and the rewrite succeeds, which needs the target live and served
+        // as approved at normal sensitivity.
         if let Some(statement) = earlier.get(target)
             && capture_rationale(statement).contested_by.is_some()
             && statement_text(&statement.payload.summary) == statement_text(text)

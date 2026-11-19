@@ -1272,7 +1272,7 @@ happened or is observed; or `unsettled`, a matter the user leaves undecided.
 A value outside these four is a schema defect of its source's decision, and
 a `lifetime` given as `null` reads as absent. The class withholds approval
 and grants none: the user's statement, as the rule above defines it, is
-approved when its `lifetime` is `lasting`, `unsettled`, or absent. Capture records each approved statement with a statement record in the
+eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent. Capture records each eligible statement with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
 automatic surfaces. A user's statement whose `lifetime` is `current_work` or
@@ -1292,7 +1292,7 @@ one message fit its lineage and the number of live statements in a project has
 no ceiling; a statement leaves when a correction supersedes or retires it.
 When the Kernel's admission policy refuses a statement record, or the
 admission that rests on it, the same frozen plan commits with each of its
-approved statements as a labeled memory for explicit search, and
+eligible statements as a labeled memory for explicit search, and
 `decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
 as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and the labeled commit supersedes
 or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
@@ -1472,12 +1472,16 @@ statement nor its contest, as with every fact captured from its own messages.
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
 contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
 of that fact's served text; when the contesting fact cannot be read, the line
-is `Contested by <fact id>` and a note says so. A later statement of the user that is eligible for approval, one whose
+is `Contested by <fact id>` and a note says so. Only a later statement of the user that is eligible for approval, one whose
 `lifetime` is `lasting`, `unsettled`, or absent,
-can settle a contest: a user statement that replaces the contested fact ends it,
+can settle a contest: a user statement that replaces the contested fact ends it
+once the Kernel accepts its statement record and the admission that rests on
+it, while a correction whose approval is refused leaves the fact approved and
+contested beside the labeled correction,
 and a user statement that repeats the contested fact word for word, up to
 edge whitespace and its closing `.` or `!`, which names it under
-`duplicate_of` and writes no fact, supersedes it with a fact of the same
+`duplicate_of` and writes no fact, supersedes it, while it is live and
+served as approved at normal sensitivity, with a fact of the same
 text and approval whose rationale holds no `contested_by` and keeps the
 record's `stated_seq` as its own `stated_seq`, so a later contest dates the
 statement from its first commit. A user statement
