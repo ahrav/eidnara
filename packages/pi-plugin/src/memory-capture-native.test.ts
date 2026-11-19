@@ -331,22 +331,33 @@ it("removes cache markers from user messages and keeps the system prompt's marke
                 role: "system",
                 content: [{ type: "text", text: "instructions", cache_control: marker }],
             },
+            {
+                role: "assistant",
+                content: [{ type: "text", text: "earlier answer", cache_control: marker }],
+            },
             { role: "user", content: [{ type: "text", text: "sources", cache_control: marker }] },
         ],
     };
+    // Only user messages lose their marker: the system and assistant messages come back as sent.
     expect(withoutConversationCacheMarkers(completions)).toEqual({
         max_completion_tokens: 100,
         messages: [
             completions.messages[0],
+            completions.messages[1],
             { role: "user", content: [{ type: "text", text: "sources" }] },
         ],
     });
     const developer = {
-        messages: [{ role: "developer", content: [{ type: "text", text: "i", cache_control: marker }] }],
+        messages: [
+            { role: "developer", content: [{ type: "text", text: "i", cache_control: marker }] },
+        ],
     };
     expect(withoutConversationCacheMarkers(developer)).toEqual(developer);
     const plain = { messages: [{ role: "user", content: "text" }], input: "x" };
     expect(withoutConversationCacheMarkers(plain)).toEqual(plain);
+    // A payload that carries its conversation outside `messages` is returned as the same object.
+    const responses = { input: [], max_output_tokens: 1 };
+    expect(withoutConversationCacheMarkers(responses)).toBe(responses);
 });
 
 it("leaves the Bedrock payload Pi builds with one cache point, after the system prompt", async () => {
