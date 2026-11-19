@@ -184,3 +184,15 @@ recipes, and the `owned-llmrunner` and `claude-code-anthropic` profiles send
 beside the native window, or the Pi check that aligned rows with `messages` is
 invalidated; line anchors into files #993 changed are as of their earlier
 recorded head.
+
+## Dated note (2026-11-19, #1223)
+
+Dated note, 2026-11-19, #1223: the daemon's host binary constructs
+`PiBackend::new` (`crates/daemon/src/bin/eidnara_host/serve.rs:992`), so Pi runs
+and this hook are on a production path at this head. The Reachability section
+above and the catalog's `test-only` label describe the tree before that
+wiring, and every clause that says the Pi runs are test-only is invalidated.
+The label stays `test-only` until the reclassification of all ModelExecution
+records. A Pi run starts in the state root's shared `cwd/` directory
+(`subprocess.rs:2496-2500`) and keeps its hook file in the per-run private
+directory.
