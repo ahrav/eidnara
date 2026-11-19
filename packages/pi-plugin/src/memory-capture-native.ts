@@ -23,13 +23,15 @@ const isRecord = (value: unknown): value is Payload =>
     typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * A capture call sends one user message and ends, so that message is never the prefix of a
- * later request. A cache marker on it writes an entry that no request reads, at the provider's
- * cache-write premium. This removes cache markers from user messages in the two spellings
- * Pi's providers emit, a Bedrock Converse `cachePoint` block and an Anthropic `cache_control`
- * member. The system prompt keeps its marker, whether the provider carries it beside
- * `messages` or as a `system` or `developer` message inside it, since the next capture call
- * sends that prompt again. The bundled model-execution hook
+ * A capture call sends one user message and ends, so the only later request that can read its
+ * cache entry is the daemon's retry of a failed capture that sends the same prompt again. A
+ * marker on it pays the provider's cache-write premium on every call for an entry only such a
+ * retry reads. This removes cache markers from user messages in the two spellings Pi's
+ * providers emit, a Bedrock Converse `cachePoint` member and an Anthropic `cache_control`
+ * member. A block's other members stay, and a block that held only a `cachePoint` is dropped.
+ * The system prompt keeps its marker, whether the provider carries it beside `messages` or as
+ * a `system` or `developer` message inside it, since the next capture call sends that prompt
+ * again. The bundled model-execution hook
  * (`crates/host-runtime/assets/pi-model_execution-extension.mjs`) applies the same rule to
  * daemon-run calls.
  */
@@ -39,13 +41,17 @@ export function withoutConversationCacheMarkers(payload: unknown): unknown {
         if (!isRecord(message) || message.role !== "user" || !Array.isArray(message.content)) {
             return message;
         }
-        const content = message.content
-            .filter((block: unknown) => !(isRecord(block) && isRecord(block.cachePoint)))
-            .map((block: unknown) => {
-                if (!isRecord(block) || !("cache_control" in block)) return block;
-                const { cache_control: _marker, ...rest } = block;
-                return rest;
-            });
+        const content = message.content.flatMap((block: unknown) => {
+            if (
+                !isRecord(block) ||
+                !(Object.hasOwn(block, "cachePoint") || Object.hasOwn(block, "cache_control"))
+            ) {
+                return [block];
+            }
+            const { cachePoint: _point, cache_control: _marker, ...rest } = block;
+            const onlyMarker = Object.hasOwn(block, "cachePoint") && Object.keys(rest).length === 0;
+            return onlyMarker ? [] : [rest];
+        });
         return { ...message, content };
     });
     return { ...payload, messages };

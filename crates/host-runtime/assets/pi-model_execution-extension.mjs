@@ -57,9 +57,11 @@ function modelRefusesTemperature(ctx) {
 // it pays the provider's cache-write premium on every run for an entry only
 // such a retry reads. The hook removes cache markers from user messages in
 // the two spellings Pi's providers emit: a Bedrock Converse `cachePoint`
-// block and an Anthropic `cache_control` member. The system prompt keeps its
-// marker, beside `messages` or on a `system` or `developer` message inside
-// it, since later runs of the same caller send that prompt again.
+// member and an Anthropic `cache_control` member. A block's other members
+// stay, and a block that held only a `cachePoint` is dropped. The system
+// prompt keeps its marker, beside `messages` or on a `system` or `developer`
+// message inside it, since later runs of the same caller send that prompt
+// again.
 // `withoutConversationCacheMarkers` in the Pi plugin's capture executor
 // applies the same rule to memory-capture calls.
 function withoutConversationCacheMarkers(messages) {
@@ -67,15 +69,17 @@ function withoutConversationCacheMarkers(messages) {
 		if (!isPlainObject(message) || message.role !== "user" || !Array.isArray(message.content)) {
 			return message;
 		}
-		const content = message.content
-			.filter((block) => !(isPlainObject(block) && isPlainObject(block.cachePoint)))
-			.map((block) => {
-				if (!isPlainObject(block) || !("cache_control" in block)) {
-					return block;
-				}
-				const { cache_control: _marker, ...rest } = block;
-				return rest;
-			});
+		const content = message.content.flatMap((block) => {
+			if (
+				!isPlainObject(block) ||
+				!(Object.hasOwn(block, "cachePoint") || Object.hasOwn(block, "cache_control"))
+			) {
+				return [block];
+			}
+			const { cachePoint: _point, cache_control: _marker, ...rest } = block;
+			const onlyMarker = Object.hasOwn(block, "cachePoint") && Object.keys(rest).length === 0;
+			return onlyMarker ? [] : [rest];
+		});
 		return { ...message, content };
 	});
 }

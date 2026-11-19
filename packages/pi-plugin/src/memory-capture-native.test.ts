@@ -358,47 +358,94 @@ it("removes cache markers from user messages and keeps the system prompt's marke
     // A payload that carries its conversation outside `messages` is returned as the same object.
     const responses = { input: [], max_output_tokens: 1 };
     expect(withoutConversationCacheMarkers(responses)).toBe(responses);
+    // A marker member beside other members is removed and the rest of its block stays. A block
+    // whose only own member is `cachePoint` is dropped, whatever the member's value.
+    const point = { type: "default" };
+    const mixed = {
+        messages: [
+            {
+                role: "user",
+                content: [
+                    { text: "prompt text", cachePoint: point },
+                    { cachePoint: null },
+                    { cachePoint: "default" },
+                    { type: "text", text: "both", cachePoint: point, cache_control: marker },
+                    { cachePoint: point, cache_control: marker },
+                    Object.assign(Object.create({ cachePoint: point }), { text: "inherited" }),
+                    ["nested"],
+                ],
+            },
+        ],
+    };
+    expect(JSON.parse(JSON.stringify(withoutConversationCacheMarkers(mixed)))).toEqual({
+        messages: [
+            {
+                role: "user",
+                content: [
+                    { text: "prompt text" },
+                    { type: "text", text: "both" },
+                    { text: "inherited" },
+                    ["nested"],
+                ],
+            },
+        ],
+    });
 });
 
 it("leaves the Bedrock payload Pi builds with one cache point, after the system prompt", async () => {
+    const wire: unknown[] = [];
+    const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request) {
+            wire.push(await request.json());
+            return new Response("{}", { status: 400 });
+        },
+    });
     const bedrock: Model<Api> = {
         ...captureModel,
         id: "anthropic.claude-sonnet-4-5",
         name: "Claude Sonnet 4.5",
         provider: "amazon-bedrock",
         api: "bedrock-converse-stream",
-        baseUrl: "http://127.0.0.1:9",
+        baseUrl: `http://127.0.0.1:${server.port}`,
     };
     let built: unknown;
-    let sent: unknown;
-    const stream = streamSimple(
-        bedrock,
-        {
-            systemPrompt: "instructions",
-            messages: [{ role: "user", content: "sources", timestamp: 0 }],
-            tools: [],
-        },
-        {
-            env: {
-                AWS_ACCESS_KEY_ID: "test",
-                AWS_SECRET_ACCESS_KEY: "test",
-                AWS_REGION: "us-west-2",
+    try {
+        const stream = streamSimple(
+            bedrock,
+            {
+                systemPrompt: "instructions",
+                messages: [{ role: "user", content: "sources", timestamp: 0 }],
+                tools: [],
             },
-            maxRetries: 0,
-            onPayload: (payload) => {
-                built = structuredClone(payload);
-                sent = withoutConversationCacheMarkers(payload);
-                throw new Error("payload inspected");
+            {
+                env: {
+                    AWS_ACCESS_KEY_ID: "test",
+                    AWS_SECRET_ACCESS_KEY: "test",
+                    AWS_REGION: "us-west-2",
+                    // The listener speaks HTTP/1.1; the SDK's default handler is HTTP/2.
+                    AWS_BEDROCK_FORCE_HTTP1: "1",
+                },
+                maxRetries: 0,
+                onPayload: (payload) => {
+                    built = structuredClone(payload);
+                    return withoutConversationCacheMarkers(payload);
+                },
             },
-        },
-    );
-    for await (const _event of stream) void _event;
+        );
+        for await (const _event of stream) void _event;
+    } finally {
+        await server.stop(true);
+    }
     const point = { cachePoint: { type: "default" } };
     expect(built).toMatchObject({
         system: [{ text: "instructions" }, point],
         messages: [{ role: "user", content: [{ text: "sources" }, point] }],
     });
-    expect(sent).toMatchObject({
+    // The request body the provider endpoint received is the payload `onPayload` returned.
+    expect(wire).toHaveLength(1);
+    expect(wire[0]).toMatchObject({
         system: [{ text: "instructions" }, point],
         messages: [{ role: "user", content: [{ text: "sources" }] }],
     });

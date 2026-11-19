@@ -1972,6 +1972,8 @@ fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
         .find_map(|runtime| {
             std::process::Command::new(runtime)
                 .arg(&driver_path)
+                .env_remove(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV)
+                .env_remove(MODEL_EXECUTION_TEMPERATURE_ENV)
                 .envs(envs.iter().copied())
                 .output()
                 .ok()
@@ -2021,6 +2023,19 @@ console.log(JSON.stringify(handler({ payload: {
   ],
 } })));
 console.log(JSON.stringify(handler({ payload: { model: "m", max_tokens: 999, messages: [{ role: "user", content: "plain string" }] } })));
+console.log(JSON.stringify(handler({ payload: {
+  modelId: "bedrock-profile",
+  inferenceConfig: { maxTokens: 999 },
+  messages: [{ role: "user", content: [
+    { text: "prompt text", cachePoint: { type: "default" } },
+    { cachePoint: null },
+    { cachePoint: "default" },
+    { type: "text", text: "both", cachePoint: { type: "default" }, cache_control: marker },
+    { cachePoint: { type: "default" }, cache_control: marker },
+    Object.assign(Object.create({ cachePoint: { type: "default" } }), { text: "inherited" }),
+    ["nested"],
+  ] }],
+} })));
 "#,
         &[(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "32000")],
     );
@@ -2080,6 +2095,18 @@ console.log(JSON.stringify(handler({ payload: { model: "m", max_tokens: 999, mes
     assert_eq!(
         plain["messages"],
         serde_json::json!([{"role": "user", "content": "plain string"}])
+    );
+
+    // A marker member beside other members is removed and the rest of its block stays. A block whose only own member is `cachePoint` is dropped, whatever the member's value.
+    let mixed = next("mixed");
+    assert_eq!(
+        mixed["messages"],
+        serde_json::json!([{"role": "user", "content": [
+            {"text": "prompt text"},
+            {"type": "text", "text": "both"},
+            {"text": "inherited"},
+            ["nested"],
+        ]}])
     );
 }
 
