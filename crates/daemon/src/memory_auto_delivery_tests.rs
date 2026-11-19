@@ -1460,6 +1460,15 @@ async fn a_refused_plan_counts_the_statements_it_writes_and_skips_an_approved_re
         |_, _| vec![fact(THURSDAY)],
     )
     .await;
+    let thursday_rows = || -> Vec<String> {
+        memory_rows(&handler, &project)
+            .into_iter()
+            .filter(|row| row.1 == stated(THURSDAY))
+            .map(|row| row.0)
+            .collect()
+    };
+    let seeded = thursday_rows();
+    assert_eq!(seeded.len(), 1);
     let both = format!("{THURSDAY} {PNPM}");
     let messages = [("m2", "user", both.as_str())];
     let jobs = enqueue(&handler, SECOND, "s2", &messages).await;
@@ -1490,6 +1499,11 @@ async fn a_refused_plan_counts_the_statements_it_writes_and_skips_an_approved_re
     assert_eq!(
         committed.2, 1,
         "the one statement the labeled commit writes"
+    );
+    assert_eq!(
+        thursday_rows(),
+        seeded,
+        "the approved row is the one seeded"
     );
 }
 
