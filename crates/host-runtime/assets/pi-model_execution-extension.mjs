@@ -52,14 +52,14 @@ function modelRefusesTemperature(ctx) {
 	}
 }
 
-// A run sends one user message and ends, so that message is never the
-// prefix of a later request. A cache marker on it writes an entry that no
-// request reads, at the provider's cache-write premium. The hook removes
-// cache markers from user messages in the two spellings Pi's providers emit:
-// a Bedrock Converse `cachePoint` block and an Anthropic `cache_control`
-// member. The system prompt keeps its marker, whether the provider carries
-// it beside `messages` or as a `system` or `developer` message inside it,
-// since later runs of the same caller send that prompt again.
+// A run sends one user message and ends, so the only later request that
+// repeats the message is Pi's retry of a failed attempt. A cache marker on
+// it pays the provider's cache-write premium on every run for an entry only
+// such a retry reads. The hook removes cache markers from user messages in
+// the two spellings Pi's providers emit: a Bedrock Converse `cachePoint`
+// block and an Anthropic `cache_control` member. The system prompt keeps its
+// marker, beside `messages` or on a `system` or `developer` message inside
+// it, since later runs of the same caller send that prompt again.
 // `withoutConversationCacheMarkers` in the Pi plugin's capture executor
 // applies the same rule to memory-capture calls.
 function withoutConversationCacheMarkers(messages) {

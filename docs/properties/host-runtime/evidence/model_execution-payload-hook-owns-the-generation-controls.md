@@ -116,7 +116,11 @@ None. The hook runs synchronously inside Pi's handler chain on every request;
 the property depends on Pi invoking `before_provider_request` handlers in
 registration order, which the runner's argv order and the test's handler
 array both assume. The cache-marker clause depends on the run staying
-single-turn, which the argv fixes.
+single-turn, which the argv fixes. Pi's retry of a failed attempt sends the
+same user message again (`auto_retry_start`, three attempts by default); a
+marker on that message would be read only by such a retry, when the provider
+had processed the failed attempt, and would cost the write premium on every
+run.
 
 ## What a test must construct
 
