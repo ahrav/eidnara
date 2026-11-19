@@ -61,13 +61,13 @@ payload's `messages` array through `withoutConversationCacheMarkers`
 (`pi-model_execution-extension.mjs:65-81`) removes a Bedrock Converse
 `cachePoint` block and an Anthropic `cache_control` member from every message
 whose role is `user`. A `system` or `developer` message and the payload's
-`system` field pass through with their markers, so the system prompt stays the
-only cache write of a run. `withoutConversationCacheMarkers` in
+`system` field pass through with their markers, so only the system prompt can
+carry cache markers in a run. `withoutConversationCacheMarkers` in
 `packages/pi-plugin/src/memory-capture-native.ts:36-52` applies the same rule
 to the plugin's capture call through `onPayload` (`:99`).
 
 Check. `pi_model_execution_hook_owns_generation_controls`
-(`tests/model_execution_subprocess.rs:2085`) writes the compiled-in bytes to a
+(`tests/model_execution_subprocess.rs:2088`) writes the compiled-in bytes to a
 scratch file, registers a handler ahead of the hook that sets `temperature: 9`
 and adds `providerTouched`, and drives the payloads under Node or Bun with the
 two environment variables set to `32000` and `0.25`. It asserts the OpenAI-style
@@ -78,10 +78,10 @@ fields; the Gemini-style payload carries the rewritten `generationConfig` with
 `inferenceConfig` is rejected; a payload with both `max_completion_tokens` and
 `max_tokens` has both rewritten; and `{ foo: "bar" }` is rejected. It then
 deletes `EIDNARA_MODEL_EXECUTION_TEMPERATURE` and drops the tampering handler
-(`:2110-2111`) to model revision 2: an OpenAI-style payload gains
-`max_output_tokens == 32000` and no `temperature` (`:2176-2177`), and a Bedrock-style
+(`:2113-2114`) to model revision 2: an OpenAI-style payload gains
+`max_output_tokens == 32000` and no `temperature` (`:2179-2180`), and a Bedrock-style
 payload keeps its own `inferenceConfig.temperature == 1` beside the rewritten
-bound (`:2180-2181`). The binary is `harness = false`.
+bound (`:2183-2184`). The binary is `harness = false`.
 
 `pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt`
 (`tests/model_execution_subprocess.rs:1989`) drives the hook with a Bedrock
@@ -108,7 +108,7 @@ wire family arrives with no recognized field. The request runs with a budget
 the caller never admitted, and the byte charge ModelExecution accounted for the run is
 wrong. A Pi release that marks a user message in a third spelling leaves that
 marker in place, and each run then pays the provider's cache-write premium for
-an entry no request reads.
+an entry only a Pi retry reads.
 
 ## Timing windows and dependencies
 
@@ -116,7 +116,11 @@ None. The hook runs synchronously inside Pi's handler chain on every request;
 the property depends on Pi invoking `before_provider_request` handlers in
 registration order, which the runner's argv order and the test's handler
 array both assume. The cache-marker clause depends on the run staying
-single-turn, which the argv fixes.
+single-turn, which the argv fixes. Pi's retry of a failed attempt sends the
+same user message again (`auto_retry_start`, up to three retries by default); a
+marker on that message would be read only by such a retry, when the provider
+had processed the failed attempt, and would cost the write premium on every
+run.
 
 ## What a test must construct
 
@@ -172,7 +176,7 @@ single-turn, which the argv fixes.
   `crates/host-runtime/src/model_execution/pi.rs` still covers models the
   registry does not mark.
   `pi_model_execution_hook_omits_temperature_for_registry_refusing_models`
-  (`tests/model_execution_subprocess.rs:2185`) drives refusing, accepting,
+  (`tests/model_execution_subprocess.rs:2188`) drives refusing, accepting,
   unmarked, throwing, and absent contexts, and refusing contexts whose payloads
   already carry a `temperature` in each of the three places.
 - Missing evidence: the driver passes a context object; no test runs the hook
