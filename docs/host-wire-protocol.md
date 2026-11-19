@@ -1279,14 +1279,13 @@ automatic surfaces, once the Kernel accepts both the record and the admission th
 `status` is stored as a labeled memory for explicit search under the rules
 of every labeled memory; it has no statement record, and
 `decisions_approval_refused` leaves it uncounted. A captured fact's rationale
-holds the class under `lifetime` when its proposal carried one. Proposals of
-one source that share a category and quotation, and that name at most one
-replacement target between them, freeze as one fact with the
-class that holds longest, in the order `lasting`, `unsettled`, `current_work`,
-`status`, and with no class when one of them carried none. Two such proposals
-that name different replacement targets stay two facts, each with its own
-class. A class on a proposal of an assistant source is stored in the same way
-and changes nothing: such a fact is never the user's statement. Capture alone writes the `user-statements` domain: a
+holds the class under `lifetime` when its proposal carried one. When proposals of
+one source that share a category and quotation freeze as one fact, that fact
+carries the class that holds longest among the proposals joined into it, in
+the order `lasting`, `unsettled`, `current_work`, `status`, and no class when
+one of them carried none. A class on a proposal of an assistant source is
+stored in the same way and changes nothing: such a fact is never the user's
+statement. Capture alone writes the `user-statements` domain: a
 `kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
 quotes: source kind `user`, source id `memory_capture_statement:` followed by
 the first 32 hexadecimal digits of the capture source's identity, revision 1.
