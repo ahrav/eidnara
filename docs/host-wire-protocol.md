@@ -690,7 +690,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
-| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record or at the admission that rests on it; every user statement of that plan that capture would approve, one whose `lifetime` is `lasting`, `unsettled`, or absent, is counted |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record or at the admission that rests on it; every eligible user statement that the labeled commit writes, one whose `lifetime` is `lasting`, `unsettled`, or absent, is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -1272,9 +1272,9 @@ happened or is observed; or `unsettled`, a matter the user leaves undecided.
 A value outside these four is a schema defect of its source's decision, and
 a `lifetime` given as `null` reads as absent. The class withholds approval
 and grants none: the user's statement, as the rule above defines it, is
-eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent. For each eligible statement that capture writes as a fact, it writes a statement record in the
+eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent. For each eligible statement that capture writes as a fact, the approving attempt writes a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
-text, and admits the fact on that approval; the statement is approved, and the Kernel serves it on
+text, and then admits the fact on that approval; the statement is approved, and the Kernel serves it on
 automatic surfaces, once the Kernel accepts both the record and the admission that rests on it (the refusal rule below covers the other case). A user's statement whose `lifetime` is `current_work` or
 `status` is stored as a labeled memory for explicit search under the rules
 of every labeled memory; it has no statement record, and
@@ -1291,9 +1291,11 @@ lineage at 64 and one batch proposes at most 64 memories, so the statements of
 one message fit its lineage and the number of live statements in a project has
 no ceiling; a statement leaves when a correction supersedes or retires it.
 When the Kernel's admission policy refuses a statement record, or the
-admission that rests on it, the same frozen plan commits with each of its
-eligible statements as a labeled memory for explicit search, and
-`decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
+admission that rests on it, the same frozen plan commits again with each eligible statement it writes
+as a labeled memory for explicit search and with no statement record, and
+`decisions_approval_refused` counts each statement so written. An eligible
+statement that duplicates an approved fact writes no fact in either attempt
+and stays uncounted. A labeled correction replaces no approved fact: each approved fact the plan names
 as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and the labeled commit supersedes
 or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility; the
