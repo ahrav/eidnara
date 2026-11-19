@@ -2083,9 +2083,10 @@ pub(crate) fn is_pi_bash_execution_text(text: &str) -> bool {
     })
 }
 
-/// A captured memory qualifies as the user's own words when it is an
-/// attributed quotation spanning whole statements of a user message that the
-/// job holds whole. `prose` is the job's text.
+/// A captured memory is the user's approved statement when it is the
+/// user's own words ([`user_stated`]) and its lifetime class outlives the
+/// task or is absent. The class withholds approval and grants none. `prose`
+/// is the job's text.
 fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     outlives_its_task(memory) && user_stated(states_whole, prose, memory)
 }
@@ -2116,18 +2117,15 @@ fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
     user_attributed(states_whole_message(job), &Prose::of(&job.text), memory)
 }
 
-/// For each memory of the plan, by index: whether it is the user's own
-/// words ([`user_stated`]) and whether it is the user's approved statement
-/// ([`user_attributed`]).
-fn attributions(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<(bool, bool)> {
+/// Whether each memory of the plan, by index, is the user's own words
+/// ([`user_stated`]). The writer adds the lifetime check that makes such a
+/// memory the user's approved statement.
+fn statements(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
     let prose = Prose::of(&job.text);
     let states_whole = states_whole_message(job);
     memories
         .iter()
-        .map(|memory| {
-            let stated = user_stated(states_whole, &prose, memory);
-            (stated, stated && outlives_its_task(memory))
-        })
+        .map(|memory| user_stated(states_whole, &prose, memory))
         .collect()
 }
 
@@ -4051,7 +4049,7 @@ fn publish_captured_memories(
         }
     }
     // The job's text is parsed once, before either commit takes the writer.
-    let attributed = attributions(job, &output.memories);
+    let stated = statements(job, &output.memories);
     let approval_refused = std::cell::Cell::new(false);
     let commit = |approval: Approval, reasons: &mut Vec<crate::source_capture::Count>| {
         reasons.clear();
@@ -4070,7 +4068,7 @@ fn publish_captured_memories(
             job,
             output,
             settlement,
-            attributed: &attributed,
+            stated: &stated,
             approval,
             approval_refused: &approval_refused,
             earlier: &earlier,
@@ -4106,9 +4104,8 @@ struct Publication<'a> {
     job: &'a CaptureJob,
     output: &'a PreparedCapture,
     settlement: SettlementOutcome,
-    /// For each memory of the plan, by index: whether it is the user's own
-    /// words, and whether it is the user's approved statement.
-    attributed: &'a [(bool, bool)],
+    /// Whether each memory of the plan, by index, is the user's own words.
+    stated: &'a [bool],
     approval: Approval,
     /// Set when the Kernel's admission policy refuses a statement record or
     /// the admission that rests on it.
@@ -4132,7 +4129,7 @@ fn write_captured_memories(
         job,
         output,
         settlement,
-        attributed,
+        stated,
         approval,
         approval_refused,
         earlier,
@@ -4159,7 +4156,10 @@ fn write_captured_memories(
         if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !user_source {
             return Err(kernel::KernelError::Conflict);
         }
-        let (stated, attributed) = attributed[index];
+        let stated = stated[index];
+        // The user's own words are the user's approved statement when their
+        // lifetime class outlives the task or is absent.
+        let attributed = stated && outlives_its_task(memory);
         // Validation at extraction refuses a duplicate that also replaces
         // and further targets beside no replacement; a stored plan of either
         // shape is refused here the same way.
@@ -6936,6 +6936,92 @@ mod tests {
         assert_eq!(parsed[0].contests, ["mem_0", "mem_1", "mem_2", "mem_3"]);
     }
 
+    /// A statement that ends with its task replaces no approved memory.
+    /// With a labeled memory as its replacement, each approved further
+    /// target becomes a contest and each labeled one is retired with the
+    /// replaced memory. With the approved memory as its replacement, every
+    /// target becomes a contest and nothing is retired.
+    #[test]
+    fn a_short_lived_statement_replaces_labeled_memories_and_contests_approved_ones() {
+        let copy = |id: &str, attribution: &str, automatic: bool| ExistingCaptureMemory {
+            id: id.into(),
+            category: "CONFIG_VALUES".into(),
+            content: format!("{attribution}: The staging port is 1234."),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic,
+            contested: false,
+        };
+        let existing = [
+            copy("mem_note", ASSISTANT_REPORTED, false),
+            copy("mem_rule", USER_STATED, true),
+            copy("mem_echo", ASSISTANT_REPORTED, false),
+        ];
+        let messages = [CaptureMessage {
+            id: "m".into(),
+            role: CaptureRole::User,
+            text: "Use port 4321 for staging.".into(),
+            own_id: true,
+        }];
+        let parse = |lifetime: &str, replaces: &str, also_replaces: [&str; 2]| {
+            let output = json!({"version": 1, "decisions": [{"message_id": "m", "memories": [{
+                "category": "CONFIG_VALUES",
+                "content": "Staging uses port 4321 for now.",
+                "quote": "Use port 4321 for staging.",
+                "lifetime": lifetime,
+                "replaces": replaces,
+                "also_replaces": also_replaces,
+            }]}]});
+            let states = |_: usize, memory: &CapturedMemory| -> bool { outlives_its_task(memory) };
+            parse_capture_batch(&output.to_string(), &messages, &existing, &states)
+                .unwrap()
+                .into_iter()
+                .flat_map(|message| message.unwrap().memories)
+                .next()
+                .unwrap()
+        };
+        for lifetime in ["current_work", "status"] {
+            let labeled_primary = parse(lifetime, "mem_note", ["mem_rule", "mem_echo"]);
+            assert_eq!(
+                (
+                    labeled_primary.replaces.as_deref(),
+                    labeled_primary.also_replaces.as_slice(),
+                    labeled_primary.contests.as_slice(),
+                ),
+                (
+                    Some("mem_note"),
+                    ["mem_echo".to_string()].as_slice(),
+                    ["mem_rule".to_string()].as_slice(),
+                ),
+                "{lifetime}"
+            );
+            let approved_primary = parse(lifetime, "mem_rule", ["mem_note", "mem_echo"]);
+            assert_eq!(
+                (
+                    approved_primary.replaces.as_deref(),
+                    approved_primary.also_replaces.as_slice(),
+                    approved_primary.contests.as_slice(),
+                ),
+                (
+                    None,
+                    [].as_slice(),
+                    [
+                        "mem_rule".to_string(),
+                        "mem_note".to_string(),
+                        "mem_echo".to_string()
+                    ]
+                    .as_slice(),
+                ),
+                "{lifetime}"
+            );
+        }
+        // The same statement classed lasting keeps its replacement.
+        let lasting = parse("lasting", "mem_rule", ["mem_note", "mem_echo"]);
+        assert_eq!(lasting.replaces.as_deref(), Some("mem_rule"));
+        assert!(lasting.contests.is_empty());
+    }
+
     /// A question that names a statement as replaced takes no claim on it,
     /// so the correction of the same statement later in the batch keeps its
     /// replacement.
@@ -8404,8 +8490,8 @@ mod tests {
             Lifetime::Unsettled,
             Lifetime::Lasting,
         ] {
-            // Naming every variant keeps a new class out of the list until
-            // the prompt defines it.
+            // A new class fails to compile here, which sends whoever adds
+            // it to the list above.
             match lifetime {
                 Lifetime::Status
                 | Lifetime::CurrentWork

@@ -1487,7 +1487,8 @@ async fn published(handler: &Handler, project: &Path) -> Published {
 #[tokio::test]
 async fn a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_search_and_counted() {
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
-    let both = format!("{THURSDAY} {TUESDAY}");
+    let remark = "The release notes for this week are drafted.";
+    let both = format!("{THURSDAY} {TUESDAY} {remark}");
     let messages = [("m1", "user", both.as_str()), ("m2", "user", PNPM)];
     let jobs = enqueue(&handler, FIRST, "s1", &messages).await;
     fill_statement_lineage(&handler, &project, &jobs[0]);
@@ -1503,7 +1504,7 @@ async fn a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_se
         if text == PNPM {
             vec![fact(PNPM)]
         } else {
-            vec![fact(THURSDAY), fact(TUESDAY)]
+            vec![fact(THURSDAY), fact(TUESDAY), classed(remark, "status")]
         }
     })
     .await;
@@ -1513,6 +1514,7 @@ async fn a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_se
         committed.0,
         [
             (stated(THURSDAY), "labeled".to_string()),
+            (stated(remark), "labeled".to_string()),
             (stated(PNPM), "visible".to_string()),
             (stated(TUESDAY), "labeled".to_string()),
         ],
@@ -1525,11 +1527,12 @@ async fn a_statement_whose_approval_the_kernel_refuses_is_stored_for_explicit_se
     );
     assert_eq!(
         committed.2, 2,
-        "each statement of the refused plan is counted once"
+        "each statement of the refused plan that capture would approve is counted once; \
+         the status remark is labeled for its class"
     );
     assert_eq!(
         (committed.3, committed.4),
-        (3, 3),
+        (4, 4),
         "the refused attempt adds no citation or anchor count: one of each per committed decision"
     );
     let digest = kernel_routes::ProjectBinding::new(&project)
@@ -4855,6 +4858,77 @@ async fn contested_limit() -> (Handler, tempfile::TempDir, PathBuf, String, Stri
         "{block}"
     );
     (handler, dir, project, statement, observation)
+}
+
+/// A statement that ends with its task settles no contest. Its
+/// word-for-word repeat of the contested statement writes no fact and the
+/// contest stays. A sentence of another value that names the contested
+/// statement as the memory holding it is stored labeled, with no statement
+/// record, and the contest stays on its observation.
+#[tokio::test]
+async fn a_statement_that_ends_with_its_task_settles_no_contest() {
+    let other = "The gateway admits at most 400 clients at once during this load test.";
+    for lifetime in ["status", "current_work"] {
+        for repeats in [true, false] {
+            let (handler, _dir, project, _statement, observation) = contested_limit().await;
+            let (text, quote) = if repeats {
+                (
+                    format!("To confirm what we agreed. {LIMIT_300}"),
+                    LIMIT_300.to_string(),
+                )
+            } else {
+                (other.to_string(), other.to_string())
+            };
+            capture(
+                &handler,
+                SECOND,
+                "s2",
+                &[("m3", "user", &text)],
+                |_, existing| {
+                    let held = ids_containing(existing, &stated(LIMIT_300));
+                    assert_eq!(held.len(), 1, "{existing:?}");
+                    vec![Extracted {
+                        duplicate_of: held.into_iter().next(),
+                        ..classed(&quote, lifetime)
+                    }]
+                },
+            )
+            .await;
+
+            let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+            rows.sort();
+            let mut expected = vec![
+                (
+                    format!("Assistant reported: {LIMIT_OBSERVED}"),
+                    "labeled".to_string(),
+                ),
+                (stated(LIMIT_300), "visible".to_string()),
+            ];
+            if !repeats {
+                expected.push((stated(other), "labeled".to_string()));
+            }
+            expected.sort();
+            assert_eq!(rows, expected, "{lifetime}, repeats {repeats}");
+            assert_eq!(
+                live_statement_records(&handler, &project),
+                [stated(LIMIT_300)],
+                "{lifetime}, repeats {repeats}"
+            );
+            let contested = memory_rows(&handler, &project)
+                .into_iter()
+                .find(|row| row.1 == stated(LIMIT_300))
+                .expect("the statement is live");
+            assert_eq!(
+                contested.3["contested_by"]["memory"], observation,
+                "the contest stays on its observation: {lifetime}, repeats {repeats}"
+            );
+            let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+            assert!(
+                block.contains("contested") && block.contains("500 now"),
+                "{block}"
+            );
+        }
+    }
 }
 
 /// The contested statement's record names the observation and holds none of

@@ -1472,7 +1472,8 @@ statement nor its contest, as with every fact captured from its own messages.
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
 contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
 of that fact's served text; when the contesting fact cannot be read, the line
-is `Contested by <fact id>` and a note says so. A later statement of the user
+is `Contested by <fact id>` and a note says so. A later approved statement of the user, one whose `lifetime` is `lasting`,
+`unsettled`, or absent,
 settles a contest: a user statement that replaces the contested fact ends it,
 and a user statement that repeats the contested fact word for word, up to
 edge whitespace and its closing `.` or `!`, which names it under
@@ -1481,7 +1482,9 @@ text and approval whose rationale holds no `contested_by` and keeps the
 record's `stated_seq` as its own `stated_seq`, so a later contest dates the
 statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
-its own fact and the contest stays. The extractor is
+its own fact and the contest stays. A statement classed `current_work` or
+`status` settles no contest: its word-for-word repeat writes no fact, and its
+statement of another text is stored labeled. The extractor is
 told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
