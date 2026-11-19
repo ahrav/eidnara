@@ -52,6 +52,9 @@ struct Extracted {
     category: Option<&'static str>,
     /// The extractor's lifetime class; left out of the proposal when absent.
     lifetime: Option<&'static str>,
+    /// The proposal's paraphrase; `A project fact: ` and the quotation when
+    /// absent.
+    content: Option<&'static str>,
 }
 
 /// A proposal the extractor classed by how long its statement holds.
@@ -143,7 +146,9 @@ async fn drain(
                     .map(|memory| {
                         let mut value = json!({
                             "category": memory.category.unwrap_or("PROJECT_RULES"),
-                            "content": format!("A project fact: {}", memory.quote),
+                            "content": memory
+                                .content
+                                .map_or_else(|| format!("A project fact: {}", memory.quote), str::to_owned),
                             "quote": memory.quote,
                         });
                         if let Some((first, rest)) = memory.replaces.split_first() {
@@ -2084,24 +2089,46 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     assert!(block.contains(&stated(undecided)), "{block}");
     assert!(!block.contains(request), "{block}");
     assert!(!block.contains(remark), "{block}");
+
+    // Each stored memory names the class its own statement was given, and a
+    // statement stored labeled for its class is no refused approval.
+    let mut classes: Vec<(String, String)> = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .into_iter()
+        .map(|rationale| {
+            (
+                rationale["quote"].as_str().unwrap().to_string(),
+                rationale["lifetime"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    classes.sort();
+    let mut expected = vec![
+        (rule.to_string(), "lasting".to_string()),
+        (undecided.to_string(), "unsettled".to_string()),
+        (request.to_string(), "current_work".to_string()),
+        (remark.to_string(), "status".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(classes, expected);
+    assert_eq!(capture_counter(&handler, "decisions_approval_refused"), 0);
 }
 
 /// A proposal that names no lifetime is approved as every whole user
-/// statement was before the class existed, and a proposal that names an
-/// unknown one is refused with its source.
+/// statement was before the class existed, and its rationale records no
+/// class. A proposal that names an unknown lifetime is refused with its own
+/// source: the valid source of the same batch commits, and the refused one
+/// stays queued with a recorded failure.
 #[tokio::test]
 async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_refused() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(&handler, FIRST, "s1", &[("m1", "user", PNPM)], |_, _| {
-        vec![fact(PNPM)]
-    })
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    enqueue(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", PNPM), ("m2", "user", THURSDAY)],
+    )
     .await;
-    assert_eq!(
-        explicit_search(&handler, (SECOND, "s2"), &project).await,
-        [(stated(PNPM), "visible".to_string())]
-    );
-
-    enqueue(&handler, FIRST, "s1", &[("m2", "user", THURSDAY)]).await;
     let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
     let work = body(
         handler
@@ -2109,38 +2136,196 @@ async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_ref
             .await,
     );
     assert_eq!(work["state"], "work", "{work}");
-    let output = json!({"version": 1, "decisions": [{"message_id": "m2", "memories": [{
-        "category": "PROJECT_RULES",
-        "content": "Release branches are cut on Thursday.",
-        "quote": THURSDAY,
-        "lifetime": "forever",
-    }]}]});
+    let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+    let sources = prompt["messages"].as_array().unwrap();
+    assert_eq!(sources.len(), 2, "one lease holds both sources: {prompt}");
+    let decisions: Vec<Value> = sources
+        .iter()
+        .map(|source| {
+            let text = source["text"].as_str().unwrap();
+            let mut memory = json!({
+                "category": "PROJECT_RULES",
+                "content": format!("A project fact: {text}"),
+                "quote": text,
+            });
+            if text == THURSDAY {
+                memory["lifetime"] = json!("forever");
+            }
+            json!({"message_id": source["id"], "memories": [memory]})
+        })
+        .collect();
     let submission = json!({
         "method": "memory.capture.submit",
         "session_id": "s1",
         "lease": work["lease"],
         "model": work["model"],
-        "output": output.to_string(),
+        "output": json!({"version": 1, "decisions": decisions}).to_string(),
     });
-    body(
-        handler
-            .handle_native_capture_submit(test_route(FIRST), &submission)
-            .await,
+    assert_eq!(
+        body(
+            handler
+                .handle_native_capture_submit(test_route(FIRST), &submission)
+                .await
+        )["state"],
+        "processed"
     );
     assert_eq!(
         explicit_search(&handler, (SECOND, "s2"), &project).await,
         [(stated(PNPM), "visible".to_string())],
-        "the refused source wrote nothing"
+        "the source with the unknown lifetime wrote nothing"
+    );
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+        .unwrap();
+    assert_eq!(
+        (status.completed, status.pending, status.failed),
+        (1, 1, 1),
+        "the refused source stays queued with its failure recorded"
+    );
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rationales.len(), 1);
+    assert!(
+        rationales[0].as_object().unwrap().get("lifetime").is_none(),
+        "{rationales:?}"
     );
 }
 
-/// A correction the extractor classes as serving the task in progress, such
-/// as a one-time exception, is stored for explicit search and leaves the
-/// approved rule it names live and delivered.
+/// A statement the extractor classes as serving the task in progress is
+/// stored for explicit search and supersedes no approved statement. An
+/// exception for one occasion leaves the rule it departs from approved and
+/// delivered. When the extractor names that rule as the fact the statement
+/// replaces, as it does for a correction it classed as work in progress,
+/// the rule is shown as contested by the user's newer words.
 #[tokio::test]
 async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
     let exception = "Skip the integration suite for this hotfix.";
     let rule = "Run the integration suite before every merge.";
+    for names_the_rule in [false, true] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", rule)], |_, _| {
+            vec![classed(rule, "lasting")]
+        })
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", exception)],
+            |_, existing| {
+                let targets = ids_containing(existing, "integration suite");
+                assert_eq!(
+                    targets.len(),
+                    1,
+                    "the capture offers the rule: {existing:?}"
+                );
+                vec![Extracted {
+                    replaces: if names_the_rule { targets } else { Vec::new() },
+                    ..classed(exception, "current_work")
+                }]
+            },
+        )
+        .await;
+
+        assert_eq!(live_statement_records(&handler, &project), [stated(rule)]);
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the rule is still delivered");
+        assert!(block.contains(&stated(rule)), "{block}");
+        assert_eq!(
+            block.contains("contested"),
+            names_the_rule,
+            "the rule is contested only by a statement that names it: {block}"
+        );
+        let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        assert!(
+            rows.contains(&(stated(exception), "labeled".to_string())),
+            "{rows:?}"
+        );
+    }
+}
+
+/// The agent stores a fact with the host memory tool, and the user's own
+/// sentence of it is classed as a remark on the state of the work. The
+/// user's words are still recorded beside the note, labeled and with no
+/// statement record, so explicit search serves both and the block neither.
+#[tokio::test]
+async fn a_statement_that_ends_with_its_task_is_recorded_beside_an_agents_note() {
+    let remark = "The staging deploy is green again after the rollback.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let written = body(
+        handler
+            .dispatch_value_for_test(
+                test_route(FIRST),
+                kernel_route_fixtures::commit_request(
+                    &project,
+                    "s1",
+                    "agent-write",
+                    vec![json!({"op": "insert_decision", "spec": {
+                        "decision_id": "dec-agent",
+                        "object_id": "mem-agent",
+                        "domain_id": "memory",
+                        "decision_kind": "PROJECT_RULES",
+                        "payload": {"summary": "Staging deploy is green after the rollback.", "rationale": ""},
+                        "source_id": "eidnara_memory",
+                        "source_revision": 1,
+                    }})],
+                    Vec::new(),
+                ),
+            )
+            .await,
+    );
+    assert_eq!(written["state"]["kind"], "available", "{written}");
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", remark)],
+        |_, existing| {
+            let note = existing
+                .iter()
+                .find(|memory| memory["user_statement"] == false)
+                .expect("the capture offers the agent's note");
+            vec![Extracted {
+                duplicate_of: Some(note["id"].as_str().unwrap().to_string()),
+                ..classed(remark, "status")
+            }]
+        },
+    )
+    .await;
+
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (
+                "Staging deploy is green after the rollback.".to_string(),
+                "labeled".to_string()
+            ),
+            (stated(remark), "labeled".to_string()),
+        ],
+        "the user's words are recorded beside the agent's note"
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
+    let served = serve(&handler, SECOND, "s2").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+    let restated: Vec<Value> = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .into_iter()
+        .filter(|rationale| !rationale["restates"].is_null())
+        .collect();
+    assert_eq!(restated.len(), 1, "{restated:?}");
+    assert_eq!(restated[0]["restates"], "mem-agent");
+    assert_eq!(restated[0]["lifetime"], "status");
+}
+
+/// The extractor proposes one sentence twice, once as work in progress that
+/// replaces an approved rule and once as a lasting statement. The two
+/// freeze as one lasting statement, and the rule the shorter-lived proposal
+/// named stays visible as contested by it.
+#[tokio::test]
+async fn a_sentence_proposed_under_two_lifetimes_is_lasting_and_contests_the_rule_it_named() {
+    let rule = "Run the integration suite before every merge.";
+    let change = "Run the integration suite only before a release merge.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     capture(&handler, FIRST, "s1", &[("m1", "user", rule)], |_, _| {
         vec![classed(rule, "lasting")]
@@ -2150,25 +2335,40 @@ async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
         &handler,
         SECOND,
         "s2",
-        &[("m2", "user", exception)],
+        &[("m2", "user", change)],
         |_, existing| {
-            vec![Extracted {
-                replaces: ids_containing(existing, "integration suite"),
-                ..classed(exception, "current_work")
-            }]
+            let targets = ids_containing(existing, "integration suite");
+            assert_eq!(targets.len(), 1, "{existing:?}");
+            vec![
+                Extracted {
+                    replaces: targets,
+                    content: Some("The integration suite runs before release merges for now."),
+                    ..classed(change, "current_work")
+                },
+                Extracted {
+                    content: Some("The integration suite runs only before a release merge."),
+                    ..classed(change, "lasting")
+                },
+            ]
         },
     )
     .await;
 
-    assert_eq!(live_statement_records(&handler, &project), [stated(rule)]);
+    let mut records = live_statement_records(&handler, &project);
+    records.sort();
+    let mut expected = vec![stated(rule), stated(change)];
+    expected.sort();
+    assert_eq!(records, expected, "the merged statement is approved");
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
-        .expect("the rule is still delivered");
-    assert!(block.contains(&stated(rule)), "{block}");
-    assert!(!block.contains("contested"), "{block}");
-    let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        .expect("both statements are delivered");
+    assert!(block.contains(&stated(change)), "{block}");
+    let contested = block
+        .lines()
+        .find(|line| line.contains(rule))
+        .expect("the rule is delivered");
     assert!(
-        rows.contains(&(stated(exception), "labeled".to_string())),
-        "{rows:?}"
+        contested.contains("contested") && contested.contains("only before a release merge"),
+        "the rule is shown beside the statement that named it: {contested}"
     );
 }
 

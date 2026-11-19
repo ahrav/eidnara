@@ -690,7 +690,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
-| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record; every user statement of that plan is counted |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record; every user statement of that plan that capture would approve, one whose `lifetime` is `lasting`, `unsettled`, or absent, is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -1269,14 +1269,15 @@ decision, constraint, or stable fact that still guides a different task in a
 later session; `current_work`, a request, specification, plan, or steering of
 the task in progress, or an instruction for one occasion; `status`, what
 happened or is observed; or `unsettled`, a matter the user leaves undecided.
-A value outside these four is a schema defect of its source's decision. The
-user's statement is approved when its `lifetime` is `lasting`, `unsettled`,
-or absent. Capture records each approved statement with a statement record in the
+A value outside these four is a schema defect of its source's decision, and
+a `lifetime` given as `null` reads as absent. The class withholds approval
+and grants none: the user's statement, as the rule above defines it, is
+approved when its `lifetime` is `lasting`, `unsettled`, or absent. Capture records each approved statement with a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and admits the fact on that approval, so the Kernel serves it on
 automatic surfaces. A user's statement whose `lifetime` is `current_work` or
-`status` is stored as a labeled memory for explicit search with the user's
-words as its text; it has no statement record, and
+`status` is stored as a labeled memory for explicit search under the rules
+of every labeled memory; it has no statement record, and
 `decisions_approval_refused` leaves it uncounted. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. Proposals of
 one source that share a category and quotation freeze as one fact with the
@@ -1290,8 +1291,8 @@ lineage at 64 and one batch proposes at most 64 memories, so the statements of
 one message fit its lineage and the number of live statements in a project has
 no ceiling; a statement leaves when a correction supersedes or retires it.
 When the Kernel's admission policy refuses a statement record, or the
-admission that rests on it, the same frozen plan commits with each of its user
-statements as a labeled memory for explicit search, and
+admission that rests on it, the same frozen plan commits with each of its
+approved statements as a labeled memory for explicit search, and
 `decisions_approval_refused` counts them. A labeled correction replaces no approved fact: each approved fact the plan names
 as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and the labeled commit supersedes
 or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
@@ -1306,8 +1307,10 @@ contest through the fact it duplicates, and settles a contest when it is the
 user's own statement of a contested fact (both below): a user's statement that
 duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
-its own fact with its statement record, the duplicated memory stays, and the
-new fact's rationale names it under `restates`; the name records which memory
+its own fact with its statement record, or as a labeled fact when its
+`lifetime` is `current_work` or `status`, the duplicated memory stays, and the
+new fact's rationale names it under `restates`; a statement of those two
+classes settles no contest; the name records which memory
 the extractor matched and carries no Kernel dependency. A memory is served as
 approved when it is visible, not labeled, on `explicit_search`; a fact
 reclassified as sensitive stays approved there while `auto_inject` hides it,
@@ -1368,11 +1371,12 @@ named in `replaces` or `also_replaces` becomes a contest, and when the
 `replaces` target is one, every target of the proposal does. A user statement
 whose `replaces` target is released contests that target when the Kernel
 serves it on `auto_inject`, so the two values are shown as a disagreement. A
-user's statement classed `current_work` or `status` ends with its task, as an
-exception for one occasion does, and leaves the rule it names in force: its
-`replaces` and `also_replaces` links to facts served on `auto_inject` are
-released and record no contest, and it keeps its links to labeled facts and
-the `contests` it names. A
+user's statement classed `current_work` or `status` is a user quotation that
+is no approved statement, so it replaces no fact served on `auto_inject`:
+each such target it names in `replaces` or `also_replaces` becomes a contest
+under the rule above. An exception for one occasion that names a rule, and a
+correction the extractor classed as work in progress, leave the rule approved
+and show it as contested by the user's newer words. A
 user source's contests are kept when the source reaches capture under its
 own message id and its quotation is one or more whole sentences of a
 plain-prose paragraph of the message, wherever a colon stands before them,

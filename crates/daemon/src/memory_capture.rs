@@ -106,7 +106,9 @@ pub struct CapturedMemory {
     pub contests: Vec<String>,
     /// How long the statement holds, as the extractor judged it from the
     /// user's wording. A plan frozen before the field existed, and a
-    /// proposal that leaves it out, read as [`Lifetime::Lasting`].
+    /// proposal that leaves it out or gives `null`, carry no class: such a
+    /// memory passes the lifetime check as a [`Lifetime::Lasting`] one does
+    /// and its rationale records none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<Lifetime>,
 }
@@ -116,6 +118,10 @@ pub struct CapturedMemory {
 /// automatic surfaces, and a statement that ends with its task or reports a
 /// passing state is stored for explicit search. The stored text is the
 /// user's words in every class.
+///
+/// The variants are declared from the class that ends soonest to the one
+/// that holds longest, and [`native::collapse_quotations`] merges two
+/// classes by that derived order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lifetime {
@@ -136,13 +142,18 @@ impl Lifetime {
     /// Whether a statement of this class is delivered to later sessions
     /// without a search.
     fn outlives_its_task(self) -> bool {
-        matches!(self, Self::Lasting | Self::Unsettled)
+        match self {
+            Self::Lasting | Self::Unsettled => true,
+            Self::CurrentWork | Self::Status => false,
+        }
     }
 }
 
-/// Whether the extractor's class admits the memory to the automatic
-/// surfaces. A memory with no class is admitted, as every statement was
-/// before the class existed.
+/// Whether the extractor's class lets the memory be approved for the
+/// automatic surfaces. A memory with no class passes, as every statement
+/// did before the class existed. The check withholds approval and grants
+/// none: the source and whole-statement checks of [`user_attributed`] still
+/// decide.
 fn outlives_its_task(memory: &CapturedMemory) -> bool {
     memory.lifetime.is_none_or(Lifetime::outlives_its_task)
 }
@@ -705,11 +716,11 @@ fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<St
 /// [`MAX_CONTESTS_PER_MEMORY`].
 ///
 /// Only a user message replaces, so the replacements an assistant message
-/// names become contests under the contest check. A user statement the
-/// extractor classed as ending with its task replaces no approved memory:
-/// each such replacement is dropped and makes no contest. A user quotation that
+/// names become contests under the contest check. A user quotation that
 /// `states` judges no statement replaces no approved memory: its approved
-/// targets become contests and take no claim. A user statement whose
+/// targets become contests and take no claim. A statement the extractor
+/// classed as ending with its task is such a quotation, so an exception for
+/// one occasion leaves the rule it names approved and shown beside it. A user statement whose
 /// replacement of an approved memory is dropped contests that memory, so
 /// the two values are shown as a disagreement.
 fn release_unsupported_targets(
@@ -746,18 +757,6 @@ fn release_unsupported_targets(
                 .into_iter()
                 .chain(std::mem::take(&mut memory.also_replaces));
             memory.contests.extend(replacements);
-        } else if !outlives_its_task(memory) {
-            // A statement that ends with its task, such as an exception for
-            // one occasion, changes no approved statement: the rule it
-            // names holds once the task is over, so the replacement is
-            // dropped and makes no contest. Its targets that are not
-            // approved keep their links, as the contests it names do.
-            if memory.replaces.as_ref().is_some_and(approved) {
-                memory.replaces = None;
-                memory.also_replaces.clear();
-            } else {
-                memory.also_replaces.retain(|target| !approved(target));
-            }
         } else if replacing && !states(memory) {
             if memory.replaces.as_ref().is_some_and(approved) {
                 memory.contests.extend(memory.replaces.take());
@@ -2088,8 +2087,16 @@ pub(crate) fn is_pi_bash_execution_text(text: &str) -> bool {
 /// attributed quotation spanning whole statements of a user message that the
 /// job holds whole. `prose` is the job's text.
 fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
+    outlives_its_task(memory) && user_stated(states_whole, prose, memory)
+}
+
+/// Whether a captured memory is the user's own words whatever its class:
+/// an attributed quotation spanning whole statements of a user message that
+/// the job holds whole. Such a memory is written even beside a memory that
+/// holds its fact; [`user_attributed`] adds the class check that approves
+/// it.
+fn user_stated(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
     states_whole
-        && outlives_its_task(memory)
         && memory
             .content
             .strip_prefix(USER_STATED)
@@ -2109,13 +2116,18 @@ fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
     user_attributed(states_whole_message(job), &Prose::of(&job.text), memory)
 }
 
-/// Whether each memory of the plan, by index, is the user's own statement.
-fn attributions(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
+/// For each memory of the plan, by index: whether it is the user's own
+/// words ([`user_stated`]) and whether it is the user's approved statement
+/// ([`user_attributed`]).
+fn attributions(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<(bool, bool)> {
     let prose = Prose::of(&job.text);
     let states_whole = states_whole_message(job);
     memories
         .iter()
-        .map(|memory| user_attributed(states_whole, &prose, memory))
+        .map(|memory| {
+            let stated = user_stated(states_whole, &prose, memory);
+            (stated, stated && outlives_its_task(memory))
+        })
         .collect()
 }
 
@@ -4094,8 +4106,9 @@ struct Publication<'a> {
     job: &'a CaptureJob,
     output: &'a PreparedCapture,
     settlement: SettlementOutcome,
-    /// Whether each memory of the plan, by index, is the user's own statement.
-    attributed: &'a [bool],
+    /// For each memory of the plan, by index: whether it is the user's own
+    /// words, and whether it is the user's approved statement.
+    attributed: &'a [(bool, bool)],
     approval: Approval,
     /// Set when the Kernel's admission policy refuses a statement record or
     /// the admission that rests on it.
@@ -4146,7 +4159,7 @@ fn write_captured_memories(
         if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !user_source {
             return Err(kernel::KernelError::Conflict);
         }
-        let attributed = attributed[index];
+        let (stated, attributed) = attributed[index];
         // Validation at extraction refuses a duplicate that also replaces
         // and further targets beside no replacement; a stored plan of either
         // shape is refused here the same way.
@@ -4157,9 +4170,11 @@ fn write_captured_memories(
             checked_capture_target(envelope, project, output, target, false)?;
             // A fact the store already holds is written again only as the
             // user's own statement of it, beside a memory that is not one.
+            // A statement that ends with its task is written there too,
+            // labeled, so the user's words are on explicit search.
             // The memory that holds it is then the observation that
             // contests what the message contradicts.
-            if !attributed || approved(envelope, target)? {
+            if !stated || approved(envelope, target)? {
                 if earlier.contains_key(target) {
                     pending.push(PendingContest {
                         targets: &memory.contests,
@@ -8304,7 +8319,16 @@ mod tests {
                 vec![Some(Lifetime::Status), Some(Lifetime::CurrentWork)],
                 Some(Lifetime::CurrentWork),
             ),
+            (
+                vec![Some(Lifetime::CurrentWork), Some(Lifetime::Unsettled)],
+                Some(Lifetime::Unsettled),
+            ),
+            (
+                vec![Some(Lifetime::Lasting), Some(Lifetime::Unsettled)],
+                Some(Lifetime::Lasting),
+            ),
             (vec![Some(Lifetime::Status), None], None),
+            (vec![None, Some(Lifetime::Lasting)], None),
         ] {
             let collapsed = native::collapse_quotations(
                 USER_STATED,
@@ -8359,6 +8383,42 @@ mod tests {
             }))
             .is_err()
         );
+        // A `null` class reads as a proposal that leaves the class out.
+        let unclassed: CapturedMemory = serde_json::from_value(json!({
+            "category": "PROJECT_RULES",
+            "content": "Run the suite.",
+            "quote": "Run the integration suite before every merge.",
+            "lifetime": null,
+        }))
+        .unwrap();
+        assert_eq!(unclassed.lifetime, None);
+    }
+
+    /// The capture prompt defines each class under the name the parser
+    /// accepts for it.
+    #[test]
+    fn the_capture_prompt_defines_every_lifetime_under_its_wire_name() {
+        for lifetime in [
+            Lifetime::Status,
+            Lifetime::CurrentWork,
+            Lifetime::Unsettled,
+            Lifetime::Lasting,
+        ] {
+            // Naming every variant keeps a new class out of the list until
+            // the prompt defines it.
+            match lifetime {
+                Lifetime::Status
+                | Lifetime::CurrentWork
+                | Lifetime::Unsettled
+                | Lifetime::Lasting => {}
+            }
+            let name = serde_json::to_value(lifetime).unwrap();
+            let label = format!(" {}: ", name.as_str().unwrap());
+            assert!(
+                CAPTURE_SYSTEM_PROMPT.contains(&label),
+                "the prompt defines {label:?}"
+            );
+        }
     }
 
     #[test]

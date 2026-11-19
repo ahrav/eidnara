@@ -848,7 +848,7 @@ impl CaptureWork {
                 // word. Another text is the user's own new statement.
                 else if named.is_some_and(|previous| {
                     previous.contested && super::is_another_approved_text(previous, &memory.content)
-                }) && user_attributed(states_whole, prose, memory)
+                }) && super::user_stated(states_whole, prose, memory)
                 {
                     memory.duplicate_of = None;
                 }
