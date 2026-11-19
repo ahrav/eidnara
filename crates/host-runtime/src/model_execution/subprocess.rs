@@ -2493,7 +2493,7 @@ pub mod group_registry {
         /// Pi ends the system prompt it sends with the current date and its working directory.
         /// One path for all runs keeps a caller's system prompt byte-identical from run to run within a day, so a provider prompt cache serves it on the next run.
         /// A run's hook, system prompt file, and `HOME` stay in its private run directory, and the run's zero core-file limit keeps a crash from writing here.
-        pub fn work_dir(&self) -> io::Result<PathBuf> {
+        pub(crate) fn work_dir(&self) -> io::Result<PathBuf> {
             let dir = self.registry_dir()?.join("cwd");
             secure_dir(&dir)?;
             Ok(dir)

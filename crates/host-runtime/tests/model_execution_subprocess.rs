@@ -1766,11 +1766,8 @@ fn pi_argv_privacy_contract() {
         .to_path_buf();
     // The child starts in the state root's shared working directory, so the system prompt Pi builds names one path on every run.
     let cwd = fs::read_to_string(setup.out.path().join("cwd.txt")).expect("cwd");
-    let work_dir = state_root().path().join("cwd");
-    assert_eq!(PathBuf::from(cwd), work_dir);
-    assert_eq!(state_root().work_dir().expect("work dir"), work_dir);
+    assert_eq!(PathBuf::from(cwd), state_root().path().join("cwd"));
     // A crashing child writes no core file into the directory later runs start in.
-    let stats = setup.stats();
     assert_eq!(stats["core_limit_soft"], 0);
     assert_eq!(stats["core_limit_hard"], 0);
     assert_eq!(
