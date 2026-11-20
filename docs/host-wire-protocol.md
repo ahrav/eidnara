@@ -1114,7 +1114,17 @@ intent. A kernel receipt completes the source and clears source/plan payloads
 while retaining replay identity.
 
 Each source permits three recorded model/output failures before it pauses
-for six hours; the pause ends with a fresh failure allowance. Cancellation
+for six hours; the pause ends with a fresh failure allowance. The failures
+recorded since a source's last pause select the shape of its next request.
+With none, the source is extracted with the other ripe sources at that count,
+beside the stored memories selected for the batch. After one, it is extracted
+alone, so each source of a failed batch gets its own request and the others
+are captured while one keeps failing. After two, it is extracted alone and
+its prompt carries an empty `existing_memories`. A source extracted that way
+names no target: the daemon marks a memory of it a duplicate of a stored
+memory served on `auto_inject` whose text equals it up to the attribution
+label, edge whitespace, and closing `.` or `!`, and writes each other memory
+as a new row beside any stored row it restates or corrects. Cancellation
 and unavailable native auth do not consume that allowance. Dispatch counts
 survive restart and drive exponential retry delay from one second to 128
 seconds; issued work carries its deadline, so a lease lost to a restart is

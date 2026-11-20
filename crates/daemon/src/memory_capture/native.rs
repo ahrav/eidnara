@@ -79,7 +79,37 @@ struct NativePlan {
     jobs: Vec<CaptureJob>,
     messages: Vec<CaptureMessage>,
     existing: Vec<ExistingCaptureMemory>,
+    /// The stored rows a request at the last stage left out of its prompt
+    /// (see [`RequestStage`]). Acceptance reads them for the word-for-word
+    /// duplicate check, so a statement an approved row already holds is
+    /// stored once.
+    withheld: Vec<ExistingCaptureMemory>,
     model: String,
+}
+
+/// The shape of a source's next extraction request, chosen by the model and
+/// output failures recorded since its last pause. A provider that stops an
+/// answer judges the whole request, so each failure sends a smaller one: the
+/// source leaves its batch, and then the stored rows leave its prompt. The
+/// third failure pauses the source, and the pause ends at the first stage.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RequestStage {
+    /// Every ripe source at this stage, beside the stored rows.
+    Batch,
+    /// The head source alone, beside the stored rows.
+    Alone,
+    /// The head source alone, with an empty `existing_memories`.
+    AloneWithoutExisting,
+}
+
+impl RequestStage {
+    fn after(failures: u32) -> Self {
+        match failures {
+            0 => Self::Batch,
+            1 => Self::Alone,
+            _ => Self::AloneWithoutExisting,
+        }
+    }
 }
 
 // Removing a completed/abandoned reservation must never remove its successor.
@@ -707,17 +737,29 @@ impl CaptureWork {
         if models.is_empty() {
             return Ok(None);
         }
-        // Fallback stage follows failures; a batch shares one model, so it
-        // holds only sources at the head's stage. The rest wait for the next
-        // drain call rather than skipping their own primary attempt.
+        // The model and the request shape follow the head's failures; a
+        // batch shares both, so it holds only sources at the head's stage.
+        // The rest wait for the next drain call rather than skipping their
+        // own primary attempt.
         let failures = unprepared[0].failures;
         unprepared.retain(|job| job.failures == failures);
+        let stage = RequestStage::after(failures);
+        if stage >= RequestStage::Alone {
+            // The sources that failed beside the head keep their place in
+            // the queue and are each extracted alone by a later call.
+            unprepared.truncate(1);
+        }
         let model = models[failures as usize % models.len()].clone();
         if !valid_capture_model(&model) {
             return Err("invalid_model_configuration");
         }
         let mut messages = messages_for(&unprepared);
         let mut existing = self.existing_memories(&messages, &unprepared)?;
+        let withheld = if stage == RequestStage::AloneWithoutExisting {
+            std::mem::take(&mut existing)
+        } else {
+            Vec::new()
+        };
         let prompt = loop {
             let prompt = render_capture_prompt_with_existing(&messages, &existing)?;
             if prompt.len() <= MAX_NATIVE_PROMPT_BYTES {
@@ -746,6 +788,7 @@ impl CaptureWork {
                 jobs: unprepared,
                 messages,
                 existing,
+                withheld,
                 model,
             },
             prompt,
@@ -855,6 +898,14 @@ impl CaptureWork {
                     memory.duplicate_of = None;
                 }
             }
+            // A source extracted without the stored rows names no target.
+            // Its memory that an approved row holds word for word names
+            // that row, so publication stores the statement once.
+            for memory in &mut memories {
+                if memory.duplicate_of.is_none() && memory.replaces.is_none() {
+                    memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
+                }
+            }
             // A user's contest shows whole sentences of the user's message
             // beside the statement, such as a question or a correction in a
             // sentence after a colon. A colon can introduce another
@@ -889,6 +940,7 @@ impl CaptureWork {
             let existing = plan
                 .existing
                 .iter()
+                .chain(&plan.withheld)
                 .filter(|previous| {
                     memories.iter().any(|memory| {
                         memory.replaces.as_deref() == Some(&previous.id)

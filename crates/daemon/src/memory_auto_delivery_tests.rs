@@ -1763,6 +1763,272 @@ async fn a_later_source_is_issued_in_the_next_drain_while_refused_plans_wait() {
     assert_eq!((status.pending, status.prepared), (40, 39));
 }
 
+/// Issues the next native capture work of `session` and returns it with its
+/// decoded prompt.
+async fn issue(handler: &Handler, channel: u16, session: &str) -> (Value, Value) {
+    let next = json!({"method": "memory.capture.next", "session_id": session, "model": "custom-native/model"});
+    let work = body(
+        handler
+            .handle_native_capture_next(test_route(channel), &next)
+            .await,
+    );
+    assert_eq!(work["state"], "work", "{work}");
+    let prompt = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
+    (work, prompt)
+}
+
+fn prompt_texts(prompt: &Value) -> Vec<&str> {
+    prompt["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["text"].as_str().unwrap())
+        .collect()
+}
+
+/// Reports that the provider stopped the extractor's answer for `work`.
+async fn stop_answer(handler: &Handler, channel: u16, session: &str, work: &Value) {
+    let submission = json!({
+        "method": "memory.capture.submit",
+        "session_id": session,
+        "lease": work["lease"],
+        "error": "model_failed",
+    });
+    assert_eq!(
+        body(
+            handler
+                .handle_native_capture_submit(test_route(channel), &submission)
+                .await
+        )["state"],
+        "pending"
+    );
+}
+
+/// Answers `work`, whose prompt holds one source, with one fact quoting `quote`.
+async fn answer_alone(handler: &Handler, channel: u16, session: &str, work: &Value, quote: &str) {
+    let output = json!({"version": 1, "decisions": [{"message_id": "source_1", "memories": [{
+        "category": "PROJECT_RULES",
+        "content": format!("A project fact: {quote}"),
+        "quote": quote,
+    }]}]});
+    let submission = json!({
+        "method": "memory.capture.submit",
+        "session_id": session,
+        "lease": work["lease"],
+        "model": work["model"],
+        "output": output.to_string(),
+    });
+    assert_eq!(
+        body(
+            handler
+                .handle_native_capture_submit(test_route(channel), &submission)
+                .await
+        )["state"],
+        "processed"
+    );
+}
+
+/// Sets the instant the retry delay of `jobs` ends: `0` for a delay that has
+/// passed, `i64::MAX` for one that is still running.
+fn set_retry_at(store: &MemoryStore, jobs: &[&str], retry_at_ms: i64) {
+    let jobs = jobs
+        .iter()
+        .map(|job| format!("'{job}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    store
+        .execute_tag_sql_for_test(&format!(
+            "UPDATE memory_capture_jobs SET retry_at_ms={retry_at_ms} WHERE job_id IN ({jobs})"
+        ))
+        .unwrap();
+}
+
+/// Three sources share one batch and the provider stops every answer to a
+/// request that holds the first. After the batch fails once, each source is
+/// extracted alone: the first is stopped again, and the other two are
+/// captured by their own requests. The first source's third request carries
+/// no stored rows. Its third failure pauses it, and it stays under `failed`
+/// with its error until the ninth dispatch abandons it.
+#[tokio::test]
+async fn a_source_the_provider_keeps_stopping_is_sent_alone_then_without_stored_rows_while_its_batch_is_captured()
+ {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let stopped = "The deploy script reads its region from the first argument.";
+    let jobs = enqueue(
+        &handler,
+        FIRST,
+        "s1",
+        &[
+            ("m1", "user", stopped),
+            ("m2", "user", THURSDAY),
+            ("m3", "user", PNPM),
+        ],
+    )
+    .await;
+    let [first, second, third] = [jobs[0].as_str(), jobs[1].as_str(), jobs[2].as_str()];
+
+    let (batch, prompt) = issue(&handler, FIRST, "s1").await;
+    assert_eq!(prompt_texts(&prompt), [stopped, THURSDAY, PNPM]);
+    stop_answer(&handler, FIRST, "s1", &batch).await;
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.pending, status.failed, status.completed),
+        (3, 3, 0),
+        "one stopped answer is a recorded failure of every source of its batch"
+    );
+
+    set_retry_at(&store, &[first, second, third], 0);
+    let (alone, prompt) = issue(&handler, FIRST, "s1").await;
+    assert_eq!(
+        prompt_texts(&prompt),
+        [stopped],
+        "after one failure the head source is extracted alone"
+    );
+    stop_answer(&handler, FIRST, "s1", &alone).await;
+
+    // The stopped source waits out its longer delay; its batch-mates are ripe.
+    set_retry_at(&store, &[first], i64::MAX);
+    set_retry_at(&store, &[second, third], 0);
+    let (work, prompt) = issue(&handler, FIRST, "s1").await;
+    assert_eq!(prompt_texts(&prompt), [THURSDAY]);
+    answer_alone(&handler, FIRST, "s1", &work, THURSDAY).await;
+    let (work, prompt) = issue(&handler, FIRST, "s1").await;
+    assert_eq!(prompt_texts(&prompt), [PNPM]);
+    assert_eq!(
+        ids_containing(prompt["existing_memories"].as_array().unwrap(), THURSDAY).len(),
+        1,
+        "a source extracted alone after one failure still reads the stored rows: {prompt}"
+    );
+    answer_alone(&handler, FIRST, "s1", &work, PNPM).await;
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.pending, status.failed, status.completed),
+        (1, 1, 2),
+        "the other two sources are captured while the stopped one stays queued"
+    );
+
+    set_retry_at(&store, &[first], 0);
+    let (bare, prompt) = issue(&handler, FIRST, "s1").await;
+    assert_eq!(prompt_texts(&prompt), [stopped]);
+    assert_eq!(
+        prompt["existing_memories"],
+        json!([]),
+        "after two failures the source is extracted without the stored rows"
+    );
+    stop_answer(&handler, FIRST, "s1", &bare).await;
+
+    let (attempts, _, error, abandoned, text, _) = queue_row(&store, first);
+    assert_eq!(
+        (attempts, error.as_deref(), abandoned),
+        (3, Some("model_failed"), None)
+    );
+    assert_eq!(text, stopped, "a paused source keeps its text");
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.pending, status.failed, status.completed),
+        (1, 1, 2),
+        "the stopped source stays visible under `failed`"
+    );
+    set_retry_at(&store, &[first], 0);
+    let now = now_ms();
+    assert!(
+        store
+            .pending_memory_captures(&digest, "pi", now)
+            .unwrap()
+            .is_empty(),
+        "the third failure pauses the source"
+    );
+    let resumed = store
+        .pending_memory_captures(
+            &digest,
+            "pi",
+            now + memory_store::memory_capture::CAPTURE_FAILURE_PAUSE_MS + 1_000,
+        )
+        .unwrap();
+    assert_eq!(
+        resumed
+            .iter()
+            .map(|job| (job.job_id.as_str(), job.failures))
+            .collect::<Vec<_>>(),
+        [(first, 0)],
+        "the pause ends with a fresh failure allowance"
+    );
+
+    // The ninth dispatch abandons the source and keeps its error.
+    store
+        .execute_tag_sql_for_test(&format!(
+            "UPDATE memory_capture_jobs SET attempts=8,paused_until_ms=0,retry_at_ms=0 WHERE job_id='{first}'"
+        ))
+        .unwrap();
+    let (last, prompt) = issue(&handler, FIRST, "s1").await;
+    assert_eq!(prompt_texts(&prompt), [stopped]);
+    stop_answer(&handler, FIRST, "s1", &last).await;
+    let (attempts, _, error, abandoned, text, _) = queue_row(&store, first);
+    assert_eq!((attempts, error.as_deref()), (9, Some("model_failed")));
+    assert!(
+        abandoned.is_some(),
+        "the ninth dispatch abandons the source"
+    );
+    assert_eq!(text, "", "an abandoned source releases its text");
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.pending, status.failed, status.completed),
+        (0, 1, 2),
+        "an abandoned source counts as failed and no longer as pending"
+    );
+}
+
+/// A user repeats, in a second session, a sentence an approved statement
+/// already holds, and the source reaches the request that carries no stored
+/// rows. The extractor names no target, and acceptance links the repeat to
+/// the approved row, so the statement is stored once.
+#[tokio::test]
+async fn a_statement_extracted_without_stored_rows_is_stored_once_when_an_approved_row_holds_it() {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY)],
+        |_, _| vec![fact(THURSDAY)],
+    )
+    .await;
+    let approved = [(stated(THURSDAY), "visible".to_string())];
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        approved
+    );
+
+    let jobs = enqueue(&handler, SECOND, "s2", &[("m2", "user", THURSDAY)]).await;
+    for _ in 0..2 {
+        store
+            .fail_memory_capture(&digest, &jobs[0], "model_failed", 0, true, now_ms())
+            .unwrap();
+    }
+    let (bare, prompt) = issue(&handler, SECOND, "s2").await;
+    assert_eq!(prompt_texts(&prompt), [THURSDAY]);
+    assert_eq!(prompt["existing_memories"], json!([]));
+    answer_alone(&handler, SECOND, "s2", &bare, THURSDAY).await;
+
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!((status.pending, status.completed), (0, 2));
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        approved,
+        "the repeat adds no second row"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(THURSDAY)]
+    );
+}
+
 /// Sets short publication waits, so a test that holds the gate or the Kernel
 /// writer finishes in well under a second.
 fn short_waits(handler: &Handler) {
