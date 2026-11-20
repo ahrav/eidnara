@@ -18,6 +18,7 @@ pub mod supervisor;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::composite::{CompositeComponent, SecondaryComponent, ShutdownError};
 use crate::handler::{
@@ -517,8 +518,13 @@ impl CompositeComponent for ModelExecutionComponent {
                 "the AWS credential refresh ended without proving its helper teardown".to_owned(),
             );
         }
+        let (residue, records) = self
+            .residue_on_disk(
+                self.supervisor.cleanup_unresolved_runs(),
+                self.supervisor.record_unresolved_runs(),
+            )
+            .await;
         // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
-        let residue = self.supervisor.cleanup_unresolved_runs();
         if residue > 0 {
             failures.push(format!(
                 "{residue} run(s) could not remove their private run files; \
@@ -526,7 +532,6 @@ impl CompositeComponent for ModelExecutionComponent {
             ));
         }
         // A retained crash-ownership record remains in the registry for a successor to sweep.
-        let records = self.supervisor.record_unresolved_runs();
         if records > 0 {
             failures.push(format!(
                 "{records} run(s) could not remove their crash-ownership records; \
@@ -537,6 +542,38 @@ impl CompositeComponent for ModelExecutionComponent {
             Ok(())
         } else {
             Err(ShutdownError(failures.join("; ")))
+        }
+    }
+}
+
+/// How long shutdown waits for removals that outlasted their runs to leave the registry: one more [`subprocess::SubprocessLimits::termination_grace`], the bound each removal had when its run ended.
+const RESIDUE_SETTLE_GRACE: Duration = Duration::from_secs(5);
+const RESIDUE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+impl ModelExecutionComponent {
+    /// The private run directories and crash-ownership records this host still holds once every run has returned.
+    ///
+    /// `residue` and `records` count the runs whose removal outlasted its bounded wait. Each count is a verdict reached when its run ended, and the removal it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a registry that holds none proves the removals completed. The read repeats until the registry is clear or [`RESIDUE_SETTLE_GRACE`] ends, which gives a removal still in flight the time to land. A registry that cannot be read proves nothing, so the runs' own counts stand.
+    async fn residue_on_disk(&self, residue: usize, records: usize) -> (usize, usize) {
+        if residue == 0 && records == 0 {
+            return (0, 0);
+        }
+        let deadline = tokio::time::Instant::now() + RESIDUE_SETTLE_GRACE;
+        loop {
+            let state_root = self.state_root.clone();
+            let found = tokio::task::spawn_blocking(move || {
+                subprocess::group_registry::own_residue(&state_root)
+            })
+            .await;
+            let Ok(Ok(found)) = found else {
+                return (residue, records);
+            };
+            if found == subprocess::group_registry::OwnResidue::default()
+                || tokio::time::Instant::now() >= deadline
+            {
+                return (found.run_dirs, found.records);
+            }
+            tokio::time::sleep(RESIDUE_POLL_INTERVAL).await;
         }
     }
 }

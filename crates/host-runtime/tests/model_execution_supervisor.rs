@@ -13,6 +13,10 @@ use host_runtime::model_execution::ModelExecutionComponent;
 use host_runtime::model_execution::backend::{BackendError, BackendTerminal, ErrorClass, Harness};
 use host_runtime::model_execution::config::{self, ModelExecutionLimits, TERMINAL_RETENTION};
 use host_runtime::model_execution::protocol::{self, SendRequest};
+use host_runtime::model_execution::subprocess::PrivateDir;
+use host_runtime::model_execution::subprocess::group_registry::{
+    self, GroupRecord, OwnResidue, StateRoot,
+};
 use host_runtime::model_execution::supervisor::{
     SessionKey, Subscription, Supervisor, SupervisorMetrics,
 };
@@ -972,6 +976,221 @@ async fn shutdown_counts_unproven_teardown_after_terminal_cap_eviction() {
         1,
         "eviction must not erase the unproven-teardown verdict"
     );
+}
+
+/// A data root of this test's own, so its registry holds only what the test puts there.
+fn own_state_root() -> (tempfile::TempDir, StateRoot) {
+    let dir = tempfile::tempdir().expect("state root dir");
+    let root = StateRoot::resolve(Some(dir.path())).expect("state root resolves");
+    (dir, root)
+}
+
+/// A component with one failed run whose terminal says the bounded waits on its private-directory removal and its record removal both ended first, as `merge_cleanup` and `merge_record_retained` word it.
+async fn component_with_removals_that_outlasted_their_waits(
+    root: StateRoot,
+) -> ModelExecutionComponent {
+    let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
+        Box::pin(async {
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Transient,
+                message: "pi run failed; additionally sensitive temp cleanup failed (TimedOut); \
+                          additionally pi backend could not remove its crash-ownership record"
+                    .to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let component = ModelExecutionComponent::new(backend as Arc<_>, root);
+    let supervisor = component.supervisor();
+    let run_id = send(&supervisor, "s-late-removal", "p1");
+    until(
+        || supervisor.status(&key("s-late-removal"), &run_id) == Ok("failed"),
+        "the run commits its failed terminal",
+    )
+    .await;
+    assert_eq!(
+        (
+            supervisor.cleanup_unresolved_runs(),
+            supervisor.record_unresolved_runs()
+        ),
+        (1, 1),
+        "the run's verdicts are counted when its backend returns"
+    );
+    component
+}
+
+/// A private run directory and a crash-ownership record that name this process, as a run leaves them while its removals are still in flight.
+fn own_entries(root: &StateRoot) -> (PrivateDir, GroupRecord) {
+    let dir = PrivateDir::create(root, "model_execution-pi").expect("private run dir");
+    let nonce = group_registry::new_group_nonce().expect("group nonce");
+    let record = GroupRecord::record(root, std::process::id() as i32, &nonce)
+        .expect("crash-ownership record");
+    (dir, record)
+}
+
+/// The removals a run stopped waiting for finish after the run ends. A host whose registry holds no entry of its own then shuts down cleanly, however long ago the run reported them.
+#[tokio::test]
+async fn shutdown_is_clean_once_the_removals_a_run_waited_on_have_left_the_registry() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    // The run's entries were on disk when its waits ended and are gone now.
+    let (dir, record) = own_entries(&root);
+    dir.cleanup().expect("the removal lands");
+    record.remove().expect("the removal lands");
+
+    CompositeComponent::shutdown(&component)
+        .await
+        .expect("no entry of this host remains, so shutdown reports no residue");
+}
+
+/// Entries that are still in the registry when the settle grace ends are reported, each class under its own count.
+#[tokio::test(start_paused = true)]
+async fn shutdown_reports_a_private_run_directory_and_a_record_that_remain_in_the_registry() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    let (dir, record) = own_entries(&root);
+
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("residue on disk fails the shutdown");
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their crash-ownership records"),
+        "{failure}"
+    );
+    dir.cleanup().expect("test cleanup");
+    record.remove().expect("test cleanup");
+}
+
+/// A removal that is still running when shutdown begins has the settle grace to land.
+#[tokio::test(start_paused = true)]
+async fn shutdown_waits_for_a_removal_that_lands_inside_the_settle_grace() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    let (dir, record) = own_entries(&root);
+    let removal = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        dir.cleanup().expect("the removal lands");
+        record.remove().expect("the removal lands");
+    });
+
+    CompositeComponent::shutdown(&component)
+        .await
+        .expect("the registry cleared inside the grace");
+    removal.await.expect("removal task");
+}
+
+/// A registry that cannot be read proves nothing about what remains, so the runs' own verdicts are reported.
+#[tokio::test]
+async fn shutdown_keeps_the_runs_verdicts_when_the_registry_cannot_be_read() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    // A regular file where the run root belongs fails the registry's hardened traversal.
+    let runs = root.run_root().expect("run root");
+    std::fs::remove_dir(&runs).expect("empty run root");
+    std::fs::write(&runs, b"").expect("file in the run root's place");
+    assert!(group_registry::own_residue(&root).is_err());
+
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("an unreadable registry keeps the verdicts");
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their crash-ownership records"),
+        "{failure}"
+    );
+}
+
+/// A shutdown request reaches a host whose earlier run reported both removals and whose registry has since cleared: the shutdown callback returns, and the host ends without a lifecycle failure.
+#[tokio::test]
+async fn host_shutdown_is_graceful_once_a_runs_late_removals_have_landed() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root).await;
+    let host = start_model_execution_host(component).await;
+
+    host.shutdown().await.expect("graceful shutdown");
+}
+
+/// A registry shared with another host incarnation counts only the entries that name this process.
+#[test]
+fn entries_another_host_owns_are_no_residue_of_this_one() {
+    use sha2::{Digest, Sha256};
+
+    let (_dir, root) = own_state_root();
+    let (dir, record) = own_entries(&root);
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue {
+            run_dirs: 1,
+            records: 1
+        }
+    );
+
+    // The same entries under another owner PID: the directory name and the record body each carry it.
+    let own_pid = std::process::id();
+    let other_pid = own_pid + 1;
+    let name = dir
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("run dir name")
+        .to_owned();
+    let foreign_dir = dir.path().with_file_name(name.replacen(
+        &format!("-{own_pid}-"),
+        &format!("-{other_pid}-"),
+        1,
+    ));
+    std::fs::create_dir(&foreign_dir).expect("foreign run dir");
+    let registry = dir
+        .path()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("registry dir");
+    let own_record = std::fs::read_dir(registry)
+        .expect("registry lists")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| path.is_file())
+        .expect("own record");
+    let text = std::fs::read_to_string(&own_record).expect("record text");
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    lines.pop();
+    let owner_start = lines[3].split_once(' ').expect("owner line").1.to_owned();
+    lines[3] = format!("{other_pid} {owner_start}");
+    let mut body = lines.join("\n");
+    body.push('\n');
+    let checksum: String = Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    std::fs::write(
+        registry.join(format!("{other_pid}-foreign")),
+        format!("{body}{checksum}\n"),
+    )
+    .expect("foreign record");
+
+    dir.cleanup().expect("own run dir removed");
+    record.remove().expect("own record removed");
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue::default(),
+        "the other owner's directory and record stay and are counted for no one here"
+    );
+    assert!(foreign_dir.is_dir());
 }
 
 /// Terminal runs with unproven teardown remain indexed so later control operations observe the teardown verdict.

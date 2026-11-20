@@ -2815,16 +2815,7 @@ pub mod group_registry {
         let mut removed = 0;
         for entry in fs::read_dir(&root)? {
             let path = entry?.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let mut fields = name.rsplitn(5, '-');
-            let (Some(_nonce), Some(start), Some(pid), Some(boot)) =
-                (fields.next(), fields.next(), fields.next(), fields.next())
-            else {
-                continue;
-            };
-            let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
+            let Some((boot, pid, start)) = run_dir_owner(&path) else {
                 continue;
             };
             if boot != current_boot {
@@ -2838,6 +2829,74 @@ pub mod group_registry {
             remove_run_dir(&path, &mut removed)?;
         }
         Ok(removed)
+    }
+
+    /// The private run directories and crash-ownership records in a registry that name this process as their owner.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct OwnResidue {
+        pub run_dirs: usize,
+        pub records: usize,
+    }
+
+    /// Counts what this process still holds in `root`.
+    ///
+    /// A run reports a cleanup or record failure when the bounded wait on its removal ends first. The removal keeps running on the blocking pool or the cleanup thread and usually completes, so the run's verdict can outlive the files it describes. The registry is the record of what remains: a host whose runs have all returned holds prompt material or coordination state exactly when an entry here still names it.
+    ///
+    /// The read removes nothing and signals no process. A record this host cannot interpret names no owner and is left to the startup sweep, which fails closed on it.
+    pub fn own_residue(root: &StateRoot) -> io::Result<OwnResidue> {
+        let owner_pid = std::process::id() as i32;
+        let owner_start = owner_start_time()?;
+        let owner_boot = owner_boot_tag()?;
+        let mut residue = OwnResidue::default();
+        for entry in fs::read_dir(root.run_root()?)? {
+            let path = entry?.path();
+            if run_dir_owner(&path)
+                .is_some_and(|owner| owner == (owner_boot.as_str(), owner_pid, owner_start))
+            {
+                residue.run_dirs += 1;
+            }
+        }
+        for entry in fs::read_dir(root.registry_dir()?)? {
+            let path = entry?.path();
+            let published = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.starts_with('.'));
+            if !published {
+                continue;
+            }
+            // A removal that finishes between the listing and a read answers `NotFound`.
+            let gone = |err: &io::Error| err.kind() == io::ErrorKind::NotFound;
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_file() => {}
+                Ok(_) => continue,
+                Err(err) if gone(&err) => continue,
+                Err(err) => return Err(err),
+            }
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(err) if gone(&err) => continue,
+                Err(err) => return Err(err),
+            };
+            if Entry::parse(&text).is_some_and(|entry| {
+                entry.owner_pid == owner_pid && entry.owner_start == owner_start
+            }) {
+                residue.records += 1;
+            }
+        }
+        Ok(residue)
+    }
+
+    /// The boot tag, PID, and start time a private run directory's name records for its creator.
+    fn run_dir_owner(path: &Path) -> Option<(&str, i32, u64)> {
+        let mut fields = path.file_name()?.to_str()?.rsplitn(5, '-');
+        let (_nonce, start, pid, boot) = (
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+        );
+        Some((boot, pid.parse().ok()?, start.parse().ok()?))
     }
 
     fn remove_run_dir(path: &Path, removed: &mut usize) -> io::Result<()> {
