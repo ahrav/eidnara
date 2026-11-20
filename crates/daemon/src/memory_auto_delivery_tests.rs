@@ -1981,12 +1981,15 @@ async fn a_source_the_provider_keeps_stopping_is_sent_alone_then_without_stored_
     );
 }
 
-/// A user repeats, in a second session, a sentence an approved statement
-/// already holds, and the source reaches the request that carries no stored
-/// rows. The extractor names no target, and acceptance links the repeat to
-/// the approved row, so the statement is stored once.
+/// In a second session a user repeats a sentence an approved statement
+/// already holds and then corrects it, and both sources reach the request
+/// that carries no stored rows. Each is extracted alone and names no target.
+/// Acceptance links the repeat to the approved row, so that statement is
+/// stored once. The correction is written as a new row, and the row it
+/// corrects stays live beside it.
 #[tokio::test]
-async fn a_statement_extracted_without_stored_rows_is_stored_once_when_an_approved_row_holds_it() {
+async fn a_source_extracted_without_stored_rows_names_an_approved_copy_and_adds_any_other_statement()
+ {
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
     let digest = kernel_routes::ProjectBinding::new(&project)
         .digest()
@@ -2005,19 +2008,28 @@ async fn a_statement_extracted_without_stored_rows_is_stored_once_when_an_approv
         approved
     );
 
-    let jobs = enqueue(&handler, SECOND, "s2", &[("m2", "user", THURSDAY)]).await;
-    for _ in 0..2 {
-        store
-            .fail_memory_capture(&digest, &jobs[0], "model_failed", 0, true, now_ms())
-            .unwrap();
+    let jobs = enqueue(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", THURSDAY), ("m3", "user", TUESDAY)],
+    )
+    .await;
+    for job in &jobs {
+        for _ in 0..2 {
+            store
+                .fail_memory_capture(&digest, job, "model_failed", 0, true, now_ms())
+                .unwrap();
+        }
     }
     let (bare, prompt) = issue(&handler, SECOND, "s2").await;
-    assert_eq!(prompt_texts(&prompt), [THURSDAY]);
+    assert_eq!(
+        prompt_texts(&prompt),
+        [THURSDAY],
+        "a source that failed twice is extracted alone"
+    );
     assert_eq!(prompt["existing_memories"], json!([]));
     answer_alone(&handler, SECOND, "s2", &bare, THURSDAY).await;
-
-    let status = store.memory_capture_status(&digest).unwrap();
-    assert_eq!((status.pending, status.completed), (0, 2));
     assert_eq!(
         explicit_search(&handler, (THIRD, "s3"), &project).await,
         approved,
@@ -2027,6 +2039,26 @@ async fn a_statement_extracted_without_stored_rows_is_stored_once_when_an_approv
         live_statement_records(&handler, &project),
         [stated(THURSDAY)]
     );
+
+    let (bare, prompt) = issue(&handler, SECOND, "s2").await;
+    assert_eq!(prompt_texts(&prompt), [TUESDAY]);
+    assert_eq!(prompt["existing_memories"], json!([]));
+    answer_alone(&handler, SECOND, "s2", &bare, TUESDAY).await;
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!((status.pending, status.completed), (0, 3));
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(THURSDAY), "visible".to_string()),
+            (stated(TUESDAY), "visible".to_string()),
+        ],
+        "a correction that names no target is a new row beside the statement it corrects"
+    );
+    let mut records = live_statement_records(&handler, &project);
+    records.sort();
+    assert_eq!(records, [stated(THURSDAY), stated(TUESDAY)]);
 }
 
 /// Sets short publication waits, so a test that holds the gate or the Kernel

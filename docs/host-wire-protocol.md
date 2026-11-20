@@ -931,8 +931,8 @@ text. The windows are independent, so frozen plans take no place in the
 extraction window. The frozen commits of one call share a 10 s budget; a plan
 the budget does not reach stays queued for the next call. A source in the
 extraction window is issued when the call holds the reservation, a model is
-configured, the batch fits the prompt ceiling, and the source is at the
-failure stage of the window's oldest source.
+configured, the batch fits the prompt ceiling, and the source is at the failure stage of the
+window's oldest source; when that stage is one or two failures, the oldest source alone is issued.
 
 A `work` response contains:
 
@@ -1100,7 +1100,8 @@ category and quotation freeze as one memory, keeping any replacement target
 among them; distinct replacement targets
 keep one memory each, since a memory supersedes exactly one predecessor. The
 frozen memory names `duplicate_of` only when every memory it joins names the
-same target, and a frozen memory that names under `duplicate_of` a reference
+same target, or when the rule for a source extracted without reference
+memories (below) names one, and a frozen memory that names under `duplicate_of` a reference
 memory not served on `auto_inject`, and whose stored text equals that of a
 reference memory that is, up to its attribution label, edge whitespace, and
 closing `.` or `!`, is a duplicate of the served one; a named target that is
@@ -1115,16 +1116,17 @@ while retaining replay identity.
 
 Each source permits three recorded model/output failures before it pauses
 for six hours; the pause ends with a fresh failure allowance. The failures
-recorded since a source's last pause select the shape of its next request.
-With none, the source is extracted with the other ripe sources at that count,
-beside the stored memories selected for the batch. After one, it is extracted
-alone, so each source of a failed batch gets its own request and the others
-are captured while one keeps failing. After two, it is extracted alone and
-its prompt carries an empty `existing_memories`. A source extracted that way
-names no target: the daemon marks a memory of it a duplicate of a stored
-memory served on `auto_inject` whose text equals it up to the attribution
-label, edge whitespace, and closing `.` or `!`, and writes each other memory
-as a new row beside any stored row it restates or corrects. Cancellation
+a source has recorded in its current allowance select the shape of its next
+request. With none, the source is extracted with the other ripe sources at
+that count, beside the reference memories selected for the batch. After one,
+it is extracted alone, so each source of a failed batch gets its own request
+and the others are captured while one keeps failing. After two, it is
+extracted alone and its prompt carries an empty `existing_memories`. A source
+extracted that way names no target: the daemon marks a memory of it a
+duplicate of a reference memory selected for its request that is served on
+`auto_inject` and whose text equals it up to the attribution label, edge
+whitespace, and closing `.` or `!`, and writes each other memory as a new row
+beside any stored row it restates or corrects. Cancellation
 and unavailable native auth do not consume that allowance. Dispatch counts
 survive restart and drive exponential retry delay from one second to 128
 seconds; issued work carries its deadline, so a lease lost to a restart is

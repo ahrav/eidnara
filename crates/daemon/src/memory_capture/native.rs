@@ -79,37 +79,12 @@ struct NativePlan {
     jobs: Vec<CaptureJob>,
     messages: Vec<CaptureMessage>,
     existing: Vec<ExistingCaptureMemory>,
-    /// The stored rows a request at the last stage left out of its prompt
-    /// (see [`RequestStage`]). Acceptance reads them for the word-for-word
+    /// The stored rows a source's request left out of its prompt after two
+    /// recorded failures. Acceptance reads them for the word-for-word
     /// duplicate check, so a statement an approved row already holds is
     /// stored once.
     withheld: Vec<ExistingCaptureMemory>,
     model: String,
-}
-
-/// The shape of a source's next extraction request, chosen by the model and
-/// output failures recorded since its last pause. A provider that stops an
-/// answer judges the whole request, so each failure sends a smaller one: the
-/// source leaves its batch, and then the stored rows leave its prompt. The
-/// third failure pauses the source, and the pause ends at the first stage.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum RequestStage {
-    /// Every ripe source at this stage, beside the stored rows.
-    Batch,
-    /// The head source alone, beside the stored rows.
-    Alone,
-    /// The head source alone, with an empty `existing_memories`.
-    AloneWithoutExisting,
-}
-
-impl RequestStage {
-    fn after(failures: u32) -> Self {
-        match failures {
-            0 => Self::Batch,
-            1 => Self::Alone,
-            _ => Self::AloneWithoutExisting,
-        }
-    }
 }
 
 // Removing a completed/abandoned reservation must never remove its successor.
@@ -743,10 +718,13 @@ impl CaptureWork {
         // own primary attempt.
         let failures = unprepared[0].failures;
         unprepared.retain(|job| job.failures == failures);
-        let stage = RequestStage::after(failures);
-        if stage >= RequestStage::Alone {
-            // The sources that failed beside the head keep their place in
-            // the queue and are each extracted alone by a later call.
+        // A provider that stops an answer judges the whole request, so each
+        // recorded failure sends a smaller one. After one failure the head
+        // source leaves its batch: the sources that failed beside it keep
+        // their place in the queue and are each extracted alone by a later
+        // call. After two, the stored rows leave its prompt as well. The
+        // third failure pauses the source, and the pause ends at a batch.
+        if failures >= 1 {
             unprepared.truncate(1);
         }
         let model = models[failures as usize % models.len()].clone();
@@ -755,7 +733,7 @@ impl CaptureWork {
         }
         let mut messages = messages_for(&unprepared);
         let mut existing = self.existing_memories(&messages, &unprepared)?;
-        let withheld = if stage == RequestStage::AloneWithoutExisting {
+        let withheld = if failures >= 2 {
             std::mem::take(&mut existing)
         } else {
             Vec::new()
@@ -902,7 +880,7 @@ impl CaptureWork {
             // Its memory that an approved row holds word for word names
             // that row, so publication stores the statement once.
             for memory in &mut memories {
-                if memory.duplicate_of.is_none() && memory.replaces.is_none() {
+                if memory.duplicate_of.is_none() {
                     memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
                 }
             }
