@@ -17,6 +17,46 @@ function failureCode(message: string | undefined, signal: AbortSignal): NativeCa
     return PROVIDER_UNAVAILABLE.test(message ?? "") ? "provider_unavailable" : "model_failed";
 }
 
+type Payload = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is Payload =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * A capture call sends one user message and ends, so the only later request that can read its
+ * cache entry is the daemon's retry of a failed capture that sends the same prompt again. A
+ * marker on it pays the provider's cache-write premium on every call for an entry only such a
+ * retry reads. This removes cache markers from user messages in the two spellings Pi's
+ * providers emit, a Bedrock Converse `cachePoint` member and an Anthropic `cache_control`
+ * member. A block's other members stay, and a block that held only a `cachePoint` is dropped.
+ * The system prompt keeps its marker, whether the provider carries it beside `messages` or as
+ * a `system` or `developer` message inside it, since the next capture call sends that prompt
+ * again. The bundled model-execution hook
+ * (`crates/host-runtime/assets/pi-model_execution-extension.mjs`) applies the same rule to
+ * daemon-run calls.
+ */
+export function withoutConversationCacheMarkers(payload: unknown): unknown {
+    if (!isRecord(payload) || !Array.isArray(payload.messages)) return payload;
+    const messages = payload.messages.map((message: unknown) => {
+        if (!isRecord(message) || message.role !== "user" || !Array.isArray(message.content)) {
+            return message;
+        }
+        const content = message.content.flatMap((block: unknown) => {
+            if (
+                !isRecord(block) ||
+                !(Object.hasOwn(block, "cachePoint") || Object.hasOwn(block, "cache_control"))
+            ) {
+                return [block];
+            }
+            const { cachePoint: _point, cache_control: _marker, ...rest } = block;
+            const onlyMarker = Object.hasOwn(block, "cachePoint") && Object.keys(rest).length === 0;
+            return onlyMarker ? [] : [rest];
+        });
+        return { ...message, content };
+    });
+    return { ...payload, messages };
+}
+
 /** Resolve auth inside the active harness, including its OAuth refresh and
  * registered custom providers. Neither credentials nor reasoning leave it. */
 export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExecutor {
@@ -62,6 +102,7 @@ export function piMemoryCaptureExecutor(ctx: ExtensionContext): NativeCaptureExe
                     ),
                     timeoutMs: work.maxDurationMs,
                     maxRetries: 0,
+                    onPayload: withoutConversationCacheMarkers,
                 },
             );
             let text = "";

@@ -18,6 +18,9 @@
 // payload shapes it does not recognize — silently dropping generation
 // controls would let a provider default exceed the caller's budget.
 //
+// The hook also owns where a run writes provider cache entries; see
+// `withoutConversationCacheMarkers`.
+//
 // The requested values arrive through two adapter-owned environment
 // variables set by host-runtime's Pi backend; they are plain bounded numbers,
 // never prompt or credential material.
@@ -47,6 +50,38 @@ function modelRefusesTemperature(ctx) {
 	} catch {
 		return false;
 	}
+}
+
+// A run sends one user message and ends, so the only later request that
+// can read its cache entry is Pi's retry of a failed attempt. A marker on
+// it pays the provider's cache-write premium on every run for an entry only
+// such a retry reads. The hook removes cache markers from user messages in
+// the two spellings Pi's providers emit: a Bedrock Converse `cachePoint`
+// member and an Anthropic `cache_control` member. A block's other members
+// stay, and a block that held only a `cachePoint` is dropped. The system
+// prompt keeps its marker, beside `messages` or on a `system` or `developer`
+// message inside it, since later runs of the same caller send that prompt
+// again.
+// `withoutConversationCacheMarkers` in the Pi plugin's capture executor
+// applies the same rule to memory-capture calls.
+function withoutConversationCacheMarkers(messages) {
+	return messages.map((message) => {
+		if (!isPlainObject(message) || message.role !== "user" || !Array.isArray(message.content)) {
+			return message;
+		}
+		const content = message.content.flatMap((block) => {
+			if (
+				!isPlainObject(block) ||
+				!(Object.hasOwn(block, "cachePoint") || Object.hasOwn(block, "cache_control"))
+			) {
+				return [block];
+			}
+			const { cachePoint: _point, cache_control: _marker, ...rest } = block;
+			const onlyMarker = Object.hasOwn(block, "cachePoint") && Object.keys(rest).length === 0;
+			return onlyMarker ? [] : [rest];
+		});
+		return { ...message, content };
+	});
 }
 
 export default function (pi) {
@@ -95,6 +130,9 @@ export default function (pi) {
 			);
 		}
 		const next = { ...payload };
+		if (Array.isArray(next.messages)) {
+			next.messages = withoutConversationCacheMarkers(next.messages);
+		}
 		for (const name of spellings) {
 			next[name] = maxOutputTokens;
 		}
