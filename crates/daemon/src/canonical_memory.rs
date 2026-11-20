@@ -1408,15 +1408,21 @@ mod tests {
             decision.payload.rationale = rationale.to_string();
             (row, decision)
         };
-        // The rows arrive in serving order, by the commit of each row.
+        // The rows arrive in serving order, by the commit of each row. The
+        // statement `tie-b` was first recorded with `tie-a` and contested
+        // since, so its row is the newest.
         let stored = [
+            work(
+                "tie-b",
+                12,
+                serde_json::json!({"contested_by": {"memory": "obs", "stated_seq": 7}}),
+            ),
             work(
                 "contested",
                 10,
                 serde_json::json!({"contested_by": {"memory": "obs", "stated_seq": 2}}),
             ),
             work("settled", 9, serde_json::json!({"stated_seq": 1})),
-            work("tie-b", 7, serde_json::json!({})),
             work("tie-a", 7, serde_json::json!({})),
             work("plain", 5, serde_json::json!({})),
         ];

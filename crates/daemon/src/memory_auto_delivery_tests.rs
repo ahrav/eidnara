@@ -2295,9 +2295,10 @@ async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_ref
 /// for the turn at hand or as work left open, leaves the rule it departs
 /// from approved and delivered. When the extractor names that rule as the
 /// fact the statement replaces, as it does for a correction it classed
-/// short-lived, the rule is shown as contested by the user's newer words.
-/// The request is stored labeled, and the work left open is delivered
-/// under `CURRENT_WORK`.
+/// short-lived, the rule is shown as contested by the user's newer words,
+/// and the exception is stored labeled whichever class it had. An
+/// exception that names no rule is stored labeled as a request and
+/// delivered under `CURRENT_WORK` as work left open.
 #[tokio::test]
 async fn a_statement_that_ends_with_its_task_replaces_no_statement_that_outlives_it() {
     let exception = "Skip the integration suite for this hotfix.";
@@ -2950,6 +2951,7 @@ async fn a_remark_with_an_appended_failure_line_ends_work_in_progress() {
         ended.3["ended_by"]["memory"],
         memory_id(&handler, &project, &with_lines).as_str()
     );
+    assert!(live_statement_records(&handler, &project).is_empty());
     let served = serve(&handler, THIRD, "s3").await;
     assert_eq!(project_memory_block(&served), None, "{served}");
 }
@@ -3040,6 +3042,11 @@ async fn contested_work_in_progress_keeps_its_place_and_ends_like_any_other() {
         ended.3["ended_by"]["memory"],
         memory_id(&handler, &project, &stated(done)).as_str()
     );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(newer)],
+        "the ended plan's statement record is retired"
+    );
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
         .expect("the newer plan is still delivered");
     assert!(!block.contains(RETRY_PLAN), "{block}");
@@ -3047,13 +3054,17 @@ async fn contested_work_in_progress_keeps_its_place_and_ends_like_any_other() {
     assert!(block.contains(&stated(newer)), "{block}");
 }
 
-/// A plan that departs from a standing statement is a correction for one
-/// task. It is stored labeled and shown on that statement's line as its
-/// contest, so it takes no place in the section, and live work in progress
-/// holds no contest.
+/// A plan that departs from a standing statement is an instruction for
+/// one occasion. It is stored labeled with the class of such an
+/// instruction and shown on that statement's line as its contest, so it
+/// takes no place in the section. A later remark that names the plan
+/// replaces it, as any statement replaces a labeled fact; the rule then
+/// renders alone, and capture still offers the rule as contested, since
+/// that flag reads the stored record.
 #[tokio::test]
 async fn a_plan_that_departs_from_a_standing_statement_is_shown_beside_it() {
     let plan = "For the importer migration, skip the integration suite before each merge.";
+    let done = "The importer migration is merged.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
@@ -3083,37 +3094,87 @@ async fn a_plan_that_departs_from_a_standing_statement_is_shown_beside_it() {
             .unwrap_or_else(|| panic!("{block}"))
             .to_string()
     };
-    let shown_beside_the_rule = |block: &str| {
-        assert!(
-            rule_line(block).contains("contested") && rule_line(block).contains("skip the"),
-            "{block}"
-        );
-        assert_eq!(block_element(block, "CURRENT_WORK"), None, "{block}");
-    };
-    shown_beside_the_rule(&project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap());
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        rule_line(&block).contains("contested") && rule_line(&block).contains("skip the"),
+        "{block}"
+    );
+    assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
     assert_eq!(
         live_statement_records(&handler, &project),
         [stated(INTEGRATION_RULE)]
     );
-    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
-    rows.sort();
+    let rows = memory_rows(&handler, &project);
+    let stored = rows.iter().find(|row| row.1 == stated(plan)).unwrap();
+    assert_eq!(stored.3["lifetime"], "request", "{:?}", stored.3);
+    let mut found = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    found.sort();
     assert_eq!(
-        rows,
+        found,
         [
             (stated(plan), "labeled".to_string()),
             (stated(INTEGRATION_RULE), "visible".to_string()),
         ]
     );
+
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "user", done)],
+        |_, existing| {
+            let rule: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["content"] == stated(INTEGRATION_RULE).as_str())
+                .collect();
+            assert_eq!(rule.len(), 1, "{existing:?}");
+            assert_eq!(rule[0]["contested"], true);
+            vec![Extracted {
+                replaces: ids_containing(existing, "importer migration"),
+                ..classed(done, "status")
+            }]
+        },
+    )
+    .await;
+    let mut found = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            (stated(INTEGRATION_RULE), "visible".to_string()),
+            (stated(done), "labeled".to_string()),
+        ]
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(!rule_line(&block).contains("contested"), "{block}");
+    let note = "The importer reads its batch size from the environment.";
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m4", "assistant", note)],
+        |_, existing| {
+            let rule: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["content"] == stated(INTEGRATION_RULE).as_str())
+                .collect();
+            assert_eq!(rule.len(), 1, "{existing:?}");
+            assert_eq!(rule[0]["contested"], true);
+            vec![fact(note)]
+        },
+    )
+    .await;
 }
 
 /// An assistant's message repeats live work in progress and contradicts a
-/// rule. The repeat writes no fact, and the work in progress it names
-/// records no contest, so the rule renders as it was.
+/// rule. The repeat writes no fact, and the contest is recorded through
+/// the work in progress it repeats, as through any fact a proposal
+/// duplicates: the rule is shown beside the plan's words.
 #[tokio::test]
-async fn a_repeat_of_live_work_in_progress_records_no_contest() {
+async fn a_repeat_of_live_work_in_progress_records_its_contest_through_it() {
     let echo =
         "As planned, the retry budget moves into the client config without the integration suite.";
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
         FIRST,
@@ -3137,15 +3198,20 @@ async fn a_repeat_of_live_work_in_progress_records_no_contest() {
         &[("m3", "assistant", echo)],
         |_, existing| {
             let plan = ids_containing(existing, "retry budget");
-            assert_eq!(plan.len(), 1, "{existing:?}");
+            let rule = ids_containing(existing, "before every merge");
+            assert_eq!((plan.len(), rule.len()), (1, 1), "{existing:?}");
             vec![Extracted {
                 duplicate_of: plan.into_iter().next(),
-                contests: ids_containing(existing, "before every merge"),
+                contests: rule,
                 ..fact(echo)
             }]
         },
     )
     .await;
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+        .unwrap();
+    assert_eq!((status.completed, status.pending, status.failed), (3, 0, 0));
     let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
     rows.sort();
     assert_eq!(
@@ -3156,7 +3222,14 @@ async fn a_repeat_of_live_work_in_progress_records_no_contest() {
         ]
     );
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
-    assert!(!block.contains("contested"), "{block}");
+    let rule_line = block
+        .lines()
+        .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+        .unwrap_or_else(|| panic!("{block}"));
+    assert!(
+        rule_line.contains("contested") && rule_line.contains("move the retry budget"),
+        "{block}"
+    );
     assert!(
         block_element(&block, "CURRENT_WORK").is_some_and(|work| work.contains(RETRY_PLAN)),
         "{block}"
@@ -3270,6 +3343,34 @@ async fn a_completion_remark_of_another_category_is_shown_beside_the_plan() {
         live_statement_records(&handler, &project),
         [stated(RETRY_PLAN)]
     );
+    // Each fact keeps the category its own proposal gave it.
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let read = kernel_routes::read::read_visible(
+        &kernel,
+        &kernel_routes::ProjectBinding::new(&project),
+        kernel::Surface::ExplicitSearch,
+        None,
+        kernel_routes::read::RowSelection::DomainDecisions("memory"),
+    )
+    .unwrap();
+    let mut categories: Vec<(&str, &str)> = read
+        .decisions
+        .values()
+        .map(|decision| {
+            (
+                decision.payload.summary.as_str(),
+                decision.decision_kind.as_str(),
+            )
+        })
+        .collect();
+    categories.sort_unstable();
+    assert_eq!(
+        categories,
+        [
+            (stated(RETRY_PLAN).as_str(), "CONSTRAINTS"),
+            (stated(done).as_str(), "CONFIG_VALUES"),
+        ]
+    );
 }
 
 /// A newer plan whose statement approval the Kernel refuses is stored
@@ -3314,6 +3415,10 @@ async fn a_newer_plan_whose_approval_is_refused_still_ends_the_older_plan() {
     assert_eq!(
         ended.3["ended_by"]["memory"],
         memory_id(&handler, &project, &stated(newer)).as_str()
+    );
+    assert!(
+        !live_statement_records(&handler, &project).contains(&stated(RETRY_PLAN)),
+        "the ended plan's statement record is retired"
     );
     let served = serve(&handler, THIRD, "s3").await;
     assert_eq!(project_memory_block(&served), None, "{served}");
