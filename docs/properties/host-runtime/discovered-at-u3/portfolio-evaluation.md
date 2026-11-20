@@ -195,7 +195,7 @@ refutes.
 **[credential-fingerprint-derives-from-the-product-domain](../catalog.md#credential-fingerprint-derives-from-the-product-domain)
 says "every provider credential row is fingerprinted before a harness
 spawns".** The fingerprint check runs only under
-`if let Some(verifier) = &self.credential_verifier` (`model_execution/mod.rs:223-235`).
+`if let Some(verifier) = &self.credential_verifier` (`model_execution/mod.rs:224-236`).
 `ModelExecutionComponent::new` sets `credential_verifier: None` (`mod.rs:73-80`, the
 field at `:80`). The verifier is installed only by `new_with_credentials`
 (`mod.rs:82`), whose sole caller in the workspace is
@@ -256,7 +256,7 @@ says why: local state is released even when teardown is unproven
 return value. `Supervisor::shutdown` returns the count of runs whose teardown
 was never proven (`:611`, `:630-633`), and
 `shutdown_counts_runs_with_unproven_teardown` asserts it equals 1
-(`tests/model_execution_supervisor.rs:770`). The doc comments at `:615-618` are explicit
+(`tests/model_execution_supervisor.rs:774`). The doc comments at `:619-622` are explicit
 that a drained supervisor does not prove harness process trees stopped and
 that the component must not report a clean shutdown while provider work may
 still run. A baseline check that reads only the metrics passes in exactly the

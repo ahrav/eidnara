@@ -55,7 +55,7 @@ actually enforces the claim, or records that none does.
 | 10 | `invalidate_on_missed` stays `false` until the raw Rust history_summarizer client can answer Ping; enabling it earlier would kill healthy long-running awaits | `config.rs:236-238` | `HostConfig::default()` sets `liveness: None` (`:294`), which sends no Pings at all. No check pins the flag |
 | 11 | Signal acquisition stays outside this crate; the source module-host work will map SIGINT/SIGTERM | `runtime.rs:3-5` | **Nothing. No signal mapping exists**; the caller supplies a `CancellationToken` |
 | 12 | `ingress_budget` is the only budget with a blocking consumer, so nothing outliving a request may draw on it | `runtime.rs:106-107` | The `scratch_budget` split (`:109-111`) and `config.rs:36-43`'s rationale. Structural, no check |
-| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | **Contradicted by `model_execution/mod.rs:164-177`.** See L2 |
+| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | **Contradicted by `model_execution/mod.rs:165-178`.** See L2 |
 | 14 | The handler shutdown callback runs at most once per incarnation even when a `run` future is dropped mid-sequence | `runtime.rs:126-129`, `handler.rs:597` | `shutdown_callback_ran.swap(true, SeqCst)` (`:1265-1270`) |
 | 15 | `ShutdownDeadlineExpired` means host tasks could not be reaped within the shutdown deadline even after aborts | `runtime.rs:42-44` | Returned on a path that can run roughly ten times that deadline. See L3 |
 | 16 | The health report is informational; degraded storage must not make transport unready | `runtime.rs:1115-1116` | `Ok(None)`/`Err(_)` both `return` without unreadying (`:1126-1127`) |
@@ -121,7 +121,7 @@ population of it lands on the wrong side of V24 by default.
 /// then unreachable because every route is general-class.
 ```
 
-ModelExecution declares a reservation. `model_execution/mod.rs:164-177` returns:
+ModelExecution declares a reservation. `model_execution/mod.rs:165-178` returns:
 
 ```
 ResourceDeclaration {
@@ -135,7 +135,7 @@ ResourceDeclaration {
 
 with `RESERVED_PENDING_REQUESTS = 96` (`model_execution/config.rs:185`) and
 `RESERVED_HANDLER_TASKS = 96` (`:188`). The comment at
-`model_execution/mod.rs:169-170` makes it deliberate and unconditional: "Constants rather
+`model_execution/mod.rs:170-171` makes it deliberate and unconditional: "Constants rather
 than limits so a test-shrunken supervisor still declares the product contract."
 
 So in the composed host the reserved pools hold 96 permits each and every

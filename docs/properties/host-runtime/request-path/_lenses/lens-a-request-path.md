@@ -28,7 +28,7 @@ verified here, not assumed.
    `runtime.rs:118-119` claims the reserved pools are "Zero-permit when no
    module declared a reservation, and then unreachable because every route is
    general-class". That comment is not a reachability answer:
-   `model_execution/mod.rs:164-176` declares `route_class: RouteClass::Reserved` with
+   `model_execution/mod.rs:165-177` declares `route_class: RouteClass::Reserved` with
    `RESERVED_PENDING_REQUESTS = 96` and `RESERVED_HANDLER_TASKS = 96`
    (`model_execution/config.rs:185`, `:188`), and `serve.rs:575` composes that exact
    ModelExecution component. Both permit classes are live in production.

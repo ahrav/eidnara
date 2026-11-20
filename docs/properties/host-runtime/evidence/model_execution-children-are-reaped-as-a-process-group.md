@@ -108,7 +108,7 @@ returns `Err`, the run becomes `FailedUnresolved`, and the registry record is
 retained (`:547-549`) for the next host's sweep. That path is asserted in the
 supervisor tests only indirectly, through
 `unproven_teardown_fails_cancel_and_delete` in
-`tests/model_execution_supervisor.rs:685`, which uses a scripted backend rather than
+`tests/model_execution_supervisor.rs:689`, which uses a scripted backend rather than
 a real stuck process.
 
 The sweep runs once, at initialize (`mod.rs:341`). It is not periodic, so a

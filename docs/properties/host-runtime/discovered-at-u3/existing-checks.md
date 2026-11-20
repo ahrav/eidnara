@@ -257,11 +257,11 @@ omitted from the pre-image is not what this test detects.
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `identical_resend_dedups_and_any_byte_difference_conflicts` | `tests/model_execution_supervisor.rs:126` | unaudited |
-| Named `racing_identical_sends_converge_on_one_run_and_one_backend_start` | `tests/model_execution_supervisor.rs:165` | unaudited |
-| Also bears `terminal_expiry_and_oldest_eviction_enforce_the_session_caps` | `tests/model_execution_supervisor.rs:857` | unaudited |
-| Also bears `retained_pressure_sweeps_expired_entries_and_retries_admission_once` | `tests/model_execution_supervisor.rs:895` | unaudited |
-| Also bears `status_and_cancel_are_scoped_to_the_bound_session` | `tests/model_execution_supervisor.rs:264` | unaudited |
+| Named `identical_resend_dedups_and_any_byte_difference_conflicts` | `tests/model_execution_supervisor.rs:130` | unaudited |
+| Named `racing_identical_sends_converge_on_one_run_and_one_backend_start` | `tests/model_execution_supervisor.rs:169` | unaudited |
+| Also bears `terminal_expiry_and_oldest_eviction_enforce_the_session_caps` | `tests/model_execution_supervisor.rs:861` | unaudited |
+| Also bears `retained_pressure_sweeps_expired_entries_and_retries_admission_once` | `tests/model_execution_supervisor.rs:899` | unaudited |
+| Also bears `status_and_cancel_are_scoped_to_the_bound_session` | `tests/model_execution_supervisor.rs:268` | unaudited |
 
 `:857` and `:895` construct the retained-then-evicted state the record's
 `Exercised:` gap names; neither issues a resend after it. `:126` asserts
@@ -273,16 +273,16 @@ through a `Barrier` (`:168-175`).
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `every_path_returns_permits_and_charges_to_baseline` | `tests/model_execution_supervisor.rs:973` | unaudited |
-| Named `host_shutdown_drains_the_supervisor_to_zero_state` | `tests/model_execution_supervisor.rs:1246` | unaudited |
-| Named `transport_detach_paths_leave_the_run_untouched` | `tests/model_execution_supervisor.rs:1099` | unaudited |
-| Also bears `subscriber_caps_enforce_per_run_and_total_without_leaking_permits` | `tests/model_execution_supervisor.rs:385` | unaudited |
-| Also bears `thirty_two_blocked_commands_admit_and_command_33_fails_fast` | `tests/model_execution_supervisor.rs:430` | unaudited |
-| Also bears `thirty_two_runs_queue_behind_eight_backends_and_run_33_fails_without_state` | `tests/model_execution_supervisor.rs:470` | unaudited |
-| Also bears `backend_panic_commits_one_failed_terminal` | `tests/model_execution_supervisor.rs:317` | unaudited |
-| Also bears `replay_overflow_commits_one_failed_terminal_and_stops_growth` | `tests/model_execution_supervisor.rs:928` | unaudited |
-| Also bears `shutdown_refuses_new_work_stops_backends_and_wakes_subscribers` | `tests/model_execution_supervisor.rs:1034` | unaudited |
-| Also bears `default_limits_and_resource_declaration_match_the_fixed_caps` | `tests/model_execution_supervisor.rs:95` | unaudited |
+| Named `every_path_returns_permits_and_charges_to_baseline` | `tests/model_execution_supervisor.rs:977` | unaudited |
+| Named `host_shutdown_drains_the_supervisor_to_zero_state` | `tests/model_execution_supervisor.rs:1465` | unaudited |
+| Named `transport_detach_paths_leave_the_run_untouched` | `tests/model_execution_supervisor.rs:1318` | unaudited |
+| Also bears `subscriber_caps_enforce_per_run_and_total_without_leaking_permits` | `tests/model_execution_supervisor.rs:389` | unaudited |
+| Also bears `thirty_two_blocked_commands_admit_and_command_33_fails_fast` | `tests/model_execution_supervisor.rs:434` | unaudited |
+| Also bears `thirty_two_runs_queue_behind_eight_backends_and_run_33_fails_without_state` | `tests/model_execution_supervisor.rs:474` | unaudited |
+| Also bears `backend_panic_commits_one_failed_terminal` | `tests/model_execution_supervisor.rs:321` | unaudited |
+| Also bears `replay_overflow_commits_one_failed_terminal_and_stops_growth` | `tests/model_execution_supervisor.rs:932` | unaudited |
+| Also bears `shutdown_refuses_new_work_stops_backends_and_wakes_subscribers` | `tests/model_execution_supervisor.rs:1253` | unaudited |
+| Also bears `default_limits_and_resource_declaration_match_the_fixed_caps` | `tests/model_execution_supervisor.rs:99` | unaudited |
 
 `:973`'s baseline oracle is `assert_baseline(supervisor.metrics(), &limits,
 0)` at `:1023` and again after shutdown at `:1030`. The one production guard
@@ -449,7 +449,7 @@ earlier inventory or is out of this catalog's subject.
 | `tests/harness_closure.rs:158`, `:185`, `:258`, `:360`, `:386`, `:499`, `:549`, `:592`, `:633`, `:685` | 10 | runtime-config's closure-store record; not the digest record |
 | `tests/harness_closure.rs:443` | 1 | `#[ignore]`, release qualification only |
 | `tests/model_execution_subprocess.rs`: the Pi and OpenCode transcript, alias, retry, flood, private-dir, and cleanup contracts at `:1292`, `:1506`, `:1545`, `:1599`, `:1675`, `:1781`, `:1885`, `:1960`, `:2203`, `:2242`, `:2278`, `:2337`, `:2365`, `:2405`, `:2452`, `:2491`, `:2669`, `:2702`, `:2724`, `:2898`, `:2940`, `:2978`, `:3029` | 23 | no record. Harness-behaviour contracts the U3 records do not state |
-| `tests/model_execution_supervisor.rs:206`, `:338`, `:515`, `:544`, `:604`, `:645`, `:685`, `:730`, `:770`, `:799` | 10 | no record. Status, replay, cancel, delete, and teardown-proof contracts |
+| `tests/model_execution_supervisor.rs:210`, `:342`, `:519`, `:548`, `:608`, `:649`, `:689`, `:734`, `:774`, `:803` | 10 | no record. Status, replay, cancel, delete, and teardown-proof contracts |
 | `tests/local_embeddings_bundle.rs:151`, `:639`, `:757`, `:818` | 4 | no record. `:757` and `:818` are activation-drop contracts; `:639` is doubly env-gated |
 | `tests/local_embeddings_jobs.rs:92`, `:278`, `:317`, `:370`, `:417`, `:480`, `:540` | 7 | no record. Retry delay, route loss, cancel, deadline, error, shutdown, shape |
 | `tests/local_embeddings_protocol.rs:186`, `:236`, `:312`, `:471`, `:512`, `:545`, `:737`, `:999`, `:1112`, `:1192` | 10 | no record. Waiter fairness, shutdown drain, pages, reservations |
@@ -596,7 +596,7 @@ proves.
    ([model_execution-permits-and-charges-return-to-baseline](../catalog.md#model_execution-permits-and-charges-return-to-baseline));
    and a fault during inference itself
    ([local_embeddings-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#local_embeddings-degrades-to-disabled-and-keeps-the-context-routable)).
-   The fixtures for the first two exist (`tests/model_execution_supervisor.rs:857`,
+   The fixtures for the first two exist (`tests/model_execution_supervisor.rs:861`,
    `tests/model_execution_subprocess.rs:2553`); the third has `DeterministicEngine::
    fail_next` (`tests/support/local_embeddings.rs:67`) and no test that fails an
    inference and then asserts context routability.
