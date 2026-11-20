@@ -118,7 +118,7 @@ pub struct CapturedMemory {
 }
 
 /// `null` maps to `None`; a present lifetime must be a string matching one
-/// of the four wire names. The derived enum reader alone also reads the
+/// of the five wire names. The derived enum reader alone also reads the
 /// one-key map `{"lasting": null}` as a class.
 fn lifetime_name<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -139,8 +139,9 @@ fn lifetime_name<'de, D: serde::Deserializer<'de>>(
 pub enum Lifetime {
     /// What happened or is observed now: progress, a result, a symptom.
     Status,
-    /// An instruction or remark that serves the task in progress and ends
-    /// with it.
+    /// An instruction the turn at hand answers.
+    Request,
+    /// Work the user leaves open beyond the turn at hand.
     CurrentWork,
     /// A matter the user says is undecided. It holds until a decision
     /// settles it.
@@ -154,7 +155,7 @@ impl Lifetime {
     fn outlives_its_task(self) -> bool {
         match self {
             Self::Lasting | Self::Unsettled => true,
-            Self::CurrentWork | Self::Status => false,
+            Self::CurrentWork | Self::Request | Self::Status => false,
         }
     }
 
@@ -163,7 +164,7 @@ impl Lifetime {
     fn is_delivered(self) -> bool {
         match self {
             Self::Lasting | Self::Unsettled | Self::CurrentWork => true,
-            Self::Status => false,
+            Self::Request | Self::Status => false,
         }
     }
 }
@@ -252,7 +253,7 @@ For each source message, return its exact id and a memories array. Every source 
 - category: one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING.
 - content: a concise, self-contained fact, including scope and qualifications needed to use it correctly in a later session.
 - quote: an exact nonempty substring of that same message supporting the fact. This quotation, not your paraphrase, will be stored as the memory; a quotation cut out of a user's sentence may be stored as that whole sentence, up to the nearest sentence edge on each side, so omit a fact whose sentence also holds content the rules above exclude, such as credentials, personal data, or a request not to retain something. Include the complete statement with its actor, scope, negation, conditions, and qualifications. Never select a positive phrase out of a negated, conditional, or hypothetical statement. Never invent a quote. Use a complete supporting clause rather than a value alone. A sentence that follows a colon in a user's paragraph is stored as the user's statement only together with the text before it in that paragraph: when a fact stands in such a sentence, quote from the paragraph's first word through that sentence, as one quotation or as one sentence per entry with none left out, and omit the fact when that text holds content the rules above exclude. Preserve Markdown backticks, whitespace, and typographic punctuation exactly; do not rewrite the quotation.
-- lifetime: only for a memory of a user source message; it sets delivery and leaves what is saved, from user and assistant messages, unchanged. lasting: still guides a different task in a later session, as a rule or preference for how work is done, a convention or decision beyond the change at hand, a constraint, or a stable fact of the project or its environment. current_work: about the task in progress, as a request, the wanted behaviour, look, or values of the thing being built, which the finished work records, a goal or plan, steering, or an instruction for this occasion. status: what happened or is observed now. unsettled: the user leaves a project matter undecided, even when asking for work meanwhile. When it reads either way: lasting if worded as a rule, constraint, or fact, current_work if worded as a request.
+- lifetime: only for a memory of a user source message; it sets delivery and leaves what is saved, from user and assistant messages, unchanged. lasting: still guides a different task in a later session, as a rule or preference for how work is done, a convention or decision beyond the change at hand, a constraint, or a stable fact of the project or its environment. request: asks for work in the turn at hand, which that turn answers and the finished work records, as an edit or a command, the wanted behaviour, look, or values of the thing being built, steering, or an instruction for this occasion. current_work: work the user leaves open beyond the turn at hand, as a goal or plan for the work ahead, or work the user defers, leaves unfinished, or marks for a later session. status: what happened or is observed now. unsettled: the user leaves a project matter undecided, even when asking for work meanwhile. When it reads either way: lasting if worded as a rule, constraint, or fact, request if worded as a request.
 - replaces: optional id from existing_memories, ONLY for a user source message, when can_replace is true and the user explicitly changes or resolves that same fact in the same scope. Assistant messages may add attributed observations but must never replace memories. Preserve unrelated qualifications. Different environments or hypothetical alternatives do not replace each other. Use each replacement target at most once. A correction uses the category of the memory it replaces. For a correction, quote the whole correcting sentence from its first word to its closing mark, including any lead-in and the old value when the user names it: a quotation cut out of the sentence does not replace a memory whose user_statement is true.
 - also_replaces: optional array of further existing_memories ids, ONLY with replaces, each with can_replace true, that state the same old value of the fact being replaced, such as an earlier duplicate or an assistant's restatement of it. Never list a memory that states a different fact or another scope.
 - contests: optional array of existing_memories ids, from any source message, whose value this message's observation contradicts without the user changing the fact: for example an assistant message that reports what a repository file, a command, or a tool result now shows, when that differs from a stored fact in the same scope. The stored fact stays and is shown as contested beside this observation. A user message that itself changes the fact uses replaces instead. An entry with contested true is a user statement an observation already contradicts: a user statement that settles it replaces it when it gives another value, and names it under duplicate_of when it repeats the stored value. Name at most four entries.
@@ -7747,7 +7748,7 @@ mod tests {
                 .next()
                 .unwrap()
         };
-        for lifetime in ["current_work", "status"] {
+        for lifetime in ["current_work", "request", "status"] {
             let labeled_primary = parse(lifetime, "mem_note", ["mem_rule", "mem_echo"]);
             assert_eq!(
                 (
@@ -7847,6 +7848,7 @@ mod tests {
             Some("lasting"),
             Some("unsettled"),
             Some("current_work"),
+            Some("request"),
             Some("status"),
         ] {
             assert_eq!(
@@ -7859,7 +7861,7 @@ mod tests {
                 contested("mem_plan"),
                 "{lifetime:?}"
             );
-            let standing = !matches!(lifetime, Some("current_work" | "status"));
+            let standing = !matches!(lifetime, Some("current_work" | "request" | "status"));
             assert_eq!(
                 parse(lifetime, "mem_rule", true),
                 if standing {
@@ -9304,6 +9306,14 @@ mod tests {
                 Some(Lifetime::CurrentWork),
             ),
             (
+                vec![Some(Lifetime::Request), Some(Lifetime::Status)],
+                Some(Lifetime::Request),
+            ),
+            (
+                vec![Some(Lifetime::CurrentWork), Some(Lifetime::Request)],
+                Some(Lifetime::CurrentWork),
+            ),
+            (
                 vec![Some(Lifetime::CurrentWork), Some(Lifetime::Unsettled)],
                 Some(Lifetime::Unsettled),
             ),
@@ -9323,11 +9333,11 @@ mod tests {
         }
     }
 
-    /// A whole user statement of every class but `status` is eligible for
-    /// approval, and one whose class is `lasting`, `unsettled`, or absent
-    /// outlives its task.
+    /// A whole user statement whose class is `lasting`, `unsettled`,
+    /// `current_work`, or absent is eligible for approval, and one whose
+    /// class is `lasting`, `unsettled`, or absent outlives its task.
     #[test]
-    fn a_statement_of_every_class_but_status_is_user_attributed() {
+    fn a_statement_of_a_delivered_class_is_user_attributed() {
         let job = CaptureJob {
             text: "Run the integration suite before every merge.".into(),
             ..job("m1")
@@ -9337,6 +9347,7 @@ mod tests {
             (Some(Lifetime::Lasting), true, true),
             (Some(Lifetime::Unsettled), true, true),
             (Some(Lifetime::CurrentWork), true, false),
+            (Some(Lifetime::Request), false, false),
             (Some(Lifetime::Status), false, false),
         ] {
             let stated = CapturedMemory {
@@ -9404,6 +9415,7 @@ mod tests {
     fn the_capture_prompt_defines_every_lifetime_under_its_wire_name() {
         for lifetime in [
             Lifetime::Status,
+            Lifetime::Request,
             Lifetime::CurrentWork,
             Lifetime::Unsettled,
             Lifetime::Lasting,
@@ -9412,6 +9424,7 @@ mod tests {
             // it to the list above.
             match lifetime {
                 Lifetime::Status
+                | Lifetime::Request
                 | Lifetime::CurrentWork
                 | Lifetime::Unsettled
                 | Lifetime::Lasting => {}
@@ -11010,6 +11023,7 @@ mod tests {
         };
         let sources = [
             (CaptureRole::User, json!({"lifetime": "current_work"})),
+            (CaptureRole::User, json!({"lifetime": "request"})),
             (CaptureRole::User, json!({"lifetime": "status"})),
             (CaptureRole::Assistant, json!({})),
         ];

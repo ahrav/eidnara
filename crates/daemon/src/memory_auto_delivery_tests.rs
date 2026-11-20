@@ -2111,13 +2111,14 @@ async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_r
     }
 }
 
-/// Capture approves a whole user statement of every class but `status`. A
-/// later session's block holds the lasting and unsettled statements under
-/// their categories and the request for the work in progress under
-/// `CURRENT_WORK`. The remark on the state of the work and the assistant's
-/// report stay labeled on explicit search.
+/// The extractor classes each user statement by how long it holds. Capture
+/// approves the lasting, unsettled, and current-work ones. A later
+/// session's block holds the first two under their categories and the work
+/// the user left open under `CURRENT_WORK`. The request for the turn at
+/// hand, the remark on the state of the work, and the assistant's report
+/// stay labeled on explicit search.
 #[tokio::test]
-async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_kept_for_search() {
+async fn a_statement_is_delivered_by_its_lifetime_class_and_kept_for_search_otherwise() {
     let rule = "Run the integration suite before every merge.";
     let undecided = "We have not settled whether the importer keeps the legacy CSV path.";
     let request = "Rename the retry helper to backoff_delay in this module.";
@@ -2131,6 +2132,7 @@ async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_k
         ("m3", "user", request),
         ("m4", "user", remark),
         ("m5", "assistant", report),
+        ("m6", "user", RETRY_PLAN),
     ];
     capture(&handler, FIRST, "s1", &messages, |text, _| {
         vec![classed(
@@ -2138,7 +2140,8 @@ async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_k
             match text {
                 text if text == rule || text == report => "lasting",
                 text if text == undecided => "unsettled",
-                text if text == request => "current_work",
+                text if text == request => "request",
+                text if text == RETRY_PLAN => "current_work",
                 _ => "status",
             },
         )]
@@ -2150,7 +2153,8 @@ async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_k
     let mut expected = vec![
         (stated(rule), "visible".to_string()),
         (stated(undecided), "visible".to_string()),
-        (stated(request), "visible".to_string()),
+        (stated(RETRY_PLAN), "visible".to_string()),
+        (stated(request), "labeled".to_string()),
         (stated(remark), "labeled".to_string()),
         (reported, "labeled".to_string()),
     ];
@@ -2158,7 +2162,7 @@ async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_k
     assert_eq!(rows, expected);
     let mut records = live_statement_records(&handler, &project);
     records.sort();
-    let mut approved = vec![stated(rule), stated(undecided), stated(request)];
+    let mut approved = vec![stated(rule), stated(undecided), stated(RETRY_PLAN)];
     approved.sort();
     assert_eq!(records, approved);
     let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
@@ -2166,7 +2170,7 @@ async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_k
     let rules = block_element(&block, "PROJECT_RULES").expect("the lasting categories render");
     assert!(rules.contains(&stated(rule)), "{block}");
     assert!(rules.contains(&stated(undecided)), "{block}");
-    assert!(!rules.contains(request), "{block}");
+    assert!(!rules.contains(RETRY_PLAN), "{block}");
     let work = block_element(&block, "CURRENT_WORK").expect("the work in progress renders");
     assert_eq!(
         work.lines()
@@ -2174,11 +2178,12 @@ async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_k
             .collect::<Vec<_>>(),
         [format!(
             "{}: {}",
-            memory_id(&handler, &project, &stated(request)),
-            stated(request)
+            memory_id(&handler, &project, &stated(RETRY_PLAN)),
+            stated(RETRY_PLAN)
         )],
         "{block}"
     );
+    assert!(!block.contains(request), "{block}");
     assert!(!block.contains(remark), "{block}");
     assert!(!block.contains(report), "{block}");
 
@@ -2198,7 +2203,8 @@ async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_k
     let mut expected = vec![
         (rule.to_string(), "lasting".to_string()),
         (undecided.to_string(), "unsettled".to_string()),
-        (request.to_string(), "current_work".to_string()),
+        (request.to_string(), "request".to_string()),
+        (RETRY_PLAN.to_string(), "current_work".to_string()),
         (remark.to_string(), "status".to_string()),
         (report.to_string(), "lasting".to_string()),
     ];
@@ -2283,17 +2289,25 @@ async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_ref
     );
 }
 
-/// A statement the extractor classes as serving the task in progress is
-/// stored for explicit search and supersedes no approved statement. An
-/// exception for one occasion leaves the rule it departs from approved and
-/// delivered. When the extractor names that rule as the fact the statement
-/// replaces, as it does for a correction it classed as work in progress,
-/// the rule is shown as contested by the user's newer words.
+/// A statement that ends with its task supersedes no statement that
+/// outlives its task. An exception for one occasion, classed as a request
+/// for the turn at hand or as work left open, leaves the rule it departs
+/// from approved and delivered. When the extractor names that rule as the
+/// fact the statement replaces, as it does for a correction it classed
+/// short-lived, the rule is shown as contested by the user's newer words.
+/// The request is stored labeled, and the work left open is delivered
+/// under `CURRENT_WORK`.
 #[tokio::test]
 async fn a_statement_that_ends_with_its_task_replaces_no_statement_that_outlives_it() {
     let exception = "Skip the integration suite for this hotfix.";
     let rule = "Run the integration suite before every merge.";
-    for names_the_rule in [false, true] {
+    for (lifetime, names_the_rule) in [
+        ("request", false),
+        ("request", true),
+        ("current_work", false),
+        ("current_work", true),
+    ] {
+        let delivered = lifetime == "current_work";
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
         capture(&handler, FIRST, "s1", &[("m1", "user", rule)], |_, _| {
             vec![classed(rule, "lasting")]
@@ -2313,7 +2327,7 @@ async fn a_statement_that_ends_with_its_task_replaces_no_statement_that_outlives
                 );
                 vec![Extracted {
                     replaces: if names_the_rule { targets } else { Vec::new() },
-                    ..classed(exception, "current_work")
+                    ..classed(exception, lifetime)
                 }]
             },
         )
@@ -2321,26 +2335,36 @@ async fn a_statement_that_ends_with_its_task_replaces_no_statement_that_outlives
 
         let mut records = live_statement_records(&handler, &project);
         records.sort();
-        assert_eq!(records, [stated(rule), stated(exception)]);
+        let mut approved = vec![stated(rule)];
+        if delivered {
+            approved.push(stated(exception));
+        }
+        approved.sort();
+        assert_eq!(records, approved, "{lifetime}");
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the rule is still delivered");
         let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
-        assert!(rules.contains(&stated(rule)), "{block}");
+        assert!(rules.contains(&stated(rule)), "{lifetime}: {block}");
         assert_eq!(
             rules.contains("contested"),
             names_the_rule,
-            "the rule is contested only by a statement that names it: {block}"
+            "the rule is contested only by a statement that names it: {lifetime}: {block}"
         );
         assert!(
             !rules.lines().any(|line| line.ends_with(&stated(exception))),
-            "the exception has no line of its own among the rules: {block}"
+            "the exception has no line of its own among the rules: {lifetime}: {block}"
         );
-        let work = block_element(&block, "CURRENT_WORK").expect("the exception is delivered");
-        assert!(work.contains(&stated(exception)), "{block}");
+        assert_eq!(
+            block_element(&block, "CURRENT_WORK")
+                .is_some_and(|work| work.contains(&stated(exception))),
+            delivered,
+            "{lifetime}: {block}"
+        );
         let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        let visibility = if delivered { "visible" } else { "labeled" };
         assert!(
-            rows.contains(&(stated(exception), "visible".to_string())),
-            "{rows:?}"
+            rows.contains(&(stated(exception), visibility.to_string())),
+            "{lifetime}: {rows:?}"
         );
     }
 }
@@ -2357,7 +2381,7 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
     let report = "The staging port is 1234 in deploy.toml.";
     let echo = "Staging listens on port 1234, the staging port.";
     let change = "Use port 4321 for the staging port during this migration.";
-    for lifetime in ["current_work", "status"] {
+    for lifetime in ["current_work", "request", "status"] {
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
         let config_value = |quote: &str, lifetime: Option<&'static str>| Extracted {
             category: Some("CONFIG_VALUES"),
@@ -2410,8 +2434,8 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
 
         let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
         rows.sort();
-        // The correction classed as work in progress is approved as such;
-        // the status remark is stored labeled.
+        // The correction classed as work left open is approved as such;
+        // the request and the status remark are stored labeled.
         let delivered = lifetime == "current_work";
         let mut expected = vec![
             (stated(value), "visible".to_string()),
@@ -2529,6 +2553,7 @@ async fn a_repeat_of_a_statement_that_ended_with_its_task_writes_no_second_copy(
     let with_lines = format!("{}\n{logged}", stated(report));
     for (text, quote, stored, repeated_as, approved_beside) in [
         (remark, remark, stated(remark), "status", false),
+        (remark, remark, stated(remark), "request", false),
         (remark, remark, stated(remark), "current_work", true),
         (remark, remark, stated(remark), "lasting", true),
         (logged.as_str(), report, with_lines, "status", false),
@@ -2628,7 +2653,7 @@ async fn work_in_progress_reaches_the_next_session_in_its_own_section() {
     let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
     assert!(
         work.starts_with(
-            "<CURRENT_WORK note=\"Requests and plans the user stated in earlier sessions, newest first, which no later statement of the user ended. They describe unfinished work, set no standing rule, and may be finished already: check the repository before resuming one.\">\n"
+            "<CURRENT_WORK note=\"Work the user left open in earlier sessions, newest first, which no later statement of the user ended. It sets no standing rule and may be finished already: check the repository before resuming it.\">\n"
         ),
         "{work}"
     );
@@ -2656,7 +2681,17 @@ async fn work_in_progress_reaches_the_next_session_in_its_own_section() {
 /// ended it.
 #[tokio::test]
 async fn a_completion_remark_ends_work_in_progress_and_search_serves_it_as_ended() {
-    let done = "The retry budget is in the client config now.";
+    ended_by_a_later_statement("The retry budget is in the client config now.", "status").await;
+}
+
+/// A request that cancels the planned work ends it as a completion remark
+/// does.
+#[tokio::test]
+async fn a_cancelling_request_ends_work_in_progress() {
+    ended_by_a_later_statement("Drop the move of the retry budget.", "request").await;
+}
+
+async fn ended_by_a_later_statement(done: &str, lifetime: &'static str) {
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     capture(
         &handler,
@@ -2682,7 +2717,7 @@ async fn a_completion_remark_ends_work_in_progress_and_search_serves_it_as_ended
             assert_eq!(offered[0]["user_statement"], true);
             vec![Extracted {
                 replaces: vec![plan.clone()],
-                ..classed(done, "status")
+                ..classed(done, lifetime)
             }]
         },
     )
@@ -2801,50 +2836,75 @@ async fn a_newer_plan_replaces_an_older_one() {
     }
 }
 
-/// Work in progress is live when its session ended with no later statement
-/// of the user ending it. A request the user reports finished in the same
-/// session is ended there and reaches no later session. A request of that
-/// session that no statement ended is delivered.
+/// Work left open is live in a later session when its own session ended
+/// with no later statement of the user ending it. A request for the turn at
+/// hand is never work left open, so it reaches no later session. Work the
+/// user left open and reported finished in the same session is ended there
+/// and reaches no later session. Work of that session that no statement
+/// ended is delivered.
 #[tokio::test]
-async fn a_request_ended_in_its_own_session_reaches_no_later_session() {
+async fn only_work_a_session_left_open_reaches_a_later_session() {
     let rename = "Rename the retry helper to backoff_delay in this module.";
-    let renamed = "The retry helper is renamed to backoff_delay, thanks.";
-    let open = "Add a timeout test for the upload path.";
+    let later = "Later in this session, add a timeout test for the upload path.";
+    let tested = "The timeout test for the upload path is in, thanks.";
+    let open = "Tomorrow we wire the retry budget into the importer.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(&handler, FIRST, "s1", &[("m1", "user", rename)], |_, _| {
-        vec![classed(rename, "current_work")]
-    })
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", rename), ("m2", "user", later)],
+        |text, _| {
+            vec![classed(
+                text,
+                if text == rename {
+                    "request"
+                } else {
+                    "current_work"
+                },
+            )]
+        },
+    )
     .await;
     capture(
         &handler,
         FIRST,
         "s1",
-        &[("m2", "user", renamed)],
+        &[("m3", "user", tested)],
         |_, existing| {
             vec![Extracted {
-                replaces: ids_containing(existing, "retry helper"),
-                ..classed(renamed, "status")
+                replaces: ids_containing(existing, "timeout test"),
+                ..classed(tested, "status")
             }]
         },
     )
     .await;
-    capture(&handler, FIRST, "s1", &[("m3", "user", open)], |_, _| {
+    capture(&handler, FIRST, "s1", &[("m4", "user", open)], |_, _| {
         vec![classed(open, "current_work")]
     })
     .await;
 
     let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
-        .expect("the open request is delivered");
-    let work = block_element(&block, "CURRENT_WORK").expect("the open request's section");
+        .expect("the open work is delivered");
+    let work = block_element(&block, "CURRENT_WORK").expect("the open work's section");
+    assert_eq!(
+        work.lines()
+            .filter(|line| line.contains("User stated"))
+            .count(),
+        1,
+        "{block}"
+    );
     assert!(work.contains(&stated(open)), "{block}");
-    assert!(!block.contains(rename), "{block}");
-    assert!(!block.contains(renamed), "{block}");
+    for left_out in [rename, later, tested] {
+        assert!(!block.contains(left_out), "{left_out}: {block}");
+    }
     let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
     rows.sort();
     let mut expected = vec![
         (stated(open), "visible".to_string()),
         (stated(rename), "labeled".to_string()),
-        (stated(renamed), "labeled".to_string()),
+        (stated(later), "labeled".to_string()),
+        (stated(tested), "labeled".to_string()),
     ];
     expected.sort();
     assert_eq!(rows, expected);
@@ -5597,7 +5657,7 @@ async fn contested_limit_store() -> (
 #[tokio::test]
 async fn a_statement_that_ends_with_its_task_settles_no_contest() {
     let other = "The gateway admits at most 400 clients at once during this load test.";
-    for lifetime in ["status", "current_work"] {
+    for lifetime in ["status", "request", "current_work"] {
         for repeats in [true, false] {
             let (handler, store, _dir, project, _statement, observation) =
                 contested_limit_store().await;

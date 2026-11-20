@@ -87,7 +87,7 @@ pub(crate) fn is_positive_memory_category(category: &str) -> bool {
 /// already be complete.
 pub(crate) const CURRENT_WORK_SECTION: &str = "CURRENT_WORK";
 
-const CURRENT_WORK_NOTE: &str = "Requests and plans the user stated in earlier sessions, newest first, which no later statement of the user ended. They describe unfinished work, set no standing rule, and may be finished already: check the repository before resuming one.";
+const CURRENT_WORK_NOTE: &str = "Work the user left open in earlier sessions, newest first, which no later statement of the user ended. It sets no standing rule and may be finished already: check the repository before resuming it.";
 
 pub(crate) fn renders_in_block(category: &str) -> bool {
     memory_category_rank(category).is_some()
