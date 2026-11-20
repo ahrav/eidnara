@@ -732,6 +732,20 @@ mod tests {
             "beside a running job each class reports the larger of its verdicts and its entries"
         );
         entry.cleanup().expect("private run dir removed");
+        // The same holds with the classes exchanged: a record is on disk and only a run-directory verdict was counted.
+        let nonce = subprocess::group_registry::new_group_nonce().expect("group nonce");
+        let record = subprocess::group_registry::GroupRecord::record(
+            &root,
+            std::process::id() as i32,
+            &nonce,
+        )
+        .expect("crash-ownership record");
+        assert_eq!(
+            settle(component.residue_on_disk((1, 0)), |_| {}).await,
+            (1, 1),
+            "beside a running job each class reports the larger of its verdicts and its entries"
+        );
+        record.remove().expect("record removed");
         release.send(()).expect("the job is released");
         job.await.expect("job task").expect("job result");
 
