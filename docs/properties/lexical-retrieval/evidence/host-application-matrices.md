@@ -44,15 +44,15 @@ Host wire and application:
   (`packages/opencode-plugin/src/tools/eidnara-search/route-search.ts:76`)
   is the application step both hosts share: it sends `retrieval.query`,
   folds entries by `canonical.decision_object_id` while collecting their
-  lanes (`:103`), and reads the selected decisions through
-  `readObjectRowsChunked` on the `explicit_search` surface (`:136`). Payload
+  lanes (`:105`), and reads the selected decisions through
+  `readObjectRowsChunked` on the `explicit_search` surface (`:151`). Payload
   text therefore loads after the route answers, through the daemon's read
   surface, never from the lexical lane. `routeFieldsOf`
   (`tools/eidnara-search/render.ts:30`) renders the collected lanes as
   `lanes=...`, followed by `provenance=...`.
 - Pi's tool (`packages/pi-plugin/src/tools/eidnara-search.ts:3`) imports
   `executeEidnaraSearch` from the OpenCode package, which calls
-  `searchThroughRoute` (`execute.ts:179`). One application path serves both
+  `searchThroughRoute` (`execute.ts:232`). One application path serves both
   hosts.
 - `packages/pi-plugin/src/tools/eidnara-search.test.ts:114` asserts
   `match=fused lanes=dense provenance=unknown` from a scripted route reply; the reply names the
