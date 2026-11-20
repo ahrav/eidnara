@@ -678,6 +678,19 @@ mod tests {
         panic!("the settle wait ends with its grace");
     }
 
+    /// Waits until a parked job reports that it runs.
+    async fn started(running: &std::sync::mpsc::Receiver<()>) {
+        loop {
+            match running.try_recv() {
+                Ok(()) => return,
+                Err(std::sync::mpsc::TryRecvError::Empty) => tokio::task::yield_now().await,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("the job ended before it parked")
+                }
+            }
+        }
+    }
+
     /// A creation that a run stopped waiting for is a filesystem job that still holds its slot. While one runs, a clear registry read says nothing about the entry the job will write, so the verdicts stand when the grace ends. Once the job has returned, the next clear read settles them.
     #[tokio::test(start_paused = true)]
     async fn a_clear_registry_settles_the_verdicts_only_once_every_filesystem_job_has_returned() {
@@ -699,9 +712,7 @@ mod tests {
         };
 
         let (running, release, job) = park();
-        while running.try_recv().is_err() {
-            tokio::task::yield_now().await;
-        }
+        started(&running).await;
         assert_eq!(
             settle(component.residue_on_disk((1, 1)), |_| {}).await,
             (1, 1),
@@ -711,13 +722,17 @@ mod tests {
         job.await.expect("job task").expect("job result");
 
         let (running, release, job) = park();
-        while running.try_recv().is_err() {
-            tokio::task::yield_now().await;
-        }
+        started(&running).await;
         let settled = settle(component.residue_on_disk((1, 1)), |step| {
-            // The job returns a second into the grace.
+            // The job returns a second into the grace. The slots are shared by every test of this process, so the step waits until all of them are free before the settle wait samples them again.
             if step == 20 {
                 release.send(()).expect("the job is released");
+                for _ in 0..10_000 {
+                    if subprocess::filesystem_jobs_idle() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
         })
         .await;
