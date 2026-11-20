@@ -287,12 +287,18 @@ impl SourceOwner {
     }
 
     /// Closes the owner and waits for its refresh to settle physically. Returns whether
-    /// every refresh proved its cleanup, including removal of its crash-ownership record.
+    /// every refresh proved its helper's teardown and cleanup. A helper record whose
+    /// removal outlasted its wait is reported by [`Self::record_retained`].
     pub async fn join(&self) -> bool {
         self.close();
         self.0.tasks.wait().await;
-        let state = self.0.read();
-        !(state.unresolved || state.record_retained)
+        !self.0.read().unresolved
+    }
+
+    /// Whether a refresh stopped waiting for the removal of its helper's crash-ownership
+    /// record. The removal keeps running, so the registry says whether the record remains.
+    pub fn record_retained(&self) -> bool {
+        self.0.read().record_retained
     }
 
     /// Starts the single refresh for the demand that ends at `demand`. The refresh runs
@@ -1085,7 +1091,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_retained_crash_record_keeps_the_source_usable_and_fails_the_join() {
+    async fn a_retained_crash_record_keeps_the_source_usable_and_is_reported_after_the_join() {
         let h = harness();
         let mut retained = h.ok(HOUR);
         retained.record_retained = true;
@@ -1096,7 +1102,11 @@ mod tests {
             .expect("a retained record leaves the source usable");
         assert_eq!(h.fake.calls(), 1);
         assert!(
-            !h.owner.join().await,
+            h.owner.join().await,
+            "the helper's teardown and cleanup were proven"
+        );
+        assert!(
+            h.owner.record_retained(),
             "a retained crash record is cleanup debt at shutdown"
         );
     }

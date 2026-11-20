@@ -496,9 +496,9 @@ impl CompositeComponent for ModelExecutionComponent {
                 None => true,
             }
         };
-        // The removals of a run that returned before this point have had the time since to finish, so the registry decides what those runs left.
+        // The removals of a run or refresh that returned before this point have had the time since to finish, so the registry decides what they left.
         let earlier_residue = self.supervisor.cleanup_unresolved_runs();
-        let earlier_records = self.supervisor.record_unresolved_runs();
+        let earlier_records = self.record_verdicts();
         let (unresolved, source_settled) = tokio::join!(self.supervisor.shutdown(), source);
         self.routes
             .lock()
@@ -522,17 +522,13 @@ impl CompositeComponent for ModelExecutionComponent {
             );
         }
         let (residue, records) = self.residue_on_disk(earlier_residue, earlier_records).await;
-        // A run that this shutdown stopped reports a removal, or a creation it stopped waiting for, that can still be in flight, so its verdict stands as counted.
+        // A run or refresh that this shutdown stopped reports a removal, or a creation it stopped waiting for, that can still be in flight, so its verdict stands as counted. Its entry can also be among those the registry read found, so each sum is an upper bound.
         let residue = residue
             + self
                 .supervisor
                 .cleanup_unresolved_runs()
                 .saturating_sub(earlier_residue);
-        let records = records
-            + self
-                .supervisor
-                .record_unresolved_runs()
-                .saturating_sub(earlier_records);
+        let records = records + self.record_verdicts().saturating_sub(earlier_records);
         // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
         if residue > 0 {
             failures.push(format!(
@@ -543,7 +539,7 @@ impl CompositeComponent for ModelExecutionComponent {
         // A retained crash-ownership record remains in the registry for a successor to sweep.
         if records > 0 {
             failures.push(format!(
-                "{records} run(s) could not remove their crash-ownership records; \
+                "{records} crash-ownership record(s) could not be removed; \
                  the registry retains them for a later sweep"
             ));
         }
@@ -555,14 +551,24 @@ impl CompositeComponent for ModelExecutionComponent {
     }
 }
 
-/// How long shutdown waits for removals that outlasted their runs to leave the registry: one more [`subprocess::SubprocessLimits::termination_grace`], the bound each removal had when its run ended.
+/// How long shutdown waits for removals that outlasted their runs to leave the registry: the default [`subprocess::SubprocessLimits::termination_grace`], the bound a run's removal has when the run ends.
 const RESIDUE_SETTLE_GRACE: Duration = Duration::from_secs(5);
 const RESIDUE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 impl ModelExecutionComponent {
+    /// The crash-ownership records whose removal outlasted its bounded wait: one per run that reported it, and one when a credential refresh's helper did.
+    fn record_verdicts(&self) -> usize {
+        self.supervisor.record_unresolved_runs()
+            + usize::from(
+                self.aws_owner
+                    .as_ref()
+                    .is_some_and(SourceOwner::record_retained),
+            )
+    }
+
     /// The private run directories and crash-ownership records this host still holds once every run has returned.
     ///
-    /// `residue` and `records` count the runs whose removal outlasted its bounded wait. Each count is a verdict reached when its run ended, and the removal it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a registry that holds none proves the removals completed. The read repeats until the registry is clear or [`RESIDUE_SETTLE_GRACE`] ends, which gives a removal still in flight the time to land. A registry that cannot be read inside the grace proves nothing, so the runs' own counts stand.
+    /// `residue` and `records` count the removals that outlasted their bounded wait. Each count is a verdict reached when its run or refresh ended, and the removal it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a registry that holds none proves the removals completed. The read repeats until the registry is clear or [`RESIDUE_SETTLE_GRACE`] ends, which gives a removal still in flight the time to land. A registry that cannot be read inside the grace proves nothing, so the counted verdicts stand.
     async fn residue_on_disk(&self, residue: usize, records: usize) -> (usize, usize) {
         if residue == 0 && records == 0 {
             return (0, 0);
@@ -576,13 +582,14 @@ impl ModelExecutionComponent {
             let Ok(Ok(Ok(found))) = tokio::time::timeout_at(deadline, read).await else {
                 return (residue, records);
             };
-            // Each read starts inside the grace, so the last one reports what the registry held then.
-            if found == subprocess::group_registry::OwnResidue::default()
-                || tokio::time::Instant::now() + RESIDUE_POLL_INTERVAL >= deadline
-            {
-                return (found.run_dirs, found.records);
+            if found == subprocess::group_registry::OwnResidue::default() {
+                return (0, 0);
             }
             tokio::time::sleep(RESIDUE_POLL_INTERVAL).await;
+            // The grace ended during the wait, so the last read reports what the registry holds.
+            if tokio::time::Instant::now() >= deadline {
+                return (found.run_dirs, found.records);
+            }
         }
     }
 }
