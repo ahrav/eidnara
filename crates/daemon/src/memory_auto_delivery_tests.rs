@@ -2066,6 +2066,91 @@ async fn a_source_extracted_without_stored_rows_names_an_approved_copy_and_adds_
     assert_eq!(records, [stated(THURSDAY), stated(TUESDAY)]);
 }
 
+const STAGING: &str = "The staging deploy fails on startup";
+
+/// Approves the user's statement of [`STAGING`], then extracts, without stored
+/// rows, an assistant message that repeats it as the line introducing a log
+/// block that holds `failure`. Returns the rows of the project and the
+/// approved statement's text.
+async fn report_extracted_without_stored_rows(failure: &str) -> (Vec<(String, String)>, String) {
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let statement = format!("{STAGING}.");
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", &statement)],
+        |_, _| vec![fact(&statement)],
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(&statement), "visible".to_string())]
+    );
+
+    let report = format!("{STAGING}:\n```log\n{failure}\n```");
+    let jobs = enqueue(&handler, SECOND, "s2", &[("m2", "assistant", &report)]).await;
+    for _ in 0..2 {
+        store
+            .fail_memory_capture(&digest, &jobs[0], "model_failed", 0, true, now_ms())
+            .unwrap();
+    }
+    let (bare, prompt) = issue(&handler, SECOND, "s2").await;
+    assert_eq!(prompt_texts(&prompt), [report.as_str()]);
+    assert_eq!(prompt["existing_memories"], json!([]));
+    answer_alone(&handler, SECOND, "s2", &bare, STAGING).await;
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!((status.pending, status.failed, status.completed), (0, 0, 2));
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(&statement)]
+    );
+    (
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        stated(&statement),
+    )
+}
+
+/// A source extracted without stored rows repeats an approved statement as
+/// the line that introduces a failure report. The frozen memory holds the
+/// failure line beside the quotation, so it is more than a copy of the
+/// approved row and is written with that line.
+#[tokio::test]
+async fn a_source_extracted_without_stored_rows_keeps_the_failure_lines_its_quotation_frames() {
+    const FAILURE: &str = "ERROR: relation \"billing_events\" does not exist";
+    let (rows, statement) = report_extracted_without_stored_rows(FAILURE).await;
+    let reports: Vec<&str> = rows
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .filter(|text| text.contains(FAILURE))
+        .collect();
+    assert_eq!(
+        reports.len(),
+        1,
+        "the report is written with its failure line: {rows:?}"
+    );
+    assert!(reports[0].contains(STAGING), "{rows:?}");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.contains(&(statement, "visible".to_string())),
+        "the approved statement stays: {rows:?}"
+    );
+}
+
+/// The store refuses a plan whose appended failure line its secret scan
+/// flags, and the plan freezes with the quotation alone. That text is the
+/// approved row's, so the frozen memory names the row and adds none.
+#[tokio::test]
+async fn a_source_extracted_without_stored_rows_names_the_approved_copy_once_its_failure_lines_are_refused()
+ {
+    let (rows, statement) =
+        report_extracted_without_stored_rows("ERROR: required secret is empty: NPM_TOKEN=").await;
+    assert_eq!(rows, [(statement, "visible".to_string())]);
+}
+
 /// Sets short publication waits, so a test that holds the gate or the Kernel
 /// writer finishes in well under a second.
 fn short_waits(handler: &Handler) {

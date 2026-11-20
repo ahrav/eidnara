@@ -876,14 +876,6 @@ impl CaptureWork {
                     memory.duplicate_of = None;
                 }
             }
-            // A source extracted without the stored rows names no target.
-            // Its memory that an approved row holds word for word names
-            // that row, so publication stores the statement once.
-            for memory in &mut memories {
-                if memory.duplicate_of.is_none() {
-                    memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
-                }
-            }
             // A user's contest shows whole sentences of the user's message
             // beside the statement, such as a question or a correction in a
             // sentence after a colon. A colon can introduce another
@@ -915,24 +907,38 @@ impl CaptureWork {
             let mut memories = quoted.clone();
             failure_evidence::attach(&job.text, &mut memories);
             let attached = keep_statement_text(&job, &proses[index], &quoted, &mut memories);
-            let existing = plan
-                .existing
-                .iter()
-                .chain(&plan.withheld)
-                .filter(|previous| {
-                    memories.iter().any(|memory| {
-                        memory.replaces.as_deref() == Some(&previous.id)
-                            || memory.also_replaces.contains(&previous.id)
-                            || memory.duplicate_of.as_deref() == Some(&previous.id)
-                            || memory.contests.contains(&previous.id)
+            // A source extracted without the stored rows names no target.
+            // Its memory whose frozen text an approved row holds word for
+            // word names that row, so publication stores the statement
+            // once. A memory that gained failure lines holds more than the
+            // row and is written.
+            let link_withheld_copies = |memories: &mut [CapturedMemory]| {
+                for memory in memories {
+                    if memory.duplicate_of.is_none() {
+                        memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
+                    }
+                }
+            };
+            let referenced = |memories: &[CapturedMemory]| -> Vec<_> {
+                plan.existing
+                    .iter()
+                    .chain(&plan.withheld)
+                    .filter(|previous| {
+                        memories.iter().any(|memory| {
+                            memory.replaces.as_deref() == Some(&previous.id)
+                                || memory.also_replaces.contains(&previous.id)
+                                || memory.duplicate_of.as_deref() == Some(&previous.id)
+                                || memory.contests.contains(&previous.id)
+                        })
                     })
-                })
-                .cloned()
-                .collect();
+                    .cloned()
+                    .collect()
+            };
+            link_withheld_copies(&mut memories);
             let mut output = PreparedCapture {
                 version: CAPTURE_SCHEMA_VERSION,
                 model: plan.model.clone(),
-                existing,
+                existing: referenced(&memories),
                 memories,
                 head: head.clone(),
             };
@@ -950,6 +956,8 @@ impl CaptureWork {
                 )
             {
                 output.memories = quoted;
+                link_withheld_copies(&mut output.memories);
+                output.existing = referenced(&output.memories);
                 let frozen =
                     serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
                 prepared = self

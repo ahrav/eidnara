@@ -1121,12 +1121,12 @@ request. With none, the source is extracted with the other ripe sources at
 that count, beside the reference memories selected for the batch. After one,
 it is extracted alone, so each source of a failed batch gets its own request
 and the others are captured while one keeps failing. After two, it is
-extracted alone and its prompt carries an empty `existing_memories`. The
-proposals of a source extracted that way name no target. The daemon marks a
-proposal a duplicate of a reference memory selected for its request when that
-memory is served on `auto_inject` and the two texts are equal up to the
-attribution label, edge whitespace, and closing `.` or `!`, and writes every
-other proposal as a new row beside any stored row it restates or corrects. Cancellation
+extracted alone and its prompt carries an empty `existing_memories`. Every
+target an answer to that request names is released. The daemon marks a frozen
+memory a duplicate of a reference memory selected for its request when that
+memory is served on `auto_inject` and the two stored texts, appended failure lines
+included, are equal up to the attribution label, edge whitespace, and closing `.` or
+`!`, and writes every other frozen memory as a new row beside any stored row it restates or corrects. Cancellation
 and unavailable native auth do not consume that allowance. Dispatch counts
 survive restart and drive exponential retry delay from one second to 128
 seconds; issued work carries its deadline, so a lease lost to a restart is
