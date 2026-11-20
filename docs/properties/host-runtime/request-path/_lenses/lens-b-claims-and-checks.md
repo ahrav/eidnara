@@ -169,7 +169,7 @@ admission classes):
 /// then unreachable because every route is general-class.
 ```
 
-ModelExecution declares the opposite. `model_execution/mod.rs:164-177` returns a
+ModelExecution declares the opposite. `model_execution/mod.rs:165-178` returns a
 `ResourceDeclaration` with `route_class: RouteClass::Reserved` and
 `reserved_handler_tasks: config::RESERVED_HANDLER_TASKS`,
 `reserved_pending_requests: config::RESERVED_PENDING_REQUESTS`, both `96`

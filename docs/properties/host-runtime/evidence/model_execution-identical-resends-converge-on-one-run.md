@@ -20,7 +20,7 @@ production caller is `ModelExecutionComponent::handle`, which passes `&ctx.body`
 `mod.rs:236`, the request frame's exact bytes. So the fingerprint is over wire
 bytes, not over the decoded `SendRequest`. `send_pair` in the test file builds
 the body by serialising the same JSON the wire carries
-(`tests/model_execution_supervisor.rs:28-43`).
+(`tests/model_execution_supervisor.rs:32-47`).
 
 The dedup decision sits under the index lock. `lock_index` is taken at
 `supervisor.rs:349`; the match on `index.sessions.get(key)` at `:356-375`
@@ -45,8 +45,8 @@ path. A deduplicated send never reaches it.
 Existing checks, verified:
 
 - `identical_resend_dedups_and_any_byte_difference_conflicts`
-  (`tests/model_execution_supervisor.rs:125-161`). Two sends with the same body return
-  the same ID (`:131-137`); a body with one inserted space returns
+  (`tests/model_execution_supervisor.rs:129-165`). Two sends with the same body return
+  the same ID (`:135-141`); a body with one inserted space returns
   `idempotency_conflict` (`:140-145`); a different prompt returns the same
   code (`:147-151`); after the gate opens, `backend.starts() == 1`
   (`:153-160`). The inserted-space case is the one that proves byte identity
@@ -109,7 +109,7 @@ uncovered case is the post-eviction resend:
 1. Build a supervisor with `max_terminal_sessions` small or use
    `start_paused` time and advance past `TERMINAL_RETENTION`, as
    `every_path_returns_permits_and_charges_to_baseline` does at
-   `tests/model_execution_supervisor.rs:1019`.
+   `tests/model_execution_supervisor.rs:1752`.
 2. Send, complete, let the entry expire or be evicted, then resend the same
    bytes.
 3. Assert the resend returns a different run ID and `backend.starts() == 2`.
@@ -122,7 +122,7 @@ bound should appear in the guarantee is the open question below.
 ### Q: Does the dedup key match the exact bytes the wire carried?
 
 - Sources examined: `mod.rs:213-239`, `supervisor.rs:323-331`,
-  `tests/model_execution_supervisor.rs:27-43`, `:139-145`.
+  `tests/model_execution_supervisor.rs:31-47`, `:143-149`.
 - Findings: yes. `handle` parses `ctx.body` at `mod.rs:213` and then passes
   the same `&ctx.body` to `send` at `:236`. The fingerprint at
   `supervisor.rs:331` is over that slice. The inserted-space test proves the
