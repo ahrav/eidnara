@@ -45,11 +45,11 @@ and owns pressure setup, rather than defining another disposition oracle.
   [inventory helper, lines 731-744](../../../../../crates/daemon/tests/harness_sources.rs#L731)
   maps absence to empty text, so that helper alone cannot observe this
   distinction for a C6 result.
-- [Search execution, lines 147-171, 233-263](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L147)
+- [Search execution, lines 153-177, 273-303](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L153)
   distinguishes invalid state, complete delivery, and packed results. An
   explicit empty sources list completes without reading. Unresolved IDs and
   truncated reads carry notes rather than proof of a complete search.
-- [Search fallback, lines 233-241](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L233)
+- [Search fallback, lines 273-281](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L273)
   retries only `no_required_consumer` ungated and adds a freshness note. Do
   not classify that first refusal as terminal if the permitted second read
   actually delivers supporting evidence.

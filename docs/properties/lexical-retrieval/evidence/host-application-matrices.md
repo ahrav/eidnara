@@ -138,7 +138,7 @@ is unset.
 
 ### Q: Is "no denied payload" structurally enforced on the host path?
 
-- Sources examined: `route-search.ts:103` through `:146`;
+- Sources examined: `route-search.ts:105` through `:148`;
   `retrieval-reads-no-payload` for the daemon side.
 - Findings: the host reads payloads only for decisions the route named, via
   `readObjectRowsChunked` on `explicit_search`, after the ranking returns.
