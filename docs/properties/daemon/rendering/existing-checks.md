@@ -419,7 +419,7 @@ no CI machine.** A fixture that no longer matches the TypeScript generator it wa
 produced from is caught by review alone.
 
 One genuine compile-coupled gate exists and it points the other way.
-`memory_render.rs:504` `include_str!`s the live TypeScript source
+`memory_render.rs:537` `include_str!`s the live TypeScript source
 `packages/plugin/src/features/eidnara/memory/constants.ts` (source-catalog path, not present at HEAD) and parses three
 `export const` arrays out of it (`:475-499`), asserting
 `CATEGORY_PRIORITY == POSITIVE_MEMORY_CATEGORIES` and that every
@@ -697,7 +697,7 @@ mechanically checked nowhere.
    test parses the Rust source, and `task-config.test.ts:39` explicitly delegates
    one assertion to a Rust test by name instead of checking it.
 5. **The `m1_revision_signal` completeness invariant crosses a sub-part boundary
-   as prose.** `memory_render.rs:354-360` tells a future editor to "re-read the
+   as prose.** `memory_render.rs:387-393` tells a future editor to "re-read the
    COMPLETENESS INVARIANT on `m1_revision_signal`" before adding a time-varying
    input. The invariant lives in `m1_compose.rs:54`, which is 4b. Nothing
    mechanically prevents the change the comment forbids.

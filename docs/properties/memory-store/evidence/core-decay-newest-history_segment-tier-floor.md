@@ -69,7 +69,7 @@ non-finite argument, provided a subnormal budget can arrive.
 A render pass computes a budget pressure of `+inf` because the effective
 history budget arrived as a positive subnormal (a division underflow upstream,
 a misparsed configuration value, or a multiplier that drove the budget to
-almost zero at `crates/daemon/src/memory_render.rs:304`). The curve is then
+almost zero at `crates/daemon/src/memory_render.rs:337`). The curve is then
 evaluated for every history_segment. HistorySegments at index 2 and beyond get
 `z = +inf` and archive, which is the sane degenerate answer. The single newest
 history_segment, at index 1, gets `z = NaN` and is rendered at tier 4 instead of
@@ -124,10 +124,10 @@ and the only variable is which inputs the campaign covers.
 - Sources examined: `crates/context-core/src/decay.rs:130-145`,
   `crates/daemon/src/decay_render.rs:278-282`,
   `crates/daemon/src/decay_render.rs:306-314`,
-  `crates/daemon/src/memory_render.rs:304`,
-  `crates/daemon/src/m0_compose.rs:117` and `:273`.
+  `crates/daemon/src/memory_render.rs:337`,
+  `crates/daemon/src/m0_compose.rs:154` and `:310`.
 - Findings: `history_budget_tokens` is an `f64` field on the m0 and
-  memory-render input structs. At `memory_render.rs:304` it is divided by
+  memory-render input structs. At `memory_render.rs:337` it is divided by
   `decay_pressure_multiplier.max(1.0)`, so the multiplier can only shrink it,
   never grow it. Every in-tree construction site I read passes it straight
   through from a caller-supplied struct field; I did not find the config

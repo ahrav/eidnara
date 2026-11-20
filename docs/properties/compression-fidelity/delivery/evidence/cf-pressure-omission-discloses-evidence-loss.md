@@ -23,7 +23,7 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
   exhausts. The loop does not exempt high importance or the newest-tier floor.
 - [decay_render.rs:1020-1037](../../../../../crates/daemon/src/decay_render.rs#L1020-L1037)
   tests an 80-character budget with importance 50 rows; status unaudited.
-- [m0_compose.rs:141-172](../../../../../crates/daemon/src/m0_compose.rs#L141-L172)
+- [m0_compose.rs:178-209](../../../../../crates/daemon/src/m0_compose.rs#L178-L209)
   adds at most three pressure retries for wrapped history above 105% of budget.
   This trigger is neither a hard-budget allowance nor a guaranteed cap. The
   [resource record](../catalog.md#cf-serving-resource-boundaries) owns that distinction.

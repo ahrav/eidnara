@@ -14,7 +14,7 @@ Altitude gate. Deployable: the eidnara daemon. Owned semantic state for this
 feature: the `contradiction_candidates` derived table in the memory-store
 (daemon-owned, `crates/memory-store/baseline.sql`, single baseline, Batch M1).
 Authority read, never written: the Kernel (decisions in domain `memory`,
-`canonical_memory.rs:19`; source descriptors `srcdesc:*` and their evidence
+`canonical_memory.rs:21`; source descriptors `srcdesc:*` and their evidence
 objects in domain `harness-capture`, `source_capture.rs:54`, `schema.rs:94`).
 Independently failing participants: the Kernel store (may be Starting or
 Unavailable), the memory-store (may be unreadable), the publication job (its own

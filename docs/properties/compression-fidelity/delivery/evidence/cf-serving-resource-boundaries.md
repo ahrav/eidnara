@@ -15,12 +15,12 @@ details do not authorize a weaker acceptance threshold.
   returns the unwrapped history body. Its positive-budget guard demotes
   oldest-first, bounded by `history_segments.len() * 5`, until the body fits
   its effective budget or is empty. This is the absolute body-budget boundary.
-- [memory_render.rs:206-215](../../../../../crates/daemon/src/memory_render.rs#L206-L215)
+- [memory_render.rs:239-248](../../../../../crates/daemon/src/memory_render.rs#L239-L248)
   divides the requested budget by the pressure multiplier before calling the
   renderer, then adds the session-history wrapper or its empty placeholder.
   [memory_render.rs:7-12](../../../../../crates/daemon/src/memory_render.rs#L7-L12)
   keeps the empty wrapper deliberately for prompt-cache stability.
-- [m0_compose.rs:134-173](../../../../../crates/daemon/src/m0_compose.rs#L134-L173)
+- [m0_compose.rs:171-210](../../../../../crates/daemon/src/m0_compose.rs#L171-L210)
   measures that wrapped history slice. Above `requested_budget * 1.05`, it
   increases pressure by 1.15 and retries at most three times. It returns the
   last render even if the trigger remains true. The trigger is not a cap.
@@ -33,7 +33,7 @@ details do not authorize a weaker acceptance threshold.
   result limit. Fidelity wording changes do not authorize broader searches.
 - [lib.rs:9257-9271](../../../../../crates/daemon/src/lib.rs#L9269-L9283)
   pins one canonical read for the pass. The
-  [reader](../../../../../crates/daemon/src/canonical_memory.rs#L195-L374)
+  [reader](../../../../../crates/daemon/src/canonical_memory.rs#L201-L380)
   applies scope, category, and budget selection before rendering, at any
   consumer lag.
 - [transform.rs:22965-22984,21111-21216](../../../../../crates/daemon/src/transform.rs#L22965-L22984)

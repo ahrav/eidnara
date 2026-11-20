@@ -118,7 +118,7 @@ and are linked rather than duplicated.
 [failure]: ../../../../../../commons/docs/plans/2026-09-10-feat-eidnara-rp2-1-projection-coverage-plan.md#L108-L120
 [plan]: ../../../../../../commons/docs/plans/2026-09-10-feat-eidnara-rp2-1-projection-coverage-plan.md#L151-L156
 [requirements]: ../../../../../../commons/docs/plans/2026-09-10-feat-eidnara-rp2-1-projection-coverage-plan.md#L35-L41
-[memory]: ../../../../../crates/daemon/src/canonical_memory.rs#L21-L87
+[memory]: ../../../../../crates/daemon/src/canonical_memory.rs#L23-L93
 [withheld]: ../../../daemon/transform/catalog.md#canonical-read-staleness-is-distinguishable-from-emptiness
 [workspace]: ../../../../../Cargo.toml#L3-L17
 [remediation]: ../catalog.md#projection-remediation-invalidates-derived-bytes

@@ -732,13 +732,13 @@ Equality between `ModuleMeta.project_memory` and
 `HistorySummarizerDiagnostics.project_memory` in one response is not claimed:
 `meta.project_memory` is the served m0's record, rewritten only on a HARD,
 while the history_summarizer records the current pass's read, and the HARD trigger
-compares only the rendered-row digest (`canonical_memory.rs:50-66`,
+compares only the rendered-row digest (`canonical_memory.rs:52-72`,
 `m1_compose.rs:80-82`). A non-HARD pass whose read advanced `known_as_of` or
 changed `truncated` over the same rendered rows, or moved from one withheld
 state to another, therefore carries a `meta.project_memory` frozen by an
 earlier pass beside a history_summarizer record taken this pass. The
 verdict-to-record mapping is total over `KernelOutcome`
-(`canonical_memory.rs:165-176`, `state.rs` `state_key`).
+(`canonical_memory.rs:171-182`, `state.rs` `state_key`).
 Required faults and enabling state: A `KernelOpenCoordinator` phase other than
 `Ready` (store starting or unavailable), or a `tip` or `read_visible` error.
 Outbox consumers maintain derived state, so the tip read is served at any

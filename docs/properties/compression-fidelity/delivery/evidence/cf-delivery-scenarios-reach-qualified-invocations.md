@@ -24,7 +24,7 @@ and final wildcard passes produced this record. Inspected 2026-09-19 at
 - [transform.rs:8339-8361](../../../../../crates/daemon/src/transform.rs#L8339-L8361)
   makes hint rarity an independent prerequisite. A singleton candidate fixture
   cannot reach selection just by containing the query words.
-- [canonical_memory.rs:195-211](../../../../../crates/daemon/src/canonical_memory.rs#L195-L211)
+- [canonical_memory.rs:201-217](../../../../../crates/daemon/src/canonical_memory.rs#L201-L217)
   filters and trims before rendering. Negative memory states must be observed
   before the provider assertion; absence alone cannot prove which state ran.
 - [rust-harness.ts:604-645](../../../../../packages/e2e-tests/src/rust-harness.ts#L604-L645)

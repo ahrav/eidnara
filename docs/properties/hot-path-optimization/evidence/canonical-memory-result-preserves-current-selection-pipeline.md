@@ -12,7 +12,7 @@ The preservation target is the selected result, not a particular SQL shape.
 
 - [daemon/lib.rs:8190-8270][pass] pins one read before the synchronous transform.
   Reruns at [8264, 8291, 8317, and 8372][reruns] reuse that captured result.
-- [canonical_memory.rs:219-244][entry] captures the tip and passes it to the
+- [canonical_memory.rs:225-250][entry] captures the tip and passes it to the
   auto-inject read; failures become withheld outcomes, and consumer lag leaves
   the read served.
 - [admission.rs:3818-4078][query] builds the served query over admission
@@ -20,7 +20,7 @@ The preservation target is the selected result, not a particular SQL shape.
   rows. [admission.rs:3328][order] sorts the collected rows by object ID.
 - [read.rs:383-550][selection] applies domain/kind and scope selection, keeps
   newest rows, checks typed-row completeness, and trims the payload prefix.
-- [canonical_memory.rs:339-374][conversion] applies Visible and positive-category
+- [canonical_memory.rs:345-380][conversion] applies Visible and positive-category
   filters only after those caps, then trims memory and creates the snapshot.
 
 ## Failure scenario
@@ -72,8 +72,8 @@ baseline commit's rendered bytes does not run yet.
 
 [pass]: ../../../../crates/daemon/src/lib.rs#L8202-L8282
 [reruns]: ../../../../crates/daemon/src/lib.rs#L8349-L8453
-[entry]: ../../../../crates/daemon/src/canonical_memory.rs#L219-L244
+[entry]: ../../../../crates/daemon/src/canonical_memory.rs#L225-L250
 [query]: ../../../../crates/kernel/src/admission.rs#L3818-L4078
 [order]: ../../../../crates/kernel/src/admission.rs#L3328
 [selection]: ../../../../crates/daemon/src/kernel_routes/read.rs#L383-L550
-[conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L339-L374
+[conversion]: ../../../../crates/daemon/src/canonical_memory.rs#L345-L380

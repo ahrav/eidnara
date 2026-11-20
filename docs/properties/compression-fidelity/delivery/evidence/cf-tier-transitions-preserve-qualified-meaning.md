@@ -18,9 +18,9 @@ integrity, lifecycle, compatibility. Inspected 2026-09-19 at
   checks P1-only acceptance and these exact fallback values; status unaudited.
 - [m1_compose.rs:202-207](../../../../../crates/daemon/src/m1_compose.rs#L202-L207)
   selects rows beyond `folded_history_segment_seq`.
-  [memory_render.rs:261-276](../../../../../crates/daemon/src/memory_render.rs#L261-L276)
+  [memory_render.rs:294-309](../../../../../crates/daemon/src/memory_render.rs#L294-L309)
   renders those new rows at explicit P1 without an age-based choice.
-- [m0_compose.rs:188-238](../../../../../crates/daemon/src/m0_compose.rs#L188-L238)
+- [m0_compose.rs:225-275](../../../../../crates/daemon/src/m0_compose.rs#L225-L275)
   reloads durable history and composes the decayed baseline.
 - [decay_render.rs:510-529,568-585](../../../../../crates/daemon/src/decay_render.rs#L510-L585)
   distinguishes missing bodies from present empty bodies. Missing requested

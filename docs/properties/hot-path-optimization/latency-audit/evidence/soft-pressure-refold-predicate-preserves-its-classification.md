@@ -133,7 +133,7 @@ a writer or treating an unreachable condition as covered.
 [m1-trim]: ../../../../../crates/daemon/src/m1_compose.rs#L194-L208
 [m1-count-zero]: ../../../../../crates/daemon/src/m1_compose.rs#L231
 [placeholder]: ../../../../../crates/daemon/src/memory_render.rs#L10-L12
-[assemble]: ../../../../../crates/daemon/src/memory_render.rs#L206-L231
+[assemble]: ../../../../../crates/daemon/src/memory_render.rs#L239-L264
 [budget-filter]: ../../../../../crates/daemon/src/lib.rs#L8259-L8262
 [h1]: ../../catalog.md#history-budget-selection-preserves-reference-bytes
 [h2]: ../../catalog.md#history-budget-boundaries-remain-distinct
