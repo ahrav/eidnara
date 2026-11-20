@@ -1080,6 +1080,42 @@ describe("generation-sensitive not-sent outcomes", () => {
         expect(transport.client).toBe(replacement);
     });
 
+    test("a connection that fails while its route opens is retired after the attempt retired an earlier one", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const rotated = {} as unknown as HostClient;
+        const dialed = {
+            routeOpen: () =>
+                Promise.reject(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })),
+            closeRoute: async () => {},
+        } as unknown as HostClient;
+        transport.client = rotated;
+        const before = transport.connectionGeneration;
+        transport.ensureConnected = async () => {
+            // The attempt finds the cached client's daemon replaced, retires it, and dials.
+            if (transport.client === rotated) {
+                void transport.invalidateConnection(rotated);
+                transport.client = dialed;
+            }
+            if (transport.client !== dialed) throw new Error("no daemon to dial");
+            return { client: dialed };
+        };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: before,
+            current_generation: before + 2,
+        });
+        expect(transport.client).toBeNull();
+    });
+
     test("a request the facade refuses on a closed client is sent once on the next connection", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;

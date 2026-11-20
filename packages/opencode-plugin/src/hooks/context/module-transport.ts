@@ -834,7 +834,7 @@ export class HostModuleTransport {
             for (;;) {
                 let ensuredRoute: EnsuredRoute | null = null;
                 let requestInvoked = false;
-                // The connection generation this attempt dials under. A failure before a route exists belongs to it.
+                // The connection generation at the start of this attempt.
                 const attemptGeneration = this.connectionGeneration;
                 try {
                     if (args.signal?.aborted) {
@@ -938,7 +938,7 @@ export class HostModuleTransport {
                         } else if (this.connectionGeneration === attemptGeneration) {
                             teardown = this.invalidateConnection();
                         } else {
-                            // Another holder retired the connection this attempt dialed under. The current client may be its replacement, which stays open.
+                            // The generation moved since this attempt began: the attempt's own dial or route opening retired the failed connection, or another holder did. The current client may be a replacement, which stays open.
                             teardown = Promise.resolve();
                         }
                         turnedOver = true;
@@ -1111,6 +1111,8 @@ export class HostModuleTransport {
                         (late) => void client.closeRoute(late).catch(() => undefined),
                         () => undefined,
                     );
+                    // A connection failure here belongs to the client this opening dialed, so that client is retired here by identity. `call` retires a connection only when its generation has not moved since the attempt began.
+                    if (isConnectionFailure(error)) void this.invalidateConnection(client);
                     const retryable =
                         isHostCallError(error) &&
                         error.kind === "terminal" &&
