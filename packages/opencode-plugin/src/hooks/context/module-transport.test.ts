@@ -1087,6 +1087,25 @@ describe("generation-sensitive not-sent outcomes", () => {
         expect(sent).toBe(1);
     });
 
+    test("an answer that arrives after the transport retired its connection is an unknown outcome", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        fakeRoute(transport, async () => {
+            // Another caller retires the connection while the daemon is answering.
+            await transport.invalidateConnection();
+            return { ok: true };
+        });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).rejects.toMatchObject({ kind: "outcome_unknown", code: "connection_changed" });
+    });
+
     test("a body built under an older generation is not sent once the route settles on a newer one", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         let sent = 0;

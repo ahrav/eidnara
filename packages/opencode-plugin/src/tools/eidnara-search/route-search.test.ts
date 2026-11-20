@@ -966,14 +966,22 @@ describe("eidnara_search through the fused route", () => {
             summary: "Live daemon text.",
         });
         const rankedUnder: string[] = [];
-        kernel.routeReply = () => {
+        const budgets: number[] = [];
+        kernel.routeReply = (body) => {
             rankedUnder.push(transport.identity);
+            budgets.push(body.remaining_ms as number);
             transport.identity = "second";
+            const until = performance.now() + 40;
+            while (performance.now() < until) {
+                // Each ranking spends 40 ms of the search's budget.
+            }
             return fused([{ object: id(1) }]);
         };
         const execution = await run({ query: "anything" });
         expect(execution.status).toBe("complete");
         expect(execution.text).toContain("Live daemon text.");
         expect(rankedUnder).toEqual(["first", "second"]);
+        // The second ranking has what the first left of the one route budget.
+        expect(budgets[1] ?? Infinity).toBeLessThanOrEqual(ROUTE_SEARCH_DEADLINE_MS - 35);
     });
 });

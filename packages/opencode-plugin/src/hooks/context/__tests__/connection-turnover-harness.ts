@@ -7,6 +7,10 @@ import { FakeDaemon, writeConnectionFile } from "../../../shared/host-client/__t
 import { type EnvelopeHeader, FrameType } from "../../../shared/host-client/protocol";
 import { FakeKernel } from "../../../shared/kernel-client-testing/fake-kernel";
 import { resetKernelClientsForTest } from "../kernel-transport";
+import type { HostModuleTransport } from "../module-transport";
+
+/** The `call` of a module transport, or of the module client a plugin builds over one. */
+export type ModuleCall = HostModuleTransport["call"];
 
 export interface RoutedRequest {
     header: EnvelopeHeader;
@@ -136,6 +140,39 @@ export class ConnectionTurnoverHarness {
 
     async acceptRoute(): Promise<number> {
         return this.openRoute(await this.nextRequest());
+    }
+
+    /** Opens the caller's route with one answered `session.status`, so the process connection exists before a kernel client dials. */
+    async warm(call: ModuleCall, sessionId: string): Promise<void> {
+        const warm = call({
+            method: "session.status",
+            sessionId,
+            projectRoot: this.root,
+            body: { method: "session.status" },
+        });
+        void warm.catch(() => {});
+        await this.acceptRoute();
+        this.daemon.respond((await this.nextRequest()).header, { ok: true });
+        await warm;
+    }
+
+    /** Sends a transform the daemon leaves pending and waits for its frame. Resolves to the error the transform's expired deadline raises. */
+    async expiringTransform(call: ModuleCall, sessionId: string): Promise<Promise<unknown>> {
+        const expired = call({
+            method: "transform",
+            sessionId,
+            projectRoot: this.root,
+            body: { method: "transform", session_id: sessionId },
+            timeoutMs: 500,
+        }).then(
+            () => new Error("the transform was answered"),
+            (error: unknown) => error,
+        );
+        const pass = await this.nextRequest();
+        if (pass.json.method !== "transform") {
+            throw new Error(`expected the transform, got ${JSON.stringify(pass.json)}`);
+        }
+        return expired;
     }
 
     /** Answers one request as the daemon does: a route for `route.open`, the fake kernel's reply for a kernel method. */

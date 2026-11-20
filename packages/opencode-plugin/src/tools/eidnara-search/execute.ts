@@ -207,7 +207,7 @@ export async function executeEidnaraSearch(
     return first;
 }
 
-/** What one pass of a search reads with. Both passes of a search rank inside `routeDeadline`. */
+/** What one pass of a search reads with. Both passes of a search rank inside `routeDeadline`; a pass that falls back to the snapshot scan starts that scan's own budget, as a search of one pass does. */
 interface SearchPass {
     client: KernelClient;
     query: string;

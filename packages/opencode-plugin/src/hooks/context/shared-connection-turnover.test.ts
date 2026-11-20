@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { isHostCallError } from "../../shared/host-client";
 import { executeEidnaraSearch } from "../../tools/eidnara-search/execute";
 import { ConnectionTurnoverHarness, MEMORY_SUMMARY } from "./__tests__/connection-turnover-harness";
 import { createKernelClient, kernelClientResolver } from "./kernel-transport";
@@ -20,35 +19,7 @@ afterEach(async () => {
     await harness.stop();
 });
 
-/** Opens the transform transport's route with one answered call, so the process connection exists before the kernel client dials. */
-async function warmTransform(): Promise<void> {
-    const warm = transform.call({
-        method: "session.status",
-        sessionId: SESSION,
-        projectRoot: harness.root,
-        body: { method: "session.status" },
-    });
-    void warm.catch(() => {});
-    await harness.acceptRoute();
-    harness.daemon.respond((await harness.nextRequest()).header, { ok: true });
-    await warm;
-}
-
-/** A transform the daemon leaves pending; resolves to the error its expired deadline raises. */
-function expiringTransform(): Promise<unknown> {
-    return transform
-        .call({
-            method: "transform",
-            sessionId: SESSION,
-            projectRoot: harness.root,
-            body: { method: "transform", session_id: SESSION },
-            timeoutMs: 80,
-        })
-        .then(
-            () => new Error("the transform was answered"),
-            (error: unknown) => error,
-        );
-}
+const transformCall: HostModuleTransport["call"] = (args) => transform.call(args);
 
 function search() {
     return executeEidnaraSearch(
@@ -64,18 +35,15 @@ function search() {
 }
 
 test("a search whose ranking is in flight when a transform deadline expires returns its results", async () => {
-    await warmTransform();
-    const expired = expiringTransform();
-    expect((await harness.nextRequest()).json.method).toBe("transform");
-
+    await harness.warm(transformCall, SESSION);
     const searching = search();
     await harness.acceptRoute();
     expect((await harness.nextRequest()).json.method).toBe("retrieval.query");
     expect(harness.connections).toBe(1);
 
-    // Both requests stay pending until the transform's deadline expires and its transport closes the connection.
-    const failure = await expired;
-    expect(isHostCallError(failure) && failure.kind).toBe("outcome_unknown");
+    // The ranking and the transform both stay pending until the transform's deadline expires and its transport closes the connection.
+    const expired = await harness.expiringTransform(transformCall, SESSION);
+    expect(await expired).toMatchObject({ kind: "outcome_unknown" });
     expect(harness.clients[0]?.isClosed).toBe(true);
 
     const { result, answered } = await harness.serve(searching);
@@ -87,15 +55,13 @@ test("a search whose ranking is in flight when a transform deadline expires retu
 });
 
 test("the first search after a transform deadline closed the shared connection returns its results", async () => {
-    await warmTransform();
+    await harness.warm(transformCall, SESSION);
     const warm = await harness.serve(search());
     expect(warm.result.status).toBe("complete");
     expect(harness.connections).toBe(1);
 
-    const expired = expiringTransform();
-    expect((await harness.nextRequest()).json.method).toBe("transform");
-    const failure = await expired;
-    expect(isHostCallError(failure) && failure.kind).toBe("outcome_unknown");
+    const expired = await harness.expiringTransform(transformCall, SESSION);
+    expect(await expired).toMatchObject({ kind: "outcome_unknown" });
     expect(harness.clients[0]?.isClosed).toBe(true);
 
     const { result, answered } = await harness.serve(search());
@@ -107,7 +73,7 @@ test("the first search after a transform deadline closed the shared connection r
 });
 
 test("a kernel call that begins after another transport closed the shared connection is answered on the next one", async () => {
-    await warmTransform();
+    await harness.warm(transformCall, SESSION);
     const kernel = createKernelClient({
         sessionId: SESSION,
         projectRoot: harness.root,
@@ -117,8 +83,7 @@ test("a kernel call that begins after another transport closed the shared connec
     expect((await harness.serve(ranked())).result.state).toEqual({ kind: "available" });
     const before = kernel.connectionIdentity();
 
-    const expired = expiringTransform();
-    expect((await harness.nextRequest()).json.method).toBe("transform");
+    const expired = await harness.expiringTransform(transformCall, SESSION);
     await expired;
     expect(harness.clients[0]?.isClosed).toBe(true);
     expect(kernel.connectionIdentity()).not.toBe(before);

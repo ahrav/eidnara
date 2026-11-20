@@ -44,36 +44,15 @@ function search() {
 }
 
 it("eidnara_search returns its results when a transform deadline closes the shared connection under it", async () => {
-    const warm = moduleClient.call({
-        method: "session.status",
-        sessionId: SESSION,
-        projectRoot: harness.root,
-        body: { method: "session.status" },
-    });
-    await harness.acceptRoute();
-    harness.daemon.respond((await harness.nextRequest()).header, { ok: true });
-    await warm;
-
-    const expired = moduleClient
-        .call({
-            method: "transform",
-            sessionId: SESSION,
-            projectRoot: harness.root,
-            body: { method: "transform", session_id: SESSION },
-            timeoutMs: 80,
-        })
-        .then(
-            () => new Error("the transform was answered"),
-            (error: unknown) => error,
-        );
-    expect((await harness.nextRequest()).json.method).toBe("transform");
-
+    const call: HostModuleClient["call"] = (args) => moduleClient.call(args);
+    await harness.warm(call, SESSION);
     const searching = search();
     await harness.acceptRoute();
     expect((await harness.nextRequest()).json.method).toBe("retrieval.query");
     expect(harness.connections).toBe(1);
 
-    // Both requests stay pending until the transform's deadline expires and its transport closes the connection.
+    // The ranking and the transform both stay pending until the transform's deadline expires and its transport closes the connection.
+    const expired = await harness.expiringTransform(call, SESSION);
     expect(await expired).toMatchObject({ kind: "outcome_unknown" });
     expect(harness.clients[0]?.isClosed).toBe(true);
 

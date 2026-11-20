@@ -895,8 +895,11 @@ export class HostModuleTransport {
                         this.client !== ensuredRoute.client ||
                         this.connectionGeneration !== ensuredRoute.generation
                     ) {
-                        throw this.connectionChangedError(
+                        // The daemon answered, so the request ran, and the answer belongs to a connection this transport has retired. The caller learns that the outcome is unknown: a write may be applied.
+                        throw new HostCallError(
+                            "outcome_unknown",
                             "daemon connection changed while awaiting the module response",
+                            "connection_changed",
                         );
                     }
                     return response;
@@ -907,7 +910,7 @@ export class HostModuleTransport {
                     // The retry path evicts the route and retries once when the host proves no dispatch.
                     const unknownChannel =
                         kind === "terminal" && errorCodeOf(error) === "unknown_channel";
-                    // The code treats a facade `not_sent`, a stale handle rejected before write, or a failure before `request()` as proven pre-send.
+                    // The code treats a facade `not_sent`, a stale handle rejected before write, a request refused by a closed client, or a failure before `request()` as proven pre-send.
                     const provenNotSent =
                         kind === "not_sent" ||
                         isStaleRouteHandleFailure(error) ||
@@ -1160,14 +1163,10 @@ export class HostModuleTransport {
 
     /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. Reading it first retires a client another holder closed, so a generation read before a call names the connection that call dials. */
     get generation(): number {
-        this.retireClosedClient();
-        return this.connectionGeneration;
-    }
-
-    /** Every transport that dials one daemon holds the same process-wide client, and each holder's invalidation closes it for all of them. A closed client serves no request, so this transport retires it as a superseded connection: its generation advances, its routes are dropped, and its next call dials. */
-    private retireClosedClient(): void {
+        // Every transport that dials one daemon holds the same process-wide client, and each holder's invalidation closes it for all of them. A closed client serves no request, so this transport retires it as a superseded connection: its generation advances, its routes are dropped, and its next call dials.
         const client = this.client;
         if (client?.isClosed) void this.invalidateConnection(client);
+        return this.connectionGeneration;
     }
 
     /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. */
@@ -1320,7 +1319,6 @@ export class HostModuleTransport {
         deadline?: Deadline,
         signal?: AbortSignal,
     ): Promise<CertifiedConnection> {
-        this.retireClosedClient();
         const cached = this.client;
         if (cached) {
             if (this.connectionOrigin !== "managed-default") {
