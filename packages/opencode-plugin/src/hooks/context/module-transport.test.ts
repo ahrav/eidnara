@@ -43,6 +43,7 @@ const REPO_ROOT = join(import.meta.dir, "../../../../..");
 
 type TransportInternals = {
     client: HostClient | null;
+    clientCacheOptions: HostClientOptions | null;
     connectionPromise: Promise<unknown> | null;
     connectionCertification: { expectedDaemonId?: Uint8Array } | null;
     routes: Map<string, { route: RouteHandle; generation: number }>;
@@ -810,6 +811,64 @@ describe("possibly sent bodies fence the session lane", () => {
         await Bun.sleep(20);
         expect(secondSettled).toBe(false);
         releaseTeardown?.();
+        await second;
+        expect(secondSettled).toBe(true);
+    });
+
+    test("the lane stays held until a client that a generation read retired has closed", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let finishClose: (() => void) | undefined;
+        const closing = new Promise<void>((resolve) => {
+            finishClose = resolve;
+        });
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            isClosed: false,
+            closeAsync: () => closing,
+            request: () => {
+                // Another holder closes the shared client while the request is in flight, and a generation read retires it on this transport.
+                client.isClosed = true;
+                expect((transport as unknown as HostModuleTransport).generation).toBe(1);
+                return Promise.reject(
+                    new HostCallError("outcome_unknown", "deadline after send", "request_deadline"),
+                );
+            },
+        };
+        const shared = client as unknown as HostClient;
+        transport.client = shared;
+        transport.clientCacheOptions = transport.clientOptions();
+        transport.ensureRoute = async () => ({
+            client: shared,
+            route,
+            routeKey: "s\0/tmp",
+            generation: 0,
+        });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+            }),
+        ).rejects.toMatchObject({ kind: "outcome_unknown" });
+
+        let secondSettled = false;
+        const second = transport
+            .call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                timeoutMs: 200,
+            })
+            .catch((error: unknown) => error)
+            .finally(() => {
+                secondSettled = true;
+            });
+        await Bun.sleep(20);
+        expect(secondSettled).toBe(false);
+        finishClose?.();
         await second;
         expect(secondSettled).toBe(true);
     });

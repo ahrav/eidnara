@@ -135,7 +135,7 @@ prepared fields. Coverage is not balanced inside those surfaces.
    production TypeScript transform calls the module transport at
    `packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts:1383-1389`.
    That transport owns a five-second transform ceiling and request cancellation
-   at `packages/opencode-plugin/src/hooks/context/module-transport.ts:768-897`.
+   at `packages/opencode-plugin/src/hooks/context/module-transport.ts:770-899`.
    Its connection uses `ShmFrameChannel`
    (`packages/opencode-plugin/src/shared/host-client/connection.ts:1-17,43`),
    which imports `@eidnara/shm-native` at

@@ -557,6 +557,8 @@ export class HostModuleTransport {
     private clientCacheOptions: HostClientOptions | null = null;
     private routes = new Map<string, CachedRoute>();
     private routeOpenings = new Map<string, OpeningRoute>();
+    // The teardown of each client this transport has retired, so a later failure on that client fences its lane on the same teardown.
+    private readonly teardowns = new WeakMap<HostClient, Promise<void>>();
     private canonicalRootCache = new Map<string, string>();
     // `sessionLanes` preserves request order within each session while independent sessions overlap.
     // Both the aggregate and per-session counts cap queued work; active calls are not waiters.
@@ -1461,9 +1463,11 @@ export class HostModuleTransport {
         return error;
     }
 
-    /** Returns the superseded connection's bounded teardown: cache eviction, then `closeAsync`. */
+    /** Returns the superseded connection's bounded teardown: cache eviction, then `closeAsync`. A client this transport retired earlier answers with that teardown. */
     private invalidateConnection(client: HostClient | null = this.client): Promise<void> {
-        if (client && this.client !== client) return Promise.resolve();
+        if (client && this.client !== client) {
+            return this.teardowns.get(client) ?? Promise.resolve();
+        }
         this.connectionGeneration += 1;
         this.connectionCertification = null;
         const superseded = this.client;
@@ -1474,10 +1478,12 @@ export class HostModuleTransport {
         this.routeOpenings.clear();
         // A retained entry holds a resolved client whose channel owns a polling interval and two ring mappings, and `handshakeTimeoutMs` is deadline-derived, so reconnects do not reuse one entry.
         if (superseded && supersededOptions) {
-            return evictProcessHostClient(supersededOptions, superseded).then(
+            const teardown = evictProcessHostClient(supersededOptions, superseded).then(
                 () => superseded.closeAsync().catch(() => undefined),
                 () => undefined,
             );
+            this.teardowns.set(superseded, teardown);
+            return teardown;
         }
         return Promise.resolve();
     }
