@@ -834,8 +834,9 @@ export class HostModuleTransport {
             for (;;) {
                 let ensuredRoute: EnsuredRoute | null = null;
                 let requestInvoked = false;
-                // The connection generation at the start of this attempt.
+                // The connection generation at the start of this attempt, and the client the attempt connected with once it has one.
                 const attemptGeneration = this.connectionGeneration;
+                const connected: { client?: HostClient } = {};
                 try {
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
@@ -846,6 +847,7 @@ export class HostModuleTransport {
                         deadline,
                         args.signal,
                         sessionClosedSinceStart,
+                        connected,
                     );
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
@@ -932,13 +934,15 @@ export class HostModuleTransport {
                         // A post-write abort relies on the bounded cleanup ticket instead of resending a possibly sent body.
                         // After a possible send, a post-write abort uses Cancel and the cleanup ticket rather than resending the body.
                         let teardown: Promise<void>;
-                        if (ensuredRoute) {
-                            this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
-                            teardown = this.invalidateConnection(ensuredRoute.client);
+                        if (ensuredRoute) this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
+                        const failed = ensuredRoute?.client ?? connected.client;
+                        if (failed) {
+                            // The failure belongs to the client this attempt connected with, which is retired by identity: a client that has replaced it since stays open.
+                            teardown = this.invalidateConnection(failed);
                         } else if (this.connectionGeneration === attemptGeneration) {
                             teardown = this.invalidateConnection();
                         } else {
-                            // The generation moved since this attempt began: the attempt's own dial or route opening retired the failed connection, or another holder did. The current client may be a replacement, which stays open.
+                            // The attempt failed before it had a client, and the generation moved since it began: its own dial retired the failed connection, or another holder did. The current client may be a replacement, which stays open.
                             teardown = Promise.resolve();
                         }
                         turnedOver = true;
@@ -1032,6 +1036,8 @@ export class HostModuleTransport {
         deadline: Deadline = Deadline.start(this.requestTimeoutMs),
         signal?: AbortSignal,
         sessionClosed: () => boolean = () => false,
+        /** Receives the client the route is opened on, so a caller whose opening fails knows which client failed. */
+        connected?: { client?: HostClient },
     ): Promise<EnsuredRoute> {
         // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
         const projectRoot = this.canonicalRoot(rawProjectRoot);
@@ -1039,6 +1045,7 @@ export class HostModuleTransport {
         const routeKey = `${sessionId}\0${projectRoot}`;
         // The cache reads a route only after connection settlement, and its generation must match the current connection.
         const { client, expectedDaemonId } = await this.ensureConnected(deadline, signal);
+        if (connected) connected.client = client;
         // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
         const credentialSourceVersion = managedCredentialSourceVersion(process.env);
         // `closeSession` fences a registered opening through `state.closed`; a close that landed before registration is observed here, so no replacement route is opened for a closed session.
@@ -1111,8 +1118,6 @@ export class HostModuleTransport {
                         (late) => void client.closeRoute(late).catch(() => undefined),
                         () => undefined,
                     );
-                    // A connection failure here belongs to the client this opening dialed, so that client is retired here by identity. `call` retires a connection only when its generation has not moved since the attempt began.
-                    if (isConnectionFailure(error)) void this.invalidateConnection(client);
                     const retryable =
                         isHostCallError(error) &&
                         error.kind === "terminal" &&

@@ -1116,6 +1116,71 @@ describe("generation-sensitive not-sent outcomes", () => {
         expect(transport.client).toBeNull();
     });
 
+    test("a route opening that fails on a client another holder retired keeps the replacement open", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const replacement = {} as unknown as HostClient;
+        const retired = {
+            routeOpen: async () => {
+                // While the route opens, another holder retires this client and a second call dials its replacement.
+                void transport.invalidateConnection(retired);
+                transport.client = replacement;
+                throw Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+            },
+            closeRoute: async () => {},
+        } as unknown as HostClient;
+        transport.client = retired;
+        const before = transport.connectionGeneration;
+        transport.ensureConnected = async () => ({ client: retired });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: before,
+            current_generation: before + 1,
+        });
+        expect(transport.client).toBe(replacement);
+    });
+
+    test("a route the host closes while it opens is opened again on the same connection", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        let opens = 0;
+        const client = {
+            routeOpen: async () => {
+                opens += 1;
+                if (opens === 1) {
+                    throw new HostCallError("terminal", "route closed by the host", "route_gone");
+                }
+                return route;
+            },
+            closeRoute: async () => {},
+            request: async () => ({ ok: true }),
+        } as unknown as HostClient;
+        transport.client = client;
+        const before = transport.connectionGeneration;
+        transport.ensureConnected = async () => ({ client });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({ ok: true });
+        expect(opens).toBe(2);
+        expect(transport.client).toBe(client);
+        expect(transport.connectionGeneration).toBe(before);
+    });
+
     test("a request the facade refuses on a closed client is sent once on the next connection", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
