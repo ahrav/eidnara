@@ -55,8 +55,8 @@ every task that will ever exist.
 Existing checks, verified:
 
 - `every_path_returns_permits_and_charges_to_baseline`
-  (`tests/model_execution_supervisor.rs:1626-1684`). With `max_active_runs: 2` and
-  `max_backend_processes: 1` (`:1628-1633`) it drives a conflict rejection
+  (`tests/model_execution_supervisor.rs:1706-1764`). With `max_active_runs: 2` and
+  `max_backend_processes: 1` (`:1708-1713`) it drives a conflict rejection
   (`:985-988`), an active-run-cap rejection (`:992-995`), a subscriber that
   reads one frame then drops (`:998-1001`), a completion (`:1003-1008`), a
   cancel and an idempotent second cancel (`:1009-1016`), a delete (`:1018`),

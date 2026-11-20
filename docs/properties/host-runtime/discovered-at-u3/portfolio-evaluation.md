@@ -210,7 +210,7 @@ producer here.
 says "every harness child receives the snapshot environment".** `EnvSnapshot`'s
 only public constructor is `capture_from` (`subprocess.rs:97`), and its callers
 are `tests/model_execution_subprocess.rs:2827`, `:2836`, `:2841`, `:2871`, `:2885`,
-`tests/model_execution_protocol.rs:436`, and the inline test at `subprocess.rs:1662`.
+`tests/model_execution_protocol.rs:436`, and the inline test at `subprocess.rs:1669`.
 Nothing in `src/` builds one. Every consumer takes it as an argument
 (`OpenCodeBackend::new` `opencode.rs:39`, `PiBackend::new` `pi.rs:60`,
 `new_with_credentials` `mod.rs:82`), and the first two have zero callers

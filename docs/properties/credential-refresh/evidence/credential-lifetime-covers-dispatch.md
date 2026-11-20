@@ -16,7 +16,7 @@ its runnable checks.
   `lease.usable_until > deadline + EXPIRY_SKEW` on the monotonic clock and
   `lease.expires_at_wall > wall + remaining + EXPIRY_SKEW` on the wall clock,
   where `remaining` is the deadline's distance from now. Both halves must hold.
-- `aws_refresh.rs:1115` `lifetime_must_exceed_the_deadline_plus_skew_strictly`
+- `aws_refresh.rs:1116` `lifetime_must_exceed_the_deadline_plus_skew_strictly`
   pushes rows of `model + skew - 1`, `model + skew`, and `model + skew + 1`
   seconds; only the last acquires. A refused row yields
   `SourceError::InsufficientLifetime` and the next acquisition yields

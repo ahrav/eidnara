@@ -57,8 +57,8 @@ built with `new_with_credentials` (`:82-91`); `new` (`:73-79`) leaves it
 Existing checks, verified:
 
 - `credential_fingerprint_matches_the_committed_vector`
-  (`model_execution/subprocess.rs:1660-1680`) asserts the crate's output over the
-  documented inputs equals the literal (`:1667-1672`) and that a zero key
+  (`model_execution/subprocess.rs:1667-1687`) asserts the crate's output over the
+  documented inputs equals the literal (`:1674-1679`) and that a zero key
   over the same row does not produce it (`:1673-1679`). It runs under
   `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`).
 - `provider_rows_exclude_ambient_credentials_and_enforce_caps`
@@ -144,7 +144,7 @@ The remaining gaps:
 
 ### Q: Was the committed vector produced independently of the crate?
 
-- Sources examined: `model_execution/subprocess.rs:167-201`, `:1660-1683`;
+- Sources examined: `model_execution/subprocess.rs:167-201`, `:1667-1690`;
   `tests/model_execution_subprocess.rs:2884-2892`; a Python HMAC over the layout
   described above.
 - Findings: the evidence summary at U3 states the vector came from a Python
