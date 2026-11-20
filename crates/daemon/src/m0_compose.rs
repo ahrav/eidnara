@@ -478,14 +478,18 @@ mod trim_memories_tests {
             section.len()
         );
         assert!(bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget);
-        // Fewer lasting rows leave room that is positive and below the
-        // quarter: the section is a run from the first supplied row that
-        // fits the room, and the next row exceeds it.
+        // Fewer lasting rows, and one too long for the room they leave, which
+        // is positive and below the quarter: the long row is skipped, and
+        // the section is a run from the first supplied row that fits the
+        // room, with the next row exceeding it.
         let some = &lasting[..22];
-        let (kept_lasting, unspent) = trim_memories_to_budget(some, budget, bytes);
+        let mut pressed = some.to_vec();
+        pressed.push(memory("PROJECT_RULES", &"x".repeat(budget as usize)));
+        let (kept_lasting, unspent) = trim_memories_to_budget(&pressed, budget, bytes);
         assert_eq!(kept_lasting, some);
         assert!(unspent > 0 && (unspent as f64) < budget / 4.0, "{unspent}");
-        let kept = trim_block_to_budget(some, &requests, budget, bytes);
+        let kept = trim_block_to_budget(&pressed, &requests, budget, bytes);
+        assert_eq!(&kept[..some.len()], some);
         let section = &kept[some.len()..];
         assert!(
             !section.is_empty() && section.len() < requests.len(),

@@ -1384,12 +1384,19 @@ progress renders after the categories in one element,
 user left open in earlier sessions that no later statement of the user ended,
 that they set no standing rule, and that the repository shows whether one is
 finished; its lines are newest first by the commit that first recorded each
-statement, so a contest, which supersedes the fact it marks, leaves a
-statement's place as it was, and a contested line of it is rendered
-as any contested statement is. The other facts are read and selected exactly
-as when no work in progress is stored: the read counts work in progress
-against bounds of its own, a quarter of the read's row and byte bounds, and
-the other facts are selected against the whole token budget first. The
+statement, statements of one commit in fact-id order, so a contest, which
+supersedes the fact it marks, leaves a
+statement's place as it was among the work in progress the read returned,
+and a contested line of it is rendered
+as any contested statement is. The read counts work in progress
+against bounds of its own, a quarter of the read's row and byte bounds,
+taken in the read's order, which is by the commit that wrote each fact's
+current row, so the other facts keep the whole of the read's row and byte
+bounds, and they are selected against the whole token budget first. The
+read ends for a session when its bounds on the other facts are reached, so
+the element holds work in progress newer than that point, and the
+eight-page limit above counts every fact the read judges, work in progress
+past its bounds among them. The
 element then takes the newest
 live work in progress, in order, until one statement exceeds the element's
 budget, which is the smaller of a quarter of
@@ -1410,8 +1417,8 @@ on `auto_inject` in the plain newest window and in the delivery of each
 session whose messages the batch holds; a fact older than every window is
 not offered. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
-supersedes the captured fact it `replaces` (which must share its category
-and at least one content word), retires each further fact it names
+supersedes the captured fact it `replaces` (which must share its category,
+or be live work in progress, and must share at least one content word), retires each further fact it names
 in `also_replaces` (each must share the replaced fact's category and at
 least half of its distinct content words, of which it must have at least
 one; a content word is a run of letters and digits of three or more
@@ -1459,12 +1466,16 @@ its `replaces` target, or as an `also_replaces` target beside a `replaces`
 target it keeps, ends it: a remark that the work is finished, a
 cancellation, and a newer plan each do. Lines capture appends to the
 statement's stored text leave that judgment as it is, since it reads the
-quotation. When the `replaces` target is a fact the statement may not
-replace, every target becomes a contest under the rule above, live work in
-progress among them. The ending statement is stored as
+quotation, and the statement's category may differ from the work's. When the
+`replaces` target is a fact served on `auto_inject` that the statement may not
+replace under the rule above, every target becomes a contest, live work in
+progress among them; when the `replaces` target fails another check of a
+replacement, the `also_replaces` targets are released as they are for any
+statement. The ending statement is stored as
 its own fact under its own class, so a `status` remark and a cancelling
 `request` are labeled and a newer plan classed `current_work` is the live
-work in progress. The ended
+work in progress when the Kernel accepts its approval, and a labeled fact
+when it refuses. The ended
 fact is superseded by a fact of the same text and category, admitted
 labeled, whose rationale holds `ended_by`, an object with `memory` (the
 ending fact's id, as it was when the statement ended) and `session` (the session whose message ended it), and
@@ -1473,8 +1484,13 @@ evidence a contested fact's successor cites (below). Explicit search serves
 the ended fact and no automatic surface does. A contest is shown while the
 fact it names is served, so a contest that work in progress placed on
 another statement lasts until that work in progress is superseded: by its
-end, and by a contest or a settlement of the work in progress itself. The
-contested statement then renders as it did before that contest. Work in progress is therefore
+end, and by a contest or a settlement of the work in progress itself. A
+statement holds one contest, and work in progress that names a statement
+whose contest a served fact holds leaves that contest as it is. The
+contested statement therefore renders after the work in progress as it did
+before it. `existing_memories[].contested` reads the stored contest, so a
+statement whose contest is no longer shown is offered as contested until a
+statement of the user that outlives its task repeats or replaces it. Work in progress is therefore
 live in a later session when its own session, and every session since,
 ended with no statement of the user ending it: a request the user reports
 finished in the session that made it reaches no later session, and a
@@ -1588,7 +1604,8 @@ approval. Only a later statement of the user whose
 can settle a contest: a user statement that replaces the contested fact ends it
 once the Kernel accepts its statement record and the admission that rests on
 it, while a correction whose approval is refused leaves the fact approved and
-contested beside the labeled correction,
+contested beside the labeled correction, unless the fact is live work in
+progress, which the correction ends,
 and a user statement that repeats the contested fact word for word, up to
 edge whitespace and its closing `.` or `!`, which names it under
 `duplicate_of` and writes no fact, supersedes it, while it is live and
@@ -1599,7 +1616,9 @@ statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
 its own fact and the contest stays. A statement classed `current_work`, `request`, or
 `status` settles no contest: its word-for-word repeat writes no fact, and its
-statement of another text is stored under its own class. The extractor is
+statement of another text is stored under its own class. A statement of any
+class that ends contested work in progress (above) ends that statement, and
+the ended fact holds no contest. The extractor is
 told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only

@@ -724,8 +724,8 @@ fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<St
 ///
 /// A replacement is dropped, with the further targets that depend on it, when
 /// its target is unprovided, protected, already claimed by an earlier memory
-/// of this source, of another category, or shares no content word with the
-/// quotation. A user's replacement of a target an earlier source of the
+/// of this source, of another category unless it is work in progress, or
+/// shares no content word with the quotation. A user's replacement of a target an earlier source of the
 /// batch claimed in `replaced` is kept for validation to refuse. A further target is dropped when it is
 /// unprovided, protected, claimed, or no restatement of the replaced memory.
 /// A duplicate link is dropped when its target is unprovided, when the
@@ -809,7 +809,7 @@ fn release_unsupported_targets(
                 .and_then(provided)
                 .is_some_and(|previous| {
                     previous.can_replace
-                        && previous.category == memory.category
+                        && (previous.category == memory.category || previous.current_work)
                         && same_fact(&memory.quote, previous)
                         && replaced.contains(&previous.id)
                 })
@@ -822,7 +822,7 @@ fn release_unsupported_targets(
             .and_then(provided)
             .filter(|previous| {
                 previous.can_replace
-                    && previous.category == memory.category
+                    && (previous.category == memory.category || previous.current_work)
                     && same_fact(&memory.quote, previous)
                     && claimed.insert(previous.id.clone())
             });
@@ -972,7 +972,7 @@ fn validate_capture_memories(
             .as_ref()
             .and_then(|target| existing.iter().find(|previous| previous.id == *target))
         {
-            if memory.category != primary.category
+            if (memory.category != primary.category && !primary.current_work)
                 || content_words(&memory.quote)
                     .intersection(&content_words(&primary.content))
                     .next()
@@ -2141,13 +2141,24 @@ fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemor
 /// the job holds whole. [`user_attributed`] adds the class check that makes
 /// it eligible for approval.
 fn user_stated(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
-    states_whole
-        && memory
-            .content
-            .strip_prefix(USER_STATED)
-            .and_then(|rest| rest.strip_prefix(": "))
-            == Some(memory.quote.as_str())
-        && quotes_whole_statements(prose, &memory.quote)
+    keeps_the_quotation(memory) && states_whole_statements(states_whole, prose, &memory.quote)
+}
+
+/// Whether the memory's stored text is the attribution label and its
+/// quotation, with no line appended.
+fn keeps_the_quotation(memory: &CapturedMemory) -> bool {
+    memory
+        .content
+        .strip_prefix(USER_STATED)
+        .and_then(|rest| rest.strip_prefix(": "))
+        == Some(memory.quote.as_str())
+}
+
+/// Whether `quote` spans whole statements of a user message the job holds
+/// whole; `states_whole` is [`states_whole_message`] of that job. Parsing
+/// and publication both judge a replacement by this answer.
+pub(super) fn states_whole_statements(states_whole: bool, prose: &Prose<'_>, quote: &str) -> bool {
+    states_whole && quotes_whole_statements(prose, quote)
 }
 
 /// Whether the job holds a whole message the user typed. The answer reads
@@ -2161,24 +2172,30 @@ fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
     user_attributed(states_whole_message(job), &Prose::of(&job.text), memory)
 }
 
-/// Whether each memory of the plan, by index, is the user's own words
-/// ([`user_stated`]). The writer adds the lifetime check that makes such a
-/// memory eligible for approval.
+/// What each memory of the plan, by index, holds of the user's own words.
+/// The writer adds the lifetime check that makes a stated memory eligible
+/// for approval.
 fn statements(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<Statement> {
     let prose = Prose::of(&job.text);
     let states_whole = states_whole_message(job);
     memories
         .iter()
-        .map(|memory| Statement {
-            whole: states_whole && quotes_whole_statements(&prose, &memory.quote),
-            stated: user_stated(states_whole, &prose, memory),
+        .map(|memory| {
+            let whole = states_whole_statements(states_whole, &prose, &memory.quote);
+            Statement {
+                whole,
+                stated: whole && keeps_the_quotation(memory),
+            }
         })
         .collect()
 }
 
 #[derive(Clone, Copy)]
 struct Statement {
+    /// The quotation spans whole statements of a whole user message
+    /// ([`states_whole_statements`]); such a memory may end work in progress.
     whole: bool,
+    /// `whole`, and the stored text is the quotation alone ([`user_stated`]).
     stated: bool,
 }
 
@@ -3827,16 +3844,16 @@ struct End {
     session: String,
 }
 
-pub(crate) fn stated_commit(decision: &kernel::DecisionRow, created_commit_seq: i64) -> i64 {
-    if !decision.payload.rationale.contains("stated_seq") {
-        return created_commit_seq;
-    }
+/// The commit that first recorded a statement: the one its contest record
+/// or its settled record names, and the row's own commit for a statement no
+/// contest has rewritten.
+pub(crate) fn stated_commit(decision: &kernel::DecisionRow) -> i64 {
     let recorded = capture_rationale(decision);
     recorded
         .contested_by
         .map(|contest| contest.stated_seq)
         .or(recorded.stated_seq)
-        .unwrap_or(created_commit_seq)
+        .unwrap_or(decision.created_commit_seq)
 }
 
 /// A caller treats a matching capture memory as live work in progress only
@@ -4083,29 +4100,40 @@ fn contest_statement(
     envelope: &mut kernel::Envelope<'_>,
     plan: &Publication<'_>,
     (contested, revision): (&kernel::DecisionRow, i64),
-    observation: &str,
+    (observation, work): (&str, bool),
     recorded_at: i64,
 ) -> Result<Option<String>, kernel::KernelError> {
     if observation == contested.object_id {
         return Ok(None);
     }
-    let recorded = capture_rationale(contested);
-    let stated_seq = match recorded.contested_by {
-        Some(contest) if contest.memory == observation => return Ok(None),
-        Some(contest) => contest.stated_seq,
-        None => recorded.stated_seq.unwrap_or(contested.created_commit_seq),
-    };
+    if let Some(contest) = capture_rationale(contested).contested_by
+        && (contest.memory == observation || (work && served(envelope, &contest.memory)?))
+    {
+        return Ok(None);
+    }
     rewrite_statement(
         envelope,
         plan,
         (contested, revision),
         Rewrite::Contested(Contest {
             memory: observation.to_owned(),
-            stated_seq,
+            stated_seq: stated_commit(contested),
             session: Some(plan.job.session_id.clone()),
         }),
         recorded_at,
     )
+}
+
+/// Whether explicit search serves `memory` at normal sensitivity, which is
+/// the condition a reader shows a contest under.
+fn served(envelope: &kernel::Envelope<'_>, memory: &str) -> Result<bool, kernel::KernelError> {
+    Ok(envelope
+        .served_rows_for(&[memory], None)?
+        .get(memory)
+        .is_some_and(|row| {
+            row.visibility(kernel::Surface::ExplicitSearch) != kernel::SurfaceVisibility::Hidden
+                && row.object.sensitivity == kernel::Sensitivity::Normal
+        }))
 }
 
 /// One memory's contests, held until the plan's other writes are done.
@@ -4113,6 +4141,10 @@ struct PendingContest<'a> {
     targets: &'a [String],
     /// The contesting memory's id.
     observation: String,
+    /// Whether the contesting memory is live work in progress. Its contest
+    /// lasts only while that work does, so it leaves a contest that a
+    /// served fact holds on the target as it is.
+    work: bool,
 }
 
 /// Records each pending contest on its capture-owned targets that are still
@@ -4205,7 +4237,7 @@ fn contest_statements(
                     envelope,
                     plan,
                     (statement, revision),
-                    &observation,
+                    (&observation, contest.work),
                     recorded_at,
                 )? {
                     renamed.insert(target.clone(), id);
@@ -4379,7 +4411,7 @@ struct Publication<'a> {
     job: &'a CaptureJob,
     output: &'a PreparedCapture,
     settlement: SettlementOutcome,
-    /// Whether each memory of the plan, by index, is the user's own words.
+    /// What each memory of the plan, by index, holds of the user's own words.
     stated: &'a [Statement],
     approval: Approval,
     /// Set when the Kernel's admission policy refuses a statement record or
@@ -4458,10 +4490,12 @@ fn write_captured_memories(
             // The memory that holds it is then the observation that
             // contests what the message contradicts.
             if !stated || repeats_stored_words || approved(envelope, target)? {
-                if earlier.contains_key(target) {
+                if let Some(held) = earlier.get(target) {
                     pending.push(PendingContest {
                         targets: &memory.contests,
                         observation: target.clone(),
+                        work: capture_rationale(held).lifetime == Some(Lifetime::CurrentWork)
+                            && approved(envelope, target)?,
                     });
                 }
                 // `reaffirmed` queues a standing statement to settle a
@@ -4482,10 +4516,21 @@ fn write_captured_memories(
                     && recorded.lifetime == Some(Lifetime::CurrentWork)
             })
         };
-        for target in memory.replaces.iter().chain(&memory.also_replaces) {
-            if !standing && work_in_progress(target).is_none() && approved(envelope, target)? {
+        // Each target with the live work in progress it names. Every
+        // target is judged before any is written.
+        let mut named = Vec::new();
+        for (target, primary) in memory
+            .replaces
+            .iter()
+            .map(|target| (target, true))
+            .chain(memory.also_replaces.iter().map(|target| (target, false)))
+        {
+            let live = approved(envelope, target)?;
+            let work = work_in_progress(target).filter(|_| live);
+            if !standing && work.is_none() && live {
                 return Err(kernel::KernelError::Conflict);
             }
+            named.push((target, primary, work, live));
         }
         // A correction whose approval the Kernel refused is stored labeled.
         let labeled = attributed && approval == Approval::Refused;
@@ -4500,15 +4545,8 @@ fn write_captured_memories(
         let mut captured = Vec::new();
         let mut ended = Vec::new();
         let mut source_revision = 1;
-        let named = memory
-            .replaces
-            .iter()
-            .map(|target| (target, true))
-            .chain(memory.also_replaces.iter().map(|target| (target, false)));
-        for (target, primary) in named {
+        for (target, primary, work, live) in named {
             let revision = checked_capture_target(envelope, project, output, target, true)?;
-            let live = approved(envelope, target)?;
-            let work = work_in_progress(target).filter(|_| live);
             match (work, revision) {
                 (Some(statement), Some(revision)) => {
                     ended.push((target, statement, revision));
@@ -4621,11 +4659,15 @@ fn write_captured_memories(
         pending.push(PendingContest {
             targets: &memory.contests,
             observation: id.to_owned(),
+            work: attributed
+                && approval == Approval::Record
+                && memory.lifetime == Some(Lifetime::CurrentWork),
         });
         for target in kept {
             pending.push(PendingContest {
                 targets: std::slice::from_ref(target),
                 observation: id.to_owned(),
+                work: false,
             });
         }
         cite::append_citations(envelope, &decision_id, &evidence, recorded_at)?;
@@ -7715,8 +7757,8 @@ mod tests {
         assert_eq!(parsed[0].contests, ["mem_0", "mem_1", "mem_2", "mem_3"]);
     }
 
-    /// A statement that ends with its task replaces no approved memory.
-    /// With a labeled memory as its replacement, each approved further
+    /// A statement that ends with its task replaces no approved memory that
+    /// outlives its task. With a labeled memory as its replacement, each approved further
     /// target becomes a contest and each labeled one is retired with the
     /// replaced memory. With the approved memory as its replacement, every
     /// target becomes a contest and nothing is retired.
@@ -7805,8 +7847,9 @@ mod tests {
     }
 
     /// A whole statement of any class keeps its replacement of an approved
-    /// target marked `current_work`. A quotation that is no whole statement
-    /// contests that target, as it contests an approved rule.
+    /// target marked `current_work`, whatever category the target has. A
+    /// quotation that is no whole statement contests that target, as it
+    /// contests an approved rule.
     #[test]
     fn a_statement_of_any_class_replaces_live_work_in_progress() {
         let plan = ExistingCaptureMemory {
@@ -7837,7 +7880,24 @@ mod tests {
             current_work: false,
             ..plan.clone()
         };
-        let existing = [plan, plan_copy, rule, rule_copy];
+        let plan_elsewhere = ExistingCaptureMemory {
+            id: "mem_plan_elsewhere".into(),
+            category: "ARCHITECTURE".into(),
+            ..plan.clone()
+        };
+        let rule_elsewhere = ExistingCaptureMemory {
+            id: "mem_rule_elsewhere".into(),
+            category: "ARCHITECTURE".into(),
+            ..rule.clone()
+        };
+        let existing = [
+            plan,
+            plan_copy,
+            rule,
+            rule_copy,
+            plan_elsewhere,
+            rule_elsewhere,
+        ];
         let messages = [CaptureMessage {
             id: "m".into(),
             role: CaptureRole::User,
@@ -7897,6 +7957,19 @@ mod tests {
                 } else {
                     contested(&["mem_rule"])
                 },
+                "{lifetime:?}"
+            );
+            // Live work in progress of another category is replaced; a
+            // statement of another category that outlives its task is
+            // contested.
+            assert_eq!(
+                parse(lifetime, "mem_plan_elsewhere", &[], true),
+                replaced("mem_plan_elsewhere", &[], &[]),
+                "{lifetime:?}"
+            );
+            assert_eq!(
+                parse(lifetime, "mem_rule_elsewhere", &[], true),
+                contested(&["mem_rule_elsewhere"]),
                 "{lifetime:?}"
             );
             // A further target that is live work in progress ends with a

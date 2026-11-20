@@ -20,7 +20,7 @@ consumer's checkpoint is not a valid oracle setup.
 
 ## Property wildcard
 
-`canonical_memory.rs:45-72` hashes rendered lines, while its rows omit source
+`canonical_memory.rs:43-66` hashes rendered lines, while its rows omit source
 revision. A revision whose change is outside the rendering cap can leave the
 rendered digest unchanged. Reusing that digest as occurrence revision or
 vector freshness would violate the RP2.1 identity contract. This adds a

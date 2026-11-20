@@ -96,5 +96,5 @@ They are not duplicated, and their check adequacy remains unaudited.
 [index]: ../../../../../../commons/docs/plans/2026-09-10-eidnara-rp2-plan-index.md#L35-L43
 [fingerprint]: ../../../../../crates/daemon/src/codec/sidecar.rs#L169-L174
 [stamp]: ../../../../../crates/daemon/src/codec/sidecar.rs#L177-L212
-[rendered]: ../../../../../crates/daemon/src/canonical_memory.rs#L45-L72
+[rendered]: ../../../../../crates/daemon/src/canonical_memory.rs#L43-L66
 [workspace]: ../../../../../Cargo.toml#L3-L17

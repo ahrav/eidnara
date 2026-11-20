@@ -254,8 +254,9 @@ fn read_at_tip(
 
 /// The most payload pages one delivery walk loads. A page holds at most the
 /// caller's row and byte caps, so with the read caps of 8,192 rows and
-/// 8 MiB the walk loads the payloads of up to 64 MiB of a session's own
-/// newer rows before it stops. The limit
+/// 8 MiB the walk loads up to 64 MiB of payloads before it stops. Every
+/// row the walk judges counts, a session's own newer rows and work in
+/// progress past its caps among them. The limit
 /// bounds the payloads a pass loads. The list of the project's visible
 /// memory rows, which holds no payload, is read and ordered whole before
 /// the walk, as every bounded read of the domain does.
@@ -275,7 +276,9 @@ const WORK_READ_DIVISOR: usize = 4;
 /// Each delivery counts visible rows that pass
 /// [`crate::memory_capture::is_current_work`] against a second pair of
 /// caps, a quarter of the first, so the response holds at most two and a
-/// half times the caps.
+/// half times the caps. A delivery ends when its first pair of caps is
+/// reached, so it holds the work in progress among the rows walked up to
+/// that row.
 ///
 /// A row's session is in its decision payload. The rows are walked in
 /// serving order and their payloads are loaded one page at a time, each page
@@ -729,8 +732,11 @@ impl ReadReport {
 /// live rows), resolves visible on the surface, and carries a decision whose
 /// kind is a positive memory category. Labeled rows never reach `auto_inject`;
 /// the guard keeps a label-bearing row out of a block that has no label
-/// renderer. The injectable rows are then trimmed to `memory_budget_tokens` in
-/// serving order, so the snapshot holds only rows the block renders.
+/// renderer. The rows are then trimmed to `memory_budget_tokens` by
+/// [`trim_block_to_budget`]: the lasting rows in serving order, then the
+/// work in progress ordered by the commit that first recorded each
+/// statement, newest first, with ties in object-id order. The snapshot
+/// holds only rows the block renders.
 fn injectable_snapshot(
     response: ReadResponse,
     memory_budget_tokens: f64,
@@ -755,7 +761,6 @@ fn injectable_snapshot(
             continue;
         }
         let work = crate::memory_capture::is_current_work(&row.object, decision);
-        let stated = crate::memory_capture::stated_commit(decision, row.object.created_commit_seq);
         let memory = CanonicalMemory {
             object_id: decision.object_id.clone(),
             category: if work {
@@ -766,7 +771,7 @@ fn injectable_snapshot(
             content: decision.payload.summary.clone(),
         };
         if work {
-            current_work.push((stated, memory));
+            current_work.push((crate::memory_capture::stated_commit(decision), memory));
         } else {
             lasting.push(memory);
         }
@@ -1313,8 +1318,9 @@ mod tests {
 
     /// A visible capture memory whose rationale holds the class
     /// `current_work` is served under `CURRENT_WORK_SECTION`. A capture
-    /// memory of another class, and a memory another writer stored with
-    /// the same rationale, keep their stored category.
+    /// memory of another class, one whose quotation holds the class name
+    /// among them, and a memory another writer stored with the same
+    /// rationale, keep their stored category.
     #[test]
     fn a_capture_memory_classed_current_work_is_served_under_its_section() {
         let captured = |object_id: &str| {
@@ -1333,11 +1339,22 @@ mod tests {
                 vec![
                     captured("plan"),
                     captured("rule"),
+                    captured("asked"),
                     visible_row("note", "decision", SurfaceVisibility::Visible),
                 ],
                 vec![
                     classed("plan", "current_work"),
                     classed("rule", "lasting"),
+                    {
+                        let mut asked = classed("asked", "request");
+                        asked.payload.rationale = serde_json::json!({
+                            "source": "memory_capture",
+                            "lifetime": "request",
+                            "quote": "Rename the current_work label.",
+                        })
+                        .to_string();
+                        asked
+                    },
                     classed("note", "current_work"),
                 ],
             ),
@@ -1352,12 +1369,76 @@ mod tests {
         assert_eq!(
             categories,
             [
+                ("asked", "CONSTRAINTS"),
                 ("note", "CONSTRAINTS"),
                 ("plan", CURRENT_WORK_SECTION),
                 ("rule", "CONSTRAINTS"),
             ]
         );
-        assert_eq!(snapshot.served_ids(), ["note", "plan", "rule"]);
+        assert_eq!(snapshot.served_ids(), ["asked", "note", "plan", "rule"]);
+    }
+
+    /// The section orders work in progress by the commit that first
+    /// recorded each statement, newest first: the commit a contest record
+    /// names for a contested statement, the commit a settled statement
+    /// kept, and the row's own commit otherwise, with statements of one
+    /// commit in object-id order. The budget cuts the section in that
+    /// order, so every budget holds a run from the first of them.
+    #[test]
+    fn the_section_orders_work_by_its_first_commit_and_the_budget_cuts_in_that_order() {
+        let work = |object_id: &str, created: i64, recorded: serde_json::Value| {
+            let mut row = visible_row(object_id, "decision", SurfaceVisibility::Visible);
+            row.object.source_id = "memory_capture".to_string();
+            row.object.created_commit_seq = created;
+            let mut decision = decision(
+                object_id,
+                "CONSTRAINTS",
+                &format!("User stated: finish the work named {object_id}."),
+            );
+            decision.created_commit_seq = created;
+            let mut rationale = serde_json::json!({
+                "source": "memory_capture",
+                "lifetime": "current_work",
+            });
+            rationale
+                .as_object_mut()
+                .unwrap()
+                .extend(recorded.as_object().unwrap().clone());
+            decision.payload.rationale = rationale.to_string();
+            (row, decision)
+        };
+        // The rows arrive in serving order, by the commit of each row.
+        let stored = [
+            work(
+                "contested",
+                10,
+                serde_json::json!({"contested_by": {"memory": "obs", "stated_seq": 2}}),
+            ),
+            work("settled", 9, serde_json::json!({"stated_seq": 1})),
+            work("tie-b", 7, serde_json::json!({})),
+            work("tie-a", 7, serde_json::json!({})),
+            work("plain", 5, serde_json::json!({})),
+        ];
+        let expected = ["tie-a", "tie-b", "plain", "contested", "settled"];
+        let section = |budget: f64| -> Vec<String> {
+            let (rows, decisions) = stored.iter().cloned().unzip();
+            injectable_snapshot(response(rows, decisions), budget)
+                .rows()
+                .iter()
+                .map(|row| {
+                    assert_eq!(row.category, CURRENT_WORK_SECTION);
+                    row.object_id.clone()
+                })
+                .collect()
+        };
+        assert_eq!(section(UNBOUNDED), expected);
+        let mut lengths = std::collections::BTreeSet::new();
+        for budget in (0..1_000).step_by(4) {
+            let kept = section(f64::from(budget));
+            assert_eq!(kept, expected[..kept.len()], "budget {budget}");
+            lengths.insert(kept.len());
+        }
+        assert_eq!(lengths.into_iter().collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
     }
 
     /// The block renders the rows of `CURRENT_WORK_SECTION` in the supplied

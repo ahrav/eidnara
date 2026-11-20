@@ -768,9 +768,7 @@ impl CaptureWork {
             .collect();
         let states = |index: usize, memory: &CapturedMemory| {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
-            super::is_user_source(job)
-                && !super::cite::is_hashed_source_id(&job.message_id)
-                && super::quotes_whole_statements(prose, &memory.quote)
+            super::states_whole_statements(super::states_whole_message(job), prose, &memory.quote)
         };
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
             Ok(decisions) => decisions,

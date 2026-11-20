@@ -777,7 +777,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8759
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L201-L380
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L195-L374
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
@@ -792,7 +792,7 @@ them without creating implementation tickets.
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L383
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3818-L4078
-[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L215-L252
+[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180
 [soft-core]: ../../../crates/cache-stability/src/lib.rs#L221-L287

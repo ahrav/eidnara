@@ -930,7 +930,16 @@ describe("eidnara_search through the fused route", () => {
             capture(3, cut, { lifetime: "current_work" }, false);
             capture(5, oldest, { lifetime: "current_work", ended_by: { memory: forged } }, false);
             // The class is read from the `lifetime` member alone.
-            capture(6, request, { lifetime: "request", ended_by: { memory: id(1) } }, false);
+            capture(
+                6,
+                request,
+                {
+                    lifetime: "request",
+                    quote: "Print the retry budget of this current_work run.",
+                    ended_by: { memory: id(1) },
+                },
+                false,
+            );
             kernel.seedDecision({
                 object_id: id(4),
                 decision_kind: "CONFIG_VALUES",
