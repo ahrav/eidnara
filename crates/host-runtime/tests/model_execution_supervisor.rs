@@ -1383,8 +1383,10 @@ fn a_published_symlink_and_a_record_past_the_read_cap_fail_the_registry_read() {
         },
         "a record of exactly the cap is read whole"
     );
-    // The same valid record with bytes after it is longer than the cap.
+    // The same valid record with bytes after it is longer than the cap, and so is a valid record one byte longer.
     std::fs::write(&oversized, format!("{at_cap}trailing\n")).expect("record past the cap");
+    assert!(group_registry::own_residue(&root).is_err());
+    std::fs::write(&oversized, padded(CAP + 1)).expect("record one byte past the cap");
     assert!(group_registry::own_residue(&root).is_err());
 }
 
