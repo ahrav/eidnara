@@ -2116,24 +2116,29 @@ async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_r
 /// block. A request for the change in progress and a remark on its state
 /// are stored with the user's words for explicit search, hold no statement
 /// record, and stay out of the block.
+/// Capture stores the assistant report's `lasting` class in its rationale and
+/// keeps the report `labeled` for explicit search.
 #[tokio::test]
 async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_otherwise() {
     let rule = "Run the integration suite before every merge.";
     let undecided = "We have not settled whether the importer keeps the legacy CSV path.";
     let request = "Rename the retry helper to backoff_delay in this module.";
     let remark = "The dashboard page loads again after the last change.";
+    let report = "The nightly build publishes its artifacts to the staging bucket.";
+    let reported = format!("Assistant reported: {report}");
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     let messages = [
         ("m1", "user", rule),
         ("m2", "user", undecided),
         ("m3", "user", request),
         ("m4", "user", remark),
+        ("m5", "assistant", report),
     ];
     capture(&handler, FIRST, "s1", &messages, |text, _| {
         vec![classed(
             text,
             match text {
-                text if text == rule => "lasting",
+                text if text == rule || text == report => "lasting",
                 text if text == undecided => "unsettled",
                 text if text == request => "current_work",
                 _ => "status",
@@ -2149,6 +2154,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
         (stated(undecided), "visible".to_string()),
         (stated(request), "labeled".to_string()),
         (stated(remark), "labeled".to_string()),
+        (reported, "labeled".to_string()),
     ];
     expected.sort();
     assert_eq!(rows, expected);
@@ -2163,6 +2169,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     assert!(block.contains(&stated(undecided)), "{block}");
     assert!(!block.contains(request), "{block}");
     assert!(!block.contains(remark), "{block}");
+    assert!(!block.contains(report), "{block}");
 
     // Each stored memory names the class its own statement was given, and a
     // statement stored labeled for its class is no refused approval.
@@ -2182,6 +2189,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
         (undecided.to_string(), "unsettled".to_string()),
         (request.to_string(), "current_work".to_string()),
         (remark.to_string(), "status".to_string()),
+        (report.to_string(), "lasting".to_string()),
     ];
     expected.sort();
     assert_eq!(classes, expected);
@@ -2482,6 +2490,59 @@ async fn a_statement_that_ends_with_its_task_is_recorded_beside_an_agents_note()
     assert_eq!(restated.len(), 1, "{restated:?}");
     assert_eq!(restated[0]["restates"], "mem-agent");
     assert_eq!(restated[0]["lifetime"], "status");
+}
+
+#[tokio::test]
+async fn a_repeat_of_a_statement_that_ended_with_its_task_writes_no_second_copy() {
+    let remark = "The staging deploy is green again after the rollback.";
+    let report = "FAILED the staging deploy again after the rollback.";
+    let logged = format!("{report} It broke.\nat the registry step.");
+    let with_lines = format!("{}\n{logged}", stated(report));
+    for (text, quote, stored, repeated_as, approved_beside) in [
+        (remark, remark, stated(remark), "status", false),
+        (remark, remark, stated(remark), "current_work", false),
+        (remark, remark, stated(remark), "lasting", true),
+        (logged.as_str(), report, with_lines, "status", false),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", text)], |_, _| {
+            vec![classed(quote, "status")]
+        })
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", text)],
+            |_, existing| {
+                let held = ids_containing(existing, &stated(quote));
+                assert_eq!(held.len(), 1, "{existing:?}");
+                vec![Extracted {
+                    duplicate_of: held.into_iter().next(),
+                    ..classed(quote, repeated_as)
+                }]
+            },
+        )
+        .await;
+        // A refused extraction of the repeat leaves one row as well, so the
+        // row check below needs both sources committed.
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!(
+            (status.completed, status.pending, status.failed),
+            (2, 0, 0),
+            "{repeated_as}: {quote}"
+        );
+
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let mut expected = vec![(stored, "labeled".to_string())];
+        if approved_beside {
+            expected.push((stated(quote), "visible".to_string()));
+        }
+        assert_eq!(rows, expected, "{repeated_as}: {quote}");
+    }
 }
 
 /// The extractor proposes one sentence twice, once as work in progress that

@@ -1350,7 +1350,10 @@ an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when its
 `lifetime` is `current_work` or `status`, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; a statement of those two
-classes settles no contest; the name records which memory
+classes settles no contest, and writes no fact when the memory it duplicates
+is a fact capture wrote under the `User stated` label whose rationale holds
+the same `quote`, so a repeat of such a statement leaves one fact on
+explicit search; the name records which memory
 the extractor matched and carries no Kernel dependency. A memory is served as
 approved when it is visible, not labeled, on `explicit_search`; a fact
 reclassified as sensitive stays approved there while `auto_inject` hides it,
@@ -1408,7 +1411,7 @@ as `null` names no target. A user quotation that does not meet the
 statement rule replaces no fact served on `auto_inject` and takes no
 replacement claim: each such target
 named in `replaces` or `also_replaces` becomes a contest, and when the
-`replaces` target is one, every target of the proposal does. A user statement
+`replaces` target is one, every target of the proposal does. Targets that become contests are counted after the contests the proposal names, the `replaces` target before the `also_replaces` targets, and a target past the fourth is released under the rule below: that fact stays as it is served and the proposal records no contest on it. A user statement
 whose `replaces` target is released contests that target when the Kernel
 serves it on `auto_inject`, so the two values are shown as a disagreement. A
 user's statement classed `current_work` or `status` is a user quotation that
@@ -1416,7 +1419,7 @@ is no approved statement, so it replaces no fact served on `auto_inject`:
 each such target it names in `replaces` or `also_replaces` becomes a contest
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as work in progress, leave the rule approved
-and show it as contested by the user's newer words. A
+and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets. A
 user source's contests are kept when the source reaches capture under its
 own message id and its quotation is one or more whole sentences of a
 plain-prose paragraph of the message, wherever a colon stands before them,
@@ -1440,7 +1443,7 @@ shares no content word with the quotation of a proposal that also names
 `contests`, is released; a `contests`
 target that is unprovided, shares no content word with the quotation, is
 also replaced, is the proposal's `duplicate_of` target, or is past the fourth is released; and the `replaces` and `also_replaces` targets an
-assistant source names become contests under the contest check. After
+assistant source names become contests under the contest check, counted after the contests it names. After
 quotations collapse, the facts of one source name each target for one
 purpose: a target one of them replaces or retires is contested by none, a
 fact that only duplicates such a target is dropped, since its text is the
