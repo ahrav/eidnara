@@ -73,7 +73,7 @@ intended behaviour: a blocked terminal holds an unsettled slot but not handler
 capacity.
 
 **The reserved class is live in production, contrary to the comment at
-`runtime.rs:118-119`.** `model_execution/mod.rs:165-177`:
+`runtime.rs:118-119`.** `model_execution/mod.rs:164-176`:
 
 ```
 ResourceDeclaration {
@@ -167,7 +167,7 @@ permit.
 ### Q: Is `RouteClass::Reserved` production or test-only?
 
 - Sources examined: `runtime.rs:117-121` (the comment claiming possible
-  unreachability), `model_execution/mod.rs:165-177`, `model_execution/config.rs:183-188`,
+  unreachability), `model_execution/mod.rs:164-176`, `model_execution/config.rs:183-188`,
   `crates/daemon/src/bin/eidnara_host/serve.rs:560-580` and `:632`,
   `composite.rs:11-14` (the fixed occupant list).
 - Findings: ModelExecution declares 96/96 with `route_class: RouteClass::Reserved`, and the

@@ -33,7 +33,7 @@ non-empty summarizer chain or another operator selection.
 
 - `default-production`: N10. Every host health report serializes the
   `aws_credentials` block from the cached cell
-  (`crates/host-runtime/src/model_execution/mod.rs:452`, `:464`), with or
+  (`crates/host-runtime/src/model_execution/mod.rs:451`, `:463`), with or
   without a source owner.
 - `explicit-config-only`: N2, N8, and N9. The source owner exists only when
   the host envelope carries an `aws_source` selection
@@ -94,7 +94,7 @@ above the deadline plus skew; a wall jump injected at the read between
 acquisition and the spawn recheck.
 Confidence: high - [evidence](evidence/credential-lifetime-covers-dispatch.md).
 The predicate and its three checks were read at the #872 branch.
-Existing check: `crates/host-runtime/src/model_execution/aws_refresh.rs:1116`
+Existing check: `crates/host-runtime/src/model_execution/aws_refresh.rs:1105`
 `lifetime_must_exceed_the_deadline_plus_skew_strictly`;
 `crates/host-runtime/tests/model_execution_subprocess.rs:4073`
 `profile_rows_without_lifetime_start_no_child`; `:4140`
@@ -240,7 +240,7 @@ hardware.
 Existing check: `crates/eval-core/src/qualification.rs:922` `audit_lineage`;
 `:1309` `the_outage_judge_fires_on_each_failure`;
 `crates/daemon/examples/eval_runner/qualification.rs` (the campaign runner);
-`crates/host-runtime/tests/model_execution_supervisor.rs:2368`
+`crates/host-runtime/tests/model_execution_supervisor.rs:1813`
 `warm_acquisition_p99_stays_within_one_millisecond` (ignored, release only).
 Impact: a million-message or outage claim without evidence that it holds.
 Open questions:

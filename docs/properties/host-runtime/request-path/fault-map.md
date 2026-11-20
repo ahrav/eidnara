@@ -112,7 +112,7 @@ configuration gate. The routed path is reached by `read_loop`
 (`connection.rs:373`) calling `dispatch_request` at `:467`, the production binary
 is `crates/daemon/src/bin/eidnara_host/serve.rs` (composite at `:575`,
 `host_runtime::run` at `:632`), and `RouteClass::Reserved` is live because
-`model_execution/mod.rs:165-178` declares it; see the reachability resolution in
+`model_execution/mod.rs:164-177` declares it; see the reachability resolution in
 `catalog.md` for the full argument.
 
 ### The arbiter
@@ -230,7 +230,7 @@ accident.
 | `req_request_join_error_was_not_a_panic` | The `Err(_)` arm at `:1058` ran, so the handler task was aborted rather than panicking | Legal whenever `force_close_all_routes` aborted the task. Does **not** assert that the pending entry leaked |
 | `req_settle_route_work_swept_a_pending_key` | `settle_route_work` removed a key at `:1374-1380` that its aborted task had not removed | The designed sweep, whose own comment says "Aborted tasks never removed their own pending entries". The precondition of the asymmetry with `force_close_all_routes` |
 | `req_permit_acquired_before_the_spawn` | Both `try_acquire_owned` calls (`:884`, `:896`) succeeded on the read loop before `spawn_tracked` at `:932` | True of every admitted request and legal by design (`:881-883`). The honest form of "the bound is not bypassable by pipelining" |
-| `req_reserved_class_permit_acquired` | A route whose stored `RouteClass` is `Reserved` drew from `reserved_pending_permits` or `reserved_task_permits` (`:873-879`) | Legal and live, because `model_execution/mod.rs:165-178` declares 96/96. Contradicts `runtime.rs:118-119`'s "unreachable" comment as a byproduct, which is why it is worth placing |
+| `req_reserved_class_permit_acquired` | A route whose stored `RouteClass` is `Reserved` drew from `reserved_pending_permits` or `reserved_task_permits` (`:873-879`) | Legal and live, because `model_execution/mod.rs:164-177` declares 96/96. Contradicts `runtime.rs:118-119`'s "unreachable" comment as a byproduct, which is why it is worth placing |
 | `req_shutdown_fence_refused_a_routed_request` | `dispatch.rs:844` answered `server_busy` while `draining` was set | The specified behaviour. Records one half of the divergence |
 | `req_shutdown_fence_refused_a_route_open` | `dispatch.rs:1112` answered `target_unavailable` under the same condition | The other half. The pair is the finding; neither code alone is wrong |
 | `req_handler_diagnostic_was_substituted` | `bounded_terminal_error` (`:82`) replaced an over-cap code or message wholesale with `internal_error` | The designed truncation-by-substitution. Records the cap firing without asserting an uncapped string ever escaped |

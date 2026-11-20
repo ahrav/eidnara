@@ -50,7 +50,7 @@ reaches the runner as `backend_cancel` (`:747`, `:750`). Both `cancel` and
 when the task returns (`:797`), so the lifecycle call resolves after the
 leader is reaped.
 
-Startup sweep. `sweep_orphaned_groups` at `subprocess.rs:1486-1546` runs from
+Startup sweep. `sweep_orphaned_groups` at `subprocess.rs:1479-1539` runs from
 `ModelExecutionComponent::initialize` (`mod.rs:341`). It skips records from another
 boot (`:1501-1504`), skips records whose owner is alive with the recorded start
 time (`:1505-1507`), treats a zombie owner as dead (`:1280-1282`), decides
@@ -108,7 +108,7 @@ returns `Err`, the run becomes `FailedUnresolved`, and the registry record is
 retained (`:547-549`) for the next host's sweep. That path is asserted in the
 supervisor tests only indirectly, through
 `unproven_teardown_fails_cancel_and_delete` in
-`tests/model_execution_supervisor.rs:689`, which uses a scripted backend rather than
+`tests/model_execution_supervisor.rs:685`, which uses a scripted backend rather than
 a real stuck process.
 
 The sweep runs once, at initialize (`mod.rs:341`). It is not periodic, so a
@@ -130,7 +130,7 @@ delete variants already discriminate: `Failed` at `:2543` is not
 
 ### Q: Does the sweep ever signal a group whose owner is alive?
 
-- Sources examined: `subprocess.rs:1281-1289`, `:1512-1514`, `:1515-1525`;
+- Sources examined: `subprocess.rs:1274-1282`, `:1505-1507`, `:1508-1518`;
   `tests/model_execution_subprocess.rs:3078-3095`.
 - Findings: the owner check compares the live start time from
   `/proc/<pid>/stat` with the recorded value and `continue`s on a match. A

@@ -7521,7 +7521,7 @@ per METHOD rule 4.
 2. **`RouteClass::Reserved` is declared only by a composed component.** The
    comment at `runtime.rs:118-119` says the reserved pools are zero-permit when no
    module declares a reservation. In this tree the only declarer is
-   `ModelExecutionComponent::resources` (`model_execution/mod.rs:152`), and every `ModelExecutionComponent`
+   `ModelExecutionComponent::resources` (`model_execution/mod.rs:151`), and every `ModelExecutionComponent`
    constructor is called only from `crates/host-runtime/tests/`. `RouteClass` is
    read back by dispatch to pick a permit pair (`dispatch.rs:821`), so
    reserved-class dispatch is live code, but the state that saturates it is
@@ -8042,7 +8042,7 @@ must construct.
 ### req-a-handler-concurrency-is-bounded-by-two-class-scoped-permit-pairs
 
 Type: safety
-Reachability: default-production for the general-class pair, which every routed request through `host_runtime::run` takes; the reserved-class pair is declared only by `ModelExecutionComponent::resources` (`model_execution/mod.rs:152`), whose constructors have only test callers in this tree, so the reserved half of the bound is exercised only in tests until a production composition declares a reservation.
+Reachability: default-production for the general-class pair, which every routed request through `host_runtime::run` takes; the reserved-class pair is declared only by `ModelExecutionComponent::resources` (`model_execution/mod.rs:151`), whose constructors have only test callers in this tree, so the reserved half of the bound is exercised only in tests until a production composition declares a reservation.
 Status: active
 Exercised: partial - `tests/dispatch.rs:976` and `:1074` prove the two classes
 cannot consume each other; `tests/handler_contract.rs:323` and `:636` prove the
@@ -8138,7 +8138,7 @@ Open questions:
 ### req-a-both-admission-classes-and-the-rejection-bound-saturate
 
 Type: reachability
-Reachability: test-only - the reserved class exists only when a composed component declares it, and the only declarer in this tree is `ModelExecutionComponent::resources` (`crates/host-runtime/src/model_execution/mod.rs:152`), whose constructors are called only from `crates/host-runtime/tests/`. Reserved-pending and reserved-task saturation are therefore reachable only in tests here; reclassify when a production composition declares a reservation.
+Reachability: test-only - the reserved class exists only when a composed component declares it, and the only declarer in this tree is `ModelExecutionComponent::resources` (`crates/host-runtime/src/model_execution/mod.rs:151`), whose constructors are called only from `crates/host-runtime/tests/`. Reserved-pending and reserved-task saturation are therefore reachable only in tests here; reclassify when a production composition declares a reservation.
 Status: active
 Exercised: partial - `tests/dispatch.rs:295`, `:976`, and `:1074` saturate
 pending capacity in both classes. Task-permit saturation and `busy_rejects`
@@ -9298,9 +9298,9 @@ question".
 
 One asymmetry to state explicitly, because it is the opposite of what the
 `runtime.rs:118-119` comment implies. The reserved admission pools are
-**`default-production` reachable**, not dormant: `model_execution/mod.rs:165-178` returns a
+**`default-production` reachable**, not dormant: `model_execution/mod.rs:164-177` returns a
 `ResourceDeclaration` with `route_class: RouteClass::Reserved` and 96/96 counts
-(`model_execution/config.rs:185`, `:188`), the comment at `model_execution/mod.rs:170-171` makes it
+(`model_execution/config.rs:185`, `:188`), the comment at `model_execution/mod.rs:169-170` makes it
 deliberate and unconditional, `composite.rs:10-13` fixes the direct profile's
 tertiary as `model_execution/management_surface`; the daemon that would compose it (`serve.rs:575` in the source repository) is not in this tree, so in this checkout the reserved ModelExecution class is `test-only`, as the ModelExecution records below classify it. So the
 comment's second clause is false and its first clause is true only of a
@@ -9934,7 +9934,7 @@ Open questions: None.
 > written, but the comment at `runtime.rs:117-119` that it verifies against is
 > **false in the composed production host**. The comment says the reserved pools
 > are "Zero-permit when no module declared a reservation, and then unreachable
-> because every route is general-class". `model_execution/mod.rs:165-178` declares
+> because every route is general-class". `model_execution/mod.rs:164-177` declares
 > `route_class: RouteClass::Reserved` with 96/96 counts (`model_execution/config.rs:185`,
 > `:188`), `composite.rs:10-13` fixes the direct profile's tertiary as
 > `model_execution/management_surface`, and `serve.rs:575` composes it. So the second
@@ -10263,7 +10263,7 @@ Open questions: None.
 ### credential-fingerprint-derives-from-the-product-domain
 
 Type: safety
-Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `ModelExecutionComponent::new_with_credentials` (`crates/host-runtime/src/model_execution/mod.rs:83`) installs one; its single caller is `tests/model_execution_protocol.rs:443`. `ModelExecutionComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
+Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `ModelExecutionComponent::new_with_credentials` (`crates/host-runtime/src/model_execution/mod.rs:82`) installs one; its single caller is `tests/model_execution_protocol.rs:443`. `ModelExecutionComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
 Status: active
 Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value and two non-UTF-8 byte values agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows; field-boundary pairs, including an empty name and an empty harness, are encoded apart by the pure encoder.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-model-execution-credential-v3"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
@@ -10340,7 +10340,7 @@ Open questions:
 ### model_execution-child-environment-carries-only-the-provider-row
 
 Type: safety
-Reachability: test-only - `EnvSnapshot::capture_from` (`crates/host-runtime/src/model_execution/subprocess.rs:97`) and `ModelExecutionComponent::new_with_credentials` (`model_execution/mod.rs:83`) have no caller outside tests in this tree, and `OpenCodeBackend::new` and `PiBackend::new` have none at all; the spawn path is exercised by fixtures only. Reclassify when the daemon (U4) wires a real backend.
+Reachability: test-only - `EnvSnapshot::capture_from` (`crates/host-runtime/src/model_execution/subprocess.rs:97`) and `ModelExecutionComponent::new_with_credentials` (`model_execution/mod.rs:82`) have no caller outside tests in this tree, and `OpenCodeBackend::new` and `PiBackend::new` have none at all; the spawn path is exercised by fixtures only. Reclassify when the daemon (U4) wires a real backend.
 Status: active
 Exercised: partial - launch-identity stripping, per-entry overhead, ambient-credential exclusion, and the size caps are covered; the OpenCode and Pi argv contracts are covered by fixture executables.
 Guarantee: A snapshot admitted through `EnvSnapshot::capture_from` (`crates/host-runtime/src/model_execution/subprocess.rs:97`) has the launch identity stripped and is charged per entry and in aggregate, and the harness child spawned from it receives only the selected provider credential row plus adapter-owned variables.

@@ -55,8 +55,8 @@ every task that will ever exist.
 Existing checks, verified:
 
 - `every_path_returns_permits_and_charges_to_baseline`
-  (`tests/model_execution_supervisor.rs:1706-1764`). With `max_active_runs: 2` and
-  `max_backend_processes: 1` (`:1708-1713`) it drives a conflict rejection
+  (`tests/model_execution_supervisor.rs:972-1031`). With `max_active_runs: 2` and
+  `max_backend_processes: 1` (`:975-980`) it drives a conflict rejection
   (`:985-988`), an active-run-cap rejection (`:992-995`), a subscriber that
   reads one frame then drops (`:998-1001`), a completion (`:1003-1008`), a
   cancel and an idempotent second cancel (`:1009-1016`), a delete (`:1018`),
@@ -115,7 +115,7 @@ and the tombstone is carved from `base_charge` instead.
 The existing tests cover every in-process terminal. The uncovered case is a
 backend that never returns and ignores its cancellation token.
 `ScriptedBackend::gated_ignoring_cancel` (`tests/support/model_execution.rs:117-134`)
-exists and is used at `tests/model_execution_supervisor.rs:435`, `:609`, and `:804`,
+exists and is used at `tests/model_execution_supervisor.rs:431`, `:605`, and `:800`,
 but in each case the gate is eventually opened. A test that calls `shutdown`
 without opening the gate would need a bound on the tracker wait, which the
 supervisor does not have; it would hang. That absence is a design fact worth
