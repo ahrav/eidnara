@@ -1112,14 +1112,14 @@ pub(crate) fn within<T: Send + 'static>(
 ) -> io::Result<T> {
     let (answer, answered) = std::sync::mpsc::channel();
     std::thread::Builder::new()
-        .name("model_execution-bounded-step".to_owned())
+        .name("bounded-fs-step".to_owned())
         .spawn(move || {
             let _ = answer.send(step());
         })?;
     answered.recv_timeout(bound).map_err(|_| {
         io::Error::new(
             io::ErrorKind::TimedOut,
-            "a filesystem step outlasted its bound",
+            "a filesystem step returned no answer inside its bound",
         )
     })?
 }
@@ -2907,12 +2907,12 @@ pub mod group_registry {
                 Err(err) => return Err(err),
             };
             // A published record this host cannot interpret may be its own, so the read answers unknown, as the startup sweep does for the same record.
-            let Some(entry) = Entry::parse(&text) else {
+            let Some(record) = Entry::parse(&text) else {
                 return Err(io::Error::other(
                     "a published registry record cannot be interpreted",
                 ));
             };
-            if entry.owner_pid == owner_pid && entry.owner_start == owner_start {
+            if record.owner_pid == owner_pid && record.owner_start == owner_start {
                 residue.records += 1;
             }
         }

@@ -578,13 +578,15 @@ impl ModelExecutionComponent {
             return counted;
         }
         let deadline = tokio::time::Instant::now() + RESIDUE_SETTLE_GRACE;
+        let read_deadline = std::time::Instant::now() + RESIDUE_SETTLE_GRACE;
         loop {
             // Read before the registry, so a job that finishes between the two has its entry on disk for the read.
             let idle = subprocess::filesystem_jobs_idle();
             let state_root = self.state_root.clone();
-            // The read runs outside the job slots, which `filesystem_jobs_idle` observes. Its blocking job waits one grace at most for it, so a read that a stalled filesystem holds leaves the runtime free to stop.
+            // The read runs outside the job slots, which `filesystem_jobs_idle` observes. Its blocking job waits for it until the grace ends, so a read that a stalled filesystem holds leaves the runtime free to stop.
             let read = tokio::task::spawn_blocking(move || {
-                subprocess::within(RESIDUE_SETTLE_GRACE, move || {
+                let left = read_deadline.saturating_duration_since(std::time::Instant::now());
+                subprocess::within(left, move || {
                     subprocess::group_registry::own_residue(&state_root)
                 })
             });
