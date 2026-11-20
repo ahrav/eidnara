@@ -834,6 +834,8 @@ export class HostModuleTransport {
             for (;;) {
                 let ensuredRoute: EnsuredRoute | null = null;
                 let requestInvoked = false;
+                // The connection generation this attempt dials under. A failure before a route exists belongs to it.
+                const attemptGeneration = this.connectionGeneration;
                 try {
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
@@ -917,8 +919,7 @@ export class HostModuleTransport {
                         isClosedClientRefusal(error) ||
                         (!requestInvoked && isConnectionFailure(error));
                     const replayEligible = unknownChannel || provenNotSent;
-                    const previousGeneration =
-                        ensuredRoute?.generation ?? this.connectionGeneration;
+                    const previousGeneration = ensuredRoute?.generation ?? attemptGeneration;
                     let turnedOver = false;
                     if (unknownChannel || isStaleRouteHandleFailure(error)) {
                         // Route-level proof evicts the dead route while retaining the connection; the facade reconnects internally when its generation retires.
@@ -934,8 +935,11 @@ export class HostModuleTransport {
                         if (ensuredRoute) {
                             this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
                             teardown = this.invalidateConnection(ensuredRoute.client);
-                        } else {
+                        } else if (this.connectionGeneration === attemptGeneration) {
                             teardown = this.invalidateConnection();
+                        } else {
+                            // Another holder retired the connection this attempt dialed under. The current client may be its replacement, which stays open.
+                            teardown = Promise.resolve();
                         }
                         turnedOver = true;
                         // A body that may have reached the daemon has no cleanup ticket of its own, so the superseded connection's teardown fences the lane until the daemon has seen the connection go.

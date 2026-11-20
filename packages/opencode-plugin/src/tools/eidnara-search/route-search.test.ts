@@ -777,7 +777,7 @@ describe("eidnara_search through the fused route", () => {
         );
     });
 
-    it("runs a search once more when the daemon connection changed before its contest read, and refuses one whose connection changes under both passes, on the route and on the fallback", async () => {
+    it("runs a search once more when the daemon connection changed under its contest read, and refuses one whose connection changes under both passes, on the route and on the fallback", async () => {
         const observation = "Assistant reported: The client limit is 500 now.";
         for (const [fallback, replacements] of [
             [false, 1],
@@ -794,10 +794,10 @@ describe("eidnara_search through the fused route", () => {
                 async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
                     if (args.method === "retrieval.query") this.passReads = 0;
                     const reply = await super.call(args);
-                    // The daemon is replaced after the read that returns the statement, in each of the first `replacements` passes.
+                    // The daemon is replaced after the contest read, the second read of a pass, in each of the first `replacements` passes.
                     if (
                         args.method === "kernel.read" &&
-                        ++this.passReads === 1 &&
+                        ++this.passReads === 2 &&
                         this.identity < replacements
                     )
                         this.identity += 1;
