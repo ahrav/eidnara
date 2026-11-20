@@ -155,19 +155,19 @@ renderer drops, bytes past the render cap, rows past the memory budget, or
 the order of the `CURRENT_WORK` rows.
 Confidence: high -
 [evidence](evidence/uo-composition-revision-digests-exactly-the-rendered-rows.md).
-read at `crates/daemon/src/canonical_memory.rs:53-60`; the revision is a
+read at `crates/daemon/src/canonical_memory.rs:54-61`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:1262`);
+(`crates/daemon/src/canonical_memory.rs:1263`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1482`);
+(`crates/daemon/src/canonical_memory.rs:1483`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1499`);
+(`crates/daemon/src/canonical_memory.rs:1500`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1521`);
+(`crates/daemon/src/canonical_memory.rs:1522`);
 `the_revision_reads_the_current_work_section_in_the_supplied_order`
-(`crates/daemon/src/canonical_memory.rs:1448`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:1449`). Status: unaudited.
 Impact: A revision that moved without a byte change would record a second serve
 of the same rows.
 Open questions:
@@ -277,7 +277,7 @@ commit.
 Confidence: high -
 [evidence](evidence/uo-known-as-of-is-the-tip-bound-read-sequence.md).
 `read_project_memory` captures the tip and passes it as the requested snapshot
-(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:207`)); the route
+(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:208`)); the route
 returns `known_as_of` from the visible read
 (`crates/daemon/src/kernel_routes/read.rs:544`).
 Existing check:
@@ -1087,17 +1087,17 @@ retry.
 Confidence: high -
 [evidence](evidence/uo-p-served-ids-equal-frozen-composition.md). the ids and
 digest come from the pinned snapshot the same fold froze (`served_ids`
-(`crates/daemon/src/canonical_memory.rs:74`), `served_set_digest`
-(`crates/daemon/src/canonical_memory.rs:84`)), and the Kernel refuses ids that
+(`crates/daemon/src/canonical_memory.rs:75`), `served_set_digest`
+(`crates/daemon/src/canonical_memory.rs:85`)), and the Kernel refuses ids that
 disagree with the digest.
 Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 (`crates/daemon/src/use_outcome_writer_tests.rs:70`);
 `a_dispute_between_folds_records_the_next_served_set_without_it`
 (`crates/daemon/src/use_outcome_writer_tests.rs:528`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:1224`);
+(`crates/daemon/src/canonical_memory.rs:1225`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1521`);
+(`crates/daemon/src/canonical_memory.rs:1522`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`

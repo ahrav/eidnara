@@ -16,10 +16,10 @@ revision.
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
   per rendered row: the positive-category rows in object-id order, then the
   `CURRENT_WORK` rows in the supplied order, which is the order the block
-  renders them in (`crates/daemon/src/canonical_memory.rs:53-60`).
+  renders them in (`crates/daemon/src/canonical_memory.rs:54-61`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:740`)).
+  (`crates/daemon/src/canonical_memory.rs:741`)).
 - The first four tests named under Existing check are unchanged since
   `a0e3f2993`; the spec cited their `fn` lines, and the production code was not
   cited. The fifth covers the order of the `CURRENT_WORK` rows.
@@ -29,15 +29,15 @@ revision.
   by object id, then the `CURRENT_WORK` rows in the order the block renders
   them.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1262`);
+  (`crates/daemon/src/canonical_memory.rs:1263`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1482`);
+  (`crates/daemon/src/canonical_memory.rs:1483`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1499`);
+  (`crates/daemon/src/canonical_memory.rs:1500`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1521`);
+  (`crates/daemon/src/canonical_memory.rs:1522`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1448`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1449`). Status: unaudited.
 
 ## Failure scenario
 
