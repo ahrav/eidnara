@@ -459,12 +459,12 @@ above mean no check was identified in the stated inspected scope, not a claim
 that no related check exists anywhere in the repository.
 
 [read-guards]: ../../../crates/daemon/src/kernel_routes/read.rs#L383-L550
-[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L682
-[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L772
-[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L830
-[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L847
-[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L869
-[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L920
+[injectable-test]: ../../../crates/daemon/src/canonical_memory.rs#L676
+[revision-test]: ../../../crates/daemon/src/canonical_memory.rs#L748
+[dropped-test]: ../../../crates/daemon/src/canonical_memory.rs#L806
+[suffix-test]: ../../../crates/daemon/src/canonical_memory.rs#L823
+[memory-budget-test]: ../../../crates/daemon/src/canonical_memory.rs#L845
+[withheld-test]: ../../../crates/daemon/src/canonical_memory.rs#L896
 [transform-memory-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L46
 [lag-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L242
 [disabled-test]: ../../../crates/daemon/tests/transform_canonical_memory.rs#L349
@@ -502,7 +502,7 @@ that no related check exists anywhere in the repository.
 [pragma-test]: ../../../crates/storage/src/lib.rs#L5855
 [rollback-test]: ../../../crates/storage/src/lib.rs#L5919
 [inner-guard]: ../../../crates/daemon/src/decay_render.rs#L324-L338
-[outer-guard]: ../../../crates/daemon/src/m0_compose.rs#L222-L252
+[outer-guard]: ../../../crates/daemon/src/m0_compose.rs#L185-L215
 [oldest-test]: ../../../crates/daemon/src/decay_render.rs#L509
 [render-golden-test]: ../../../crates/daemon/src/decay_render.rs#L614
 [shape-test]: ../../../crates/daemon/src/decay_render.rs#L644
@@ -522,11 +522,11 @@ that no related check exists anywhere in the repository.
 [historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1875
 [object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2016
 [selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2080
-[render-category]: ../../../crates/daemon/src/memory_render.rs#L290
-[render-markup]: ../../../crates/daemon/src/memory_render.rs#L317
-[render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L341
-[render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L385
-[render-order]: ../../../crates/daemon/src/memory_render.rs#L408
+[render-category]: ../../../crates/daemon/src/memory_render.rs#L257
+[render-markup]: ../../../crates/daemon/src/memory_render.rs#L284
+[render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
+[render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
+[render-order]: ../../../crates/daemon/src/memory_render.rs#L375
 [parse-admission]: ../../../crates/daemon/src/lib.rs#L16379-L16392
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425

@@ -30,7 +30,7 @@ units while preserving existing m0; pressure refold may rematerialize m0.
 [Pure Defer/SoftPlus][defer] replays the retained prefix unchanged.
 
 [inner]: ../../../../crates/daemon/src/decay_render.rs#L289-L338
-[outer]: ../../../../crates/daemon/src/m0_compose.rs#L215-L252
+[outer]: ../../../../crates/daemon/src/m0_compose.rs#L178-L215
 [cache]: ../../../../crates/daemon/src/token_cache.rs#L165-L180
 [goldens]: ../../../../crates/daemon/src/decay_render.rs#L614-L800
 [dependency]: ../../../../crates/daemon/Cargo.toml#L21-L32

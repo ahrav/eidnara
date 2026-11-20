@@ -206,7 +206,7 @@ struct ExistingCaptureMemory {
     #[serde(default, rename = "user_statement")]
     automatic: bool,
     /// Whether an observation contests the memory. Only a user statement
-    /// that is eligible for approval can settle it, by replacing the
+    /// that outlives its task can settle it, by replacing the
     /// memory or by repeating it word for word; the wire document states
     /// the conditions of each.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2164,13 +2164,22 @@ fn user_attributed_alone(job: &CaptureJob, memory: &CapturedMemory) -> bool {
 /// Whether each memory of the plan, by index, is the user's own words
 /// ([`user_stated`]). The writer adds the lifetime check that makes such a
 /// memory eligible for approval.
-fn statements(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<bool> {
+fn statements(job: &CaptureJob, memories: &[CapturedMemory]) -> Vec<Statement> {
     let prose = Prose::of(&job.text);
     let states_whole = states_whole_message(job);
     memories
         .iter()
-        .map(|memory| user_stated(states_whole, &prose, memory))
+        .map(|memory| Statement {
+            whole: states_whole && quotes_whole_statements(&prose, &memory.quote),
+            stated: user_stated(states_whole, &prose, memory),
+        })
         .collect()
+}
+
+#[derive(Clone, Copy)]
+struct Statement {
+    whole: bool,
+    stated: bool,
 }
 
 /// The domain of the statement records that approve user-attributed captures;
@@ -3815,7 +3824,19 @@ pub(crate) struct CaptureRationale {
 #[derive(Serialize)]
 struct End {
     memory: String,
-    session: Option<String>,
+    session: String,
+}
+
+pub(crate) fn stated_commit(decision: &kernel::DecisionRow, created_commit_seq: i64) -> i64 {
+    if !decision.payload.rationale.contains("stated_seq") {
+        return created_commit_seq;
+    }
+    let recorded = capture_rationale(decision);
+    recorded
+        .contested_by
+        .map(|contest| contest.stated_seq)
+        .or(recorded.stated_seq)
+        .unwrap_or(created_commit_seq)
 }
 
 /// A caller treats a matching capture memory as live work in progress only
@@ -3896,7 +3917,8 @@ const CARRIED_CITATIONS: std::num::NonZeroUsize = std::num::NonZeroUsize::new(25
 enum Rewrite {
     Contested(Contest),
     Settled,
-    /// The superseding row records `End` in its `ended_by` rationale field.
+    /// The superseding row records `End` in its `ended_by` rationale field,
+    /// is admitted without approval, and the statement record is retired.
     Ended(End),
 }
 
@@ -3948,22 +3970,28 @@ fn rewrite_statement(
         Rewrite::Settled => format!("{}:settled:{}", statement.object_id, plan.job.job_id),
         Rewrite::Ended(end) => format!("{}:ended:{}", statement.object_id, end.memory),
     };
-    let ended = matches!(rewrite, Rewrite::Ended(_));
-    match rewrite {
+    // A settled or ended statement keeps the commit that first recorded it.
+    let uncontest = |rationale: &mut serde_json::Map<String, Value>| {
+        if let Some(settled) = rationale.remove("contested_by")
+            && let Some(stated_seq) = settled.get("stated_seq").and_then(Value::as_i64)
+        {
+            rationale.insert("stated_seq".to_owned(), json!(stated_seq));
+        }
+    };
+    let approval = match rewrite {
         Rewrite::Contested(contest) => {
             rationale.remove("stated_seq");
             rationale.insert("contested_by".to_owned(), json!(contest));
+            Some(approval)
         }
-        // A settled statement keeps the commit that first recorded it.
-        Rewrite::Settled | Rewrite::Ended(_) => {
-            if let Some(settled) = rationale.remove("contested_by")
-                && let Some(stated_seq) = settled.get("stated_seq").and_then(Value::as_i64)
-            {
-                rationale.insert("stated_seq".to_owned(), json!(stated_seq));
-            }
-            if let Rewrite::Ended(end) = rewrite {
-                rationale.insert("ended_by".to_owned(), json!(end));
-            }
+        Rewrite::Settled => {
+            uncontest(&mut rationale);
+            Some(approval)
+        }
+        Rewrite::Ended(end) => {
+            uncontest(&mut rationale);
+            rationale.insert("ended_by".to_owned(), json!(end));
+            None
         }
     };
     // Citations are events of the superseded decision, judged live by their
@@ -4039,11 +4067,9 @@ fn rewrite_statement(
         &evidence,
         recorded_at,
     )?;
-    if ended {
-        kernel_routes::commit::admit_capture(envelope, id, None)?;
+    kernel_routes::commit::admit_capture(envelope, id, approval.as_deref())?;
+    if approval.is_none() {
         retire_statement(envelope, &statement.object_id)?;
-    } else {
-        kernel_routes::commit::admit_capture(envelope, id, Some(&approval))?;
     }
     Ok(Some(id.to_owned()))
 }
@@ -4354,7 +4380,7 @@ struct Publication<'a> {
     output: &'a PreparedCapture,
     settlement: SettlementOutcome,
     /// Whether each memory of the plan, by index, is the user's own words.
-    stated: &'a [bool],
+    stated: &'a [Statement],
     approval: Approval,
     /// Set when the Kernel's admission policy refuses a statement record or
     /// the admission that rests on it.
@@ -4405,7 +4431,7 @@ fn write_captured_memories(
         if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !user_source {
             return Err(kernel::KernelError::Conflict);
         }
-        let stated = stated[index];
+        let Statement { whole, stated } = stated[index];
         // Approval requires the Kernel to accept the statement record and
         // the admission that rests on it.
         let attributed = stated && is_delivered(memory);
@@ -4449,21 +4475,19 @@ fn write_captured_memories(
         // A statement of any class may replace an approved capture memory
         // with lifetime `current_work`.
         let work_in_progress = |target: &String| {
-            stated
-                && earlier.get(target).is_some_and(|row| {
-                    let recorded = capture_rationale(row);
-                    recorded.source.as_deref() == Some(CAPTURE_SOURCE_ID)
-                        && recorded.lifetime == Some(Lifetime::CurrentWork)
-                })
+            earlier.get(target).filter(|row| {
+                let recorded = capture_rationale(row);
+                whole
+                    && recorded.source.as_deref() == Some(CAPTURE_SOURCE_ID)
+                    && recorded.lifetime == Some(Lifetime::CurrentWork)
+            })
         };
         for target in memory.replaces.iter().chain(&memory.also_replaces) {
-            if !(standing || work_in_progress(target)) && approved(envelope, target)? {
+            if !standing && work_in_progress(target).is_none() && approved(envelope, target)? {
                 return Err(kernel::KernelError::Conflict);
             }
         }
         // A correction whose approval the Kernel refused is stored labeled.
-        // A labeled fact replaces no approved one, so each approved target
-        // stays live beside it.
         let labeled = attributed && approval == Approval::Refused;
         // The approved targets a labeled correction leaves live. Each is
         // contested by the correction, so its line shows the user's newer
@@ -4476,40 +4500,34 @@ fn write_captured_memories(
         let mut captured = Vec::new();
         let mut ended = Vec::new();
         let mut source_revision = 1;
-        if let Some(target) = &memory.replaces {
+        let named = memory
+            .replaces
+            .iter()
+            .map(|target| (target, true))
+            .chain(memory.also_replaces.iter().map(|target| (target, false)));
+        for (target, primary) in named {
             let revision = checked_capture_target(envelope, project, output, target, true)?;
             let live = approved(envelope, target)?;
-            if labeled && live {
-                kept.push(target);
-            } else if let Some(revision) = revision.filter(|_| live && work_in_progress(target)) {
-                ended.push((target, revision));
-                captured.push(target);
-            } else {
-                match revision {
-                    Some(revision) => {
-                        source_revision = revision
-                            .checked_add(1)
-                            .ok_or(kernel::KernelError::InvalidInput)?;
-                        superseded = Some(target);
-                        captured.push(target);
-                    }
-                    None => retired.push(target),
-                }
-            }
-        }
-        for target in &memory.also_replaces {
-            let revision = checked_capture_target(envelope, project, output, target, true)?;
-            let live = approved(envelope, target)?;
-            if labeled && live {
-                kept.push(target);
-            } else if let Some(revision) = revision.filter(|_| live && work_in_progress(target)) {
-                ended.push((target, revision));
-                captured.push(target);
-            } else {
-                if revision.is_some() {
+            let work = work_in_progress(target).filter(|_| live);
+            match (work, revision) {
+                (Some(statement), Some(revision)) => {
+                    ended.push((target, statement, revision));
                     captured.push(target);
                 }
-                retired.push(target);
+                _ if labeled && live => kept.push(target),
+                (_, Some(revision)) if primary => {
+                    source_revision = revision
+                        .checked_add(1)
+                        .ok_or(kernel::KernelError::InvalidInput)?;
+                    superseded = Some(target);
+                    captured.push(target);
+                }
+                (_, revision) => {
+                    if revision.is_some() {
+                        captured.push(target);
+                    }
+                    retired.push(target);
+                }
             }
         }
         // The job's first written decision inserts the anchor every
@@ -4578,18 +4596,13 @@ fn write_captured_memories(
             retire_statement(envelope, target)?;
             removed.insert(target.clone());
         }
-        for (target, revision) in ended {
+        for (target, statement, revision) in ended {
             let end = Rewrite::Ended(End {
                 memory: id.to_owned(),
-                session: Some(job.session_id.clone()),
+                session: job.session_id.clone(),
             });
-            let rewritten = match earlier.get(target) {
-                Some(statement) => {
-                    rewrite_statement(envelope, plan, (statement, revision), end, recorded_at)?
-                }
-                None => None,
-            };
-            if rewritten.is_none() {
+            if rewrite_statement(envelope, plan, (statement, revision), end, recorded_at)?.is_none()
+            {
                 envelope.retire_decision(target)?;
                 retire_statement(envelope, target)?;
             }
@@ -7807,25 +7820,37 @@ mod tests {
             contested: false,
             current_work: true,
         };
+        let plan_copy = ExistingCaptureMemory {
+            id: "mem_plan_copy".into(),
+            content: format!("{USER_STATED}: Move the retry budget into the client config next."),
+            ..plan.clone()
+        };
         let rule = ExistingCaptureMemory {
             id: "mem_rule".into(),
             content: format!("{USER_STATED}: The retry budget is five attempts."),
             current_work: false,
             ..plan.clone()
         };
-        let existing = [plan, rule];
+        let rule_copy = ExistingCaptureMemory {
+            id: "mem_rule_copy".into(),
+            content: format!("{USER_STATED}: The client config holds the retry budget."),
+            current_work: false,
+            ..plan.clone()
+        };
+        let existing = [plan, plan_copy, rule, rule_copy];
         let messages = [CaptureMessage {
             id: "m".into(),
             role: CaptureRole::User,
             text: "The retry budget is in the client config now.".into(),
             own_id: true,
         }];
-        let parse = |lifetime: Option<&str>, target: &str, whole: bool| {
+        let parse = |lifetime: Option<&str>, target: &str, further: &[&str], whole: bool| {
             let mut memory = json!({
                 "category": "CONSTRAINTS",
                 "content": "The retry budget moved.",
                 "quote": "The retry budget is in the client config now.",
                 "replaces": target,
+                "also_replaces": further,
             });
             if let Some(lifetime) = lifetime {
                 memory["lifetime"] = json!(lifetime);
@@ -7839,10 +7864,13 @@ mod tests {
                 .flat_map(|message| message.unwrap().memories)
                 .next()
                 .unwrap();
-            (parsed.replaces, parsed.contests)
+            (parsed.replaces, parsed.also_replaces, parsed.contests)
         };
-        let replaced = |target: &str| (Some(target.to_string()), Vec::<String>::new());
-        let contested = |target: &str| (None, vec![target.to_string()]);
+        let names = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let replaced = |target: &str, further: &[&str], contests: &[&str]| {
+            (Some(target.to_string()), names(further), names(contests))
+        };
+        let contested = |targets: &[&str]| (None, Vec::new(), names(targets));
         for lifetime in [
             None,
             Some("lasting"),
@@ -7851,23 +7879,53 @@ mod tests {
             Some("request"),
             Some("status"),
         ] {
-            assert_eq!(
-                parse(lifetime, "mem_plan", true),
-                replaced("mem_plan"),
-                "{lifetime:?}"
-            );
-            assert_eq!(
-                parse(lifetime, "mem_plan", false),
-                contested("mem_plan"),
-                "{lifetime:?}"
-            );
             let standing = !matches!(lifetime, Some("current_work" | "request" | "status"));
             assert_eq!(
-                parse(lifetime, "mem_rule", true),
+                parse(lifetime, "mem_plan", &[], true),
+                replaced("mem_plan", &[], &[]),
+                "{lifetime:?}"
+            );
+            assert_eq!(
+                parse(lifetime, "mem_plan", &[], false),
+                contested(&["mem_plan"]),
+                "{lifetime:?}"
+            );
+            assert_eq!(
+                parse(lifetime, "mem_rule", &[], true),
                 if standing {
-                    replaced("mem_rule")
+                    replaced("mem_rule", &[], &[])
                 } else {
-                    contested("mem_rule")
+                    contested(&["mem_rule"])
+                },
+                "{lifetime:?}"
+            );
+            // A further target that is live work in progress ends with a
+            // replacement the statement keeps.
+            assert_eq!(
+                parse(lifetime, "mem_plan", &["mem_plan_copy"], true),
+                replaced("mem_plan", &["mem_plan_copy"], &[]),
+                "{lifetime:?}"
+            );
+            // A further target that outlives its task is replaced by a
+            // statement that does, and contested by one that ends with its
+            // task.
+            assert_eq!(
+                parse(lifetime, "mem_plan", &["mem_rule_copy"], true),
+                if standing {
+                    replaced("mem_plan", &["mem_rule_copy"], &[])
+                } else {
+                    replaced("mem_plan", &[], &["mem_rule_copy"])
+                },
+                "{lifetime:?}"
+            );
+            // When the replacement target is refused, every target becomes
+            // a contest, the live work in progress among them.
+            assert_eq!(
+                parse(lifetime, "mem_rule", &["mem_plan"], true),
+                if standing {
+                    replaced("mem_rule", &["mem_plan"], &[])
+                } else {
+                    contested(&["mem_rule", "mem_plan"])
                 },
                 "{lifetime:?}"
             );
@@ -9436,6 +9494,13 @@ mod tests {
                 "the prompt defines {label:?}"
             );
         }
+        for definition in [
+            " request: asks for work in the turn at hand,",
+            " current_work: work the user leaves open beyond the turn at hand,",
+            "a user source message that reports that work finished, cancels it, or changes its plan names the entry under replaces, whatever lifetime the message's own memory has.",
+        ] {
+            assert!(CAPTURE_SYSTEM_PROMPT.contains(definition), "{definition}");
+        }
     }
 
     #[test]
@@ -10185,6 +10250,167 @@ mod tests {
             [0, 1, 3, 2].map(|index| reports[index]),
             "the number's memory, the function words' memory, then the newest first"
         );
+    }
+
+    /// Publication applies the parser's replacement rule to a stored plan.
+    /// A statement that ends with its task and names an approved statement
+    /// that outlives its task meets a conflict and writes nothing. The same
+    /// statement that names live work in progress ends it, with or without
+    /// lines appended to its text, and a clause cut out of a sentence meets
+    /// a conflict.
+    #[test]
+    fn a_stored_plan_ends_work_in_progress_and_conflicts_on_a_standing_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let publish = |source: &CaptureJob, output: &PreparedCapture| {
+            publish_now(
+                &kernel,
+                &project,
+                source,
+                output,
+                &serde_json::to_string(output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+        };
+        let rows = || {
+            let read = kernel_routes::read::read_visible(
+                &kernel,
+                &project,
+                kernel::Surface::ExplicitSearch,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap();
+            let mut rows: Vec<(String, kernel::SurfaceVisibility, Value)> = read
+                .rows
+                .iter()
+                .map(|row| {
+                    let decision = &read.decisions[&row.object.object_id];
+                    (
+                        decision.payload.summary.clone(),
+                        row.visibility,
+                        serde_json::from_str(&decision.payload.rationale).unwrap(),
+                    )
+                })
+                .collect();
+            rows.sort_by(|left, right| left.0.cmp(&right.0));
+            rows
+        };
+        // The stored row `summary` names, as the plan of a later source
+        // holds it.
+        let target = |summary: &str| -> ExistingCaptureMemory {
+            let read = kernel_routes::read::read_visible(
+                &kernel,
+                &project,
+                kernel::Surface::ExplicitSearch,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap();
+            let row = read
+                .rows
+                .iter()
+                .find(|row| read.decisions[&row.object.object_id].payload.summary == summary)
+                .unwrap();
+            serde_json::from_value(json!({
+                "id": row.object.object_id,
+                "category": "CONFIG_VALUES",
+                "content": summary,
+                "can_replace": true,
+                "source_revision": row.object.source_revision,
+                "created_commit_seq": row.object.created_commit_seq,
+                "user_statement": true,
+            }))
+            .unwrap()
+        };
+        let classed = |key: &str, statement: &str, lifetime: Lifetime| {
+            let (source, mut output) = stated_job(key, &[statement.to_string()]);
+            output.memories[0].lifetime = Some(lifetime);
+            (source, output)
+        };
+        let rule = "The retry budget is five attempts.";
+        let plan = "Next, move the retry budget into the client config.";
+        let (source, output) = classed("job-rule", rule, Lifetime::Lasting);
+        publish(&source, &output).unwrap();
+        let (source, output) = classed("job-plan", plan, Lifetime::CurrentWork);
+        publish(&source, &output).unwrap();
+        let stated = |statement: &str| format!("{USER_STATED}: {statement}");
+        let before = rows();
+        assert_eq!(
+            before
+                .iter()
+                .map(|row| (row.0.as_str(), row.1))
+                .collect::<Vec<_>>(),
+            [
+                (stated(plan).as_str(), kernel::SurfaceVisibility::Visible),
+                (stated(rule).as_str(), kernel::SurfaceVisibility::Visible),
+            ]
+        );
+
+        let done = "The retry budget is in the client config now.";
+        for (key, lifetime) in [
+            ("job-request", Lifetime::Request),
+            ("job-work", Lifetime::CurrentWork),
+            ("job-status", Lifetime::Status),
+        ] {
+            let (source, mut output) = classed(key, done, lifetime);
+            let named = target(&stated(rule));
+            output.memories[0].replaces = Some(named.id.clone());
+            output.existing = vec![named];
+            let refused = publish(&source, &output);
+            assert!(
+                matches!(refused, Err(kernel::KernelError::Conflict)),
+                "{key}: {:?}",
+                refused.map(|receipt| receipt.commit_seq)
+            );
+        }
+        // A clause of the sentence is no whole statement, so it ends no
+        // work in progress.
+        let (mut source, mut output) = classed("job-clause", done, Lifetime::Status);
+        source.text = format!("I am glad that {}", done.to_lowercase());
+        output.memories[0].quote = done.to_lowercase();
+        output.memories[0].content = stated(&done.to_lowercase());
+        let named = target(&stated(plan));
+        output.memories[0].replaces = Some(named.id.clone());
+        output.existing = vec![named];
+        assert!(matches!(
+            publish(&source, &output),
+            Err(kernel::KernelError::Conflict)
+        ));
+        assert_eq!(
+            rows().iter().map(|row| row.0.clone()).collect::<Vec<_>>(),
+            before.iter().map(|row| row.0.clone()).collect::<Vec<_>>(),
+            "the refused plans wrote nothing"
+        );
+
+        // The remark's stored text holds a line appended after its
+        // quotation, as a failure line is.
+        let (source, mut output) = classed("job-done", done, Lifetime::Status);
+        let with_line = format!("{}\nat the registry step.", stated(done));
+        output.memories[0].content.clone_from(&with_line);
+        let named = target(&stated(plan));
+        let plan_id = named.id.clone();
+        output.memories[0].replaces = Some(named.id.clone());
+        output.existing = vec![named];
+        publish(&source, &output).unwrap();
+        let after = rows();
+        let ended = after.iter().find(|row| row.0 == stated(plan)).unwrap();
+        assert_eq!(ended.1, kernel::SurfaceVisibility::Labeled);
+        assert_eq!(ended.2["lifetime"], "current_work");
+        assert_eq!(ended.2["ended_by"]["session"], source.session_id.as_str());
+        let ending = ended.2["ended_by"]["memory"].as_str().unwrap();
+        assert_ne!(ending, plan_id);
+        let remark = after.iter().find(|row| row.0 == with_line).unwrap();
+        assert_eq!(remark.1, kernel::SurfaceVisibility::Labeled);
+        assert_eq!(remark.2["lifetime"], "status");
+        assert!(
+            after
+                .iter()
+                .any(|row| row.0 == stated(rule) && row.1 == kernel::SurfaceVisibility::Visible)
+        );
+        assert_eq!(after.len(), 3);
     }
 
     /// A stored plan whose memory names further targets beside no

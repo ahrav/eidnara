@@ -723,7 +723,7 @@ Open questions: None.
    calls `fs::read_to_string` at `:73`, which follows symlinks. The window is
    narrowed, not closed. The guard's stated threat model is exfiltrating
    `~/.ssh/id_rsa` into the prompt (`:7-8`), and the file is read into the
-   trusted m0 baseline through `m0_compose.rs:545` and `transform.rs:38`.
+   trusted m0 baseline through `m0_compose.rs:352` and `transform.rs:38`.
    Recommend synthesis promote this to a record; I left it as a lead to stay
    inside the 12-record budget and because the consumer is 4b's.
 5. **`claim.effects.apply`'s name and response field.** `ackedEffectId`

@@ -148,7 +148,7 @@ rows after the token-budget trim: the positive-category rows sorted by object
 id, then the `CURRENT_WORK` rows in the order the block renders them.
 Check: `always` - two snapshots with equal rendered rows have equal revisions
 and a change to any rendered row, or to the order of the `CURRENT_WORK` rows,
-changes it; a dropped or over-budget row never moves it.
+changes it; a row the block does not render contributes no byte to it.
 Fault/timing angle: none
 Required faults and enabling state: Snapshots that differ only in rows the
 renderer drops, bytes past the render cap, rows past the memory budget, or

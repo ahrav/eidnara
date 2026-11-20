@@ -415,15 +415,12 @@ mod trim_memories_tests {
                 "the section is a run from the first supplied row: budget {budget}"
             );
             let used = section_tokens(&kept, bytes) as f64;
-            assert!(
-                used <= budget * CURRENT_WORK_BUDGET_SHARE,
-                "budget {budget}: {used}"
-            );
+            assert!(used <= budget / 4.0, "budget {budget}: {used}");
             // The next row is the one that exceeds the section's budget.
             let mut longer = kept.clone();
             longer.push(requests[section.len()].clone());
             assert!(
-                section_tokens(&longer, bytes) as f64 > budget * CURRENT_WORK_BUDGET_SHARE,
+                section_tokens(&longer, bytes) as f64 > budget / 4.0,
                 "budget {budget}"
             );
             assert!(
@@ -481,6 +478,25 @@ mod trim_memories_tests {
             section.len()
         );
         assert!(bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget);
+        // Fewer lasting rows leave room that is positive and below the
+        // quarter: the section is a run from the first supplied row that
+        // fits the room, and the next row exceeds it.
+        let some = &lasting[..22];
+        let (kept_lasting, unspent) = trim_memories_to_budget(some, budget, bytes);
+        assert_eq!(kept_lasting, some);
+        assert!(unspent > 0 && (unspent as f64) < budget / 4.0, "{unspent}");
+        let kept = trim_block_to_budget(some, &requests, budget, bytes);
+        let section = &kept[some.len()..];
+        assert!(
+            !section.is_empty() && section.len() < requests.len(),
+            "{}",
+            section.len()
+        );
+        assert_eq!(section, &requests[..section.len()]);
+        assert!(section_tokens(&kept, bytes) as u64 <= unspent);
+        let mut longer = kept.clone();
+        longer.push(requests[section.len()].clone());
+        assert!(section_tokens(&longer, bytes) as u64 > unspent);
         // With a few lasting rows the section is bound by its quarter.
         let few = trim_block_to_budget(&lasting[..2], &requests, budget, bytes);
         assert_eq!(few[..2], lasting[..2]);

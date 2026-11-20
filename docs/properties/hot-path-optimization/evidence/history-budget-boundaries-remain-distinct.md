@@ -15,7 +15,7 @@ request validation, and replay. These have different implemented boundaries.
 - [tokenizer/lib.rs:123-149][tokenizer] counts encoded tokens and defines zero
   tokens for empty input. At representable `H` and `5H`, at most `4H` demotions
   reach all-tier-5 output for `H` history_segments, without requiring monotonic cost.
-- [m0_compose.rs:215-252][outer] counts the wrapped history slice, retries above
+- [m0_compose.rs:178-215][outer] counts the wrapped history slice, retries above
   105% at most three times, and can return a still-over-budget render.
 - [daemon/lib.rs:8247-8250][validation] resolves request budgets separately.
 - [transform.rs:4081-4108][hard] composes on HARD; [4348-4381][refold] also
@@ -63,7 +63,7 @@ outer retry matrix. Existing checks are
 [inner]: ../../../../crates/daemon/src/decay_render.rs#L289-L338
 [tiers]: ../../../../crates/daemon/src/decay_render.rs#L203-L240
 [tokenizer]: ../../../../crates/tokenizer/src/lib.rs#L123-L149
-[outer]: ../../../../crates/daemon/src/m0_compose.rs#L215-L252
+[outer]: ../../../../crates/daemon/src/m0_compose.rs#L178-L215
 [validation]: ../../../../crates/daemon/src/lib.rs#L8259-L8262
 [hard]: ../../../../crates/daemon/src/transform.rs#L4081-L4108
 [refold]: ../../../../crates/daemon/src/transform.rs#L4348-L4381

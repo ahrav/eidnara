@@ -44,13 +44,9 @@ pub struct CanonicalMemorySnapshot {
 impl CanonicalMemorySnapshot {
     /// Builds the snapshot and digests the rows the block renders from.
     ///
-    /// Rows are digested in object-id order after the renderer's
-    /// positive-category filter, so the digest is a function of the rendered
-    /// row set and not of the order the read returned it in or of rows the
-    /// renderer drops. Each row contributes its category and the exact line
-    /// `render_memory_line` emits, so an edit past the renderer's content cap
-    /// changes no digested byte. `truncated` is not digested: it does not
-    /// change the rendered bytes.
+    /// Each rendered row contributes its category and the exact line
+    /// `render_memory_line` emits. Edits past the renderer's content cap and
+    /// changes to `truncated` preserve the rendered bytes and the digest.
     pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
         let rendered = rendered_rows(&rows);
         let mut hasher = DefaultHasher::new();
@@ -148,7 +144,7 @@ impl ServedSet {
     }
 }
 
-/// The rows the block renders, in object-id order; the revision and the served-set digest derive from them.
+/// The rows the block renders, in object-id order. The served-set digest derives from them, and the revision reads them with the `CURRENT_WORK` rows in the supplied order.
 fn rendered_rows(rows: &[CanonicalMemory]) -> Vec<&CanonicalMemory> {
     let mut rendered: Vec<&CanonicalMemory> = rows
         .iter()
@@ -265,6 +261,10 @@ fn read_at_tip(
 /// the walk, as every bounded read of the domain does.
 const MAX_DELIVERY_PAGES: usize = 8;
 
+/// Each delivery charges work in progress to separate row and byte caps,
+/// each one quarter of the corresponding walk cap.
+const WORK_READ_DIVISOR: usize = 4;
+
 /// The project's injectable memory rows at `tip` that a pass delivers to each
 /// of `sessions`: for one session, the newest rows under the row and byte
 /// caps among the rows whose capture rationale names another session or
@@ -272,12 +272,16 @@ const MAX_DELIVERY_PAGES: usize = 8;
 /// plain newest window. With several readers the response holds the union
 /// of their deliveries, which is at most twice the caps, because a row a
 /// session leaves out is kept only while another reader still has room.
+/// Each delivery counts visible rows that pass
+/// [`crate::memory_capture::is_current_work`] against a second pair of
+/// caps, a quarter of the first, so the response holds at most two and a
+/// half times the caps.
 ///
 /// A row's session is in its decision payload. The rows are walked in
 /// serving order and their payloads are loaded one page at a time, each page
 /// within the caps, so a session's own rows spend neither cap however many
 /// of them are newer than the rows it is served, and the payloads held at
-/// once stay within three times the byte cap. The walk loads at most
+/// once stay within three and a half times the byte cap. The walk loads at most
 /// [`MAX_DELIVERY_PAGES`] pages. `truncated` reports that some session's
 /// delivery left out a row it was eligible for at a row or byte cap, that
 /// a row whose payload alone passes the byte cap ended the walk, or that
@@ -290,12 +294,21 @@ pub(crate) fn read_other_sessions(
     tip: i64,
     (max_rows, max_row_bytes): (usize, usize),
 ) -> Result<ReadResponse, kernel::KernelError> {
-    struct Delivery<'s> {
-        session: Option<&'s str>,
+    #[derive(Default)]
+    struct Allowance {
         rows: usize,
         bytes: u64,
         full: bool,
     }
+    struct Delivery<'s> {
+        session: Option<&'s str>,
+        facts: Allowance,
+        work: Allowance,
+    }
+    let work_caps = (
+        (max_rows / WORK_READ_DIVISOR).max(1),
+        (max_row_bytes / WORK_READ_DIVISOR) as u64,
+    );
     let (known_as_of, tip, candidates) =
         crate::kernel_routes::read::domain_decisions_in_serving_order(
             store,
@@ -308,9 +321,8 @@ pub(crate) fn read_other_sessions(
         .iter()
         .map(|&session| Delivery {
             session,
-            rows: 0,
-            bytes: 0,
-            full: false,
+            facts: Allowance::default(),
+            work: Allowance::default(),
         })
         .collect();
     let mut response = ReadResponse {
@@ -322,7 +334,7 @@ pub(crate) fn read_other_sessions(
     };
     let mut pending = std::collections::VecDeque::from(candidates);
     let mut pages = 0;
-    while !pending.is_empty() && deliveries.iter().any(|delivery| !delivery.full) {
+    while !pending.is_empty() && deliveries.iter().any(|delivery| !delivery.facts.full) {
         // The walk's work is bounded: past the page limit the rows not yet
         // judged are left out and the response reports the cut.
         if pages == MAX_DELIVERY_PAGES {
@@ -373,19 +385,30 @@ pub(crate) fn read_other_sessions(
             let owner = crate::memory_capture::is_capture_memory(&row.object)
                 .then(|| capture_session(&decision.payload.rationale))
                 .flatten();
+            let work = row.visibility == SurfaceVisibility::Visible
+                && crate::memory_capture::is_current_work(&row.object, &decision);
             let mut delivered = false;
-            for delivery in deliveries.iter_mut().filter(|delivery| !delivery.full) {
+            for delivery in deliveries
+                .iter_mut()
+                .filter(|delivery| !delivery.facts.full)
+            {
                 if owner.is_some() && owner.as_deref() == delivery.session {
                     continue;
                 }
-                if delivery.rows == max_rows
-                    || delivery.bytes.saturating_add(size) > max_row_bytes as u64
-                {
-                    delivery.full = true;
+                let (allowance, (rows, bytes)) = if work {
+                    (&mut delivery.work, work_caps)
+                } else {
+                    (&mut delivery.facts, (max_rows, max_row_bytes as u64))
+                };
+                if allowance.full {
+                    continue;
+                }
+                if allowance.rows == rows || allowance.bytes.saturating_add(size) > bytes {
+                    allowance.full = true;
                     response.truncated = true;
                 } else {
-                    delivery.rows += 1;
-                    delivery.bytes += size;
+                    allowance.rows += 1;
+                    allowance.bytes += size;
                     delivered = true;
                 }
             }
@@ -732,6 +755,7 @@ fn injectable_snapshot(
             continue;
         }
         let work = crate::memory_capture::is_current_work(&row.object, decision);
+        let stated = crate::memory_capture::stated_commit(decision, row.object.created_commit_seq);
         let memory = CanonicalMemory {
             object_id: decision.object_id.clone(),
             category: if work {
@@ -742,11 +766,18 @@ fn injectable_snapshot(
             content: decision.payload.summary.clone(),
         };
         if work {
-            current_work.push(memory);
+            current_work.push((stated, memory));
         } else {
             lasting.push(memory);
         }
     }
+    current_work.sort_by(|(left_stated, left), (right_stated, right)| {
+        right_stated
+            .cmp(left_stated)
+            .then_with(|| left.object_id.cmp(&right.object_id))
+    });
+    let current_work: Vec<CanonicalMemory> =
+        current_work.into_iter().map(|(_, memory)| memory).collect();
     let rows = trim_block_to_budget(
         &lasting,
         &current_work,

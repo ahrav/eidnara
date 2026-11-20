@@ -33,8 +33,8 @@ warning, which would make the range oracle pass for the wrong reason.
 
 `Handler::project_memory_read` (`lib.rs:4832-4845`) passes the effective budget
 to `canonical_memory::read_project_memory` when memory is enabled. The reader
-applies its visible-row read before memory trimming (`canonical_memory.rs:169-180`,
-`:201-218`). Increasing this budget does not remove the separate row and byte
+applies its visible-row read before memory trimming (`canonical_memory.rs:163-174`,
+`:195-212`). Increasing this budget does not remove the separate row and byte
 caps of the visible-row read.
 
 ## Failure scenario

@@ -690,7 +690,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
-| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record or at the admission that rests on it; every eligible user statement that the labeled commit writes, one whose `lifetime` is `lasting`, `unsettled`, or absent, is counted |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record or at the admission that rests on it; every eligible user statement that the labeled commit writes, one whose `lifetime` is `lasting`, `unsettled`, `current_work`, or absent, is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -1341,9 +1341,9 @@ admission that rests on it, the same frozen plan commits again with each eligibl
 as a labeled memory for explicit search and with no statement record, and
 `decisions_approval_refused` counts each statement so written. An eligible
 statement that duplicates an approved fact adds no fact of its own in either
-attempt and stays uncounted. A labeled correction replaces no approved fact: each approved fact the plan names
+attempt and stays uncounted. A labeled correction replaces no approved fact that outlives its task: each such fact the plan names
 as a replacement stays live and served on `auto_inject` beside the labeled correction, contested by it (below), and as a replacement the labeled commit supersedes
-or retires only a named fact that is itself labeled. Every other captured fact remains labeled model inference
+or retires only a named fact that is itself labeled; live work in progress that the plan names is ended in either attempt (below), since ending it needs no approval. Every other captured fact remains labeled model inference
 for explicit search, not human approval or automatic-context eligibility; the
 one text of such a fact that reaches automatic context is the bounded, quoted
 excerpt on a contested statement's line (below).
@@ -1372,15 +1372,25 @@ source that names a replacement meets a conflict and is planned again. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
-and leaves out facts captured from that session's own messages. Live work in
+and leaves out facts captured from that session's own messages. Those facts
+are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
+they take no place from another session's facts. The read loads at most
+eight pages of that size, the payloads of up to 64 MiB of a session's own
+newer facts; past that it stops, keeps the facts it had selected, and
+leaves the older facts out of the block. A fact whose stored payload alone
+passes 8 MiB is left unloaded and ends the read the same way. Live work in
 progress renders after the categories in one element,
 `<CURRENT_WORK note="...">`, whose `note` states that its lines are work the
 user left open in earlier sessions that no later statement of the user ended,
 that they set no standing rule, and that the repository shows whether one is
-finished; its lines are newest first, and a contested line of it is rendered
-as any contested statement is. The other facts are selected against the
-whole budget first, exactly as when no work in progress is stored, so work
-in progress takes no place from them. The element then takes the newest
+finished; its lines are newest first by the commit that first recorded each
+statement, so a contest, which supersedes the fact it marks, leaves a
+statement's place as it was, and a contested line of it is rendered
+as any contested statement is. The other facts are read and selected exactly
+as when no work in progress is stored: the read counts work in progress
+against bounds of its own, a quarter of the read's row and byte bounds, and
+the other facts are selected against the whole token budget first. The
+element then takes the newest
 live work in progress, in order, until one statement exceeds the element's
 budget, which is the smaller of a quarter of
 `memory.injection_budget_tokens` and the tokens the other facts left; that
@@ -1394,13 +1404,7 @@ of the default 4,000 tokens holds less than that one statement. And work in
 progress is short-lived text that a later session may find finished, so it
 is held to a minor part of the block however little else the block holds: a
 half would let it reach 2,000 tokens of every request at the default
-budget. Those facts
-are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
-they take no place from another session's facts. The read loads at most
-eight pages of that size, the payloads of up to 64 MiB of a session's own
-newer facts; past that it stops, keeps the facts it had selected, and
-leaves the older facts out of the block. A fact whose stored payload alone
-passes 8 MiB is left unloaded and ends the read the same way. The extractor's reference memories are ranked from two bounded reads
+budget. The extractor's reference memories are ranked from two bounded reads
 at one snapshot: the newest facts on `explicit_search`, and the facts served
 on `auto_inject` in the plain newest window and in the delivery of each
 session whose messages the batch holds; a fact older than every window is
@@ -1450,18 +1454,27 @@ each other such target it names in `replaces` or `also_replaces` becomes a conte
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as one of those three, leave the rule approved
 and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets. A
-whole statement of the user of any class that names live work in progress in
-`replaces` or `also_replaces` ends it: a remark that the work is finished, a
-cancellation, and a newer plan each do. The ending statement is stored as
+whole statement of the user of any class that names live work in progress as
+its `replaces` target, or as an `also_replaces` target beside a `replaces`
+target it keeps, ends it: a remark that the work is finished, a
+cancellation, and a newer plan each do. Lines capture appends to the
+statement's stored text leave that judgment as it is, since it reads the
+quotation. When the `replaces` target is a fact the statement may not
+replace, every target becomes a contest under the rule above, live work in
+progress among them. The ending statement is stored as
 its own fact under its own class, so a `status` remark and a cancelling
 `request` are labeled and a newer plan classed `current_work` is the live
 work in progress. The ended
 fact is superseded by a fact of the same text and category, admitted
 labeled, whose rationale holds `ended_by`, an object with `memory` (the
-ending fact's id) and `session` (the session whose message ended it), and
+ending fact's id, as it was when the statement ended) and `session` (the session whose message ended it), and
 no `contested_by`; its statement record is retired, and it cites again the
 evidence a contested fact's successor cites (below). Explicit search serves
-the ended fact and no automatic surface does. Work in progress is therefore
+the ended fact and no automatic surface does. A contest is shown while the
+fact it names is served, so a contest that work in progress placed on
+another statement lasts until that work in progress is superseded: by its
+end, and by a contest or a settlement of the work in progress itself. The
+contested statement then renders as it did before that contest. Work in progress is therefore
 live in a later session when its own session, and every session since,
 ended with no statement of the user ending it: a request the user reports
 finished in the session that made it reaches no later session, and a

@@ -396,6 +396,8 @@ export function memoryResultFromRow(
             ...(row.labeled ? { policyLabel: "labeled" } : {}),
         };
     }
+    const contestingMemoryId = decision ? contestingMemoryOf(row, decision) : undefined;
+    const work = decision ? workInProgressOf(row, decision) : undefined;
     return {
         source: "memory",
         // `rowText` ranks the rationale, so the rationale renders too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated.
@@ -407,12 +409,8 @@ export function memoryResultFromRow(
         category: decision?.decision_kind ?? row.object.object_kind,
         matchType,
         ...(row.labeled ? { policyLabel: "labeled" } : {}),
-        ...(decision && contestingMemoryOf(row, decision) !== undefined
-            ? { contestingMemoryId: contestingMemoryOf(row, decision) }
-            : {}),
-        ...(decision && workInProgressOf(row, decision) !== undefined
-            ? { work: workInProgressOf(row, decision) }
-            : {}),
+        ...(contestingMemoryId === undefined ? {} : { contestingMemoryId }),
+        ...(work === undefined ? {} : { work }),
     };
 }
 

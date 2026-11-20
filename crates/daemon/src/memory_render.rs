@@ -83,8 +83,6 @@ pub(crate) fn is_positive_memory_category(category: &str) -> bool {
     POSITIVE_MEMORY_CATEGORIES.contains(&category)
 }
 
-/// [`CURRENT_WORK_SECTION`] groups earlier requests and plans that may
-/// already be complete.
 pub(crate) const CURRENT_WORK_SECTION: &str = "CURRENT_WORK";
 
 const CURRENT_WORK_NOTE: &str = "Work the user left open in earlier sessions, newest first, which no later statement of the user ended. It sets no standing rule and may be finished already: check the repository before resuming it.";
@@ -183,6 +181,7 @@ pub fn render_memory_line(memory: &CanonicalMemory) -> String {
 }
 
 /// Renders positive memories grouped in deterministic category and object-id order.
+/// The `CURRENT_WORK` rows render last, in the supplied order.
 ///
 /// Native surfaces filter non-positive categories because callers can construct
 /// [`CanonicalMemory`] directly and native surfaces lack a warning renderer.
