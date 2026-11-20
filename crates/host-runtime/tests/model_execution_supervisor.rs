@@ -1506,11 +1506,12 @@ fn entries_another_host_owns_are_no_residue_of_this_one() {
         .and_then(|owner| owner.split_once(' '))
         .expect("owner line");
     let own_start: u64 = own_start.parse().expect("owner start");
-    // A record like this process's own, written for the owner `pid` that started at `start`.
-    let forge = |name: &str, pid: u32, start: u64| {
+    // A record like this process's own, written for the owner `pid` that started at `start`. `edit` changes its lines before the checksum is taken.
+    let forge_with = |name: &str, pid: u32, start: u64, edit: &dyn Fn(&mut Vec<String>)| {
         let mut lines: Vec<String> = record_text.lines().map(str::to_owned).collect();
         lines.pop();
         lines[3] = format!("{pid} {start}");
+        edit(&mut lines);
         let mut body = lines.join("\n");
         body.push('\n');
         let checksum: String = Sha256::digest(body.as_bytes())
@@ -1521,6 +1522,7 @@ fn entries_another_host_owns_are_no_residue_of_this_one() {
         std::fs::write(&path, format!("{body}{checksum}\n")).expect("forged record");
         path
     };
+    let forge = |name: &str, pid: u32, start: u64| forge_with(name, pid, start, &|_| {});
     // The forged form is one the registry reads: a second record of this owner is counted.
     let twin = forge("twin", own_pid, own_start);
     assert_eq!(
@@ -1533,6 +1535,14 @@ fn entries_another_host_owns_are_no_residue_of_this_one() {
     forge(".unpublished.tmp", own_pid, own_start);
     forge("other-pid", own_pid + 1, own_start);
     forge("other-start", own_pid, own_start + 1);
+    // A record of another boot names another owner even with this process's PID and start time, and whatever its schema version.
+    forge_with("other-boot", own_pid, own_start, &|lines| {
+        lines[1].push('x')
+    });
+    forge_with("other-boot-other-version", own_pid, own_start, &|lines| {
+        lines[0] = "v9".to_owned();
+        lines[1].push('x');
+    });
     // The directory name carries `<boot>-<pid>-<start>-<nonce>` after its prefix.
     let name = dir
         .path()

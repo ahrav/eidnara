@@ -598,11 +598,11 @@ impl ModelExecutionComponent {
             }
             tokio::time::sleep(RESIDUE_POLL_INTERVAL).await;
             if tokio::time::Instant::now() >= deadline {
-                // The grace ended during the wait. Entries the last read found are the residue. A clear read beside a job still running leaves the verdicts as counted.
-                return if found == subprocess::group_registry::OwnResidue::default() {
-                    counted
-                } else {
+                // The grace ended during the wait. Once every job has returned, the entries the last read found are the residue. Beside a job still running, an entry may be yet to land, so each class reports the larger of its verdicts and its entries.
+                return if idle {
                     (found.run_dirs, found.records)
+                } else {
+                    (counted.0.max(found.run_dirs), counted.1.max(found.records))
                 };
             }
         }
@@ -675,7 +675,7 @@ mod tests {
                 biased;
                 settled = &mut settling => return settled,
                 () = tokio::time::advance(RESIDUE_POLL_INTERVAL) => {
-                    std::thread::sleep(Duration::from_millis(1));
+                    std::thread::sleep(Duration::from_millis(5));
                 }
             }
         }
@@ -696,6 +696,7 @@ mod tests {
     }
 
     /// A creation that a run stopped waiting for is a filesystem job that still holds its slot. While one runs, a clear registry read says nothing about the entry the job will write, so the verdicts stand when the grace ends. Once the job has returned, the next clear read settles them.
+    #[cfg(target_os = "linux")]
     #[tokio::test(start_paused = true)]
     async fn a_clear_registry_settles_the_verdicts_only_once_every_filesystem_job_has_returned() {
         let dir = tempfile::tempdir().expect("state root dir");
@@ -722,6 +723,15 @@ mod tests {
             (1, 1),
             "a job still running at the end of the grace leaves the verdicts as counted"
         );
+        // One class has an entry on disk at the end of the grace. The job may still write an entry of the other class, so that class keeps its verdict.
+        let entry =
+            subprocess::PrivateDir::create(&root, "model_execution-pi").expect("private run dir");
+        assert_eq!(
+            settle(component.residue_on_disk((1, 1)), |_| {}).await,
+            (1, 1),
+            "beside a running job each class reports the larger of its verdicts and its entries"
+        );
+        entry.cleanup().expect("private run dir removed");
         release.send(()).expect("the job is released");
         job.await.expect("job task").expect("job result");
 
@@ -731,7 +741,7 @@ mod tests {
             // The job returns a second into the grace. The slots are shared by every test of this process, so the step waits until all of them are free before the settle wait samples them again.
             if step == 20 {
                 release.send(()).expect("the job is released");
-                for _ in 0..10_000 {
+                for _ in 0..4_000 {
                     if subprocess::filesystem_jobs_idle() {
                         break;
                     }

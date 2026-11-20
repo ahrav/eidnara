@@ -1110,17 +1110,27 @@ pub(crate) fn within<T: Send + 'static>(
     bound: Duration,
     step: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
+    let outlasted = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "a filesystem step outlasted its bound",
+        )
+    };
+    // A step starts only while its bound has time left.
+    if bound.is_zero() {
+        return Err(outlasted());
+    }
     let (answer, answered) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("bounded-fs-step".to_owned())
         .spawn(move || {
             let _ = answer.send(step());
         })?;
-    answered.recv_timeout(bound).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "a filesystem step returned no answer inside its bound",
-        )
+    answered.recv_timeout(bound).map_err(|err| match err {
+        std::sync::mpsc::RecvTimeoutError::Timeout => outlasted(),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            io::Error::other("a filesystem step ended without an answer")
+        }
     })?
 }
 
@@ -2676,6 +2686,32 @@ pub mod group_registry {
         }
     }
 
+    /// The most a registry record is read for. A record this host writes is far smaller, and a longer file fails its checksum.
+    const RECORD_READ_CAP: u64 = 64 * 1024;
+
+    /// Reads the record at `path` through one descriptor: a regular file owned by this user, opened without following a symlink and read up to [`RECORD_READ_CAP`]. `Ok(None)` means another process removed the record after the directory was listed.
+    fn read_pinned_record(path: &Path) -> io::Result<Option<String>> {
+        use std::os::unix::fs::MetadataExt;
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
+            return Err(io::Error::other(
+                "a registry record is not a regular file owned by this user",
+            ));
+        }
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(file, RECORD_READ_CAP), &mut text)?;
+        Ok(Some(text))
+    }
+
     /// Sweeps one registry entry; `Ok(n)` counts groups killed, `Err` means the record was retained.
     fn sweep_record(path: &Path, current_boot: &str) -> io::Result<usize> {
         let mut killed = 0;
@@ -2705,27 +2741,8 @@ pub mod group_registry {
         }
         // A record names a kill target, so the sweep parses only a pinned regular file owned by this user.
         // A planted foreign-owned file or symlink fails the sweep closed instead of driving `kill_process_group`.
-        let text = {
-            use std::os::unix::fs::MetadataExt;
-            let mut file = match fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(path)
-            {
-                Ok(file) => file,
-                // `NotFound` means another process removed the record after directory enumeration.
-                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
-                Err(err) => return Err(err),
-            };
-            let meta = file.metadata()?;
-            if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
-                return Err(io::Error::other(
-                    "a registry record is not a regular file owned by this user",
-                ));
-            }
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut file, &mut text)?;
-            text
+        let Some(text) = read_pinned_record(path)? else {
+            return Ok(0);
         };
         // A record from a different boot is removed without signaling because its PIDs may be reused. The boot line is trusted only when the record's checksum verifies, so a corrupted boot line cannot masquerade as a stale record.
         if Entry::verified_body(&text)
@@ -2875,6 +2892,7 @@ pub mod group_registry {
         let owner_pid = std::process::id() as i32;
         let owner_start = owner_start_time()?;
         let owner_boot = owner_boot_tag()?;
+        let record_boot = boot_id()?;
         let mut residue = OwnResidue::default();
         for entry in fs::read_dir(root.run_root()?)? {
             let path = entry?.path();
@@ -2894,18 +2912,23 @@ pub mod group_registry {
                 continue;
             }
             // A removal that finishes between the listing and a read answers `NotFound`.
-            let gone = |err: &io::Error| err.kind() == io::ErrorKind::NotFound;
             match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.is_file() => {}
                 Ok(_) => continue,
-                Err(err) if gone(&err) => continue,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
             }
-            let text = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(err) if gone(&err) => continue,
-                Err(err) => return Err(err),
+            // The record is read as the startup sweep reads it: through one descriptor, as a regular file owned by this user.
+            let Some(text) = read_pinned_record(&path)? else {
+                continue;
             };
+            // A record of another boot names another owner, whatever its schema version. The startup sweep removes it.
+            if Entry::verified_body(&text)
+                .and_then(|body| body.lines().nth(1))
+                .is_some_and(|boot| boot != record_boot)
+            {
+                continue;
+            }
             // A published record this host cannot interpret may be its own, so the read answers unknown, as the startup sweep does for the same record.
             let Some(record) = Entry::parse(&text) else {
                 return Err(io::Error::other(
@@ -2983,6 +3006,30 @@ mod tests {
 
         let answered = super::within(Duration::from_secs(10), || Ok(7)).expect("the step answers");
         assert_eq!(answered, 7);
+
+        // A step starts only while its bound has time left.
+        let (ran, step_ran) = std::sync::mpsc::channel::<()>();
+        let spent = super::within(Duration::ZERO, move || {
+            let _ = ran.send(());
+            Ok(())
+        });
+        assert_eq!(
+            spent.expect_err("the bound is spent").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(
+            step_ran.recv().is_err(),
+            "the step is dropped without running"
+        );
+
+        // A step that ends without an answer is reported as that, apart from a step still running.
+        let ended = super::within(Duration::from_secs(10), || -> std::io::Result<()> {
+            panic!("the step ends without an answer")
+        });
+        assert_eq!(
+            ended.expect_err("no answer").kind(),
+            std::io::ErrorKind::Other
+        );
     }
 
     #[test]
