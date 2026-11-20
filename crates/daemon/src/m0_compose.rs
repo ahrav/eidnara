@@ -16,8 +16,8 @@ use crate::decay_render::{
     PRESSURE_WINDOW, TokenCount, counting, fold_plan, m0_block, render_owned_rows,
 };
 use crate::memory_render::{
-    M0Inputs, is_positive_memory_category, render_m0_counted, render_memory_block,
-    render_memory_line,
+    CURRENT_WORK_SECTION, M0Inputs, is_positive_memory_category, push_category_open,
+    render_m0_counted, render_memory_block, render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
 
@@ -74,16 +74,17 @@ pub struct M0ComposeInputs<'a> {
 /// Keeps the memories whose rendered lines fit `budget_tokens`, in the supplied
 /// serving order, charging each category's wrapper once. A row that does not
 /// fit is skipped, so a later smaller row can still be admitted. Only positive
-/// categories are charged, matching what the renderer emits.
+/// categories are charged, matching what the renderer emits. Returns the
+/// kept rows and the tokens they left unspent.
 pub(crate) fn trim_memories_to_budget(
     memories: &[CanonicalMemory],
     budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
-) -> Vec<CanonicalMemory> {
+) -> (Vec<CanonicalMemory>, u64) {
     let budget = budget_tokens.max(1.0);
     let wrapper = estimate_tokens("<project-memory>\n</project-memory>");
     if wrapper as f64 > budget {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let positive: Vec<&CanonicalMemory> = memories
         .iter()
@@ -110,10 +111,46 @@ pub(crate) fn trim_memories_to_budget(
             }
         },
     );
-    scan.admitted
+    let kept = scan
+        .admitted
         .iter()
         .map(|index| positive[*index].clone())
-        .collect()
+        .collect();
+    (kept, scan.remaining)
+}
+
+pub(crate) const CURRENT_WORK_BUDGET_SHARE: f64 = 0.25;
+
+/// Trims `lasting` to `budget_tokens` with [`trim_memories_to_budget`],
+/// then admits `current_work` rows in the supplied order until one exceeds
+/// the section's budget: the smaller of [`CURRENT_WORK_BUDGET_SHARE`] of
+/// `budget_tokens` and the tokens the lasting rows left.
+pub(crate) fn trim_block_to_budget(
+    lasting: &[CanonicalMemory],
+    current_work: &[CanonicalMemory],
+    budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize + Copy,
+) -> Vec<CanonicalMemory> {
+    let (mut kept, unspent) = trim_memories_to_budget(lasting, budget_tokens, estimate_tokens);
+    let share = (budget_tokens.max(1.0) * CURRENT_WORK_BUDGET_SHARE).floor() as u64;
+    let mut section = String::new();
+    push_category_open(&mut section, CURRENT_WORK_SECTION);
+    section.push_str(&format!("\n</{CURRENT_WORK_SECTION}>\n"));
+    let Some(mut room) = unspent
+        .min(share)
+        .checked_sub(estimate_tokens(&section) as u64)
+    else {
+        return kept;
+    };
+    for memory in current_work {
+        let cost = estimate_tokens(&(render_memory_line(memory) + "\n")) as u64;
+        let Some(left) = room.checked_sub(cost) else {
+            break;
+        };
+        room = left;
+        kept.push(memory.clone());
+    }
+    kept
 }
 
 pub(crate) fn trim_user_profile_to_budget(
@@ -311,7 +348,7 @@ mod trim_memories_tests {
             memory("WARNING", "never rendered"),
         ];
         assert_eq!(
-            trim_memories_to_budget(&memories, 1e6, bytes).len(),
+            trim_memories_to_budget(&memories, 1e6, bytes).0.len(),
             3,
             "the positive rows are admitted under a generous budget"
         );
@@ -330,11 +367,167 @@ mod trim_memories_tests {
             f64::INFINITY,
         ] {
             assert_eq!(
-                trim_memories_to_budget(&memories, budget, bytes),
+                trim_memories_to_budget(&memories, budget, bytes).0,
                 reference(&memories, budget, bytes),
                 "budget {budget}"
             );
         }
+    }
+
+    fn work(id: usize, content: &str) -> CanonicalMemory {
+        CanonicalMemory {
+            object_id: format!("work-{id}"),
+            category: CURRENT_WORK_SECTION.to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    /// The tokens of the `CURRENT_WORK` element `rows` render, through the
+    /// line break that follows it, by `estimate`.
+    fn section_tokens(rows: &[CanonicalMemory], estimate: impl Fn(&str) -> usize) -> usize {
+        let block = render_memory_block(rows, "project-memory");
+        block
+            .find(&format!("<{CURRENT_WORK_SECTION}"))
+            .map_or(0, |start| {
+                estimate(&block[start..block.len() - "</project-memory>".len()])
+            })
+    }
+
+    #[test]
+    fn the_section_holds_a_newest_first_run_within_a_quarter_of_the_budget() {
+        let bytes = |text: &str| text.len();
+        let lasting = [memory("ARCHITECTURE", "alpha"), memory("NAMING", "gamma")];
+        let requests: Vec<CanonicalMemory> = (0..100)
+            .map(|id| work(id, &format!("request number {id}")))
+            .collect();
+        for budget in [2_000.0, 4_000.0, 8_000.0] {
+            let kept = trim_block_to_budget(&lasting, &requests, budget, bytes);
+            assert_eq!(kept[..2], lasting, "budget {budget}");
+            let section = &kept[2..];
+            assert!(
+                !section.is_empty() && section.len() < requests.len(),
+                "budget {budget}: {}",
+                section.len()
+            );
+            assert_eq!(
+                section,
+                &requests[..section.len()],
+                "the section is a run from the first supplied row: budget {budget}"
+            );
+            let used = section_tokens(&kept, bytes) as f64;
+            assert!(
+                used <= budget * CURRENT_WORK_BUDGET_SHARE,
+                "budget {budget}: {used}"
+            );
+            // The next row is the one that exceeds the section's budget.
+            let mut longer = kept.clone();
+            longer.push(requests[section.len()].clone());
+            assert!(
+                section_tokens(&longer, bytes) as f64 > budget * CURRENT_WORK_BUDGET_SHARE,
+                "budget {budget}"
+            );
+            assert!(
+                bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget,
+                "budget {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_that_exceeds_the_sections_budget_ends_the_section() {
+        let bytes = |text: &str| text.len();
+        let requests = [
+            work(0, "short"),
+            work(1, &"long ".repeat(200)),
+            work(2, "short again"),
+        ];
+        let kept = trim_block_to_budget(&[], &requests, 2_000.0, bytes);
+        assert_eq!(kept, requests[..1]);
+        // The same rows fit a budget that holds the long one.
+        let kept = trim_block_to_budget(&[], &requests, 8_000.0, bytes);
+        assert_eq!(kept, requests);
+    }
+
+    #[test]
+    fn lasting_rows_keep_the_whole_budget_and_the_section_takes_what_they_leave() {
+        let bytes = |text: &str| text.len();
+        let lasting: Vec<CanonicalMemory> = (0..30)
+            .map(|id| {
+                memory(
+                    "ARCHITECTURE",
+                    &format!("decision {id:02} {}", "x".repeat(40)),
+                )
+            })
+            .collect();
+        let requests: Vec<CanonicalMemory> = (0..10)
+            .map(|id| work(id, &format!("request number {id}")))
+            .collect();
+        let budget = 2_000.0;
+        let alone = trim_memories_to_budget(&lasting, budget, bytes).0;
+        assert!(
+            alone.len() < lasting.len(),
+            "the lasting rows exceed the budget"
+        );
+        let kept = trim_block_to_budget(&lasting, &requests, budget, bytes);
+        assert_eq!(
+            kept[..alone.len()],
+            alone,
+            "every lasting row the budget admits alone stays"
+        );
+        let section = &kept[alone.len()..];
+        assert!(
+            section.len() < trim_block_to_budget(&[], &requests, budget, bytes).len(),
+            "the section holds fewer rows than its quarter admits: {}",
+            section.len()
+        );
+        assert!(bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget);
+        // With a few lasting rows the section is bound by its quarter.
+        let few = trim_block_to_budget(&lasting[..2], &requests, budget, bytes);
+        assert_eq!(few[..2], lasting[..2]);
+        assert_eq!(
+            few[2..],
+            trim_block_to_budget(&[], &requests, budget, bytes),
+        );
+    }
+
+    #[test]
+    fn a_budget_below_the_section_wrapper_renders_no_section() {
+        let bytes = |text: &str| text.len();
+        let requests = [work(0, "short")];
+        assert!(trim_block_to_budget(&[], &requests, 300.0, bytes).is_empty());
+        assert!(trim_block_to_budget(&[], &requests, f64::NAN, bytes).is_empty());
+        assert!(trim_block_to_budget(&[], &requests, -5.0, bytes).is_empty());
+    }
+
+    /// A statement of the largest size capture stores, written as text with
+    /// paths and identifiers, fits a quarter of the default budget and
+    /// exceeds an eighth of it, counted by the production estimator.
+    #[test]
+    fn a_quarter_of_the_default_budget_holds_one_statement_of_the_largest_size() {
+        let step = "Move `crates/retry_budget/src/client_config.rs:4821` into \
+                    `packages/http-client/src/config/retry.ts`, rename `RetryBudgetV2` to \
+                    `ClientRetryBudget`, and keep `max_attempts=5`. ";
+        let mut statement = String::from("User stated: ");
+        while statement.len() + step.len() <= crate::memory_capture::MAX_CAPTURE_MEMORY_BYTES {
+            statement.push_str(step);
+        }
+        let largest = CanonicalMemory {
+            object_id: format!("mem_{}", "0".repeat(32)),
+            category: CURRENT_WORK_SECTION.to_owned(),
+            content: statement,
+        };
+        let section = |budget: f64| {
+            trim_block_to_budget(
+                &[],
+                std::slice::from_ref(&largest),
+                budget,
+                crate::token_cache::cached_estimate_tokens,
+            )
+        };
+        let default = crate::config::DEFAULT_MEMORY_BUDGET_TOKENS;
+        assert_eq!(section(default), std::slice::from_ref(&largest));
+        // A budget whose quarter is an eighth of the default.
+        assert!(section(default / 2.0).is_empty());
     }
 
     proptest! {
@@ -354,7 +547,7 @@ mod trim_memories_tests {
                 .collect();
             let bytes = |text: &str| text.len();
             prop_assert_eq!(
-                trim_memories_to_budget(&memories, budget, bytes),
+                trim_memories_to_budget(&memories, budget, bytes).0,
                 reference(&memories, budget, bytes)
             );
         }

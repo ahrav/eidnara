@@ -759,11 +759,8 @@ impl CaptureWork {
         now: i64,
         settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
-        // Whether a memory of the message at `index` that names a target is
-        // eligible for approval as the user's own statement: a whole
-        // statement as quoted whose lifetime class outlives the task or is
-        // absent. Freezing keeps the quotation of such a memory, so this is
-        // the judgment publication makes of it.
+        // If `states` rejects a user quotation, its approved replacement
+        // targets become contests.
         let proses: Vec<super::Prose<'_>> = plan
             .jobs
             .iter()
@@ -773,7 +770,6 @@ impl CaptureWork {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
             super::is_user_source(job)
                 && !super::cite::is_hashed_source_id(&job.message_id)
-                && super::outlives_its_task(memory)
                 && super::quotes_whole_statements(prose, &memory.quote)
         };
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
@@ -956,12 +952,9 @@ impl CaptureWork {
     }
 }
 
-/// Restores the quoted text of each memory that is eligible for approval
-/// as the user's own statement: a whole statement whose lifetime class
-/// outlives the task or is absent. A statement is approved as the sentence
-/// the user wrote, so it keeps its exact text and failure lines stay on the
-/// other memories of the source. Returns whether any memory still holds an
-/// appended line.
+/// Restores the quoted text of each memory that passes [`user_attributed`].
+/// Failure lines stay on the source's other memories.
+/// Returns whether any memory still holds an appended line.
 pub(super) fn keep_statement_text(
     job: &CaptureJob,
     prose: &super::Prose<'_>,

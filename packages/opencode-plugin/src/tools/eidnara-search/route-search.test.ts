@@ -904,6 +904,69 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).toContain(`Contested by ${id(2)}: ${JSON.stringify(observation)}`);
     });
 
+    it("serves a current-work statement with its class and state on the route and on the fallback", async () => {
+        const plan = "User stated: Next, move the retry budget into the client config.";
+        const older = "User stated: Next, move the retry budget into the server config.";
+        const cut = "User stated: move the retry budget";
+        const note = "The retry budget is five attempts.";
+        const shown: Record<string, unknown>[] = [];
+        for (const fallback of [false, true]) {
+            const { kernel, run } = harness();
+            const capture = (object: number, summary: string, rationale: object, live: boolean) =>
+                kernel.seedDecision({
+                    object_id: id(object),
+                    decision_kind: "CONSTRAINTS",
+                    summary,
+                    rationale: JSON.stringify({ source: "memory_capture", ...rationale }),
+                    source_id: "memory_capture",
+                    labeled: !live,
+                });
+            capture(1, plan, { lifetime: "current_work" }, true);
+            capture(2, older, { lifetime: "current_work", ended_by: { memory: id(1) } }, false);
+            capture(3, cut, { lifetime: "current_work" }, false);
+            kernel.seedDecision({
+                object_id: id(4),
+                decision_kind: "CONFIG_VALUES",
+                summary: note,
+                rationale: JSON.stringify({ lifetime: "current_work" }),
+            });
+            kernel.routeReply = () =>
+                fallback
+                    ? { kind: "terminal", terminal: "disabled" }
+                    : fused([
+                          { object: id(1) },
+                          { object: id(2), labeled: true },
+                          { object: id(3), labeled: true },
+                          { object: id(4), labeled: true },
+                      ]);
+            const execution = await run({ query: "retry budget" });
+            if (execution.status !== "complete") throw new Error(execution.text);
+            const header = (object: number) =>
+                execution.text.split("\n").find((line) => line.includes(` id=${id(object)} `));
+            expect(header(1)).toMatch(/ match=(fused|lexical).* lifetime=current_work state=live$/);
+            expect(header(2)).toMatch(/ trust=\[labeled\] lifetime=current_work state=ended$/);
+            expect(header(3)).toMatch(/ trust=\[labeled\] lifetime=current_work$/);
+            expect(header(4)).toMatch(/ trust=\[labeled\]$/);
+            expect(execution.text.match(/^Ended by /gm)).toHaveLength(1);
+            expect(execution.text).toContain(`\nEnded by ${id(1)}`);
+            shown.push(
+                Object.fromEntries(
+                    execution.prePack.map((result) => [
+                        result.objectId,
+                        result.source === "memory" ? (result.work ?? null) : null,
+                    ]),
+                ),
+            );
+        }
+        expect(shown[0]).toEqual({
+            [id(1)]: { state: "live" },
+            [id(2)]: { state: "ended", endedBy: id(1) },
+            [id(3)]: {},
+            [id(4)]: null,
+        });
+        expect(shown[1]).toEqual(shown[0]);
+    });
+
     it("refuses a ranking whose daemon connection changed before hydration", async () => {
         class MovingTransport extends FakeKernelTransport {
             identity = "first";

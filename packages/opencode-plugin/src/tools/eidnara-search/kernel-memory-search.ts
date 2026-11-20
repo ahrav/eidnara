@@ -56,6 +56,14 @@ export interface MemorySearchResult {
     contestingMemoryId?: string;
     /** Present when capture recorded an observation that contradicts this user statement and the daemon serves that observation on explicit search. */
     contestedBy?: MemoryContest;
+    /** `work` is present when the capture rationale specifies `lifetime: "current_work"`. */
+    work?: WorkInProgress;
+}
+
+/** A string `ended_by.memory` sets `state` to `ended` and supplies `endedBy`. Otherwise, unlabeled rows report `live` and labeled rows omit `state`. */
+export interface WorkInProgress {
+    state?: "live" | "ended";
+    endedBy?: string;
 }
 
 export interface AntiMemorySearchResult {
@@ -243,10 +251,7 @@ export function contestMemoryId(id: string): string {
 function contestingMemoryOf(row: ReadRow, decision: ReadDecision): string | undefined {
     const { rationale } = decision.payload;
     // The shape of a capture decision, as the daemon's `is_capture_memory` reads it.
-    const captured =
-        isMemoryDecisionRow(row) &&
-        row.object.source_id === CAPTURE_SOURCE_ID &&
-        row.object.source_kind === CAPTURE_SOURCE_KIND;
+    const captured = isCaptureRow(row);
     if (!captured || !rationale.includes("contested_by")) return undefined;
     let parsed: unknown;
     try {
@@ -264,6 +269,31 @@ function contestingMemoryOf(row: ReadRow, decision: ReadDecision): string | unde
             contest.session === null ||
             typeof contest.session === "string");
     return whole ? (contest.memory as string) : undefined;
+}
+
+function isCaptureRow(row: ReadRow): boolean {
+    return (
+        isMemoryDecisionRow(row) &&
+        row.object.source_id === CAPTURE_SOURCE_ID &&
+        row.object.source_kind === CAPTURE_SOURCE_KIND
+    );
+}
+
+function workInProgressOf(row: ReadRow, decision: ReadDecision): WorkInProgress | undefined {
+    const { rationale } = decision.payload;
+    if (!isCaptureRow(row) || !rationale.includes("current_work")) return undefined;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(rationale);
+    } catch {
+        return undefined;
+    }
+    if (!isRecord(parsed) || parsed.lifetime !== "current_work") return undefined;
+    const end = parsed.ended_by;
+    if (isRecord(end) && typeof end.memory === "string") {
+        return { state: "ended", endedBy: end.memory };
+    }
+    return row.labeled ? {} : { state: "live" };
 }
 
 /** Whether a reader is shown this memory as a contesting observation: a live memory decision the daemon serves on explicit search, labeled or not, with normal sensitivity. */
@@ -379,6 +409,9 @@ export function memoryResultFromRow(
         ...(row.labeled ? { policyLabel: "labeled" } : {}),
         ...(decision && contestingMemoryOf(row, decision) !== undefined
             ? { contestingMemoryId: contestingMemoryOf(row, decision) }
+            : {}),
+        ...(decision && workInProgressOf(row, decision) !== undefined
+            ? { work: workInProgressOf(row, decision) }
             : {}),
     };
 }

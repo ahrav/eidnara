@@ -13,8 +13,10 @@ use memory_store::ProjectMemoryComposition;
 
 use crate::kernel_routes::read::{MAX_READ_ROW_BYTES, MAX_READ_ROWS, ReadResponse};
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding};
-use crate::m0_compose::trim_memories_to_budget;
-use crate::memory_render::{is_positive_memory_category, render_memory_line};
+use crate::m0_compose::trim_block_to_budget;
+use crate::memory_render::{
+    CURRENT_WORK_SECTION, is_positive_memory_category, render_memory_line, renders_in_block,
+};
 
 pub(crate) const MEMORY_DOMAIN_ID: &str = "memory";
 
@@ -53,7 +55,11 @@ impl CanonicalMemorySnapshot {
         let rendered = rendered_rows(&rows);
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
-        for row in &rendered {
+        // Swapping two `CURRENT_WORK_SECTION` rows with different rendered
+        // lines changes the digest input.
+        let in_section = |row: &&CanonicalMemory| row.category == CURRENT_WORK_SECTION;
+        let lasting = rendered.iter().copied().filter(|row| !in_section(row));
+        for row in lasting.chain(rows.iter().filter(in_section)) {
             row.category.hash(&mut hasher);
             render_memory_line(row).hash(&mut hasher);
         }
@@ -146,7 +152,7 @@ impl ServedSet {
 fn rendered_rows(rows: &[CanonicalMemory]) -> Vec<&CanonicalMemory> {
     let mut rendered: Vec<&CanonicalMemory> = rows
         .iter()
-        .filter(|row| is_positive_memory_category(&row.category))
+        .filter(|row| renders_in_block(&row.category))
         .collect();
     rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
     rendered
@@ -713,19 +719,37 @@ fn injectable_snapshot(
         decisions,
         ..
     } = response;
-    let injectable: Vec<CanonicalMemory> = rows
+    let mut lasting = Vec::new();
+    let mut current_work = Vec::new();
+    for row in rows
         .iter()
         .filter(|row| row.visibility == SurfaceVisibility::Visible)
-        .filter_map(|row| decisions.get(&row.object.object_id))
-        .filter(|decision| is_positive_memory_category(&decision.decision_kind))
-        .map(|decision| CanonicalMemory {
+    {
+        let Some(decision) = decisions.get(&row.object.object_id) else {
+            continue;
+        };
+        if !is_positive_memory_category(&decision.decision_kind) {
+            continue;
+        }
+        let work = crate::memory_capture::is_current_work(&row.object, decision);
+        let memory = CanonicalMemory {
             object_id: decision.object_id.clone(),
-            category: decision.decision_kind.clone(),
+            category: if work {
+                CURRENT_WORK_SECTION.to_owned()
+            } else {
+                decision.decision_kind.clone()
+            },
             content: decision.payload.summary.clone(),
-        })
-        .collect();
-    let rows = trim_memories_to_budget(
-        &injectable,
+        };
+        if work {
+            current_work.push(memory);
+        } else {
+            lasting.push(memory);
+        }
+    }
+    let rows = trim_block_to_budget(
+        &lasting,
+        &current_work,
         memory_budget_tokens,
         crate::token_cache::cached_estimate_tokens,
     );
@@ -1254,6 +1278,92 @@ mod tests {
         );
         let empty = injectable_snapshot(response(Vec::new(), Vec::new()), UNBOUNDED);
         assert_ne!(base.revision(), empty.revision());
+    }
+
+    /// A visible capture memory whose rationale holds the class
+    /// `current_work` is served under `CURRENT_WORK_SECTION`. A capture
+    /// memory of another class, and a memory another writer stored with
+    /// the same rationale, keep their stored category.
+    #[test]
+    fn a_capture_memory_classed_current_work_is_served_under_its_section() {
+        let captured = |object_id: &str| {
+            let mut row = visible_row(object_id, "decision", SurfaceVisibility::Visible);
+            row.object.source_id = "memory_capture".to_string();
+            row
+        };
+        let classed = |object_id: &str, lifetime: &str| {
+            let mut decision = decision(object_id, "CONSTRAINTS", "User stated: a sentence.");
+            decision.payload.rationale =
+                serde_json::json!({"source": "memory_capture", "lifetime": lifetime}).to_string();
+            decision
+        };
+        let snapshot = injectable_snapshot(
+            response(
+                vec![
+                    captured("plan"),
+                    captured("rule"),
+                    visible_row("note", "decision", SurfaceVisibility::Visible),
+                ],
+                vec![
+                    classed("plan", "current_work"),
+                    classed("rule", "lasting"),
+                    classed("note", "current_work"),
+                ],
+            ),
+            UNBOUNDED,
+        );
+        let mut categories: Vec<(&str, &str)> = snapshot
+            .rows()
+            .iter()
+            .map(|row| (row.object_id.as_str(), row.category.as_str()))
+            .collect();
+        categories.sort_unstable();
+        assert_eq!(
+            categories,
+            [
+                ("note", "CONSTRAINTS"),
+                ("plan", CURRENT_WORK_SECTION),
+                ("rule", "CONSTRAINTS"),
+            ]
+        );
+        assert_eq!(snapshot.served_ids(), ["note", "plan", "rule"]);
+    }
+
+    /// The block renders the rows of `CURRENT_WORK_SECTION` in the supplied
+    /// order, so two orders of the same rows are two revisions with one
+    /// served set.
+    #[test]
+    fn the_revision_reads_the_current_work_section_in_the_supplied_order() {
+        let work = |object_id: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: CURRENT_WORK_SECTION.to_string(),
+            content: content.to_string(),
+        };
+        let rule = CanonicalMemory {
+            object_id: "rule".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content: "Keep the public contract.".to_string(),
+        };
+        let rows = vec![
+            work("b", "newer request"),
+            rule.clone(),
+            work("a", "older request"),
+        ];
+        let newest_first = CanonicalMemorySnapshot::new(1, false, rows.clone());
+        let moved_rule = CanonicalMemorySnapshot::new(
+            1,
+            false,
+            vec![rows[0].clone(), rows[2].clone(), rule.clone()],
+        );
+        assert_eq!(newest_first.revision(), moved_rule.revision());
+        let oldest_first =
+            CanonicalMemorySnapshot::new(1, false, vec![rows[2].clone(), rule, rows[0].clone()]);
+        assert_ne!(newest_first.revision(), oldest_first.revision());
+        assert_eq!(
+            newest_first.served_set_digest(),
+            oldest_first.served_set_digest()
+        );
+        assert_eq!(newest_first.served_ids(), ["a", "b", "rule"]);
     }
 
     #[test]

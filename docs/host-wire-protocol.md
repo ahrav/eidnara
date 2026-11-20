@@ -1307,13 +1307,17 @@ happened or is observed; or `unsettled`, a matter the user leaves undecided.
 A value outside these four is a schema defect of its source's decision, and
 a `lifetime` given as `null` reads as absent. The class withholds approval
 and grants none: the user's statement, as the rule above defines it, is
-eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent. For each eligible statement that capture writes as a fact, the approving attempt writes a statement record in the
+eligible for approval when its `lifetime` is `lasting`, `unsettled`, `current_work`, or absent. For each eligible statement that capture writes as a fact, the approving attempt writes a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and then admits the fact on that approval; the statement is approved, and the Kernel serves it on
-automatic surfaces, once the Kernel accepts both the record and the admission that rests on it (the refusal rule below covers the other case). A user's statement whose `lifetime` is `current_work` or
+automatic surfaces, once the Kernel accepts both the record and the admission that rests on it (the refusal rule below covers the other case). A user's statement whose `lifetime` is
 `status` is stored as a labeled memory for explicit search under the rules
 of every labeled memory; it has no statement record, and
-`decisions_approval_refused` leaves it uncounted. A captured fact's rationale
+`decisions_approval_refused` leaves it uncounted. An approved statement whose
+`lifetime` is `current_work` is live work in progress: a later session needs
+the work an earlier session left unfinished, so the statement is delivered
+until a later statement of the user ends it (below) or newer work in
+progress fills the block's share for it (below). A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1341,16 +1345,16 @@ one text of such a fact that reaches automatic context is the bounded, quoted
 excerpt on a contested statement's line (below).
 Each reference memory offered to the extractor carries `user_statement`, true
 when the Kernel serves it on automatic surfaces, which a user's recorded
-statement is. A proposal that names
+statement is, and `current_work: true` when it is live work in progress. A proposal that names
 `duplicate_of` writes no fact, with one exception, may still record a
 contest through the fact it duplicates, and can settle a contest when it is the
 user's eligible word-for-word statement of a contested fact, under the conditions below (both below): a user's statement that
 duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when its
-`lifetime` is `current_work` or `status`, the duplicated memory stays, and the
-new fact's rationale names it under `restates`; a statement of those two
-classes settles no contest, and writes no fact when the memory it duplicates
+`lifetime` is `status`, the duplicated memory stays, and the
+new fact's rationale names it under `restates`; a statement whose `lifetime`
+is `current_work` or `status` settles no contest, and a `status` statement writes no fact when the memory it duplicates
 is a fact capture wrote under the `User stated` label whose rationale holds
 the same `quote`, so a repeat of such a statement leaves one fact on
 explicit search; the name records which memory
@@ -1364,7 +1368,29 @@ source that names a replacement meets a conflict and is planned again. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
-and leaves out facts captured from that session's own messages. Those facts
+and leaves out facts captured from that session's own messages. Live work in
+progress renders after the categories in one element,
+`<CURRENT_WORK note="...">`, whose `note` states that its lines are requests
+and plans from earlier sessions that no later statement of the user ended,
+that they set no standing rule, and that the repository shows whether one is
+finished; its lines are newest first, and a contested line of it is rendered
+as any contested statement is. The other facts are selected against the
+whole budget first, exactly as when no work in progress is stored, so work
+in progress takes no place from them. The element then takes the newest
+live work in progress, in order, until one statement exceeds the element's
+budget, which is the smaller of a quarter of
+`memory.injection_budget_tokens` and the tokens the other facts left; that
+statement and every older one are left out, so the element holds one
+unbroken newest run and older work in progress leaves the block as newer
+work is stated. The share is a quarter for two reasons. The element has to
+hold a statement of the largest size capture stores, 2,048 bytes, which is
+about 700 tokens when the statement is paths and identifiers at three bytes
+a token, with room for a few sentence-sized statements beside it; an eighth
+of the default 4,000 tokens holds less than that one statement. And work in
+progress is short-lived text that a later session may find finished, so it
+is held to a minor part of the block however little else the block holds: a
+half would let it reach 2,000 tokens of every request at the default
+budget. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
 they take no place from another session's facts. The read loads at most
 eight pages of that size, the payloads of up to 64 MiB of a session's own
@@ -1414,12 +1440,26 @@ named in `replaces` or `also_replaces` becomes a contest, and when the
 `replaces` target is one, every target of the proposal does. Targets that become contests are counted after the contests the proposal names, the `replaces` target before the `also_replaces` targets, and a target past the fourth is released under the rule below: that fact stays as it is served and the proposal records no contest on it. A user statement
 whose `replaces` target is released contests that target when the Kernel
 serves it on `auto_inject`, so the two values are shown as a disagreement. A
-user's statement classed `current_work` or `status` is a user quotation that
-is no approved statement, so it replaces no fact served on `auto_inject`:
-each such target it names in `replaces` or `also_replaces` becomes a contest
+user's statement classed `current_work` or `status` replaces no fact served
+on `auto_inject` except live work in progress:
+each other such target it names in `replaces` or `also_replaces` becomes a contest
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as work in progress, leave the rule approved
 and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets. A
+whole statement of the user of any class that names live work in progress in
+`replaces` or `also_replaces` ends it: a remark that the work is finished, a
+cancellation, and a newer plan each do. The ending statement is stored as
+its own fact under its own class, so a `status` remark is labeled and a
+newer plan classed `current_work` is the live work in progress. The ended
+fact is superseded by a fact of the same text and category, admitted
+labeled, whose rationale holds `ended_by`, an object with `memory` (the
+ending fact's id) and `session` (the session whose message ended it), and
+no `contested_by`; its statement record is retired, and it cites again the
+evidence a contested fact's successor cites (below). Explicit search serves
+the ended fact and no automatic surface does. Work in progress is therefore
+live in a later session when its own session, and every session since,
+ended with no statement of the user ending it: a request the user reports
+finished in the session that made it reaches no later session. A
 user source's contests are kept when the source reaches capture under its
 own message id and its quotation is one or more whole sentences of a
 plain-prose paragraph of the message, wherever a colon stands before them,
@@ -1515,8 +1555,17 @@ statement nor its contest, as with every fact captured from its own messages.
 `Contested by <fact id>: "<excerpt>"` after its text, the fact id being the
 contesting fact's own result id, shown by the block's rule for a fact id, and the excerpt the same 240-character form
 of that fact's served text; when the contesting fact cannot be read, the line
-is `Contested by <fact id>` and a note says so. Only a later statement of the user that is eligible for approval, one whose
-`lifetime` is `lasting`, `unsettled`, or absent,
+is `Contested by <fact id>` and a note says so. `eidnara_search` renders a
+fact capture stored with `lifetime` `current_work` with ` lifetime=current_work`
+at the end of its header line, followed by ` state=live` when the Kernel
+serves the fact as approved and by ` state=ended` when its rationale holds
+`ended_by`, in which case a line `Ended by <fact id>` follows its text, the
+fact id shown by the block's rule for a fact id; a fact stored labeled with
+no `ended_by` carries the class alone. Both search routes build a result
+from the fact's row as `explicit_search` serves it, so they render one
+class and state for a fact, and neither route selects facts by class or by
+approval. Only a later statement of the user whose
+`lifetime` is `lasting`, `unsettled`, or absent
 can settle a contest: a user statement that replaces the contested fact ends it
 once the Kernel accepts its statement record and the admission that rests on
 it, while a correction whose approval is refused leaves the fact approved and
@@ -1531,7 +1580,7 @@ statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
 its own fact and the contest stays. A statement classed `current_work` or
 `status` settles no contest: its word-for-word repeat writes no fact, and its
-statement of another text is stored labeled. The extractor is
+statement of another text is stored under its own class. The extractor is
 told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only

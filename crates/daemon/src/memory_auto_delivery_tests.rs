@@ -2111,15 +2111,13 @@ async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_r
     }
 }
 
-/// The extractor classes each user statement by how long it holds. A rule
-/// and an undecided matter outlive their task and reach the next session's
-/// block. A request for the change in progress and a remark on its state
-/// are stored with the user's words for explicit search, hold no statement
-/// record, and stay out of the block.
-/// Capture stores the assistant report's `lasting` class in its rationale and
-/// keeps the report `labeled` for explicit search.
+/// Capture approves a whole user statement of every class but `status`. A
+/// later session's block holds the lasting and unsettled statements under
+/// their categories and the request for the work in progress under
+/// `CURRENT_WORK`. The remark on the state of the work and the assistant's
+/// report stay labeled on explicit search.
 #[tokio::test]
-async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_otherwise() {
+async fn a_statement_is_delivered_by_its_lifetime_class_and_a_status_remark_is_kept_for_search() {
     let rule = "Run the integration suite before every merge.";
     let undecided = "We have not settled whether the importer keeps the legacy CSV path.";
     let request = "Rename the retry helper to backoff_delay in this module.";
@@ -2152,7 +2150,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     let mut expected = vec![
         (stated(rule), "visible".to_string()),
         (stated(undecided), "visible".to_string()),
-        (stated(request), "labeled".to_string()),
+        (stated(request), "visible".to_string()),
         (stated(remark), "labeled".to_string()),
         (reported, "labeled".to_string()),
     ];
@@ -2160,14 +2158,27 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     assert_eq!(rows, expected);
     let mut records = live_statement_records(&handler, &project);
     records.sort();
-    let mut approved = vec![stated(rule), stated(undecided)];
+    let mut approved = vec![stated(rule), stated(undecided), stated(request)];
     approved.sort();
     assert_eq!(records, approved);
     let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
-        .expect("the lasting statements are delivered to a later session");
-    assert!(block.contains(&stated(rule)), "{block}");
-    assert!(block.contains(&stated(undecided)), "{block}");
-    assert!(!block.contains(request), "{block}");
+        .expect("the approved statements are delivered to a later session");
+    let rules = block_element(&block, "PROJECT_RULES").expect("the lasting categories render");
+    assert!(rules.contains(&stated(rule)), "{block}");
+    assert!(rules.contains(&stated(undecided)), "{block}");
+    assert!(!rules.contains(request), "{block}");
+    let work = block_element(&block, "CURRENT_WORK").expect("the work in progress renders");
+    assert_eq!(
+        work.lines()
+            .filter(|line| line.contains("User stated"))
+            .collect::<Vec<_>>(),
+        [format!(
+            "{}: {}",
+            memory_id(&handler, &project, &stated(request)),
+            stated(request)
+        )],
+        "{block}"
+    );
     assert!(!block.contains(remark), "{block}");
     assert!(!block.contains(report), "{block}");
 
@@ -2279,7 +2290,7 @@ async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_ref
 /// replaces, as it does for a correction it classed as work in progress,
 /// the rule is shown as contested by the user's newer words.
 #[tokio::test]
-async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
+async fn a_statement_that_ends_with_its_task_replaces_no_statement_that_outlives_it() {
     let exception = "Skip the integration suite for this hotfix.";
     let rule = "Run the integration suite before every merge.";
     for names_the_rule in [false, true] {
@@ -2308,18 +2319,27 @@ async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
         )
         .await;
 
-        assert_eq!(live_statement_records(&handler, &project), [stated(rule)]);
+        let mut records = live_statement_records(&handler, &project);
+        records.sort();
+        assert_eq!(records, [stated(rule), stated(exception)]);
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the rule is still delivered");
-        assert!(block.contains(&stated(rule)), "{block}");
+        let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+        assert!(rules.contains(&stated(rule)), "{block}");
         assert_eq!(
-            block.contains("contested"),
+            rules.contains("contested"),
             names_the_rule,
             "the rule is contested only by a statement that names it: {block}"
         );
+        assert!(
+            !rules.lines().any(|line| line.ends_with(&stated(exception))),
+            "the exception has no line of its own among the rules: {block}"
+        );
+        let work = block_element(&block, "CURRENT_WORK").expect("the exception is delivered");
+        assert!(work.contains(&stated(exception)), "{block}");
         let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
         assert!(
-            rows.contains(&(stated(exception), "labeled".to_string())),
+            rows.contains(&(stated(exception), "visible".to_string())),
             "{rows:?}"
         );
     }
@@ -2390,20 +2410,29 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
 
         let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
         rows.sort();
+        // The correction classed as work in progress is approved as such;
+        // the status remark is stored labeled.
+        let delivered = lifetime == "current_work";
         let mut expected = vec![
             (stated(value), "visible".to_string()),
-            (stated(change), "labeled".to_string()),
+            (
+                stated(change),
+                if delivered { "visible" } else { "labeled" }.to_string(),
+            ),
         ];
         expected.sort();
         assert_eq!(
             rows, expected,
             "the two reports are retired and the approved statement stays: {lifetime}"
         );
-        assert_eq!(
-            live_statement_records(&handler, &project),
-            [stated(value)],
-            "{lifetime}"
-        );
+        let mut records = live_statement_records(&handler, &project);
+        records.sort();
+        let mut approved = vec![stated(value)];
+        if delivered {
+            approved.push(stated(change));
+        }
+        approved.sort();
+        assert_eq!(records, approved, "{lifetime}");
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the approved statement is delivered");
         let line = block
@@ -2500,7 +2529,7 @@ async fn a_repeat_of_a_statement_that_ended_with_its_task_writes_no_second_copy(
     let with_lines = format!("{}\n{logged}", stated(report));
     for (text, quote, stored, repeated_as, approved_beside) in [
         (remark, remark, stated(remark), "status", false),
-        (remark, remark, stated(remark), "current_work", false),
+        (remark, remark, stated(remark), "current_work", true),
         (remark, remark, stated(remark), "lasting", true),
         (logged.as_str(), report, with_lines, "status", false),
     ] {
@@ -2543,6 +2572,399 @@ async fn a_repeat_of_a_statement_that_ended_with_its_task_writes_no_second_copy(
         }
         assert_eq!(rows, expected, "{repeated_as}: {quote}");
     }
+}
+
+/// The text of block element `name`, from its opening tag to its closing
+/// tag.
+fn block_element<'b>(block: &'b str, name: &str) -> Option<&'b str> {
+    let start = block.find(&format!("<{name}"))?;
+    let end = block[start..].find(&format!("</{name}>"))? + start;
+    Some(&block[start..end])
+}
+
+/// The id of the memory on explicit search whose summary is `summary`.
+fn memory_id(handler: &Handler, project: &Path, summary: &str) -> String {
+    let rows = memory_rows(handler, project);
+    rows.iter()
+        .find(|row| row.1 == summary)
+        .unwrap_or_else(|| panic!("{summary}: {rows:?}"))
+        .0
+        .clone()
+}
+
+const INTEGRATION_RULE: &str = "Run the integration suite before every merge.";
+const RETRY_PLAN: &str = "Next, move the retry budget into the client config.";
+
+/// The user states a rule and the next step of unfinished work in one
+/// session. The next session's block holds the rule under its category and
+/// the plan under `CURRENT_WORK`, which follows the categories and states
+/// what its rows are. The stating session's block holds neither.
+#[tokio::test]
+async fn work_in_progress_reaches_the_next_session_in_its_own_section() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE), ("m2", "user", RETRY_PLAN)],
+        |text, _| {
+            vec![classed(
+                text,
+                if text == RETRY_PLAN {
+                    "current_work"
+                } else {
+                    "lasting"
+                },
+            )]
+        },
+    )
+    .await;
+
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("a later session carries the block");
+    let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+    assert!(rules.contains(&stated(INTEGRATION_RULE)), "{block}");
+    assert!(!rules.contains(RETRY_PLAN), "{block}");
+    let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+    assert!(
+        work.starts_with(
+            "<CURRENT_WORK note=\"Requests and plans the user stated in earlier sessions, newest first, which no later statement of the user ended. They describe unfinished work, set no standing rule, and may be finished already: check the repository before resuming one.\">\n"
+        ),
+        "{work}"
+    );
+    assert_eq!(
+        work.lines().skip(1).collect::<Vec<_>>(),
+        [format!(
+            "{}: {}",
+            memory_id(&handler, &project, &stated(RETRY_PLAN)),
+            stated(RETRY_PLAN)
+        )],
+        "{block}"
+    );
+    assert!(
+        block.find("</PROJECT_RULES>").unwrap() < block.find("<CURRENT_WORK").unwrap(),
+        "the section follows the categories: {block}"
+    );
+    let own = serve(&handler, FIRST, "s1").await;
+    assert_eq!(project_memory_block(&own), None, "{own}");
+}
+
+/// A later session reports the planned work finished. The remark is a
+/// status statement that names the plan as the fact it resolves. The plan
+/// leaves the block, the remark is delivered to no session, and explicit
+/// search serves the plan labeled with a record of the statement that
+/// ended it.
+#[tokio::test]
+async fn a_completion_remark_ends_work_in_progress_and_search_serves_it_as_ended() {
+    let done = "The retry budget is in the client config now.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", RETRY_PLAN)],
+        |_, _| vec![classed(RETRY_PLAN, "current_work")],
+    )
+    .await;
+    let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", done)],
+        |_, existing| {
+            let offered: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["current_work"] == true)
+                .collect();
+            assert_eq!(offered.len(), 1, "{existing:?}");
+            assert_eq!(offered[0]["id"], plan.as_str());
+            assert_eq!(offered[0]["user_statement"], true);
+            vec![Extracted {
+                replaces: vec![plan.clone()],
+                ..classed(done, "status")
+            }]
+        },
+    )
+    .await;
+
+    let served = serve(&handler, THIRD, "s3").await;
+    assert_eq!(
+        project_memory_block(&served),
+        None,
+        "the ended plan and the remark are delivered to no session: {served}"
+    );
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(RETRY_PLAN), "labeled".to_string()),
+        (stated(done), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+    assert!(live_statement_records(&handler, &project).is_empty());
+    let stored = memory_rows(&handler, &project);
+    let ended = stored
+        .iter()
+        .find(|row| row.1 == stated(RETRY_PLAN))
+        .expect("the plan stays on explicit search");
+    assert_ne!(ended.0, plan, "the ended plan is a new row");
+    assert_eq!(ended.3["lifetime"], "current_work");
+    assert_eq!(
+        ended.3["ended_by"],
+        json!({"memory": memory_id(&handler, &project, &stated(done)), "session": "s2"}),
+    );
+
+    // A later capture is offered the ended plan as a labeled memory.
+    capture(
+        &handler,
+        THIRD,
+        "s3",
+        &[("m3", "user", INTEGRATION_RULE)],
+        |_, existing| {
+            let held: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["content"] == stated(RETRY_PLAN).as_str())
+                .collect();
+            assert_eq!(held.len(), 1, "{existing:?}");
+            assert_eq!(held[0]["user_statement"], false);
+            assert!(held[0].get("current_work").is_none(), "{existing:?}");
+            vec![classed(INTEGRATION_RULE, "lasting")]
+        },
+    )
+    .await;
+}
+
+/// The user replaces a plan with a newer one. The newer plan is delivered
+/// as the work in progress, and the older plan stays on explicit search as
+/// ended by it.
+#[tokio::test]
+async fn a_newer_plan_replaces_an_older_one() {
+    let newer = "Put the retry budget in the server config instead.";
+    for lifetime in ["current_work", "lasting"] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, "current_work")],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", newer)],
+            |_, existing| {
+                vec![Extracted {
+                    replaces: ids_containing(existing, "retry budget"),
+                    ..classed(newer, lifetime)
+                }]
+            },
+        )
+        .await;
+
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the newer plan is delivered");
+        assert!(!block.contains(RETRY_PLAN), "{lifetime}: {block}");
+        let element = if lifetime == "current_work" {
+            "CURRENT_WORK"
+        } else {
+            "PROJECT_RULES"
+        };
+        let delivered = block_element(&block, element).expect("the newer plan's element");
+        assert!(delivered.contains(&stated(newer)), "{lifetime}: {block}");
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let mut expected = vec![
+            (stated(RETRY_PLAN), "labeled".to_string()),
+            (stated(newer), "visible".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected, "{lifetime}");
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(newer)],
+            "{lifetime}"
+        );
+        let stored = memory_rows(&handler, &project);
+        let older = stored
+            .iter()
+            .find(|row| row.1 == stated(RETRY_PLAN))
+            .unwrap();
+        assert_eq!(
+            older.3["ended_by"]["memory"],
+            memory_id(&handler, &project, &stated(newer)).as_str(),
+            "{lifetime}"
+        );
+    }
+}
+
+/// Work in progress is live when its session ended with no later statement
+/// of the user ending it. A request the user reports finished in the same
+/// session is ended there and reaches no later session. A request of that
+/// session that no statement ended is delivered.
+#[tokio::test]
+async fn a_request_ended_in_its_own_session_reaches_no_later_session() {
+    let rename = "Rename the retry helper to backoff_delay in this module.";
+    let renamed = "The retry helper is renamed to backoff_delay, thanks.";
+    let open = "Add a timeout test for the upload path.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", rename)], |_, _| {
+        vec![classed(rename, "current_work")]
+    })
+    .await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", renamed)],
+        |_, existing| {
+            vec![Extracted {
+                replaces: ids_containing(existing, "retry helper"),
+                ..classed(renamed, "status")
+            }]
+        },
+    )
+    .await;
+    capture(&handler, FIRST, "s1", &[("m3", "user", open)], |_, _| {
+        vec![classed(open, "current_work")]
+    })
+    .await;
+
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the open request is delivered");
+    let work = block_element(&block, "CURRENT_WORK").expect("the open request's section");
+    assert!(work.contains(&stated(open)), "{block}");
+    assert!(!block.contains(rename), "{block}");
+    assert!(!block.contains(renamed), "{block}");
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(open), "visible".to_string()),
+        (stated(rename), "labeled".to_string()),
+        (stated(renamed), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+}
+
+/// The block's budget is 4,000 tokens, and the work in progress takes at
+/// most a quarter of it, newest first. Eighty requests exceed that
+/// quarter: the section holds the newest of them as one unbroken run, and
+/// every lasting statement stays. When the lasting statements fill the
+/// budget, the section holds what they left.
+#[tokio::test]
+async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting_statement() {
+    const REQUESTS: usize = 80;
+    let config = capture_config();
+    let (handler, _store, _dir, project) = delivery_handler(config.clone()).await;
+    let rules = numbered(6, "billing");
+    capture_statements(&handler, FIRST, "s1", &rules).await;
+    let requests: Vec<(String, String)> = (0..REQUESTS)
+        .map(|index| {
+            (
+                format!("request-{index}"),
+                format!("Please update the changelog entry number {index} before the release."),
+            )
+        })
+        .collect();
+    for batch in requests.chunks(16) {
+        let messages: Vec<(&str, &str, &str)> = batch
+            .iter()
+            .map(|(id, text)| (id.as_str(), "user", text.as_str()))
+            .collect();
+        capture(&handler, FIRST, "s1", &messages, |text, _| {
+            vec![classed(text, "current_work")]
+        })
+        .await;
+    }
+    let tokens = |text: &str| crate::token_cache::cached_estimate_tokens(text) as f64;
+    let delivered_requests = |block: &str| -> Vec<usize> {
+        (0..REQUESTS)
+            .filter(|index| block.contains(&format!("entry number {index} before")))
+            .collect()
+    };
+
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("a later session carries the block");
+    assert!(tokens(&block) <= config.memory_budget_tokens, "{block}");
+    for (_, rule) in &rules {
+        assert!(block.contains(&stated(rule)), "{rule}: {block}");
+    }
+    let work = block_element(&block, "CURRENT_WORK").expect("the section renders");
+    assert!(
+        tokens(work) <= config.memory_budget_tokens / 4.0,
+        "{}",
+        tokens(work)
+    );
+    let delivered = delivered_requests(work);
+    assert!(
+        !delivered.is_empty() && delivered.len() < REQUESTS,
+        "the section holds part of the requests: {delivered:?}"
+    );
+    assert_eq!(
+        delivered,
+        (REQUESTS - delivered.len()..REQUESTS).collect::<Vec<_>>(),
+        "the section holds the newest requests as one run"
+    );
+    let newest = work.find(&format!("entry number {} before", REQUESTS - 1));
+    let oldest = work.find(&format!(
+        "entry number {} before",
+        REQUESTS - delivered.len()
+    ));
+    assert!(newest < oldest, "the newest request renders first: {work}");
+
+    // Enough lasting statements to fill the budget: each stays in the
+    // order the budget admits them, and the section holds what they left.
+    let more_rules = numbered(150, "search");
+    capture_statements(&handler, FIRST, "s1", &more_rules).await;
+    bind(&handler, 70, &project, "lasting-only", config.clone());
+    let full =
+        project_memory_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
+    assert!(tokens(&full) <= config.memory_budget_tokens, "{full}");
+    let lasting_delivered = |block: &str| -> Vec<usize> {
+        (0..more_rules.len())
+            .filter(|index| block.contains(&format!("search service number {index} listens")))
+            .collect()
+    };
+    let kept = lasting_delivered(&full);
+    assert!(
+        kept.len() < more_rules.len(),
+        "the lasting statements exceed the budget: {}",
+        kept.len()
+    );
+    assert!(
+        delivered_requests(&full).len() < delivered.len(),
+        "the section yields to the lasting statements: {full}"
+    );
+    // The same lasting statements are delivered as when no work in
+    // progress is stored: a block of the lasting rows alone, trimmed to
+    // the whole budget, holds them.
+    let lasting_only: Vec<crate::canonical_memory::CanonicalMemory> = more_rules
+        .iter()
+        .rev()
+        .chain(rules.iter().rev())
+        .map(|(_, rule)| crate::canonical_memory::CanonicalMemory {
+            object_id: memory_id(&handler, &project, &stated(rule)),
+            category: "PROJECT_RULES".to_string(),
+            content: stated(rule),
+        })
+        .collect();
+    let (alone, _) = crate::m0_compose::trim_memories_to_budget(
+        &lasting_only,
+        config.memory_budget_tokens,
+        crate::token_cache::cached_estimate_tokens,
+    );
+    assert_eq!(
+        kept.len(),
+        alone
+            .iter()
+            .filter(|memory| memory.content.contains("search service"))
+            .count(),
+        "work in progress takes no place from a lasting statement"
+    );
 }
 
 /// The extractor proposes one sentence twice, once as work in progress that
@@ -5222,16 +5644,25 @@ async fn a_statement_that_ends_with_its_task_settles_no_contest() {
                 ),
                 (stated(LIMIT_300), "visible".to_string()),
             ];
+            // Another value classed as work in progress is approved as
+            // such; the contest stays either way.
+            let delivered = !repeats && lifetime == "current_work";
             if !repeats {
-                expected.push((stated(other), "labeled".to_string()));
+                expected.push((
+                    stated(other),
+                    if delivered { "visible" } else { "labeled" }.to_string(),
+                ));
             }
             expected.sort();
             assert_eq!(rows, expected, "{lifetime}, repeats {repeats}");
-            assert_eq!(
-                live_statement_records(&handler, &project),
-                [stated(LIMIT_300)],
-                "{lifetime}, repeats {repeats}"
-            );
+            let mut records = live_statement_records(&handler, &project);
+            records.sort();
+            let mut approved = vec![stated(LIMIT_300)];
+            if delivered {
+                approved.push(stated(other));
+            }
+            approved.sort();
+            assert_eq!(records, approved, "{lifetime}, repeats {repeats}");
             let contested = memory_rows(&handler, &project)
                 .into_iter()
                 .find(|row| row.1 == stated(LIMIT_300))
