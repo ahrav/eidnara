@@ -951,6 +951,38 @@ describe("eidnara_search through the fused route", () => {
         ]);
     });
 
+    it("asks the route again when the daemon connection changed after the route reported itself disabled", async () => {
+        class MovingTransport extends FakeKernelTransport {
+            identity = "first";
+            connectionIdentity(): string {
+                return this.identity;
+            }
+        }
+        const transport = new MovingTransport(new FakeKernel());
+        const { kernel, run } = harness(transport);
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Live daemon text.",
+        });
+        const askedUnder: string[] = [];
+        kernel.routeReply = () => {
+            askedUnder.push(transport.identity);
+            if (transport.identity === "first") {
+                // The first connection reports the route disabled and is replaced before the scan reads.
+                transport.identity = "second";
+                return { kind: "terminal", terminal: "disabled" };
+            }
+            return fused([{ object: id(1) }]);
+        };
+        const execution = await run({ query: "anything" });
+        expect(execution.status).toBe("complete");
+        expect(execution.text).toContain("Live daemon text.");
+        expect(askedUnder).toEqual(["first", "second"]);
+        // The first pass sends no scan read: the second route query follows the first.
+        expect(methods(transport).slice(0, 2)).toEqual(["retrieval.query", "retrieval.query"]);
+    });
+
     it("hydrates a second ranking on the connection that replaced the first ranking's", async () => {
         class MovingTransport extends FakeKernelTransport {
             identity = "first";

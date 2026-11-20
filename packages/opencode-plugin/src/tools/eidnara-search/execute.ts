@@ -223,6 +223,12 @@ interface SearchPass {
 /** One pass of a search: the fused route, then the legacy snapshot scan when the route reports itself disabled or unavailable. */
 async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
     const { client, query, limit, toolContext, completeFrom } = pass;
+    // The route's answer, the rows, and the contest read after them are one pass: the daemon connection they are read under is the same one.
+    const connection = client.connectionIdentity();
+    const diverged: EidnaraSearchExecution = {
+        status: "invalid",
+        text: `Error: ${renderToolStateText({ kind: "unavailable", reason: "snapshot_diverged" })}`,
+    };
     const routed = await searchThroughRoute({
         client,
         query,
@@ -238,6 +244,8 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
         );
     }
 
+    // The connection that reported the route disabled or unavailable is the one the scan reads. After a turnover the pass is refused, and the search asks the live connection's route.
+    if (client.connectionIdentity() !== connection) return diverged;
     // The legacy snapshot scan answers only when the route reports itself disabled or unavailable, and its result names that fallback. The snapshot read is gated on
     // freshness: a lagging projector answers `stale` and the search says so instead of
     // ranking rows that may miss recent writes.
@@ -285,8 +293,6 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
               }
             : { state: read.state };
     };
-    // The rows and the contest read after them are one search: the daemon connection they are read under is the same one.
-    const connection = client.connectionIdentity();
     let memory = await readMemory(true);
     let freshnessNote: string | undefined;
     if (memory.state?.kind === "unavailable" && memory.state.reason === "no_required_consumer") {
@@ -324,12 +330,7 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
         asOf: memory.knownAsOf,
         ...(toolContext.abort ? { signal: toolContext.abort } : {}),
     });
-    if (client.connectionIdentity() !== connection) {
-        return {
-            status: "invalid",
-            text: `Error: ${renderToolStateText({ kind: "unavailable", reason: "snapshot_diverged" })}`,
-        };
-    }
+    if (client.connectionIdentity() !== connection) return diverged;
     if (contestNote) notes.push(contestNote);
     return completeFrom(hits, notes.join("\n"));
 }

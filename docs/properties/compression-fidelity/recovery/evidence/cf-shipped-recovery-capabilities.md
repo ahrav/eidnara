@@ -27,7 +27,7 @@ record. No permanent prohibition on adding capabilities is inferred.
   catches an added or renamed expansion tool better than one absent name.
 - [Search wrapper, lines 13-41](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.ts#L13)
   exposes memory-only sources and calls `executeEidnaraSearch`. Its
-  [execution, lines 188-298](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L188)
+  [execution, lines 188-304](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L188)
   performs kernel-client reads. The
   [client, lines 550-585](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L550)
   sends `kernel.read`, not an `eidnara_search` facade request.
