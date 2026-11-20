@@ -985,21 +985,24 @@ fn own_state_root() -> (tempfile::TempDir, StateRoot) {
     (dir, root)
 }
 
-/// A component with one failed run whose terminal says the bounded waits on its private-directory removal and its record removal both ended first, as `merge_cleanup` and `merge_record_retained` word it.
+/// The terminal of a run whose bounded waits on its private-directory removal and its record removal both ended first, as `merge_cleanup` and `merge_record_retained` word it.
+fn removals_outlasted_their_waits() -> BackendTerminal {
+    BackendTerminal::Failed(BackendError {
+        class: ErrorClass::Transient,
+        message: "pi run failed; additionally sensitive temp cleanup failed (TimedOut); \
+                  additionally pi backend could not remove its crash-ownership record"
+            .to_owned(),
+        retry_after_secs: None,
+        provider_code: None,
+    })
+}
+
+/// A component with one failed run that reported both removals.
 async fn component_with_removals_that_outlasted_their_waits(
     root: StateRoot,
 ) -> ModelExecutionComponent {
     let backend = ScriptedBackend::with_behavior(|_request, _events, _cancel| {
-        Box::pin(async {
-            BackendTerminal::Failed(BackendError {
-                class: ErrorClass::Transient,
-                message: "pi run failed; additionally sensitive temp cleanup failed (TimedOut); \
-                          additionally pi backend could not remove its crash-ownership record"
-                    .to_owned(),
-                retry_after_secs: None,
-                provider_code: None,
-            })
-        })
+        Box::pin(async { removals_outlasted_their_waits() })
     });
     let component = ModelExecutionComponent::new(backend as Arc<_>, root);
     let supervisor = component.supervisor();
@@ -1051,9 +1054,15 @@ async fn shutdown_reports_a_private_run_directory_and_a_record_that_remain_in_th
     let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
     let (dir, record) = own_entries(&root);
 
+    let started = tokio::time::Instant::now();
     let failure = CompositeComponent::shutdown(&component)
         .await
         .expect_err("residue on disk fails the shutdown");
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_millis(4_900)..=Duration::from_secs(5)).contains(&waited),
+        "shutdown waits one termination grace for the registry to clear: {waited:?}"
+    );
     assert!(
         failure
             .0
@@ -1066,6 +1075,84 @@ async fn shutdown_reports_a_private_run_directory_and_a_record_that_remain_in_th
             .contains("1 run(s) could not remove their crash-ownership records"),
         "{failure}"
     );
+    dir.cleanup().expect("test cleanup");
+    record.remove().expect("test cleanup");
+}
+
+/// The run reported both removals, the private directory is gone, and the record is still in the registry: shutdown reports the record alone.
+#[tokio::test(start_paused = true)]
+async fn shutdown_reports_only_the_class_that_remains_in_the_registry() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    let (dir, record) = own_entries(&root);
+    dir.cleanup().expect("the directory's removal lands");
+
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("the record on disk fails the shutdown");
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their crash-ownership records"),
+        "{failure}"
+    );
+    assert!(!failure.0.contains("private run files"), "{failure}");
+    record.remove().expect("test cleanup");
+}
+
+/// A run that shutdown itself stops reports its removals while they can still be in flight, so its verdicts stand whatever the registry holds at that instant.
+#[tokio::test]
+async fn shutdown_keeps_the_verdicts_of_a_run_it_stopped() {
+    let (_dir, root) = own_state_root();
+    let backend = ScriptedBackend::with_behavior(|_request, _events, cancel| {
+        Box::pin(async move {
+            cancel.cancelled().await;
+            removals_outlasted_their_waits()
+        })
+    });
+    let component = ModelExecutionComponent::new(backend as Arc<_>, root.clone());
+    let supervisor = component.supervisor();
+    let run_id = send(&supervisor, "s-stopped", "p1");
+    until(
+        || supervisor.status(&key("s-stopped"), &run_id) == Ok("running"),
+        "the backend starts before shutdown cancels it",
+    )
+    .await;
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue::default()
+    );
+
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("verdicts reached during shutdown are reported");
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their crash-ownership records"),
+        "{failure}"
+    );
+}
+
+/// A host with no counted verdict reads no registry: entries that name this process, as another component of the same process leaves them while it runs, leave its shutdown clean.
+#[tokio::test]
+async fn shutdown_without_a_counted_verdict_reads_no_registry() {
+    let (_dir, root) = own_state_root();
+    let component = ModelExecutionComponent::new(
+        Arc::clone(&ScriptedBackend::completing("out")) as Arc<_>,
+        root.clone(),
+    );
+    let (dir, record) = own_entries(&root);
+
+    CompositeComponent::shutdown(&component)
+        .await
+        .expect("no run reported a removal");
     dir.cleanup().expect("test cleanup");
     record.remove().expect("test cleanup");
 }
@@ -1126,71 +1213,104 @@ async fn host_shutdown_is_graceful_once_a_runs_late_removals_have_landed() {
     host.shutdown().await.expect("graceful shutdown");
 }
 
-/// A registry shared with another host incarnation counts only the entries that name this process.
+/// A registry shared with another host incarnation counts only the entries that name this process: its boot, its PID, and its start time together.
 #[test]
 fn entries_another_host_owns_are_no_residue_of_this_one() {
     use sha2::{Digest, Sha256};
 
     let (_dir, root) = own_state_root();
     let (dir, record) = own_entries(&root);
+    let own = OwnResidue {
+        run_dirs: 1,
+        records: 1,
+    };
     assert_eq!(
         group_registry::own_residue(&root).expect("registry reads"),
-        OwnResidue {
-            run_dirs: 1,
-            records: 1
-        }
+        own
     );
 
-    // The same entries under another owner PID: the directory name and the record body each carry it.
-    let own_pid = std::process::id();
-    let other_pid = own_pid + 1;
-    let name = dir
-        .path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("run dir name")
-        .to_owned();
-    let foreign_dir = dir.path().with_file_name(name.replacen(
-        &format!("-{own_pid}-"),
-        &format!("-{other_pid}-"),
-        1,
-    ));
-    std::fs::create_dir(&foreign_dir).expect("foreign run dir");
     let registry = dir
         .path()
         .parent()
         .and_then(std::path::Path::parent)
-        .expect("registry dir");
-    let own_record = std::fs::read_dir(registry)
+        .expect("registry dir")
+        .to_owned();
+    let record_text = std::fs::read_dir(&registry)
         .expect("registry lists")
         .map(|entry| entry.expect("entry").path())
         .find(|path| path.is_file())
+        .map(|path| std::fs::read_to_string(path).expect("record text"))
         .expect("own record");
-    let text = std::fs::read_to_string(&own_record).expect("record text");
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-    lines.pop();
-    let owner_start = lines[3].split_once(' ').expect("owner line").1.to_owned();
-    lines[3] = format!("{other_pid} {owner_start}");
-    let mut body = lines.join("\n");
-    body.push('\n');
-    let checksum: String = Sha256::digest(body.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    std::fs::write(
-        registry.join(format!("{other_pid}-foreign")),
-        format!("{body}{checksum}\n"),
-    )
-    .expect("foreign record");
+    let own_pid = std::process::id();
+    let (_, own_start) = record_text
+        .lines()
+        .nth(3)
+        .and_then(|owner| owner.split_once(' '))
+        .expect("owner line");
+    let own_start: u64 = own_start.parse().expect("owner start");
+    // A record like this process's own, written for the owner `pid` that started at `start`.
+    let forge = |name: &str, pid: u32, start: u64| {
+        let mut lines: Vec<String> = record_text.lines().map(str::to_owned).collect();
+        lines.pop();
+        lines[3] = format!("{pid} {start}");
+        let mut body = lines.join("\n");
+        body.push('\n');
+        let checksum: String = Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let path = registry.join(name);
+        std::fs::write(&path, format!("{body}{checksum}\n")).expect("forged record");
+        path
+    };
+    // The forged form is one the registry reads: a second record of this owner is counted.
+    let twin = forge("twin", own_pid, own_start);
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue { records: 2, ..own }
+    );
+    std::fs::remove_file(twin).expect("twin removed");
+
+    forge("other-pid", own_pid + 1, own_start);
+    forge("other-start", own_pid, own_start + 1);
+    std::fs::write(registry.join("uninterpretable"), b"v4\nno record\n").expect("garbage");
+    // The directory name carries `<boot>-<pid>-<start>-<nonce>` after its prefix.
+    let name = dir
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("run dir name");
+    let mut fields = name.rsplitn(5, '-');
+    let (nonce, start, pid, boot, prefix) = (
+        fields.next().expect("nonce"),
+        fields.next().expect("start"),
+        fields.next().expect("pid"),
+        fields.next().expect("boot"),
+        fields.next().expect("prefix"),
+    );
+    assert_eq!(
+        (pid, start),
+        (&*own_pid.to_string(), &*own_start.to_string())
+    );
+    for foreign in [
+        format!("{prefix}-{boot}-{}-{start}-{nonce}", own_pid + 1),
+        format!("{prefix}-{boot}-{pid}-{}-{nonce}", own_start + 1),
+        format!("{prefix}-x{boot}-{pid}-{start}-{nonce}"),
+    ] {
+        std::fs::create_dir(dir.path().with_file_name(foreign)).expect("foreign run dir");
+    }
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        own,
+        "entries that differ in boot, PID, or start time name another owner"
+    );
 
     dir.cleanup().expect("own run dir removed");
     record.remove().expect("own record removed");
     assert_eq!(
         group_registry::own_residue(&root).expect("registry reads"),
-        OwnResidue::default(),
-        "the other owner's directory and record stay and are counted for no one here"
+        OwnResidue::default()
     );
-    assert!(foreign_dir.is_dir());
 }
 
 /// Terminal runs with unproven teardown remain indexed so later control operations observe the teardown verdict.

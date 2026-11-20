@@ -496,6 +496,9 @@ impl CompositeComponent for ModelExecutionComponent {
                 None => true,
             }
         };
+        // The removals of a run that returned before this point have had the time since to finish, so the registry decides what those runs left.
+        let earlier_residue = self.supervisor.cleanup_unresolved_runs();
+        let earlier_records = self.supervisor.record_unresolved_runs();
         let (unresolved, source_settled) = tokio::join!(self.supervisor.shutdown(), source);
         self.routes
             .lock()
@@ -518,12 +521,18 @@ impl CompositeComponent for ModelExecutionComponent {
                 "the AWS credential refresh ended without proving its helper teardown".to_owned(),
             );
         }
-        let (residue, records) = self
-            .residue_on_disk(
-                self.supervisor.cleanup_unresolved_runs(),
-                self.supervisor.record_unresolved_runs(),
-            )
-            .await;
+        let (residue, records) = self.residue_on_disk(earlier_residue, earlier_records).await;
+        // A run that this shutdown stopped reports a removal, or a creation it stopped waiting for, that can still be in flight, so its verdict stands as counted.
+        let residue = residue
+            + self
+                .supervisor
+                .cleanup_unresolved_runs()
+                .saturating_sub(earlier_residue);
+        let records = records
+            + self
+                .supervisor
+                .record_unresolved_runs()
+                .saturating_sub(earlier_records);
         // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
         if residue > 0 {
             failures.push(format!(
@@ -553,7 +562,7 @@ const RESIDUE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 impl ModelExecutionComponent {
     /// The private run directories and crash-ownership records this host still holds once every run has returned.
     ///
-    /// `residue` and `records` count the runs whose removal outlasted its bounded wait. Each count is a verdict reached when its run ended, and the removal it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a registry that holds none proves the removals completed. The read repeats until the registry is clear or [`RESIDUE_SETTLE_GRACE`] ends, which gives a removal still in flight the time to land. A registry that cannot be read proves nothing, so the runs' own counts stand.
+    /// `residue` and `records` count the runs whose removal outlasted its bounded wait. Each count is a verdict reached when its run ended, and the removal it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a registry that holds none proves the removals completed. The read repeats until the registry is clear or [`RESIDUE_SETTLE_GRACE`] ends, which gives a removal still in flight the time to land. A registry that cannot be read inside the grace proves nothing, so the runs' own counts stand.
     async fn residue_on_disk(&self, residue: usize, records: usize) -> (usize, usize) {
         if residue == 0 && records == 0 {
             return (0, 0);
@@ -561,15 +570,15 @@ impl ModelExecutionComponent {
         let deadline = tokio::time::Instant::now() + RESIDUE_SETTLE_GRACE;
         loop {
             let state_root = self.state_root.clone();
-            let found = tokio::task::spawn_blocking(move || {
+            let read = tokio::task::spawn_blocking(move || {
                 subprocess::group_registry::own_residue(&state_root)
-            })
-            .await;
-            let Ok(Ok(found)) = found else {
+            });
+            let Ok(Ok(Ok(found))) = tokio::time::timeout_at(deadline, read).await else {
                 return (residue, records);
             };
+            // Each read starts inside the grace, so the last one reports what the registry held then.
             if found == subprocess::group_registry::OwnResidue::default()
-                || tokio::time::Instant::now() >= deadline
+                || tokio::time::Instant::now() + RESIDUE_POLL_INTERVAL >= deadline
             {
                 return (found.run_dirs, found.records);
             }
