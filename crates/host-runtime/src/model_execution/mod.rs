@@ -496,9 +496,10 @@ impl CompositeComponent for ModelExecutionComponent {
                 None => true,
             }
         };
-        // The removals of a run or refresh that returned before this point have had the time since to finish, so the registry decides what they left.
-        let earlier_residue = self.supervisor.cleanup_unresolved_runs();
-        let earlier_records = self.record_verdicts();
+        let earlier = (
+            self.supervisor.cleanup_unresolved_runs(),
+            self.record_verdicts(),
+        );
         let (unresolved, source_settled) = tokio::join!(self.supervisor.shutdown(), source);
         self.routes
             .lock()
@@ -521,14 +522,17 @@ impl CompositeComponent for ModelExecutionComponent {
                 "the AWS credential refresh ended without proving its helper teardown".to_owned(),
             );
         }
-        let (residue, records) = self.residue_on_disk(earlier_residue, earlier_records).await;
-        // A run or refresh that this shutdown stopped reports a removal, or a creation it stopped waiting for, that can still be in flight, so its verdict stands as counted. Its entry can also be among those the registry read found, so each sum is an upper bound.
-        let residue = residue
-            + self
-                .supervisor
-                .cleanup_unresolved_runs()
-                .saturating_sub(earlier_residue);
-        let records = records + self.record_verdicts().saturating_sub(earlier_records);
+        let counted = (
+            self.supervisor.cleanup_unresolved_runs(),
+            self.record_verdicts(),
+        );
+        let (residue, records) = if counted == earlier {
+            // Every verdict was counted before this shutdown stopped the runs. The removals behind them have had the time since to finish, so the registry decides what they left.
+            self.residue_on_disk(counted).await
+        } else {
+            // A run or refresh that this shutdown stopped has just reported a removal that can still be in flight. The verdicts stand as counted.
+            counted
+        };
         // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
         if residue > 0 {
             failures.push(format!(
@@ -551,44 +555,50 @@ impl CompositeComponent for ModelExecutionComponent {
     }
 }
 
-/// How long shutdown waits for removals that outlasted their runs to leave the registry: the default [`subprocess::SubprocessLimits::termination_grace`], the bound a run's removal has when the run ends.
+/// How long shutdown waits for the filesystem jobs that outlasted their runs to finish: the default [`subprocess::SubprocessLimits::termination_grace`], the bound a run's removal has when the run ends.
 const RESIDUE_SETTLE_GRACE: Duration = Duration::from_secs(5);
 const RESIDUE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 impl ModelExecutionComponent {
-    /// The crash-ownership records whose removal outlasted its bounded wait: one per run that reported it, and one when a credential refresh's helper did.
+    /// The crash-ownership records whose removal outlasted its bounded wait: one per run and one per credential refresh that reported it.
     fn record_verdicts(&self) -> usize {
         self.supervisor.record_unresolved_runs()
-            + usize::from(
-                self.aws_owner
-                    .as_ref()
-                    .is_some_and(SourceOwner::record_retained),
-            )
+            + self
+                .aws_owner
+                .as_ref()
+                .map_or(0, SourceOwner::records_retained)
     }
 
     /// The private run directories and crash-ownership records this host still holds once every run has returned.
     ///
-    /// `residue` and `records` count the removals that outlasted their bounded wait. Each count is a verdict reached when its run or refresh ended, and the removal it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a registry that holds none proves the removals completed. The read repeats until the registry is clear or [`RESIDUE_SETTLE_GRACE`] ends, which gives a removal still in flight the time to land. A registry that cannot be read inside the grace proves nothing, so the counted verdicts stand.
-    async fn residue_on_disk(&self, residue: usize, records: usize) -> (usize, usize) {
-        if residue == 0 && records == 0 {
-            return (0, 0);
+    /// `counted` holds the removals of private run files and of records that outlasted their bounded wait. Each count is a verdict reached when its run or refresh ended, and the job it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a clear registry read once every filesystem job of this process has returned proves that the removals completed and that no entry is still to be written. The read repeats until then or until [`RESIDUE_SETTLE_GRACE`] ends, which gives a job still in flight the time to finish. A job still running at the end of the grace, or a registry that cannot be read inside it, proves nothing, so the counted verdicts stand.
+    async fn residue_on_disk(&self, counted: (usize, usize)) -> (usize, usize) {
+        if counted == (0, 0) {
+            return counted;
         }
         let deadline = tokio::time::Instant::now() + RESIDUE_SETTLE_GRACE;
         loop {
+            // Read before the registry, so a job that finishes between the two has its entry on disk for the read.
+            let idle = subprocess::filesystem_jobs_idle();
             let state_root = self.state_root.clone();
+            // The read runs outside the job slots, which `filesystem_jobs_idle` observes.
             let read = tokio::task::spawn_blocking(move || {
                 subprocess::group_registry::own_residue(&state_root)
             });
             let Ok(Ok(Ok(found))) = tokio::time::timeout_at(deadline, read).await else {
-                return (residue, records);
+                return counted;
             };
-            if found == subprocess::group_registry::OwnResidue::default() {
+            if idle && found == subprocess::group_registry::OwnResidue::default() {
                 return (0, 0);
             }
             tokio::time::sleep(RESIDUE_POLL_INTERVAL).await;
-            // The grace ended during the wait, so the last read reports what the registry holds.
             if tokio::time::Instant::now() >= deadline {
-                return (found.run_dirs, found.records);
+                // The grace ended during the wait: the last read reports what the registry holds, and a job still running leaves the verdicts as counted.
+                return if idle {
+                    (found.run_dirs, found.records)
+                } else {
+                    counted
+                };
             }
         }
     }
@@ -633,6 +643,93 @@ impl SecondaryComponent for ModelExecutionComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backend whose run reports that the bounded waits on its private-directory removal and its record removal both ended first.
+    struct RemovalsOutlastTheirWaits;
+
+    impl LlmExecutionBackend for RemovalsOutlastTheirWaits {
+        fn execute(
+            &self,
+            _: backend::BackendRequest,
+            _: backend::EventSink,
+            _: crate::CancellationToken,
+        ) -> backend::BackendFuture {
+            Box::pin(async {
+                backend::BackendTerminal::Failed(backend::BackendError {
+                    class: backend::ErrorClass::Transient,
+                    message: format!(
+                        "pi run failed; additionally sensitive temp {}; additionally pi backend {}",
+                        subprocess::CLEANUP_FAILURE_MARKER,
+                        subprocess::RECORD_RETAINED_MARKER
+                    ),
+                    retry_after_secs: None,
+                    provider_code: None,
+                })
+            })
+        }
+    }
+
+    /// A creation that a run stopped waiting for is a filesystem job that still holds its slot. While one runs, a clear registry read says nothing about the entry the job will write, so the runs' verdicts are reported. The supervisor tests cover the same clear registry once every job has returned.
+    #[tokio::test(start_paused = true)]
+    async fn a_filesystem_job_still_running_keeps_the_verdicts_a_clear_registry_would_settle() {
+        let dir = tempfile::tempdir().expect("state root dir");
+        let root = StateRoot::resolve(Some(dir.path())).expect("state root resolves");
+        let component =
+            ModelExecutionComponent::new(Arc::new(RemovalsOutlastTheirWaits), root.clone());
+        let key = SessionKey {
+            project_root: "/workspace/project".into(),
+            harness: Harness::OpenCode,
+            session: "s".to_owned(),
+        };
+        let request = protocol::SendRequest {
+            prompt: "p".to_owned(),
+            system: None,
+            provider: "prov".to_owned(),
+            model: "model-a".to_owned(),
+            max_output_tokens: 1_000,
+            temperature: None,
+        };
+        component
+            .supervisor
+            .send(&key, request, b"body")
+            .expect("send admits");
+        while (
+            component.supervisor.cleanup_unresolved_runs(),
+            component.supervisor.record_unresolved_runs(),
+        ) != (1, 1)
+        {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            subprocess::group_registry::own_residue(&root).expect("registry reads"),
+            subprocess::group_registry::OwnResidue::default()
+        );
+
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let job = tokio::spawn(subprocess::off_runtime(move || {
+            let _ = parked.recv();
+        }));
+        while subprocess::filesystem_jobs_idle() {
+            tokio::task::yield_now().await;
+        }
+        // The parked job holds the paused clock, so the test moves it one poll interval at a time and gives each registry read the real time to return.
+        let mut shutdown = std::pin::pin!(CompositeComponent::shutdown(&component));
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                outcome = &mut shutdown => break outcome,
+                () = tokio::time::advance(RESIDUE_POLL_INTERVAL) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        };
+        let failure = outcome.expect_err("a job still running keeps the verdicts");
+        assert!(failure.0.contains("private run files"), "{failure}");
+        assert!(failure.0.contains("crash-ownership record"), "{failure}");
+
+        release.send(()).expect("the job is released");
+        job.await.expect("job task").expect("job result");
+    }
 
     const PROVIDERS: [&str; 7] = [
         "amazon-bedrock",

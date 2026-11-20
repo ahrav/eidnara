@@ -1078,6 +1078,13 @@ fn blocking_slots() -> &'static Arc<tokio::sync::Semaphore> {
     SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BLOCKING_SLOTS)))
 }
 
+/// Whether every blocking filesystem job of this process has returned.
+///
+/// A waiter that stops waiting for a job leaves it running, and the job keeps its slot until it returns. A private-directory creation or a record publication that a run stopped waiting for is such a job, and its entry reaches the registry when it returns. Free slots therefore mean that every entry this process will write is already on disk.
+pub(crate) fn filesystem_jobs_idle() -> bool {
+    blocking_slots().available_permits() == BLOCKING_SLOTS
+}
+
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
 /// A cancelled or panicked blocking task reads as an unknown answer.
 /// The slot moves into the job, so a stalled job keeps its slot until it returns and callers behind it wait (and time out) instead of adding more.

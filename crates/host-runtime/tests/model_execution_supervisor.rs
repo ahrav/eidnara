@@ -1100,6 +1100,73 @@ async fn shutdown_reports_only_the_class_that_remains_in_the_registry() {
     record.remove().expect("test cleanup");
 }
 
+/// The mirror case: the record is gone and the private directory is still in the registry, so shutdown reports the directory alone.
+#[tokio::test(start_paused = true)]
+async fn shutdown_reports_a_private_run_directory_that_remains_alone() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    let (dir, record) = own_entries(&root);
+    record.remove().expect("the record's removal lands");
+
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("the directory on disk fails the shutdown");
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    assert!(!failure.0.contains("crash-ownership record"), "{failure}");
+    dir.cleanup().expect("test cleanup");
+}
+
+/// The registry read is a blocking job with the settle grace as its bound. A read that is still queued when the grace ends proves nothing, so the runs' verdicts are reported.
+#[test]
+fn shutdown_keeps_the_runs_verdicts_when_the_registry_read_outlasts_the_grace() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .max_blocking_threads(1)
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (_dir, root) = own_state_root();
+        let component = component_with_removals_that_outlasted_their_waits(root).await;
+        // The one blocking thread is busy, so the registry read waits in the pool's queue.
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let busy = tokio::task::spawn_blocking(move || {
+            let _ = parked.recv();
+        });
+        let mut shutdown = std::pin::pin!(CompositeComponent::shutdown(&component));
+        let mut waited = Duration::ZERO;
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                outcome = &mut shutdown => break outcome,
+                () = tokio::time::advance(Duration::from_secs(1)) => waited += Duration::from_secs(1),
+            }
+            assert!(waited <= Duration::from_secs(10), "the read is bounded");
+        };
+        release.send(()).expect("the blocking thread is released");
+        busy.await.expect("blocking task");
+
+        let failure = outcome.expect_err("an unfinished read keeps the verdicts");
+        assert!(
+            failure
+                .0
+                .contains("1 run(s) could not remove their private run files"),
+            "{failure}"
+        );
+        assert!(
+            failure
+                .0
+                .contains("1 crash-ownership record(s) could not be removed"),
+            "{failure}"
+        );
+    });
+}
+
 /// A run that shutdown itself stops reports its removals while they can still be in flight, so its verdicts stand whatever the registry holds at that instant.
 #[tokio::test]
 async fn shutdown_keeps_the_verdicts_of_a_run_it_stopped() {
@@ -1203,10 +1270,10 @@ async fn shutdown_keeps_the_runs_verdicts_when_the_registry_cannot_be_read() {
     );
 }
 
-/// A credential refresh whose helper record's removal outlasted its wait. It reports at once, or when shutdown cancels it.
+/// A credential refresh whose helper record's removal outlasted its wait. It reports at once until `until_cancelled` is set, and from then on when shutdown cancels it. `started` counts the refreshes begun.
 struct RecordRetainingRefresh {
-    until_cancelled: bool,
-    started: Arc<std::sync::atomic::AtomicBool>,
+    until_cancelled: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl host_runtime::model_execution::aws_refresh::Refresh for RecordRetainingRefresh {
@@ -1216,9 +1283,11 @@ impl host_runtime::model_execution::aws_refresh::Refresh for RecordRetainingRefr
         cancel: CancellationToken,
     ) -> host_runtime::model_execution::aws_refresh::RefreshFuture {
         use host_runtime::model_execution::aws_transaction::{RenewalEvidence, TransactionOutcome};
-        let until_cancelled = self.until_cancelled;
+        let until_cancelled = self
+            .until_cancelled
+            .load(std::sync::atomic::Ordering::SeqCst);
         self.started
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
             if until_cancelled {
                 cancel.cancelled().await;
@@ -1237,22 +1306,23 @@ impl host_runtime::model_execution::aws_refresh::Refresh for RecordRetainingRefr
     }
 }
 
-/// A component over `root` whose profile source runs `RecordRetainingRefresh`, with the owner and the flag its refresh sets when it starts.
-fn component_with_record_retaining_refresh(
-    root: StateRoot,
-    until_cancelled: bool,
-) -> (
-    ModelExecutionComponent,
-    host_runtime::model_execution::aws_refresh::SourceOwner,
-    Arc<std::sync::atomic::AtomicBool>,
-) {
+/// A component over `root` whose profile source runs `RecordRetainingRefresh`.
+struct RefreshingComponent {
+    component: ModelExecutionComponent,
+    owner: host_runtime::model_execution::aws_refresh::SourceOwner,
+    until_cancelled: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+fn component_with_record_retaining_refresh(root: StateRoot) -> RefreshingComponent {
     use host_runtime::model_execution::aws_refresh::{SourceOwner, SystemClock};
     use host_runtime::model_execution::source_health::{
         SourceHealthCell, SourceKind, SourceObservation,
     };
-    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let until_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let refresh = RecordRetainingRefresh {
-        until_cancelled,
+        until_cancelled: Arc::clone(&until_cancelled),
         started: Arc::clone(&started),
     };
     let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
@@ -1262,7 +1332,12 @@ fn component_with_record_retaining_refresh(
         root,
     )
     .with_source_owner(Some(owner.clone()));
-    (component, owner, started)
+    RefreshingComponent {
+        component,
+        owner,
+        until_cancelled,
+        started,
+    }
 }
 
 /// Runs one refresh of `owner` to its end.
@@ -1275,11 +1350,11 @@ async fn refresh_once(owner: &host_runtime::model_execution::aws_refresh::Source
 #[tokio::test]
 async fn shutdown_is_clean_once_a_refreshs_late_record_removal_has_landed() {
     let (_dir, root) = own_state_root();
-    let (component, owner, _started) = component_with_record_retaining_refresh(root, false);
-    refresh_once(&owner).await;
-    assert!(owner.record_retained());
+    let host = component_with_record_retaining_refresh(root);
+    refresh_once(&host.owner).await;
+    assert_eq!(host.owner.records_retained(), 1);
 
-    CompositeComponent::shutdown(&component)
+    CompositeComponent::shutdown(&host.component)
         .await
         .expect("no record of this host remains");
 }
@@ -1287,12 +1362,12 @@ async fn shutdown_is_clean_once_a_refreshs_late_record_removal_has_landed() {
 #[tokio::test(start_paused = true)]
 async fn shutdown_reports_a_refreshs_record_that_remains_in_the_registry() {
     let (_dir, root) = own_state_root();
-    let (component, owner, _started) = component_with_record_retaining_refresh(root.clone(), false);
-    refresh_once(&owner).await;
+    let host = component_with_record_retaining_refresh(root.clone());
+    refresh_once(&host.owner).await;
     let (dir, record) = own_entries(&root);
     dir.cleanup().expect("no run directory remains");
 
-    let failure = CompositeComponent::shutdown(&component)
+    let failure = CompositeComponent::shutdown(&host.component)
         .await
         .expect_err("the record on disk fails the shutdown");
     assert!(
@@ -1305,29 +1380,34 @@ async fn shutdown_reports_a_refreshs_record_that_remains_in_the_registry() {
     record.remove().expect("test cleanup");
 }
 
-/// A refresh that shutdown itself stops reports its record while the removal can still be in flight, so its verdict stands.
-#[tokio::test]
+/// A refresh that shutdown itself stops reports its record while the removal can still be in flight, so its verdict stands. An earlier refresh of the same owner has reported a record whose removal has landed, so the stopped refresh's verdict is the owner's second.
+#[tokio::test(start_paused = true)]
 async fn shutdown_keeps_the_record_verdict_of_a_refresh_it_stopped() {
     let (_dir, root) = own_state_root();
-    let (component, owner, started) = component_with_record_retaining_refresh(root.clone(), true);
+    let host = component_with_record_retaining_refresh(root.clone());
+    refresh_once(&host.owner).await;
+    assert_eq!(host.owner.records_retained(), 1);
+    // The first refresh returned no credential row, so the owner paces the next one.
+    tokio::time::advance(Duration::from_secs(600)).await;
+    host.until_cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let waiter = tokio::spawn({
-        let owner = owner.clone();
+        let owner = host.owner.clone();
         async move { refresh_once(&owner).await }
     });
     until(
-        || started.load(std::sync::atomic::Ordering::SeqCst),
-        "the refresh starts before shutdown cancels it",
+        || host.started.load(std::sync::atomic::Ordering::SeqCst) == 2,
+        "the second refresh starts before shutdown cancels it",
     )
     .await;
-    assert!(!owner.record_retained());
 
-    let failure = CompositeComponent::shutdown(&component)
+    let failure = CompositeComponent::shutdown(&host.component)
         .await
         .expect_err("a verdict reached during shutdown is reported");
     assert!(
         failure
             .0
-            .contains("1 crash-ownership record(s) could not be removed"),
+            .contains("2 crash-ownership record(s) could not be removed"),
         "{failure}"
     );
     assert_eq!(
@@ -1347,7 +1427,7 @@ async fn host_shutdown_is_graceful_once_a_runs_late_removals_have_landed() {
     host.shutdown().await.expect("graceful shutdown");
 }
 
-/// A registry shared with another host incarnation counts only the entries that name this process: its boot, its PID, and its start time together.
+/// A registry shared with another host incarnation counts only the entries that name this process: a run directory by boot, PID, and start time, and a record by the owner PID and start time it carries.
 #[test]
 fn entries_another_host_owns_are_no_residue_of_this_one() {
     use sha2::{Digest, Sha256};

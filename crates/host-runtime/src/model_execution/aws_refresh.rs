@@ -132,7 +132,7 @@ struct State {
     failures: u32,
     unresolved: bool,
     /// A refresh retained its crash-ownership record.
-    record_retained: bool,
+    records_retained: usize,
     closed: bool,
 }
 
@@ -288,17 +288,17 @@ impl SourceOwner {
 
     /// Closes the owner and waits for its refresh to settle physically. Returns whether
     /// every refresh proved its helper's teardown and cleanup. A helper record whose
-    /// removal outlasted its wait is reported by [`Self::record_retained`].
+    /// removal outlasted its wait is counted by [`Self::records_retained`].
     pub async fn join(&self) -> bool {
         self.close();
         self.0.tasks.wait().await;
         !self.0.read().unresolved
     }
 
-    /// Whether a refresh stopped waiting for the removal of its helper's crash-ownership
-    /// record. The removal keeps running, so the registry says whether the record remains.
-    pub fn record_retained(&self) -> bool {
-        self.0.read().record_retained
+    /// How many refreshes stopped waiting for the removal of their helper's crash-ownership
+    /// record. Each removal keeps running, so the registry says whether a record remains.
+    pub fn records_retained(&self) -> usize {
+        self.0.read().records_retained
     }
 
     /// Starts the single refresh for the demand that ends at `demand`. The refresh runs
@@ -383,7 +383,7 @@ impl Inner {
         let mut state = self.lock();
         state.in_flight = None;
         state.unresolved |= outcome.failure == Some(TransactionFailure::CleanupUnproven);
-        state.record_retained |= outcome.record_retained;
+        state.records_retained += usize::from(outcome.record_retained);
         let stale = epoch != state.epoch;
         let verdict = if outcome
             .identity
@@ -1105,8 +1105,9 @@ mod tests {
             h.owner.join().await,
             "the helper's teardown and cleanup were proven"
         );
-        assert!(
-            h.owner.record_retained(),
+        assert_eq!(
+            h.owner.records_retained(),
+            1,
             "a retained crash record is cleanup debt at shutdown"
         );
     }
