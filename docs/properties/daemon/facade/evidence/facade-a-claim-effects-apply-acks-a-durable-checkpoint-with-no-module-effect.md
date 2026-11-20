@@ -45,8 +45,8 @@ Producer side, `packages/plugin/src/hooks/eidnara/`.
   `{ name: "claim.effects.apply", arguments: request }`, so this is the MCP facade
   shape, not a flat method body. That is what makes it default-production
   reachable on the surface this lens owns.
-- `module-transport.ts:1077-1096` — `claimEffectsApply`. The comment at
-  `:1078-1080` says "The last effect is the delivery checkpoint (same contract as
+- `module-transport.ts:1068-1087` — `claimEffectsApply`. The comment at
+  `:1069-1071` says "The last effect is the delivery checkpoint (same contract as
   the outbox drain and the mirror receipt decoder)."
 - `module-wire.ts:717-735` — `decodeClaimEffectDeliveryResponse` throws if
   `ackedEffectId !== expectedEffectId` (`:729-733`).
@@ -158,14 +158,14 @@ has no open store.
   `module-state-sync.ts:1617,1621` for the two consumer constants;
   `module-state-sync.ts:1960-2050` for the mirror drain, which calls
   `client.claimMirrorApply` at `:2032`; `hook.ts:930-990` for the settle path;
-  `module-transport.ts:1077-1096` and `module-wire.ts:717-735` for the ack
+  `module-transport.ts:1068-1087` and `module-wire.ts:717-735` for the ack
   contract; a search of `crates/` for `claim_effects` in test code, which found
   nothing in `daemon`.
 - Findings: the two-consumer arrangement is real and deliberate, and the mirror
   consumer's handler is visibly the writing one. That is the strongest evidence
   for reading B. Against it: the handler is named `apply`, the field is
   `ackedEffectId`, the producer's own comment calls the last effect "the delivery
-  checkpoint" (`module-transport.ts:1078-1080`), and the drain's error text on
+  checkpoint" (`module-transport.ts:1069-1071`), and the drain's error text on
   mismatch is "claim effect delivery skipped checkpoint"
   (`module-state-sync.ts:2324-2326`). Every name on the path asserts delivery.
   Also against it: if the module needs nothing from these effects, it is unclear

@@ -130,7 +130,7 @@ None. Two stages with the same identity and different bodies is enough, and the
 order does not matter.
 
 Reachability: default-production. `claim.intent.stage` is sent as a facade
-envelope by `module-wire.ts:602-605` through `module-transport.ts:1035-1052`, and
+envelope by `module-wire.ts:602-605` through `module-transport.ts:1026-1043`, and
 the plugin's commit path invokes it from `hook.ts:938-990`. No flag gates it.
 
 ## What a test must construct

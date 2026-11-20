@@ -31,9 +31,9 @@ Do not build a second fixture or a second three-way disposition oracle.
 - [Search schema/wrapper, lines 13-41](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.ts#L13)
   exposes `query`, `limit`, and memory-only `sources`, then invokes
   `executeEidnaraSearch` and returns its text.
-- [Execution, lines 144-183](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L144)
+- [Execution, lines 152-191](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L152)
   resolves the session/project and creates the kernel client. At
-  [lines 236-281](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L236)
+  [lines 250-298](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L250)
   object IDs use chunked filtered reads, text queries use `explicit_search`,
   and nonavailable states remain explicit unless the no-consumer fallback
   succeeds with its freshness note.
@@ -47,7 +47,7 @@ Do not build a second fixture or a second three-way disposition oracle.
   uses memory decision summaries/rationales. Exact object-id matching is a
   lookup mode. [Lines 188-229](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L178)
   render rejected approaches distinctly and carry their rationale.
-- [Delivery, lines 153-171, 282-303](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L153)
+- [Delivery, lines 161-180, 313-334](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L161)
   separates pre-pack ranking from delivered results. The
   [search tests, lines 218-255, 497-517](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L218)
   assert memory text, rationale, and packing behavior using a fake kernel.

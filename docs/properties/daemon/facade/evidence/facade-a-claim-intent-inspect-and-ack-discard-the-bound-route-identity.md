@@ -85,7 +85,7 @@ handlers.
   `{name, arguments}` bodies for `claim.intent.stage`, `claim.intent.inspect`,
   `claim.intent.ack`, and `claim.effects.apply`. So these are facade-envelope
   commands, routed at `lib.rs:10048-10051`.
-- `module-transport.ts:1035-1096` sends them.
+- `module-transport.ts:1026-1087` sends them.
 - `hook.ts:938-990` wires `commitModuleClaimIntent` with all four.
 
 Reachability class: default-production. No feature flag, no config gate. The

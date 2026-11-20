@@ -473,8 +473,8 @@ call site. `messageCacheSignature` is defined at 363-368; 1152, 1264, and
 [pagemax]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L9-L10
 [pagecontract]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L629-L633
 [numbers]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/hooks/context/module-wire.ts#L57-L109
-[bodyvalid]: ../../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L499-L506
-[transportcall]: ../../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L829-L841
+[bodyvalid]: ../../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L541-L548
+[transportcall]: ../../../../../packages/opencode-plugin/src/hooks/context/module-transport.ts#L873-L885
 [request]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/host-client/client.ts#L534-L549
 [encodebody]: https://github.com/ahrav/eidnara/blob/913234433ae36a80a6e22c6aac14c7f9aab74386/packages/opencode-plugin/src/shared/host-client/client.ts#L1515-L1520
 [utf8len]: ../../../../../packages/opencode-plugin/src/shared/host-client/frame-channel.ts#L184-L193
