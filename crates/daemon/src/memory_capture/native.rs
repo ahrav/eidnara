@@ -873,6 +873,9 @@ impl CaptureWork {
             settled.push((memories, kept_for_contests));
         }
         settle_batch_contests(&mut settled);
+        for (memories, _) in &mut settled {
+            super::class_contesting_work(memories, &plan.existing);
+        }
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
         let budget = Instant::now() + self.plan_commit_budget;

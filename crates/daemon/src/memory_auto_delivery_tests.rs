@@ -2297,8 +2297,8 @@ async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_ref
 /// fact the statement replaces, as it does for a correction it classed
 /// short-lived, the rule is shown as contested by the user's newer words,
 /// and the exception is stored labeled whichever class it had. An
-/// exception that names no rule is stored labeled as a request and
-/// delivered under `CURRENT_WORK` as work left open.
+/// exception that names no rule is stored labeled when it is a request,
+/// and delivered under `CURRENT_WORK` when it is work left open.
 #[tokio::test]
 async fn a_statement_that_ends_with_its_task_replaces_no_statement_that_outlives_it() {
     let exception = "Skip the integration suite for this hotfix.";
@@ -3164,6 +3164,112 @@ async fn a_plan_that_departs_from_a_standing_statement_is_shown_beside_it() {
         },
     )
     .await;
+}
+
+/// The class of a plan follows the contests its source keeps. A plan that
+/// contradicts an assistant's report, which is a labeled fact, stays work
+/// in progress and is delivered. In one batch a remark and a plan both
+/// name a rule: the first source holds the rule's contest, so the plan
+/// keeps none, stays work in progress, and is delivered beside the rule.
+#[tokio::test]
+async fn a_plan_is_work_in_progress_unless_its_source_keeps_a_contest_of_a_delivered_fact() {
+    let report = "The retry budget is read from the server config.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "assistant", report)],
+        |_, _| vec![fact(report)],
+    )
+    .await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", RETRY_PLAN)],
+        |_, existing| {
+            let named = ids_containing(existing, "server config");
+            assert_eq!(named.len(), 1, "{existing:?}");
+            vec![Extracted {
+                contests: named,
+                ..classed(RETRY_PLAN, "current_work")
+            }]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let stored = rows.iter().find(|row| row.1 == stated(RETRY_PLAN)).unwrap();
+    assert_eq!(stored.3["lifetime"], "current_work", "{:?}", stored.3);
+    assert_eq!(stored.3["contests"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(RETRY_PLAN)]
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        block_element(&block, "CURRENT_WORK").is_some_and(|work| work.contains(RETRY_PLAN)),
+        "{block}"
+    );
+
+    let remark = "The integration suite failed before the merge again.";
+    let plan = "Tomorrow, skip the integration suite before the importer merge.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE)],
+        |_, _| vec![fact(INTEGRATION_RULE)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", remark), ("m3", "user", plan)],
+        |text, existing| {
+            let rule = ids_containing(existing, "before every merge");
+            assert_eq!(rule.len(), 1, "{existing:?}");
+            vec![Extracted {
+                replaces: rule,
+                ..classed(
+                    text,
+                    if text == remark {
+                        "status"
+                    } else {
+                        "current_work"
+                    },
+                )
+            }]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let class = |text: &str| {
+        rows.iter()
+            .find(|row| row.1 == stated(text))
+            .unwrap_or_else(|| panic!("{text}: {rows:?}"))
+            .3["lifetime"]
+            .clone()
+    };
+    assert_eq!(
+        (class(remark), class(plan)),
+        (json!("status"), json!("current_work"))
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let rule_line = block
+        .lines()
+        .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+        .unwrap_or_else(|| panic!("{block}"));
+    assert!(
+        rule_line.contains("contested") && rule_line.contains("failed before the merge"),
+        "{block}"
+    );
+    assert!(
+        block_element(&block, "CURRENT_WORK").is_some_and(|work| work.contains(plan)),
+        "{block}"
+    );
 }
 
 /// An assistant's message repeats live work in progress and contradicts a

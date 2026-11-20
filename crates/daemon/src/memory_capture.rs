@@ -159,9 +159,10 @@ impl Lifetime {
         }
     }
 
-    /// A later session needs the work an earlier session left unfinished
-    /// as well as the statements that outlive their task.
-    fn is_delivered(self) -> bool {
+    /// Whether a whole user statement of this class is eligible for
+    /// approval. A later session needs the work an earlier session left
+    /// unfinished as well as the statements that outlive their task.
+    fn is_eligible(self) -> bool {
         match self {
             Self::Lasting | Self::Unsettled | Self::CurrentWork => true,
             Self::Request | Self::Status => false,
@@ -173,8 +174,27 @@ fn outlives_its_task(memory: &CapturedMemory) -> bool {
     memory.lifetime.is_none_or(Lifetime::outlives_its_task)
 }
 
-fn is_delivered(memory: &CapturedMemory) -> bool {
-    memory.lifetime.is_none_or(Lifetime::is_delivered)
+fn has_eligible_lifetime(memory: &CapturedMemory) -> bool {
+    memory.lifetime.is_none_or(Lifetime::is_eligible)
+}
+
+/// Gives the class `request` to each `current_work` memory of a settled
+/// source that contests a memory served automatically. Such a memory is an
+/// instruction for one occasion, shown on the line of the memory it
+/// contests. It runs on the links a source keeps after the batch is
+/// settled, so the class follows the contests the plan is frozen with.
+fn class_contesting_work(memories: &mut [CapturedMemory], existing: &[ExistingCaptureMemory]) {
+    for memory in memories {
+        if memory.lifetime == Some(Lifetime::CurrentWork)
+            && memory.contests.iter().any(|target| {
+                existing
+                    .iter()
+                    .any(|previous| previous.id == *target && previous.automatic)
+            })
+        {
+            memory.lifetime = Some(Lifetime::Request);
+        }
+    }
 }
 
 /// A link array an extractor wrote as `null` names no target, as an absent
@@ -742,9 +762,7 @@ fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<St
 /// outlives its task or a target marked `current_work`.
 /// An automatic target that fails this check becomes a contest and takes
 /// no claim.
-/// A dropped replacement of an approved memory contests that memory. A
-/// `current_work` proposal left contesting an automatic memory takes the
-/// class `request`.
+/// A dropped replacement of an approved memory contests that memory.
 fn release_unsupported_targets(
     memories: &mut [CapturedMemory],
     source: &CaptureMessage,
@@ -865,17 +883,6 @@ fn release_unsupported_targets(
             }
         }
         memory.contests = contests;
-        // Work in progress that contests a fact served automatically is an
-        // instruction for one occasion. It is shown beside that fact, so
-        // it takes the class of such an instruction.
-        if memory.lifetime == Some(Lifetime::CurrentWork)
-            && memory
-                .contests
-                .iter()
-                .any(|target| provided(target).is_some_and(|previous| previous.automatic))
-        {
-            memory.lifetime = Some(Lifetime::Request);
-        }
         // The memory a contest is recorded through holds the observation,
         // so it shares a content word with the quotation.
         if !memory.contests.is_empty()
@@ -2141,12 +2148,12 @@ pub(crate) fn is_pi_bash_execution_text(text: &str) -> bool {
 
 /// A captured memory is eligible for approval as the user's statement
 /// when it is the user's own words ([`user_stated`]) and its lifetime class
-/// passes [`is_delivered`]. Approval
+/// passes [`has_eligible_lifetime`]. Approval
 /// requires the Kernel to accept both the statement record and the
 /// admission based on that record.
 /// `prose` is the job's text.
 fn user_attributed(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -> bool {
-    is_delivered(memory) && user_stated(states_whole, prose, memory)
+    has_eligible_lifetime(memory) && user_stated(states_whole, prose, memory)
 }
 
 /// Whether a captured memory is the user's own words whatever its class:
@@ -4464,7 +4471,7 @@ fn write_captured_memories(
         let Statement { whole, stated } = stated[index];
         // Approval requires the Kernel to accept the statement record and
         // the admission that rests on it.
-        let attributed = stated && is_delivered(memory);
+        let attributed = stated && has_eligible_lifetime(memory);
         let standing = stated && outlives_its_task(memory);
         // Validation at extraction refuses a duplicate that also replaces
         // and further targets beside no replacement; a stored plan of either
@@ -4521,8 +4528,14 @@ fn write_captured_memories(
             .map(|target| (target, true))
             .chain(memory.also_replaces.iter().map(|target| (target, false)))
         {
-            let live = approved(envelope, target)?;
-            let work = work_in_progress(target).filter(|_| live);
+            let served = envelope.served_rows_for(&[target.as_str()], None)?;
+            let served = served.get(target.as_str());
+            let live = served.is_some_and(|row| {
+                row.visibility(kernel::Surface::ExplicitSearch)
+                    == kernel::SurfaceVisibility::Visible
+            });
+            let owned = served.is_some_and(|row| is_capture_memory(&row.object));
+            let work = work_in_progress(target).filter(|_| live && owned);
             if !standing && work.is_none() && live {
                 return Err(kernel::KernelError::Conflict);
             }
@@ -8004,10 +8017,11 @@ mod tests {
         }
     }
 
-    /// Work in progress that contests a memory served automatically is an
-    /// instruction for one occasion and takes the class `request`. Work in
-    /// progress that ends a plan, contests a labeled memory, or names
-    /// nothing keeps its class, and so does a statement of another class.
+    /// Work in progress whose settled links contest a memory served
+    /// automatically is an instruction for one occasion and takes the class
+    /// `request`, whatever else it names. Work in progress that ends a
+    /// plan, contests only labeled memories, or names nothing keeps its
+    /// class, and so does a statement of another class.
     #[test]
     fn work_in_progress_that_contests_an_automatic_memory_takes_the_request_class() {
         let stored =
@@ -8049,7 +8063,7 @@ mod tests {
             text: quote.into(),
             own_id: true,
         }];
-        let parse = |lifetime: &str, links: Value| {
+        let classed = |lifetime: &str, links: Value| {
             let mut memory = json!({
                 "category": "CONSTRAINTS",
                 "content": "The retry budget for this release.",
@@ -8062,47 +8076,99 @@ mod tests {
                 .extend(links.as_object().unwrap().clone());
             let output =
                 json!({"version": 1, "decisions": [{"message_id": "m", "memories": [memory]}]});
-            let parsed = parse_batch(&output.to_string(), &messages, &existing)
-                .unwrap()
-                .into_iter()
-                .flat_map(|message| message.unwrap().memories)
-                .next()
-                .unwrap();
+            let mut parsed: Vec<CapturedMemory> =
+                parse_batch(&output.to_string(), &messages, &existing)
+                    .unwrap()
+                    .into_iter()
+                    .flat_map(|message| message.unwrap().memories)
+                    .collect();
+            // The parser leaves the class as the extractor gave it.
+            assert_eq!(
+                serde_json::to_value(parsed[0].lifetime).unwrap(),
+                json!(lifetime)
+            );
+            class_contesting_work(&mut parsed, &existing);
+            let parsed = parsed.remove(0);
             (parsed.lifetime, parsed.replaces, parsed.contests)
         };
         let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
-        assert_eq!(
-            parse("current_work", json!({"replaces": "mem_rule"})),
-            (Some(Lifetime::Request), None, ids(&["mem_rule"]))
-        );
-        assert_eq!(
-            parse("current_work", json!({"contests": ["mem_rule"]})),
-            (Some(Lifetime::Request), None, ids(&["mem_rule"]))
-        );
-        assert_eq!(
-            parse("current_work", json!({"replaces": "mem_plan"})),
+        use Lifetime::{CurrentWork, Lasting, Request, Status};
+        for (lifetime, links, class, replaces, contests) in [
             (
-                Some(Lifetime::CurrentWork),
-                Some("mem_plan".into()),
-                ids(&[])
-            )
-        );
-        assert_eq!(
-            parse("current_work", json!({"contests": ["mem_report"]})),
-            (Some(Lifetime::CurrentWork), None, ids(&["mem_report"]))
-        );
-        assert_eq!(
-            parse("current_work", json!({})),
-            (Some(Lifetime::CurrentWork), None, ids(&[]))
-        );
-        assert_eq!(
-            parse("status", json!({"replaces": "mem_rule"})),
-            (Some(Lifetime::Status), None, ids(&["mem_rule"]))
-        );
-        assert_eq!(
-            parse("lasting", json!({"replaces": "mem_rule"})),
-            (Some(Lifetime::Lasting), Some("mem_rule".into()), ids(&[]))
-        );
+                "current_work",
+                json!({"replaces": "mem_rule"}),
+                Request,
+                None,
+                vec!["mem_rule"],
+            ),
+            (
+                "current_work",
+                json!({"contests": ["mem_rule"]}),
+                Request,
+                None,
+                vec!["mem_rule"],
+            ),
+            // One automatic target among the contests is enough.
+            (
+                "current_work",
+                json!({"contests": ["mem_report", "mem_rule"]}),
+                Request,
+                None,
+                vec!["mem_report", "mem_rule"],
+            ),
+            // A statement that ends a plan and contests a rule is stored
+            // labeled and still ends the plan.
+            (
+                "current_work",
+                json!({"replaces": "mem_plan", "contests": ["mem_rule"]}),
+                Request,
+                Some("mem_plan"),
+                vec!["mem_rule"],
+            ),
+            // Live work in progress is served automatically.
+            (
+                "current_work",
+                json!({"contests": ["mem_plan"]}),
+                Request,
+                None,
+                vec!["mem_plan"],
+            ),
+            (
+                "current_work",
+                json!({"replaces": "mem_plan"}),
+                CurrentWork,
+                Some("mem_plan"),
+                vec![],
+            ),
+            (
+                "current_work",
+                json!({"contests": ["mem_report"]}),
+                CurrentWork,
+                None,
+                vec!["mem_report"],
+            ),
+            ("current_work", json!({}), CurrentWork, None, vec![]),
+            (
+                "status",
+                json!({"replaces": "mem_rule"}),
+                Status,
+                None,
+                vec!["mem_rule"],
+            ),
+            (
+                "lasting",
+                json!({"replaces": "mem_rule"}),
+                Lasting,
+                Some("mem_rule"),
+                vec![],
+            ),
+        ] {
+            assert_eq!(
+                classed(lifetime, links.clone()),
+                (Some(class), replaces.map(str::to_string), ids(&contests)),
+                "{lifetime} {links}"
+            );
+        }
     }
 
     /// A question that names a statement as replaced takes no claim on it,

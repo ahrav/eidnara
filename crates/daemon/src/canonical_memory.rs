@@ -1408,25 +1408,30 @@ mod tests {
             decision.payload.rationale = rationale.to_string();
             (row, decision)
         };
-        // The rows arrive in serving order, by the commit of each row. The
-        // statement `tie-b` was first recorded with `tie-a` and contested
-        // since, so its row is the newest.
-        let stored = [
+        // The rows arrive in serving order, by the commit of each row.
+        // Three statements were first recorded by commit 7, and contests
+        // have since written two of them again, in the order `tie-a` and
+        // then `tie-b`.
+        let tied = |object_id: &str, created: i64| {
             work(
-                "tie-b",
-                12,
+                object_id,
+                created,
                 serde_json::json!({"contested_by": {"memory": "obs", "stated_seq": 7}}),
-            ),
+            )
+        };
+        let stored = [
+            tied("tie-b", 12),
+            tied("tie-a", 11),
             work(
                 "contested",
                 10,
                 serde_json::json!({"contested_by": {"memory": "obs", "stated_seq": 2}}),
             ),
             work("settled", 9, serde_json::json!({"stated_seq": 1})),
-            work("tie-a", 7, serde_json::json!({})),
+            work("tie-c", 7, serde_json::json!({})),
             work("plain", 5, serde_json::json!({})),
         ];
-        let expected = ["tie-a", "tie-b", "plain", "contested", "settled"];
+        let expected = ["tie-a", "tie-b", "tie-c", "plain", "contested", "settled"];
         let section = |budget: f64| -> Vec<String> {
             let (rows, decisions) = stored.iter().cloned().unzip();
             injectable_snapshot(response(rows, decisions), budget)
@@ -1445,7 +1450,10 @@ mod tests {
             assert_eq!(kept, expected[..kept.len()], "budget {budget}");
             lengths.insert(kept.len());
         }
-        assert_eq!(lengths.into_iter().collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            lengths.into_iter().collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5, 6]
+        );
     }
 
     /// The block renders the rows of `CURRENT_WORK_SECTION` in the supplied

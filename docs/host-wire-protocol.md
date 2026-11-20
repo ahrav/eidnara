@@ -1322,10 +1322,13 @@ made in answers it, and the user's next message says so when it did not. An appr
 the work an earlier session left open, so the statement is delivered
 until a later statement of the user ends it (below), within the bounds of
 the block's share for work in progress and of the delivery read (both
-below). A `current_work` proposal whose contests, once its links are
-checked (below), name a fact served on `auto_inject` is an instruction for
-one occasion: its fact is stored with `lifetime` `request`, and the contest
-rule (below) shows the fact it contests beside it. A captured fact's rationale
+below). A `current_work` fact whose plan is frozen contesting a fact
+served on `auto_inject`, after the links of its source and its batch are
+settled (below), is an instruction for one occasion: it is stored with
+`lifetime` `request`, and the contest rule (below) shows it on the line of
+the fact it contests. A `current_work` fact frozen with no such contest,
+because it names none, contests only labeled facts, or another fact of its
+source or batch holds the contest, keeps its class. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1464,7 +1467,7 @@ each other such target it names in `replaces` or `also_replaces` becomes a conte
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as one of those three, leave the rule approved
 and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets; the
-exception or correction is stored labeled, with `lifetime` `request` when the extractor classed it `current_work`. A
+exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen with that contest (above). A
 whole statement of the user of any class that names live work in progress as
 its `replaces` target, or as an `also_replaces` target beside a `replaces`
 target it keeps, ends it: a remark that the work is finished, a
@@ -1478,7 +1481,8 @@ work in progress stays delivered with the statement shown on its line. When the
 `replaces` target is a fact served on `auto_inject` that the statement may not
 replace under the rule above, every target becomes a contest, live work in
 progress among them. The ending statement is stored as
-its own fact under its own class, so a `status` remark and a cancelling
+its own fact under its own class, a `current_work` statement under the class
+its frozen plan gives it (above), so a `status` remark and a cancelling
 `request` are labeled and a newer plan classed `current_work` is the live
 work in progress when the Kernel accepts its approval, and a labeled fact
 when it refuses. The ended
