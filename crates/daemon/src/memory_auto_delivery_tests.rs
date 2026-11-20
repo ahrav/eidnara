@@ -1965,6 +1965,11 @@ async fn a_source_the_provider_keeps_stopping_is_sent_alone_then_without_stored_
         .unwrap();
     let (last, prompt) = issue(&handler, FIRST, "s1").await;
     assert_eq!(prompt_texts(&prompt), [stopped]);
+    assert_eq!(
+        ids_containing(prompt["existing_memories"].as_array().unwrap(), THURSDAY).len(),
+        1,
+        "a fresh allowance reads the stored rows again: {prompt}"
+    );
     stop_answer(&handler, FIRST, "s1", &last).await;
     let (attempts, _, error, abandoned, text, _) = queue_row(&store, first);
     assert_eq!((attempts, error.as_deref()), (9, Some("model_failed")));
