@@ -2686,7 +2686,7 @@ pub mod group_registry {
         }
     }
 
-    /// The most a registry record is read for. A record this host writes is far smaller, and a longer file fails its checksum.
+    /// The most a registry record is read for. A record this host writes is a few hundred bytes.
     const RECORD_READ_CAP: u64 = 64 * 1024;
 
     /// Reads the record at `path` through one descriptor: a regular file owned by this user, opened without following a symlink and read up to [`RECORD_READ_CAP`]. `Ok(None)` means another process removed the record after the directory was listed.
@@ -2911,7 +2911,7 @@ pub mod group_registry {
             if !published {
                 continue;
             }
-            // A removal that finishes between the listing and a read answers `NotFound`.
+            // The registry holds directories beside its records, and only a regular file is a record. A removal that finishes between the listing and a read answers `NotFound`.
             match fs::symlink_metadata(&path) {
                 Ok(meta) if meta.is_file() => {}
                 Ok(_) => continue,

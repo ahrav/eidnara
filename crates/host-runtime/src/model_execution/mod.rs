@@ -723,11 +723,11 @@ mod tests {
             (1, 1),
             "a job still running at the end of the grace leaves the verdicts as counted"
         );
-        // One class has an entry on disk at the end of the grace. The job may still write an entry of the other class, so that class keeps its verdict.
+        // A run directory is on disk at the end of the grace and only a record verdict was counted. The entry is reported, and the record class keeps its verdict because the job may still write a record.
         let entry =
             subprocess::PrivateDir::create(&root, "model_execution-pi").expect("private run dir");
         assert_eq!(
-            settle(component.residue_on_disk((1, 1)), |_| {}).await,
+            settle(component.residue_on_disk((0, 1)), |_| {}).await,
             (1, 1),
             "beside a running job each class reports the larger of its verdicts and its entries"
         );
