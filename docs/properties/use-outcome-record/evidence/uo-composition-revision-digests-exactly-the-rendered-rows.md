@@ -31,13 +31,13 @@ revision.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
   (`crates/daemon/src/canonical_memory.rs:1263`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1483`);
+  (`crates/daemon/src/canonical_memory.rs:1489`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1500`);
+  (`crates/daemon/src/canonical_memory.rs:1506`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1522`);
+  (`crates/daemon/src/canonical_memory.rs:1528`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1449`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1455`). Status: unaudited.
 
 ## Failure scenario
 

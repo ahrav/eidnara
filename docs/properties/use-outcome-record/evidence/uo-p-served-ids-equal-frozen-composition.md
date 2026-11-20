@@ -29,7 +29,7 @@ revision.
   `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
   (`crates/daemon/src/canonical_memory.rs:1225`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1522`);
+  (`crates/daemon/src/canonical_memory.rs:1528`);
   `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
   (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
   `duplicate_and_malformed_serves_are_refused_without_rows`
