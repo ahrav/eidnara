@@ -1268,9 +1268,12 @@ word behind another mark there, such as a bracket or a dash, is asked the
 question of a capitalized paragraph; one capitalized sentence start anywhere
 in the paragraph keeps the rule for capitalized text, since its lowercase
 first letter may be a tool name; in such a lowercase paragraph a period
-stays inside its sentence after a run of periods, after a title of the list
+stays inside its sentence in a run of periods, as in `wait...`, when it is a
+word of its own, as each period of `. . .` is, after a title of the list
 below in any letter case, and after `etc`, `vs`, `cf`, `approx`, `incl`, or
-`esp`; in such a lowercase paragraph a sentence also continues past its
+`esp`, while a single period behind a word that holds no letter or digit,
+such as a code span of symbols, ends its sentence; in such a lowercase
+paragraph a sentence also continues past its
 closing mark and whitespace into `unless`, `except`, `but`, `though`,
 `although`, `only if`, `only when`, `only for`, `only on`, or `only in`,
 written in lowercase with one space between two words and followed by a

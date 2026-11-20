@@ -2445,13 +2445,18 @@ const LOWERCASE_ABBREVIATIONS: [&str; 6] = ["etc", "vs", "cf", "approx", "incl",
 /// Whether the period after `word` stays inside its sentence in a paragraph
 /// written without sentence capitals, beyond what [`is_abbreviation`]
 /// keeps in every paragraph: a title of [`TITLES`] in any letter case, as
-/// in `dr. lee`, one of [`LOWERCASE_ABBREVIATIONS`], or a word that is
-/// only periods, as the last dots of `wait...` are. `word` is read with or
-/// without its period.
+/// in `dr. lee`, one of [`LOWERCASE_ABBREVIATIONS`], a period that
+/// follows another, as the last dots of `wait...` do, or a word written
+/// with periods alone, as each period of `. . .` is. A single period
+/// behind marks that hold no letter or digit, as in `` `/`. ``, ends its
+/// sentence. `word` is read with or without its period.
 fn keeps_period_in_lowercase(word: &str) -> bool {
+    // The lists name words without the marks around them, so the marks are
+    // trimmed after the word is read as written.
+    let periods_alone = word.chars().all(|ch| ch == '.');
     let word = word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
     let single = word.trim_end_matches('.');
-    single.is_empty()
+    periods_alone
         || word.ends_with("..")
         || TITLES
             .iter()
@@ -6103,6 +6108,8 @@ mod tests {
         let titled = "ask dr. lee before merging. keep the changelog current.";
         let listed = "run the tests, the linter etc. then push. tag the release.";
         let trailing = "use tabs... not spaces. keep lines short.";
+        let slashed = "the root path is `/`. keep the lockfile committed.";
+        let spaced = "use tabs . . . not spaces. keep lines short.";
         for (text, quote, whole) in [
             (typed, "keep the lockfile committed.", true),
             (typed, "use pnpm for installs.", true),
@@ -6175,6 +6182,42 @@ mod tests {
             (titled, "keep the changelog current.", true),
             (listed, "then push.", false),
             (listed, "tag the release.", true),
+            // A single period ends its sentence after a word that holds no
+            // letter or digit, such as a code span of symbols or an emoji.
+            (slashed, "the root path is `/`.", true),
+            (slashed, "the root path is `/`", true),
+            (slashed, "keep the lockfile committed.", true),
+            (
+                "pass flags after `--`. keep the lockfile committed.",
+                "keep the lockfile committed.",
+                true,
+            ),
+            (
+                "thanks \u{1f44d}. keep the lockfile committed.",
+                "keep the lockfile committed.",
+                true,
+            ),
+            // A period written as a word of its own stays inside its
+            // sentence, as the periods of a spaced ellipsis do.
+            (spaced, "not spaces.", false),
+            (spaced, "use tabs . . .", false),
+            (spaced, "use tabs .", false),
+            (spaced, "keep lines short.", true),
+            (
+                "use tabs . not spaces. keep lines short.",
+                "not spaces.",
+                false,
+            ),
+            (
+                "use tabs. . . not spaces. keep lines short.",
+                "not spaces.",
+                false,
+            ),
+            (
+                "pass flags after `--`... keep the lockfile committed.",
+                "keep the lockfile committed.",
+                false,
+            ),
             (
                 "avoid heavy tools, e.g. docker for local tests.",
                 "docker for local tests.",
@@ -9151,15 +9194,25 @@ mod tests {
     #[test]
     fn sentence_boundaries_are_read_once_however_often_the_quote_occurs() {
         let unbroken = "x".repeat(16_384);
-        let spaced = format!("{}a", ". ".repeat(8_192));
-        for (text, quote) in [(unbroken.as_str(), "x"), (spaced.as_str(), ".")] {
+        // The letter that decides whether a sentence ends at each `!` is the
+        // last character of the message.
+        let spaced = format!("A! {}a", "! ".repeat(8_192));
+        for (text, quote, scans) in [
+            (unbroken.as_str(), "x", false),
+            (spaced.as_str(), "!", true),
+        ] {
             let before = BOUNDARY_BYTES.with(std::cell::Cell::get);
-            assert!(!quotes_whole_statements(&Prose::of(text), quote));
+            assert!(!whole_sentences(&Prose::of(text), quote, true));
             let read = BOUNDARY_BYTES.with(std::cell::Cell::get) - before;
             assert!(
                 read <= 2 * text.len(),
                 "{quote:?} read {read} bytes beside its occurrences in a {}-byte message",
                 text.len()
+            );
+            assert_eq!(
+                read >= text.len() / 2,
+                scans,
+                "{quote:?} read {read} bytes to the next letter"
             );
         }
     }
