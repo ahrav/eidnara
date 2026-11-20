@@ -690,7 +690,7 @@ text, an identity, a path, a digest, or a project.
 | `expiry_retired`, `expiry_retained` | unsigned integer | harness captures past their retention deadline: retired outright, and retired while a citation kept their evidence |
 | `decisions_cited`, `decisions_source_capture_off`, `decisions_source_id_unjoinable`, `decisions_publish_budget_expired`, `decisions_descriptor_not_found` | unsigned integer | memory-capture decisions committed, by citation reason: cited a captured message; source or memory consent off; a hashed source id that names no descriptor; the session's source publish was refused, ended on its deadline, or outlasted its 5 s budget while the submit waited, and the lookup found no descriptor; no live descriptor of the message |
 | `decisions_anchored`, `decisions_head_unavailable` | unsigned integer | memory-capture decisions committed, by anchor reason: anchored at the frozen checkout HEAD; no readable HEAD |
-| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record or at the admission that rests on it; every eligible user statement that the labeled commit writes, one whose `lifetime` is `lasting`, `unsettled`, `current_work`, or absent, is counted |
+| `decisions_approval_refused` | unsigned integer | user statements a plan committed as labeled memories for explicit search after the Kernel's admission policy refused the plan's approving commit at a statement record or at the admission that rests on it; every eligible user statement that the labeled commit writes, one whose `lifetime` is `lasting`, `unsettled`, or absent, or is `current_work` on a fact that contests none, is counted |
 | `oldest_deferred_age_ms` | unsigned integer or `null` | `null` means no unit is pending |
 
 The same integer rules as `kernel` apply: every integer MUST be no greater
@@ -1310,18 +1310,21 @@ leaves undecided.
 A value outside these five is a schema defect of its source's decision, and
 a `lifetime` given as `null` reads as absent. The class withholds approval
 and grants none: the user's statement, as the rule above defines it, is
-eligible for approval when its `lifetime` is `lasting`, `unsettled`, `current_work`, or absent. For each eligible statement that capture writes as a fact, the approving attempt writes a statement record in the
+eligible for approval when its `lifetime` is `lasting`, `unsettled`, or absent, or is `current_work` and the fact it is stored as contests no fact (below). For each eligible statement that capture writes as a fact, the approving attempt writes a statement record in the
 `user-statements` domain, an `adr_accepted` decision admitted as explicit user
 text, and then admits the fact on that approval; the statement is approved, and the Kernel serves it on
 automatic surfaces, once the Kernel accepts both the record and the admission that rests on it (the refusal rule below covers the other case). A user's statement whose `lifetime` is `request` or
-`status` is stored as a labeled memory for explicit search under the rules
+`status`, and one whose `lifetime` is `current_work` that contests a fact, is stored as a labeled memory for explicit search under the rules
 of every labeled memory; it has no statement record, and
 `decisions_approval_refused` leaves it uncounted: the turn a request was
 made in answers it, and the user's next message says so when it did not. An approved statement whose
 `lifetime` is `current_work` is live work in progress: a later session needs
 the work an earlier session left open, so the statement is delivered
-until a later statement of the user ends it (below) or newer work in
-progress fills the block's share for it (below). A captured fact's rationale
+until a later statement of the user ends it (below), within the bounds of
+the block's share for work in progress and of the delivery read (both
+below). Work in progress that contests a fact is a correction for one task:
+it is stored labeled and shown beside that fact as its contest, so live work
+in progress holds no contest and its end changes no other fact. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1351,12 +1354,11 @@ Each reference memory offered to the extractor carries `user_statement`, true
 when the Kernel serves it on automatic surfaces, which a user's recorded
 statement is, and `current_work: true` when it is live work in progress. A proposal that names
 `duplicate_of` writes no fact, with one exception, may still record a
-contest through the fact it duplicates, and can settle a contest when it is the
-user's eligible word-for-word statement of a contested fact, under the conditions below (both below): a user's statement that
+contest through the fact it duplicates, unless that fact is live work in progress, and can settle a contest when it is the
+user's word-for-word statement of a contested fact whose `lifetime` is `lasting`, `unsettled`, or absent, under the conditions below (both below): a user's statement that
 duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
-its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when its
-`lifetime` is `request` or `status`, the duplicated memory stays, and the
+its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when it is not eligible for approval, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; a statement whose `lifetime`
 is `current_work`, `request`, or `status` settles no contest, and a `request` or `status` statement writes no fact when the memory it duplicates
 is a fact capture wrote under the `User stated` label whose rationale holds
@@ -1384,10 +1386,10 @@ progress renders after the categories in one element,
 user left open in earlier sessions that no later statement of the user ended,
 that they set no standing rule, and that the repository shows whether one is
 finished; its lines are newest first by the commit that first recorded each
-statement, statements of one commit in fact-id order, so a contest, which
-supersedes the fact it marks, leaves a
-statement's place as it was among the work in progress the read returned,
-and a contested line of it is rendered
+statement, so a contest, which supersedes the fact it marks, leaves a
+statement's place among the statements of other commits that the read
+returned as it was; statements of one commit are in fact-id order, which
+follows the fact's current id. A contested line of it is rendered
 as any contested statement is. The read counts work in progress
 against bounds of its own, a quarter of the read's row and byte bounds,
 taken in the read's order, which is by the commit that wrote each fact's
@@ -1417,8 +1419,8 @@ on `auto_inject` in the plain newest window and in the delivery of each
 session whose messages the batch holds; a fact older than every window is
 not offered. A user message may correct earlier facts, and only
 the user's statement may replace a fact served on `auto_inject`: its fact
-supersedes the captured fact it `replaces` (which must share its category,
-or be live work in progress, and must share at least one content word), retires each further fact it names
+supersedes the captured fact it `replaces` (which must share its category
+and at least one content word), retires each further fact it names
 in `also_replaces` (each must share the replaced fact's category and at
 least half of its distinct content words, of which it must have at least
 one; a content word is a run of letters and digits of three or more
@@ -1460,18 +1462,20 @@ on `auto_inject` except live work in progress:
 each other such target it names in `replaces` or `also_replaces` becomes a contest
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as one of those three, leave the rule approved
-and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets. A
+and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets; the
+exception or correction is stored labeled, whichever of the three classes it has. A
 whole statement of the user of any class that names live work in progress as
 its `replaces` target, or as an `also_replaces` target beside a `replaces`
 target it keeps, ends it: a remark that the work is finished, a
 cancellation, and a newer plan each do. Lines capture appends to the
 statement's stored text leave that judgment as it is, since it reads the
-quotation, and the statement's category may differ from the work's. When the
+quotation. The other checks of a replacement apply as they do to any
+statement: a `replaces` target of another category is released with its
+`also_replaces` targets (below), and the statement then contests the work in
+progress, which stays delivered with the statement shown on its line. When the
 `replaces` target is a fact served on `auto_inject` that the statement may not
 replace under the rule above, every target becomes a contest, live work in
-progress among them; when the `replaces` target fails another check of a
-replacement, the `also_replaces` targets are released as they are for any
-statement. The ending statement is stored as
+progress among them. The ending statement is stored as
 its own fact under its own class, so a `status` remark and a cancelling
 `request` are labeled and a newer plan classed `current_work` is the live
 work in progress when the Kernel accepts its approval, and a labeled fact
@@ -1481,15 +1485,7 @@ labeled, whose rationale holds `ended_by`, an object with `memory` (the
 ending fact's id, as it was when the statement ended) and `session` (the session whose message ended it), and
 no `contested_by`; its statement record is retired, and it cites again the
 evidence a contested fact's successor cites (below). Explicit search serves
-the ended fact and no automatic surface does. A contest is shown while the
-fact it names is served, so a contest that work in progress placed on
-another statement lasts until that work in progress is superseded: by its
-end, and by a contest or a settlement of the work in progress itself. A
-statement holds one contest, and work in progress that names a statement
-whose contest a served fact holds leaves that contest as it is. The
-contested statement therefore renders after the work in progress as it did
-before it, and it is offered to the extractor as contested (below) until a
-statement of the user that outlives its task repeats or replaces it. Work in progress is therefore
+the ended fact and no automatic surface does. Work in progress is therefore
 live in a later session when its own session, and every session since,
 ended with no statement of the user ending it: a request the user reports
 finished in the session that made it reaches no later session, and a

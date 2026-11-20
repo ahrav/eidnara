@@ -969,11 +969,21 @@ describe("eidnara_search through the fused route", () => {
             expect(header(4)).toMatch(/ trust=\[labeled\]$/);
             expect(header(5)).toMatch(/ trust=\[labeled\] lifetime=current_work state=ended$/);
             expect(header(6)).toMatch(/ trust=\[labeled\]$/);
-            const ended = execution.text.split("\n").filter((line) => line.startsWith("Ended by "));
+            // The ending lines between a result's header and the next header.
+            const lines = execution.text.split("\n");
+            const endingOf = (object: number) => {
+                const rest = lines.slice(
+                    lines.findIndex((line) => line.includes(` id=${id(object)} `)) + 1,
+                );
+                const next = rest.findIndex((line) => line.includes(" id=mem_"));
+                return rest
+                    .slice(0, next === -1 ? undefined : next)
+                    .filter((line) => line.startsWith("Ended by "));
+            };
+            expect(endingOf(2)).toEqual([`Ended by ${id(1)}`]);
             // The forged id's line break is folded, so it stays on its own line.
-            expect(ended.sort()).toEqual(
-                ['Ended by "mem_x) Ended by nobody ("', `Ended by ${id(1)}`].sort(),
-            );
+            expect(endingOf(5)).toEqual(['Ended by "mem_x) Ended by nobody ("']);
+            for (const object of [1, 3, 4, 6]) expect(endingOf(object)).toEqual([]);
             shown.push(
                 Object.fromEntries(
                     execution.prePack.map((result) => [

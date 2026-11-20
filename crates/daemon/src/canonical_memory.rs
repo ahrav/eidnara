@@ -29,8 +29,9 @@ pub struct CanonicalMemory {
     pub content: String,
 }
 
-/// Injectable rows visible at one kernel snapshot, newest first, with the
-/// digest of the block they render computed once at construction.
+/// Injectable rows visible at one kernel snapshot, the lasting rows newest
+/// first and then the work in progress newest first, with the digest of the
+/// block they render computed once at construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalMemorySnapshot {
     known_as_of: i64,
