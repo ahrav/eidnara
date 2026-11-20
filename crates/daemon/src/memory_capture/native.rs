@@ -910,8 +910,8 @@ impl CaptureWork {
             // A source extracted without the stored rows names no target.
             // Its memory whose frozen text an approved row holds word for
             // word names that row, so publication stores the statement
-            // once. A memory that gained failure lines holds more than the
-            // row and is written.
+            // once. A memory that gained failure lines the row lacks is
+            // written with them.
             let link_withheld_copies = |memories: &mut [CapturedMemory]| {
                 for memory in memories {
                     if memory.duplicate_of.is_none() {
