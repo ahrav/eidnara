@@ -3130,6 +3130,25 @@ async fn a_contest_placed_by_work_in_progress_lasts_until_that_work_is_supersede
         .await;
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
         assert!(!rule_line(&block).contains("contested"), "{ends}: {block}");
+        // The extractor is offered the stored contest record, which the
+        // rule keeps.
+        let note = "The importer reads its batch size from the environment.";
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m4", "assistant", note)],
+            |_, existing| {
+                let rule: Vec<&Value> = existing
+                    .iter()
+                    .filter(|memory| memory["content"] == stated(INTEGRATION_RULE).as_str())
+                    .collect();
+                assert_eq!(rule.len(), 1, "{existing:?}");
+                assert_eq!(rule[0]["contested"], true, "{ends}");
+                vec![fact(note)]
+            },
+        )
+        .await;
         let work = block_element(&block, "CURRENT_WORK");
         if ends {
             assert_eq!(work, None, "{block}");
@@ -3449,6 +3468,102 @@ async fn work_in_progress_is_read_under_its_own_caps() {
     let two = size(4) + size(3);
     assert_eq!(read(100, 4 * two), (vec![4, 3], 4, true));
     assert_eq!(read(100, 4 * two - 4), (vec![4], 4, true));
+}
+
+/// The delivery read takes its rows in serving order, by the commit that
+/// wrote each fact's current row, and bounds three things. It ends for a
+/// reader when the reader's caps on lasting statements are reached, so a
+/// plan older than that row is left out. A contest writes a plan's row
+/// again, so at a full work cap a contested older plan is read before a
+/// newer one. The page limit counts every row the read judges, so enough
+/// newer plans end the read before it reaches an older statement.
+#[tokio::test]
+async fn the_delivery_read_bounds_the_work_in_progress_it_returns() {
+    let read = |handler: &Handler, project: &Path, rows: usize| {
+        let kernel = handler.kernel.kernel_store().unwrap();
+        let response = crate::canonical_memory::read_other_sessions(
+            &kernel,
+            &kernel_routes::ProjectBinding::new(project),
+            &[Some("reader")],
+            kernel.tip().unwrap(),
+            (rows, 1 << 20),
+        )
+        .unwrap();
+        let summaries: Vec<String> = response
+            .rows
+            .iter()
+            .map(|row| {
+                response.decisions[&row.object.object_id]
+                    .payload
+                    .summary
+                    .clone()
+            })
+            .collect();
+        (summaries, response.truncated)
+    };
+    let plan = |index: usize| format!("Next, migrate importer number {index} to the new queue.");
+    let one_by_one = |statements: Vec<(String, &'static str)>| async move {
+        let (handler, _store, dir, project) = delivery_handler(capture_config()).await;
+        for (index, (text, lifetime)) in statements.iter().enumerate() {
+            let id = format!("m{index}");
+            capture(
+                &handler,
+                FIRST,
+                "s1",
+                &[(id.as_str(), "user", text.as_str())],
+                |text, _| vec![classed(text, lifetime)],
+            )
+            .await;
+        }
+        (handler, dir, project)
+    };
+    let rule = |index: usize| numbered(index + 1, "billing")[index].1.clone();
+
+    // A plan older than five lasting statements, read four rows at a time.
+    let mut statements = vec![(plan(0), "current_work")];
+    statements.extend((0..5).map(|index| (rule(index), "lasting")));
+    let (handler, _dir, project) = one_by_one(statements).await;
+    let newest_four: Vec<String> = (1..5).rev().map(|index| stated(&rule(index))).collect();
+    assert_eq!(read(&handler, &project, 4), (newest_four, true));
+    let (all, truncated) = read(&handler, &project, 8);
+    assert!(all.contains(&stated(&plan(0))) && all.len() == 6 && !truncated);
+
+    // Two plans, the older one contested after the newer was stated, read
+    // with room for one plan.
+    let observed = "Importer number 0 already reads from the new queue.";
+    let (handler, _dir, project) =
+        one_by_one(vec![(plan(0), "current_work"), (plan(1), "current_work")]).await;
+    assert_eq!(read(&handler, &project, 4), (vec![stated(&plan(1))], true));
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("o1", "assistant", observed)],
+        |_, existing| {
+            vec![Extracted {
+                contests: ids_containing(existing, "importer number 0"),
+                ..fact(observed)
+            }]
+        },
+    )
+    .await;
+    let (rows, truncated) = read(&handler, &project, 4);
+    assert!(truncated);
+    assert_eq!(
+        rows.iter()
+            .filter(|summary| summary.starts_with("User stated"))
+            .collect::<Vec<_>>(),
+        [&stated(&plan(0))]
+    );
+
+    // Thirty-three plans newer than one lasting statement, read four rows
+    // at a time: eight pages hold thirty-two rows.
+    let mut statements = vec![(rule(0), "lasting")];
+    statements.extend((0..33).map(|index| (plan(index), "current_work")));
+    let (handler, _dir, project) = one_by_one(statements).await;
+    assert_eq!(read(&handler, &project, 4), (vec![stated(&plan(32))], true));
+    let (all, _) = read(&handler, &project, 64);
+    assert!(all.contains(&stated(&rule(0))), "{all:?}");
 }
 
 /// The block's budget is 4,000 tokens, and the work in progress takes at

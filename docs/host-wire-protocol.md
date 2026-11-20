@@ -1376,7 +1376,7 @@ and leaves out facts captured from that session's own messages. Those facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
 they take no place from another session's facts. The read loads at most
 eight pages of that size, the payloads of up to 64 MiB of a session's own
-newer facts; past that it stops, keeps the facts it had selected, and
+newer facts and of work in progress past its bounds (below); past that it stops, keeps the facts it had selected, and
 leaves the older facts out of the block. A fact whose stored payload alone
 passes 8 MiB is left unloaded and ends the read the same way. Live work in
 progress renders after the categories in one element,
@@ -1488,8 +1488,7 @@ end, and by a contest or a settlement of the work in progress itself. A
 statement holds one contest, and work in progress that names a statement
 whose contest a served fact holds leaves that contest as it is. The
 contested statement therefore renders after the work in progress as it did
-before it. `existing_memories[].contested` reads the stored contest, so a
-statement whose contest is no longer shown is offered as contested until a
+before it, and it is offered to the extractor as contested (below) until a
 statement of the user that outlives its task repeats or replaces it. Work in progress is therefore
 live in a later session when its own session, and every session since,
 ended with no statement of the user ending it: a request the user reports
@@ -1619,7 +1618,8 @@ its own fact and the contest stays. A statement classed `current_work`, `request
 statement of another text is stored under its own class. A statement of any
 class that ends contested work in progress (above) ends that statement, and
 the ended fact holds no contest. The extractor is
-told which reference memories are `contested`. A host `kernel.commit` that supersedes or retires a
+told which reference memories are `contested`; the flag reads the stored
+`contested_by` record, whether or not a reader still shows that contest. A host `kernel.commit` that supersedes or retires a
 decision admitted as explicit user text, or one admitted on an approval,
 answers `invalid:admission_policy`. `memory.auto_inject.enabled` is user-only
 and defaults to true; the daemon ignores a project-tier value with a warning,
