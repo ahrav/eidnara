@@ -12,11 +12,11 @@ its runnable checks.
 
 - `crates/host-runtime/src/model_execution/aws_refresh.rs:38` sets
   `EXPIRY_SKEW` to 60 seconds.
-- `aws_refresh.rs:363` `Inner::covers` requires
+- `aws_refresh.rs:369` `Inner::covers` requires
   `lease.usable_until > deadline + EXPIRY_SKEW` on the monotonic clock and
   `lease.expires_at_wall > wall + remaining + EXPIRY_SKEW` on the wall clock,
   where `remaining` is the deadline's distance from now. Both halves must hold.
-- `aws_refresh.rs:1105` `lifetime_must_exceed_the_deadline_plus_skew_strictly`
+- `aws_refresh.rs:1115` `lifetime_must_exceed_the_deadline_plus_skew_strictly`
   pushes rows of `model + skew - 1`, `model + skew`, and `model + skew + 1`
   seconds; only the last acquires. A refused row yields
   `SourceError::InsufficientLifetime` and the next acquisition yields
@@ -59,8 +59,8 @@ rather than only that an error was returned.
 
 ### Q: Does the predicate hold at every spawn, or only at acquisition?
 
-- Sources examined: `aws_refresh.rs:208` (the acquisition contract), `:358`
-  (`covers` at acquisition), `:612` `recheck_before_spawn` (`covers` again
+- Sources examined: `aws_refresh.rs:208` (the acquisition contract), `:364`
+  (`covers` at acquisition), `:618` `recheck_before_spawn` (`covers` again
   before the child starts, returning a `Transient` `SourceFailed` when the
   lease stopped covering the deadline).
 - Findings: `covers` runs at acquisition and again in `recheck_before_spawn`;

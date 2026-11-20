@@ -8,12 +8,12 @@ a link, not a proof. Locations are verified against the #872 branch.
 
 | Check | Location | Covers | Status |
 | --- | --- | --- | --- |
-| `lifetime_must_exceed_the_deadline_plus_skew_strictly` | `crates/host-runtime/src/model_execution/aws_refresh.rs:1105` | threshold minus one, equal, plus one; the row at the skew; cooldown after a refused row | unaudited |
-| `clock_rollback_never_extends_life_and_a_forward_jump_shortens_it` | `aws_refresh.rs:1138` | monotonic bound after a wall rollback; a forward wall jump shortens life | unaudited |
+| `lifetime_must_exceed_the_deadline_plus_skew_strictly` | `crates/host-runtime/src/model_execution/aws_refresh.rs:1115` | threshold minus one, equal, plus one; the row at the skew; cooldown after a refused row | unaudited |
+| `clock_rollback_never_extends_life_and_a_forward_jump_shortens_it` | `aws_refresh.rs:1148` | monotonic bound after a wall rollback; a forward wall jump shortens life | unaudited |
 | `profile_rows_without_lifetime_start_no_child` | `crates/host-runtime/tests/model_execution_subprocess.rs:4073` | a row five seconds short and a row with no lifetime start no child on either adapter | unaudited |
 | `a_wall_jump_after_acquisition_refuses_the_spawn` | `model_execution_subprocess.rs:4140` | a wall jump between acquisition and the spawn recheck | unaudited |
 
-Production guard: `recheck_before_spawn` at `aws_refresh.rs:612` re-applies
+Production guard: `recheck_before_spawn` at `aws_refresh.rs:618` re-applies
 `covers` before the child starts.
 
 ## Model-effect certainty (N8)
@@ -59,7 +59,7 @@ None found: a check that counts credential I/O across a health read.
 | `the_outage_judge_fires_on_each_failure` | `qualification.rs:1309` | each `OutageFailure` variant | unaudited |
 | `the_lineage_audit_fires_on_duplicates_overlaps_loss_and_gaps` | `qualification.rs:1399` | each `LineageViolation` kind | unaudited |
 | `only_a_complete_passing_run_on_the_dedicated_runner_qualifies` | `qualification.rs:1572` | host shortfalls, cgroup constraint, pending witnesses | unaudited |
-| `warm_acquisition_p99_stays_within_one_millisecond` | `crates/host-runtime/tests/model_execution_supervisor.rs:2152` | warm-path p99, release only, `#[ignore]` | unaudited |
+| `warm_acquisition_p99_stays_within_one_millisecond` | `crates/host-runtime/tests/model_execution_supervisor.rs:2288` | warm-path p99, release only, `#[ignore]` | unaudited |
 
 Production oracles: `gate` at `qualification.rs:459`, `OutageRun::judge` at
 `:731`, `audit_lineage` at `:922`, `QualificationReport::build` at `:994`.
