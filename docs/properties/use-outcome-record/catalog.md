@@ -161,13 +161,13 @@ served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
 (`crates/daemon/src/canonical_memory.rs:1263`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1489`);
+(`crates/daemon/src/canonical_memory.rs:1497`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1506`);
+(`crates/daemon/src/canonical_memory.rs:1514`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1528`);
+(`crates/daemon/src/canonical_memory.rs:1536`);
 `the_revision_reads_the_current_work_section_in_the_supplied_order`
-(`crates/daemon/src/canonical_memory.rs:1455`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:1463`). Status: unaudited.
 Impact: A revision that moved without a byte change would record a second serve
 of the same rows.
 Open questions:
@@ -1097,7 +1097,7 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
 (`crates/daemon/src/canonical_memory.rs:1225`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1528`);
+(`crates/daemon/src/canonical_memory.rs:1536`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`
