@@ -19,7 +19,7 @@ the existing canonical reader excludes before bounded selection.
   (`crates/kernel/src/admission.rs:3852-3856`). Unadmitted registry rows are
   not its returned candidates.
 - [admission.rs:3608-3620][visible] removes Hidden rows from the visible result.
-- [canonical_memory.rs:201-216][late] filters Visible/positive categories and
+- [canonical_memory.rs:197-212][late] filters Visible/positive categories and
   trims the memory budget after the route reader has applied its caps.
 
 ## Failure scenario
@@ -60,4 +60,4 @@ truncation. K3 supplies pressure; existing generic cap checks remain
 [filter]: ../../../../crates/daemon/src/kernel_routes/read.rs#L461-L488
 [sql]: ../../../../crates/kernel/src/admission.rs#L3923-L3952
 [visible]: ../../../../crates/kernel/src/admission.rs#L3608-L3620
-[late]: ../../../../crates/daemon/src/canonical_memory.rs#L201-L216
+[late]: ../../../../crates/daemon/src/canonical_memory.rs#L197-L212

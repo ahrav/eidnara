@@ -15,7 +15,7 @@ details do not authorize a weaker acceptance threshold.
   returns the unwrapped history body. Its positive-budget guard demotes
   oldest-first, bounded by `history_segments.len() * 5`, until the body fits
   its effective budget or is empty. This is the absolute body-budget boundary.
-- [memory_render.rs:239-248](../../../../../crates/daemon/src/memory_render.rs#L239-L248)
+- [memory_render.rs:238-247](../../../../../crates/daemon/src/memory_render.rs#L238-L247)
   divides the requested budget by the pressure multiplier before calling the
   renderer, then adds the session-history wrapper or its empty placeholder.
   [memory_render.rs:7-12](../../../../../crates/daemon/src/memory_render.rs#L7-L12)
