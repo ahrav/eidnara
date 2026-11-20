@@ -131,7 +131,7 @@ struct State {
     failure: Option<SourceError>,
     failures: u32,
     unresolved: bool,
-    /// A refresh retained its crash-ownership record.
+    /// How many refreshes stopped waiting for the removal of their helper's crash-ownership record.
     records_retained: usize,
     closed: bool,
 }
