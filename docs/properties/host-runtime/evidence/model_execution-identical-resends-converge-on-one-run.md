@@ -109,7 +109,7 @@ uncovered case is the post-eviction resend:
 1. Build a supervisor with `max_terminal_sessions` small or use
    `start_paused` time and advance past `TERMINAL_RETENTION`, as
    `every_path_returns_permits_and_charges_to_baseline` does at
-   `tests/model_execution_supervisor.rs:1617`.
+   `tests/model_execution_supervisor.rs:1795`.
 2. Send, complete, let the entry expire or be evicted, then resend the same
    bytes.
 3. Assert the resend returns a different run ID and `backend.starts() == 2`.
