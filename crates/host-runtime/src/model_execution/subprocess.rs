@@ -2686,10 +2686,10 @@ pub mod group_registry {
         }
     }
 
-    /// The most a registry record is read for. A record this host writes is a few hundred bytes.
+    /// The longest registry record a read accepts. A record this host writes is a few hundred bytes.
     const RECORD_READ_CAP: u64 = 64 * 1024;
 
-    /// Reads the record at `path` through one descriptor: a regular file owned by this user, opened without following a symlink and read up to [`RECORD_READ_CAP`]. `Ok(None)` means another process removed the record after the directory was listed.
+    /// Reads the record at `path` through one descriptor: a regular file owned by this user, opened without following a symlink. A file longer than [`RECORD_READ_CAP`] fails the read, so a record is interpreted whole. `Ok(None)` means another process removed the record after the directory was listed.
     fn read_pinned_record(path: &Path) -> io::Result<Option<String>> {
         use std::os::unix::fs::MetadataExt;
         let file = match fs::OpenOptions::new()
@@ -2708,7 +2708,15 @@ pub mod group_registry {
             ));
         }
         let mut text = String::new();
-        std::io::Read::read_to_string(&mut std::io::Read::take(file, RECORD_READ_CAP), &mut text)?;
+        std::io::Read::read_to_string(
+            &mut std::io::Read::take(file, RECORD_READ_CAP + 1),
+            &mut text,
+        )?;
+        if text.len() as u64 > RECORD_READ_CAP {
+            return Err(io::Error::other(
+                "a registry record is longer than the read cap",
+            ));
+        }
         Ok(Some(text))
     }
 
@@ -2897,9 +2905,15 @@ pub mod group_registry {
         for entry in fs::read_dir(root.run_root()?)? {
             let path = entry?.path();
             if run_dir_owner(&path)
-                .is_some_and(|owner| owner == (owner_boot.as_str(), owner_pid, owner_start))
+                .is_none_or(|owner| owner != (owner_boot.as_str(), owner_pid, owner_start))
             {
-                residue.run_dirs += 1;
+                continue;
+            }
+            // A removal that finishes after the listing answers `NotFound`, and that directory has left the disk.
+            match fs::symlink_metadata(&path) {
+                Ok(_) => residue.run_dirs += 1,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
             }
         }
         for entry in fs::read_dir(root.registry_dir()?)? {
@@ -2911,8 +2925,8 @@ pub mod group_registry {
             if !published {
                 continue;
             }
-            // The registry holds directories beside its records, and only a regular file is a record. A removal that finishes between the listing and a read answers `NotFound`.
-            match fs::symlink_metadata(&path) {
+            // The registry holds directories beside its records, and only an entry that resolves to a regular file is read, as in the startup sweep. A symlink to a regular file then fails the pinned read. A removal that finishes between the listing and a read answers `NotFound`.
+            match fs::metadata(&path) {
                 Ok(meta) if meta.is_file() => {}
                 Ok(_) => continue,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,

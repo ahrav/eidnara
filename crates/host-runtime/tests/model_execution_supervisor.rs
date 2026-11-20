@@ -1314,6 +1314,80 @@ async fn shutdown_keeps_the_runs_verdicts_when_a_published_record_cannot_be_inte
     );
 }
 
+/// The registry read interprets a record whole and through one pinned file, as the startup sweep does. A published symlink to a regular file and a record longer than the read cap both fail the read, so shutdown keeps the verdicts it counted.
+#[test]
+fn a_published_symlink_and_a_record_past_the_read_cap_fail_the_registry_read() {
+    use sha2::{Digest, Sha256};
+
+    let (state, root) = own_state_root();
+    let (dir, record) = own_entries(&root);
+    let registry = dir
+        .path()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("registry dir")
+        .to_owned();
+    let record_path = std::fs::read_dir(&registry)
+        .expect("registry lists")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| path.is_file())
+        .expect("own record");
+    let record_text = std::fs::read_to_string(&record_path).expect("record text");
+    dir.cleanup().expect("own run dir removed");
+    record.remove().expect("own record removed");
+    let clear = || {
+        assert_eq!(
+            group_registry::own_residue(&root).expect("registry reads"),
+            OwnResidue::default()
+        );
+    };
+    clear();
+
+    // A symlink to a directory resolves to no record and is passed over; one to a regular file is read and refused.
+    let linked = registry.join("linked");
+    std::os::unix::fs::symlink(state.path(), &linked).expect("symlink to a directory");
+    clear();
+    std::fs::remove_file(&linked).expect("symlink removed");
+    let target = state.path().join("target");
+    std::fs::write(&target, &record_text).expect("link target");
+    std::os::unix::fs::symlink(&target, &linked).expect("symlink to a file");
+    assert!(group_registry::own_residue(&root).is_err());
+    std::fs::remove_file(&linked).expect("symlink removed");
+    clear();
+
+    // This process's record, padded with a body line so that the record and its checksum end exactly at `length` bytes.
+    let padded = |length: usize| {
+        let mut lines: Vec<&str> = record_text.lines().collect();
+        lines.pop();
+        let mut body = lines.join("\n");
+        body.push('\n');
+        let padding = length - body.len() - 1 - 64 - 1;
+        body.push_str(&"x".repeat(padding));
+        body.push('\n');
+        let checksum: String = Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("{body}{checksum}\n")
+    };
+    const CAP: usize = 64 * 1024;
+    let at_cap = padded(CAP);
+    assert_eq!(at_cap.len(), CAP);
+    let oversized = registry.join("oversized");
+    std::fs::write(&oversized, &at_cap).expect("record at the cap");
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue {
+            run_dirs: 0,
+            records: 1
+        },
+        "a record of exactly the cap is read whole"
+    );
+    // The same valid record with bytes after it is longer than the cap.
+    std::fs::write(&oversized, format!("{at_cap}trailing\n")).expect("record past the cap");
+    assert!(group_registry::own_residue(&root).is_err());
+}
+
 /// A credential refresh whose helper record's removal outlasted its wait. It reports at once until `until_cancelled` is set, and from then on when shutdown cancels it. `started` counts the refreshes begun.
 struct RecordRetainingRefresh {
     until_cancelled: Arc<std::sync::atomic::AtomicBool>,
