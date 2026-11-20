@@ -20,8 +20,8 @@ checks.
   expiry to unknown. It performs no credential I/O.
 - `crates/host-runtime/src/model_execution/aws_refresh.rs:263` `health()`
   clones that cell for the owner's consumers.
-- `crates/host-runtime/src/model_execution/mod.rs:452` reads the cached cell
-  with `self.source_health.get()` and `:464` serializes it with `to_json`. The
+- `crates/host-runtime/src/model_execution/mod.rs:451` reads the cached cell
+  with `self.source_health.get()` and `:463` serializes it with `to_json`. The
   surrounding probe at `:439` checks harness descriptors on the blocking pool;
   it touches no credential.
 - `crates/host-runtime/tests/source_health_vectors.rs:5`

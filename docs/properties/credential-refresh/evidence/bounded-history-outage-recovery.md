@@ -38,7 +38,7 @@ All in `crates/eval-core/src/qualification.rs` unless noted.
   `:1399` `the_lineage_audit_fires_on_duplicates_overlaps_loss_and_gaps`;
   `:1572` `only_a_complete_passing_run_on_the_dedicated_runner_qualifies`.
 - Runner: `crates/daemon/examples/eval_runner/qualification.rs`.
-- Warm acquisition: `crates/host-runtime/tests/model_execution_supervisor.rs:2411`
+- Warm acquisition: `crates/host-runtime/tests/model_execution_supervisor.rs:1813`
   `warm_acquisition_p99_stays_within_one_millisecond`, `#[ignore]`, run in
   release with `--ignored` on the qualified runner.
 - No qualifying run exists. The authoring host has 128 logical CPUs and runs

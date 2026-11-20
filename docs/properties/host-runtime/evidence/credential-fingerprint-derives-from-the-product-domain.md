@@ -44,8 +44,8 @@ layout: with key `00..1f`, harness `opencode`, provider `anthropic`, and row
 `36:harness-provider-name-length-value/18:opencode9:anthropic17:ANTHROPIC_API_KEY1:66:secret`
 and the digest is `ecac831b...7e80`.
 
-Consumer. `CredentialVerifier::verify` (`model_execution/mod.rs:45-70`) recomputes the
-fingerprint with the connection key installed at `:131-133` and compares it
+Consumer. `CredentialVerifier::verify` (`model_execution/mod.rs:44-69`) recomputes the
+fingerprint with the connection key installed at `:130-132` and compares it
 to the presented value in constant time (`:64`). `ModelExecutionComponent::handle`
 runs it for `session.send` after the harness-availability check and before
 `supervisor.send` (`:223-236`), returning `harness_unavailable` with the
@@ -57,8 +57,8 @@ built with `new_with_credentials` (`:82-91`); `new` (`:73-79`) leaves it
 Existing checks, verified:
 
 - `credential_fingerprint_matches_the_committed_vector`
-  (`model_execution/subprocess.rs:1688-1708`) asserts the crate's output over the
-  documented inputs equals the literal (`:1695-1700`) and that a zero key
+  (`model_execution/subprocess.rs:1660-1680`) asserts the crate's output over the
+  documented inputs equals the literal (`:1667-1672`) and that a zero key
   over the same row does not produce it (`:1673-1679`). It runs under
   `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`).
 - `provider_rows_exclude_ambient_credentials_and_enforce_caps`
@@ -97,8 +97,8 @@ the credential.
 ## Timing windows and dependencies
 
 None on the derivation. The verifier's key is a `OnceLock` set through
-`install_connection_key` (`model_execution/mod.rs:131-133`); a `session.send` before
-the key is installed fails with `credential_snapshot_mismatch` (`:51`)
+`install_connection_key` (`model_execution/mod.rs:130-132`); a `session.send` before
+the key is installed fails with `credential_snapshot_mismatch` (`:50`)
 rather than skipping the check. The row is read from the startup
 `EnvSnapshot`, so a credential rotated in the process environment after
 start does not change the expected fingerprint.
@@ -144,7 +144,7 @@ The remaining gaps:
 
 ### Q: Was the committed vector produced independently of the crate?
 
-- Sources examined: `model_execution/subprocess.rs:167-201`, `:1688-1711`;
+- Sources examined: `model_execution/subprocess.rs:167-201`, `:1660-1683`;
   `tests/model_execution_subprocess.rs:2884-2892`; a Python HMAC over the layout
   described above.
 - Findings: the evidence summary at U3 states the vector came from a Python
@@ -161,7 +161,7 @@ The remaining gaps:
 
 ### Q: Is the fingerprint check reachable in default production?
 
-- Sources examined: `model_execution/mod.rs:74-92`, `:224-237`; a grep for
+- Sources examined: `model_execution/mod.rs:73-91`, `:223-236`; a grep for
   `ModelExecutionComponent::new_with_credentials` across `crates`.
 - Findings: the only callers of `new_with_credentials` are in
   `tests/model_execution_protocol.rs:443`. Every other construction uses `new`, which

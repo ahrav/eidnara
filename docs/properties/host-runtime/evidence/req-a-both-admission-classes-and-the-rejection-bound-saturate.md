@@ -169,7 +169,7 @@ entered.
 ### Q: Is state 4 reachable without modifying ModelExecution?
 
 - Sources examined: `model_execution/config.rs:183-188` (constants, not limits - the comment
-  at `model_execution/mod.rs:170-171` says "Constants rather than limits so a test-shrunken
+  at `model_execution/mod.rs:169-170` says "Constants rather than limits so a test-shrunken
   supervisor still declares the product contract"), `runtime.rs:537-560`
   (declaration validation), `handler.rs:565-567` (the trait default).
 - Findings: ModelExecution's declaration is hard-coded to 96/96 and deliberately not

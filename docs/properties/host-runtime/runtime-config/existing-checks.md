@@ -249,7 +249,7 @@ unimplemented, and both are catalog findings:
 | # | Claim | Source | Contradicted by |
 | --- | --- | --- | --- |
 | 4 | Every operation owns exactly one deadline; stages within it share the same budget | `config.rs:196-197`, protocol `:731` | `runtime.rs:1223`'s `saturating_mul(2)`, armed after the absolute deadline at `:1148` already expired |
-| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | `model_execution/mod.rs:165-178`, which declares `RouteClass::Reserved` with 96/96 counts (`model_execution/config.rs:185`, `:188`) |
+| 13 | Reserved-class pools are zero-permit when no module declares a reservation, and then unreachable because every route is general-class | `runtime.rs:117-119` | `model_execution/mod.rs:164-177`, which declares `RouteClass::Reserved` with 96/96 counts (`model_execution/config.rs:185`, `:188`) |
 | 17 | Health probes run at `health_interval` | `config.rs:216-217` | `runtime.rs:1130`, a hardcoded 50 ms selected whenever a handler-authored string says `starting` |
 
 Row 15 is a third case of the same kind, and it is contradicted by the same code
