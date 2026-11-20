@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it } from "bun:test";
 import {
     ConnectionTurnoverHarness,
     MEMORY_SUMMARY,
+    type ModuleCall,
 } from "@eidnara/opencode/hooks/context/__tests__/connection-turnover-harness";
 import {
     createHostModuleClient,
@@ -44,7 +45,7 @@ function search() {
 }
 
 it("eidnara_search returns its results when a transform deadline closes the shared connection under it", async () => {
-    const call: HostModuleClient["call"] = (args) => moduleClient.call(args);
+    const call: ModuleCall = (args) => moduleClient.call(args);
     await harness.warm(call, SESSION);
     const searching = search();
     await harness.acceptRoute();
@@ -53,7 +54,7 @@ it("eidnara_search returns its results when a transform deadline closes the shar
 
     // The ranking and the transform both stay pending until the transform's deadline expires and its transport closes the connection.
     const expired = await harness.expiringTransform(call, SESSION);
-    expect(await expired).toMatchObject({ kind: "outcome_unknown" });
+    expect(expired).toMatchObject({ kind: "outcome_unknown" });
     expect(harness.clients[0]?.isClosed).toBe(true);
 
     const { result, answered } = await harness.serve(searching);

@@ -18,7 +18,7 @@ export interface RoutedRequest {
 }
 
 /** The fused ranking uses `MEMORY_ID` to reference the seeded decision. */
-export const MEMORY_ID = `mem_${"1".padStart(32, "0")}`;
+const MEMORY_ID = `mem_${"1".padStart(32, "0")}`;
 export const MEMORY_SUMMARY = "Release branches are cut from main.";
 
 /**
@@ -156,8 +156,8 @@ export class ConnectionTurnoverHarness {
         await warm;
     }
 
-    /** Sends a transform the daemon leaves pending and waits for its frame. Resolves to the error the transform's expired deadline raises. */
-    async expiringTransform(call: ModuleCall, sessionId: string): Promise<Promise<unknown>> {
+    /** Sends a transform the daemon leaves pending, and resolves once its deadline has expired, to the error that expiry raises. */
+    async expiringTransform(call: ModuleCall, sessionId: string): Promise<unknown> {
         const expired = call({
             method: "transform",
             sessionId,

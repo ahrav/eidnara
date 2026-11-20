@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { executeEidnaraSearch } from "../../tools/eidnara-search/execute";
-import { ConnectionTurnoverHarness, MEMORY_SUMMARY } from "./__tests__/connection-turnover-harness";
+import {
+    ConnectionTurnoverHarness,
+    MEMORY_SUMMARY,
+    type ModuleCall,
+} from "./__tests__/connection-turnover-harness";
 import { createKernelClient, kernelClientResolver } from "./kernel-transport";
 import { HostModuleTransport } from "./module-transport";
 
@@ -19,7 +23,7 @@ afterEach(async () => {
     await harness.stop();
 });
 
-const transformCall: HostModuleTransport["call"] = (args) => transform.call(args);
+const transformCall: ModuleCall = (args) => transform.call(args);
 
 function search() {
     return executeEidnaraSearch(
@@ -43,7 +47,7 @@ test("a search whose ranking is in flight when a transform deadline expires retu
 
     // The ranking and the transform both stay pending until the transform's deadline expires and its transport closes the connection.
     const expired = await harness.expiringTransform(transformCall, SESSION);
-    expect(await expired).toMatchObject({ kind: "outcome_unknown" });
+    expect(expired).toMatchObject({ kind: "outcome_unknown" });
     expect(harness.clients[0]?.isClosed).toBe(true);
 
     const { result, answered } = await harness.serve(searching);
@@ -61,7 +65,7 @@ test("the first search after a transform deadline closed the shared connection r
     expect(harness.connections).toBe(1);
 
     const expired = await harness.expiringTransform(transformCall, SESSION);
-    expect(await expired).toMatchObject({ kind: "outcome_unknown" });
+    expect(expired).toMatchObject({ kind: "outcome_unknown" });
     expect(harness.clients[0]?.isClosed).toBe(true);
 
     const { result, answered } = await harness.serve(search());
@@ -83,8 +87,7 @@ test("a kernel call that begins after another transport closed the shared connec
     expect((await harness.serve(ranked())).result.state).toEqual({ kind: "available" });
     const before = kernel.connectionIdentity();
 
-    const expired = await harness.expiringTransform(transformCall, SESSION);
-    await expired;
+    await harness.expiringTransform(transformCall, SESSION);
     expect(harness.clients[0]?.isClosed).toBe(true);
     expect(kernel.connectionIdentity()).not.toBe(before);
 
