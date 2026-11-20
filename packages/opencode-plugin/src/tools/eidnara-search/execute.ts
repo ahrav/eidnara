@@ -7,7 +7,13 @@
 
 import { resolveProjectRootDirectory } from "../../features/context/project-identity";
 import { getErrorMessage } from "../../shared/error-message";
-import { type MemoryState, type ReadRow, renderToolStateText } from "../../shared/kernel-client";
+import { Deadline } from "../../shared/host-client";
+import {
+    type KernelClient,
+    type MemoryState,
+    type ReadRow,
+    renderToolStateText,
+} from "../../shared/kernel-client";
 import {
     boundDynamicField,
     describeQueryBoundsViolation,
@@ -24,7 +30,7 @@ import {
 } from "./kernel-memory-search";
 import { normalizeEidnaraSearchArgs, prepareQueryFromNormalizedArgs } from "./query-input";
 import { type ExplicitDeliveryReason, type PackedSearchResults, packSearchResults } from "./render";
-import { searchThroughRoute } from "./route-search";
+import { ROUTE_SEARCH_DEADLINE_MS, searchThroughRoute } from "./route-search";
 import type { EidnaraSearchArgs, EidnaraSearchSource, EidnaraSearchToolDeps } from "./types";
 
 const VALID_SOURCES: ReadonlySet<EidnaraSearchSource> = new Set(["memory"]);
@@ -184,10 +190,44 @@ export async function executeEidnaraSearch(
         projectRoot,
     });
     const limit = normalizeSearchResultLimit(args.limit);
+    const pass: SearchPass = {
+        client,
+        query,
+        limit,
+        toolContext,
+        completeFrom,
+        routeDeadline: Deadline.start(ROUTE_SEARCH_DEADLINE_MS),
+    };
+    // A search only reads. A daemon connection that another request's failure replaced during a pass leaves that pass with requests answered by two connections, or by none, and the pass is refused. The search then runs once more, on the live connection.
+    const connection = client.connectionIdentity();
+    const first = await searchPass(pass);
+    if (first.status === "invalid" && client.connectionIdentity() !== connection) {
+        return await searchPass(pass);
+    }
+    return first;
+}
+
+/** What one pass of a search reads with. Both passes of a search rank inside `routeDeadline`. */
+interface SearchPass {
+    client: KernelClient;
+    query: string;
+    limit: number;
+    toolContext: EidnaraSearchCallContext;
+    completeFrom: (
+        results: KernelMemorySearchResult[],
+        memoryNote?: string,
+    ) => EidnaraSearchExecution;
+    routeDeadline: Deadline;
+}
+
+/** One pass of a search: the fused route, then the legacy snapshot scan when the route reports itself disabled or unavailable. */
+async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
+    const { client, query, limit, toolContext, completeFrom } = pass;
     const routed = await searchThroughRoute({
         client,
         query,
         limit,
+        deadline: pass.routeDeadline,
         ...(toolContext.abort ? { signal: toolContext.abort } : {}),
     });
     if (routed.kind === "refused") return { status: "invalid", text: routed.text };

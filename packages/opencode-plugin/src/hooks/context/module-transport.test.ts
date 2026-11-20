@@ -18,6 +18,7 @@ import {
     Deadline,
     HostCallError,
     type HostClient,
+    HostClientError,
     type HostClientOptions,
     MODEL_EXECUTION_CREDENTIAL_NAMES,
     MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
@@ -1026,6 +1027,64 @@ describe("generation-sensitive not-sent outcomes", () => {
                 generationSensitive: true,
             }),
         ).resolves.toMatchObject({ transport_status: "connection_generation_changed" });
+    });
+
+    test("a request the facade refuses on a closed client reports a generation change", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        fakeRoute(transport, () =>
+            Promise.reject(new HostClientError("client closed", "client_closed")),
+        );
+        const before = transport.connectionGeneration;
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: before,
+            current_generation: before + 1,
+        });
+    });
+
+    test("a request the facade refuses on a closed client is sent once on the next connection", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const closed = {
+            request: () => Promise.reject(new HostClientError("client closed", "client_closed")),
+        } as unknown as HostClient;
+        let sent = 0;
+        const live = {
+            request: async () => {
+                sent += 1;
+                return { ok: true };
+            },
+        } as unknown as HostClient;
+        const clients = [closed, live];
+        transport.ensureRoute = async () => {
+            const client = clients.shift() ?? live;
+            transport.client = client;
+            return {
+                client,
+                route,
+                routeKey: "s\0/tmp",
+                generation: transport.connectionGeneration,
+            };
+        };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+            }),
+        ).resolves.toEqual({ ok: true });
+        expect(sent).toBe(1);
     });
 
     test("a body built under an older generation is not sent once the route settles on a newer one", async () => {

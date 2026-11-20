@@ -79,10 +79,12 @@ export async function searchThroughRoute(args: {
     limit: number;
     signal?: AbortSignal;
     nowMs?: number;
+    /** The budget a caller that runs several passes of one search gives them together; absent, the pass starts its own. */
+    deadline?: Deadline;
 }): Promise<RouteSearch> {
     const translated = routeQueryText(args.query);
     if (!translated.ok) return { kind: "refused", text: translated.text };
-    const deadline = Deadline.start(ROUTE_SEARCH_DEADLINE_MS);
+    const deadline = args.deadline ?? Deadline.start(ROUTE_SEARCH_DEADLINE_MS);
     const connection = args.client.connectionIdentity();
     const ranked = await args.client.query({
         query: translated.text,

@@ -438,6 +438,11 @@ function isStaleRouteHandleFailure(error: unknown): boolean {
     );
 }
 
+/** The facade answers `client_closed` when it refuses work on a closed client, before it writes any byte of the request. */
+function isClosedClientRefusal(error: unknown): boolean {
+    return isRecord(error) && error.name === "HostClientError" && error.code === "client_closed";
+}
+
 /** Attach a bounded cleanup ticket when caller abort can race a possible send. */
 /** Rejects with the signal's reason as soon as it aborts; `operation` itself keeps running. */
 function untilAborted<T>(operation: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -906,6 +911,7 @@ export class HostModuleTransport {
                     const provenNotSent =
                         kind === "not_sent" ||
                         isStaleRouteHandleFailure(error) ||
+                        isClosedClientRefusal(error) ||
                         (!requestInvoked && isConnectionFailure(error));
                     const replayEligible = unknownChannel || provenNotSent;
                     const previousGeneration =
@@ -1152,9 +1158,16 @@ export class HostModuleTransport {
         return this.connectionFile;
     }
 
-    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. */
+    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. Reading it first retires a client another holder closed, so a generation read before a call names the connection that call dials. */
     get generation(): number {
+        this.retireClosedClient();
         return this.connectionGeneration;
+    }
+
+    /** Every transport that dials one daemon holds the same process-wide client, and each holder's invalidation closes it for all of them. A closed client serves no request, so this transport retires it as a superseded connection: its generation advances, its routes are dropped, and its next call dials. */
+    private retireClosedClient(): void {
+        const client = this.client;
+        if (client?.isClosed) void this.invalidateConnection(client);
     }
 
     /** Tears down the live connection, its routes, and cached capabilities so an owner evicting this transport does not strand a socket, channel poller, or ring mappings for the process lifetime. A later call on this instance redials. */
@@ -1307,6 +1320,7 @@ export class HostModuleTransport {
         deadline?: Deadline,
         signal?: AbortSignal,
     ): Promise<CertifiedConnection> {
+        this.retireClosedClient();
         const cached = this.client;
         if (cached) {
             if (this.connectionOrigin !== "managed-default") {
