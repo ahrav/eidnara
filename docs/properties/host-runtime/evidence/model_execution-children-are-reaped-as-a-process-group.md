@@ -50,7 +50,7 @@ reaches the runner as `backend_cancel` (`:747`, `:750`). Both `cancel` and
 when the task returns (`:797`), so the lifecycle call resolves after the
 leader is reaped.
 
-Startup sweep. `sweep_orphaned_groups` at `subprocess.rs:1486-1546` runs from
+Startup sweep. `sweep_orphaned_groups` at `subprocess.rs:1507-1567` runs from
 `ModelExecutionComponent::initialize` (`mod.rs:341`). It skips records from another
 boot (`:1501-1504`), skips records whose owner is alive with the recorded start
 time (`:1505-1507`), treats a zombie owner as dead (`:1280-1282`), decides
@@ -130,7 +130,7 @@ delete variants already discriminate: `Failed` at `:2543` is not
 
 ### Q: Does the sweep ever signal a group whose owner is alive?
 
-- Sources examined: `subprocess.rs:1281-1289`, `:1512-1514`, `:1515-1525`;
+- Sources examined: `subprocess.rs:1302-1310`, `:1533-1535`, `:1536-1546`;
   `tests/model_execution_subprocess.rs:3078-3095`.
 - Findings: the owner check compares the live start time from
   `/proc/<pid>/stat` with the recorded value and `continue`s on a match. A

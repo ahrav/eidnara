@@ -28,7 +28,7 @@ temperature.
 
 Delivery. `run_pi` writes `PI_MODEL_EXECUTION_EXTENSION_BYTES` to a 0600 file in the
 per-run 0700 directory through `PrivateDir::write_private_async` (`pi.rs:427-430`;
-`subprocess.rs:1389-1397`, `create_new` refuses an existing path or symlink), so
+`subprocess.rs:1410-1418`, `create_new` refuses an existing path or symlink), so
 no installed hook can be swapped under the daemon. The argv disables
 extension discovery with `--no-approve --no-extensions` (`pi.rs:494-495`),
 pushes each trusted closure extension (`:497-500`), and pushes the hook last
@@ -231,5 +231,5 @@ above and the catalog's `test-only` label describe the tree before that
 wiring, and every clause that says the Pi runs are test-only is invalidated.
 The label stays `test-only` until the reclassification of all ModelExecution
 records. A Pi run starts in the state root's shared `cwd/` directory
-(`subprocess.rs:2503-2507`) and keeps its hook file in the per-run private
+(`subprocess.rs:2524-2528`) and keeps its hook file in the per-run private
 directory.
