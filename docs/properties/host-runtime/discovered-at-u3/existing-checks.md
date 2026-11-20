@@ -274,14 +274,14 @@ through a `Barrier` (`:168-175`).
 | Check | Site | Status |
 | --- | --- | --- |
 | Named `every_path_returns_permits_and_charges_to_baseline` | `tests/model_execution_supervisor.rs:977` | unaudited |
-| Named `host_shutdown_drains_the_supervisor_to_zero_state` | `tests/model_execution_supervisor.rs:1465` | unaudited |
-| Named `transport_detach_paths_leave_the_run_untouched` | `tests/model_execution_supervisor.rs:1318` | unaudited |
+| Named `host_shutdown_drains_the_supervisor_to_zero_state` | `tests/model_execution_supervisor.rs:1585` | unaudited |
+| Named `transport_detach_paths_leave_the_run_untouched` | `tests/model_execution_supervisor.rs:1438` | unaudited |
 | Also bears `subscriber_caps_enforce_per_run_and_total_without_leaking_permits` | `tests/model_execution_supervisor.rs:389` | unaudited |
 | Also bears `thirty_two_blocked_commands_admit_and_command_33_fails_fast` | `tests/model_execution_supervisor.rs:434` | unaudited |
 | Also bears `thirty_two_runs_queue_behind_eight_backends_and_run_33_fails_without_state` | `tests/model_execution_supervisor.rs:474` | unaudited |
 | Also bears `backend_panic_commits_one_failed_terminal` | `tests/model_execution_supervisor.rs:321` | unaudited |
 | Also bears `replay_overflow_commits_one_failed_terminal_and_stops_growth` | `tests/model_execution_supervisor.rs:932` | unaudited |
-| Also bears `shutdown_refuses_new_work_stops_backends_and_wakes_subscribers` | `tests/model_execution_supervisor.rs:1253` | unaudited |
+| Also bears `shutdown_refuses_new_work_stops_backends_and_wakes_subscribers` | `tests/model_execution_supervisor.rs:1373` | unaudited |
 | Also bears `default_limits_and_resource_declaration_match_the_fixed_caps` | `tests/model_execution_supervisor.rs:99` | unaudited |
 
 `:973`'s baseline oracle is `assert_baseline(supervisor.metrics(), &limits,

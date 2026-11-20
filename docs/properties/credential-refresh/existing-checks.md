@@ -59,7 +59,7 @@ None found: a check that counts credential I/O across a health read.
 | `the_outage_judge_fires_on_each_failure` | `qualification.rs:1309` | each `OutageFailure` variant | unaudited |
 | `the_lineage_audit_fires_on_duplicates_overlaps_loss_and_gaps` | `qualification.rs:1399` | each `LineageViolation` kind | unaudited |
 | `only_a_complete_passing_run_on_the_dedicated_runner_qualifies` | `qualification.rs:1572` | host shortfalls, cgroup constraint, pending witnesses | unaudited |
-| `warm_acquisition_p99_stays_within_one_millisecond` | `crates/host-runtime/tests/model_execution_supervisor.rs:2032` | warm-path p99, release only, `#[ignore]` | unaudited |
+| `warm_acquisition_p99_stays_within_one_millisecond` | `crates/host-runtime/tests/model_execution_supervisor.rs:2152` | warm-path p99, release only, `#[ignore]` | unaudited |
 
 Production oracles: `gate` at `qualification.rs:459`, `OutageRun::judge` at
 `:731`, `audit_lineage` at `:922`, `QualificationReport::build` at `:994`.

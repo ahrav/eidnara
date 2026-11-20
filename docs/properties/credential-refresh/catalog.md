@@ -240,7 +240,7 @@ hardware.
 Existing check: `crates/eval-core/src/qualification.rs:922` `audit_lineage`;
 `:1309` `the_outage_judge_fires_on_each_failure`;
 `crates/daemon/examples/eval_runner/qualification.rs` (the campaign runner);
-`crates/host-runtime/tests/model_execution_supervisor.rs:2032`
+`crates/host-runtime/tests/model_execution_supervisor.rs:2152`
 `warm_acquisition_p99_stays_within_one_millisecond` (ignored, release only).
 Impact: a million-message or outage claim without evidence that it holds.
 Open questions:
