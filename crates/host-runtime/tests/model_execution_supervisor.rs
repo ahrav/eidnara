@@ -1270,6 +1270,50 @@ async fn shutdown_keeps_the_runs_verdicts_when_the_registry_cannot_be_read() {
     );
 }
 
+/// A published record this host cannot interpret may be the one whose removal a run waited on, so the registry read answers unknown and the runs' verdicts are reported. The startup sweep keeps the same record for the same reason.
+#[tokio::test]
+async fn shutdown_keeps_the_runs_verdicts_when_a_published_record_cannot_be_interpreted() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    let (dir, record) = own_entries(&root);
+    let registry = dir
+        .path()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("registry dir")
+        .to_owned();
+    dir.cleanup().expect("the removal lands");
+    record.remove().expect("the removal lands");
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue::default()
+    );
+    // A record still being written sits under a dot-prefixed name and is no published record.
+    std::fs::write(registry.join(".unpublished.tmp"), b"v4\nno record\n").expect("temp");
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue::default()
+    );
+    std::fs::write(registry.join("damaged"), b"v4\nno record\n").expect("damaged record");
+    assert!(group_registry::own_residue(&root).is_err());
+
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("a record of unknown owner keeps the verdicts");
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("1 crash-ownership record(s) could not be removed"),
+        "{failure}"
+    );
+}
+
 /// A credential refresh whose helper record's removal outlasted its wait. It reports at once until `until_cancelled` is set, and from then on when shutdown cancels it. `started` counts the refreshes begun.
 struct RecordRetainingRefresh {
     until_cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -1489,7 +1533,6 @@ fn entries_another_host_owns_are_no_residue_of_this_one() {
     forge(".unpublished.tmp", own_pid, own_start);
     forge("other-pid", own_pid + 1, own_start);
     forge("other-start", own_pid, own_start + 1);
-    std::fs::write(registry.join("uninterpretable"), b"v4\nno record\n").expect("garbage");
     // The directory name carries `<boot>-<pid>-<start>-<nonce>` after its prefix.
     let name = dir
         .path()

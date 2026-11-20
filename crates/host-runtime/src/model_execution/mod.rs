@@ -582,9 +582,11 @@ impl ModelExecutionComponent {
             // Read before the registry, so a job that finishes between the two has its entry on disk for the read.
             let idle = subprocess::filesystem_jobs_idle();
             let state_root = self.state_root.clone();
-            // The read runs outside the job slots, which `filesystem_jobs_idle` observes.
+            // The read runs outside the job slots, which `filesystem_jobs_idle` observes. Its blocking job waits one grace at most for it, so a read that a stalled filesystem holds leaves the runtime free to stop.
             let read = tokio::task::spawn_blocking(move || {
-                subprocess::group_registry::own_residue(&state_root)
+                subprocess::within(RESIDUE_SETTLE_GRACE, move || {
+                    subprocess::group_registry::own_residue(&state_root)
+                })
             });
             let Ok(Ok(Ok(found))) = tokio::time::timeout_at(deadline, read).await else {
                 return counted;

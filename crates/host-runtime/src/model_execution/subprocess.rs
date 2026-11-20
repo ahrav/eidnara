@@ -1103,6 +1103,27 @@ pub(crate) async fn off_runtime<T: Send + 'static>(
     .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
 }
 
+/// Runs a filesystem step on a thread of its own and waits for its answer for `bound` at most.
+///
+/// A runtime waits for every job of its blocking pool when it is dropped. A job that runs its step through this function returns at the bound, and a step that a stalled filesystem holds stays on its own thread, which ends with the process.
+pub(crate) fn within<T: Send + 'static>(
+    bound: Duration,
+    step: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let (answer, answered) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("model_execution-bounded-step".to_owned())
+        .spawn(move || {
+            let _ = answer.send(step());
+        })?;
+    answered.recv_timeout(bound).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "a filesystem step outlasted its bound",
+        )
+    })?
+}
+
 /// Queues a fork on one immortal OS thread and returns the reply channel without waiting.
 ///
 /// `pdeathsig` SIGKILLs a leader when its forking thread exits, so a retiring `spawn_blocking` thread may not fork.
@@ -2849,7 +2870,7 @@ pub mod group_registry {
     ///
     /// A run reports a cleanup or record failure when the bounded wait on its removal ends first. The removal keeps running on the blocking pool or the cleanup thread and usually completes, so the run's verdict can outlive the files it describes. The registry is the record of what remains: a host whose runs have all returned holds prompt material or coordination state exactly when an entry here still names it.
     ///
-    /// The read removes nothing and signals no process. A record this host cannot interpret names no owner and is left to the startup sweep, which fails closed on it.
+    /// The read removes nothing and signals no process. A published record this host cannot interpret fails the read, so the caller keeps the verdicts it counted.
     pub fn own_residue(root: &StateRoot) -> io::Result<OwnResidue> {
         let owner_pid = std::process::id() as i32;
         let owner_start = owner_start_time()?;
@@ -2885,9 +2906,13 @@ pub mod group_registry {
                 Err(err) if gone(&err) => continue,
                 Err(err) => return Err(err),
             };
-            if Entry::parse(&text).is_some_and(|entry| {
-                entry.owner_pid == owner_pid && entry.owner_start == owner_start
-            }) {
+            // A published record this host cannot interpret may be its own, so the read answers unknown, as the startup sweep does for the same record.
+            let Some(entry) = Entry::parse(&text) else {
+                return Err(io::Error::other(
+                    "a published registry record cannot be interpreted",
+                ));
+            };
+            if entry.owner_pid == owner_pid && entry.owner_start == owner_start {
                 residue.records += 1;
             }
         }
@@ -2931,6 +2956,34 @@ mod tests {
         CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
         EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
+
+    /// A blocking-pool job whose step is still running at the bound returns a timeout, so the runtime that waits for the job when it is dropped can stop.
+    #[test]
+    fn a_step_still_running_at_its_bound_ends_the_blocking_job_that_waits_for_it() {
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let job = runtime.spawn_blocking(move || {
+            super::within(Duration::from_millis(50), move || {
+                // The step ends when the test releases it, and after ten seconds at the latest.
+                let _ = parked.recv_timeout(Duration::from_secs(10));
+                Ok(())
+            })
+        });
+        let answer = runtime.block_on(job).expect("the job returns");
+        assert_eq!(
+            answer.expect_err("the step is still running").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        drop(runtime);
+        release.send(()).expect("the step is released");
+
+        let answered = super::within(Duration::from_secs(10), || Ok(7)).expect("the step answers");
+        assert_eq!(answered, 7);
+    }
 
     #[test]
     fn discarded_lines_keep_their_newlines_and_the_partial_tail() {
