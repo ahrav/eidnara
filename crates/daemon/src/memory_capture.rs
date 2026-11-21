@@ -187,8 +187,8 @@ fn has_eligible_lifetime(memory: &CapturedMemory) -> bool {
 
 /// Gives the class `request` to each `current_work` memory of a settled
 /// user source that contests a memory served automatically. Such a memory is an
-/// instruction for one occasion, shown on the line of the memory it
-/// contests.
+/// instruction for one occasion, and a contest it records is shown on the
+/// line of the memory it contests.
 ///
 /// It runs on the links a source keeps after the batch is settled, so the
 /// class follows the contests the plan is frozen with.
@@ -4348,7 +4348,8 @@ fn publish_captured_memories(
         .cloned()
         .collect();
     let mut earlier: HashMap<String, kernel::DecisionRow> = HashMap::new();
-    if !targets.is_empty() {
+    // A plan of another version writes nothing, so it reads no target.
+    if !targets.is_empty() && output.version == CAPTURE_PLAN_VERSION {
         let tip = kernel.tip()?;
         let rows = |ids: &[String]| {
             kernel

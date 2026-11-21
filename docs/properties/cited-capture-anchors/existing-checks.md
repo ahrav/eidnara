@@ -71,6 +71,7 @@ part.
 | `crates/daemon/src/memory_capture.rs:5006`, `:5039`, `:5071`, `:5213`, `:9954` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
 | `crates/daemon/src/memory_capture.rs:8643` `sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow` | same; a parse-level check that each joined quotation is a slice of its source text | unaudited |
 | `crates/daemon/src/lib.rs:25366` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
+| `crates/daemon/src/memory_capture.rs:10522` `a_stored_plan_ends_work_in_progress_and_conflicts_on_a_standing_statement` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` (an ended revision's id) | unaudited |
 | `crates/memory-store/src/memory_capture.rs:882` `job_identity_derives_from_redacted_text_so_a_stored_digest_cannot_confirm_a_secret` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
 | `crates/daemon/src/memory_capture.rs:9973`, `:10022`, `:11075`, `:11053`; `crates/daemon/src/lib.rs:26418` | same | unaudited |
 | `crates/daemon/src/lib.rs:25538`, `:25876`, `:26088`, `:26741`, `:25263`; `crates/daemon/src/source_capture_tests.rs:1062` | `p2-capture-publish-and-session-delete-are-serialized` | unaudited |

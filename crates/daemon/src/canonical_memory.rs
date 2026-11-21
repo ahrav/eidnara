@@ -277,9 +277,9 @@ const WORK_READ_DIVISOR: usize = 4;
 /// Each delivery counts visible rows that pass
 /// [`crate::memory_capture::is_current_work`] against a second pair of
 /// caps, a quarter of the first, so the response holds at most two and a
-/// half times the caps. A delivery ends when its first pair of caps is
-/// reached, so it holds the work in progress among the rows walked up to
-/// that row.
+/// half times the caps. A delivery ends when a row is refused at its first
+/// pair of caps, so it holds the work in progress among the rows walked up
+/// to that row.
 ///
 /// A row's session is in its decision payload. The rows are walked in
 /// serving order and their payloads are loaded one page at a time, each page

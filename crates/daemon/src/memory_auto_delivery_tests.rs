@@ -3389,10 +3389,17 @@ async fn an_assistant_report_that_contests_a_rule_keeps_the_class_it_carried() {
     assert_eq!(stored.3["lifetime"], "current_work", "{:?}", stored.3);
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
     assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
-    assert!(
-        block.contains("contested") && block.contains("skipped the integration suite"),
-        "{block}"
+    // The rule's contest names the report's fact and quotes its text whole.
+    let rule_line = block
+        .lines()
+        .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+        .unwrap_or_else(|| panic!("{block}"));
+    let contest = format!(
+        "by {}: {})",
+        stored.0,
+        serde_json::to_string(&stored.1).unwrap()
     );
+    assert!(rule_line.ends_with(&contest), "{block}");
 }
 
 /// An assistant's message repeats live work in progress and contradicts a
@@ -3749,8 +3756,9 @@ async fn work_in_progress_is_read_under_its_own_caps() {
 
 /// The delivery read takes its rows in serving order, by the commit that
 /// wrote each fact's current row, and bounds three things. It ends for a
-/// reader when the reader's caps on lasting statements are reached, so a
-/// plan older than that row is left out. A contest writes a plan's row
+/// reader when a lasting statement is refused at the reader's caps, so a
+/// plan older than that statement is left out, and a plan behind
+/// statements that fill the caps exactly is read. A contest writes a plan's row
 /// again, so at a full work cap a contested older plan is read before a
 /// newer one. The page limit counts every row the read judges, so enough
 /// newer plans end the read before it reaches an older statement.
@@ -3785,6 +3793,11 @@ async fn the_delivery_read_bounds_the_work_in_progress_it_returns() {
     assert_eq!(read(&handler, &project, 4), (newest_four, true));
     let (all, truncated) = read(&handler, &project, 8);
     assert!(all.contains(&stated(&plan(0))) && all.len() == 6 && !truncated);
+    // Five statements fill a cap of five exactly, so none is refused and
+    // the plan behind them is read.
+    let mut filled: Vec<String> = (0..5).rev().map(|index| stated(&rule(index))).collect();
+    filled.push(stated(&plan(0)));
+    assert_eq!(read(&handler, &project, 5), (filled, false));
 
     // Two plans, the older one contested after the newer was stated, read
     // with room for one plan.
@@ -5344,10 +5357,16 @@ async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made(
         .unwrap();
 
     let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
     body(
         handler
             .handle_native_capture_next(test_route(FIRST), &next)
             .await,
+    );
+    assert_eq!(
+        handler.kernel.kernel_store().unwrap().tip().unwrap(),
+        tip,
+        "the replay and the refusal commit nothing"
     );
     let (attempts, _, error, abandoned, _, frozen) = queue_row(&store, &jobs[0]);
     assert_eq!(

@@ -86,9 +86,10 @@ aliased branch loose and in `packed-refs`.
 
 - Sources examined: `CAPTURE_SCHEMA_VERSION` and `PreparedCapture`.
 - Findings: the extractor's document version stays 1, and a frozen plan
-  carries plan version 2 (`CAPTURE_PLAN_VERSION`), which publication
-  requires; `head` is `#[serde(default)]`, so a plan of that version
-  without it reads as `HeadUnavailable`
+  carries plan version 2 (`CAPTURE_PLAN_VERSION`), which a commit that
+  writes requires (a plan of another version whose commit the Kernel holds
+  completes by replay); `head` is `#[serde(default)]`, so a plan of that
+  version without it reads as `HeadUnavailable`
   (`crates/daemon/src/memory_capture.rs:11152`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
