@@ -105,7 +105,8 @@ pub struct CapturedMemory {
     )]
     pub contests: Vec<String>,
     /// How long the statement holds, as the extractor judged it from the
-    /// user's wording. A plan frozen before the field existed, and a
+    /// user's wording; [`class_contesting_work`] gives a settled
+    /// `current_work` memory the class `request`. A plan frozen before the field existed, and a
     /// proposal that leaves it out or gives `null`, carry no class: such a
     /// memory passes the lifetime check as a [`Lifetime::Lasting`] one does
     /// and its rationale records none.
@@ -4274,9 +4275,12 @@ fn approved(envelope: &kernel::Envelope<'_>, target: &str) -> Result<bool, kerne
     Ok(envelope
         .served_rows_for(&[target], None)?
         .get(target)
-        .is_some_and(|row| {
-            row.visibility(kernel::Surface::ExplicitSearch) == kernel::SurfaceVisibility::Visible
-        }))
+        .is_some_and(is_approved))
+}
+
+/// Whether explicit search serves the row as approved.
+fn is_approved(row: &kernel::ServedRow) -> bool {
+    row.visibility(kernel::Surface::ExplicitSearch) == kernel::SurfaceVisibility::Visible
 }
 
 /// The rationale's `quote` field identifies the quotation even when capture
@@ -4509,18 +4513,9 @@ fn write_captured_memories(
                 continue;
             }
         }
-        // A statement of any class may replace an approved capture memory
-        // with lifetime `current_work`.
-        let work_in_progress = |target: &String| {
-            earlier.get(target).filter(|row| {
-                let recorded = capture_rationale(row);
-                whole
-                    && recorded.source.as_deref() == Some(CAPTURE_SOURCE_ID)
-                    && recorded.lifetime == Some(Lifetime::CurrentWork)
-            })
-        };
-        // Each target with the live work in progress it names. Every
-        // target is judged before any is written.
+        // Each target with the live work in progress it names, which a
+        // whole statement of any class may end. Every target is judged
+        // before any is written.
         let mut named = Vec::new();
         for (target, primary) in memory
             .replaces
@@ -4529,13 +4524,11 @@ fn write_captured_memories(
             .chain(memory.also_replaces.iter().map(|target| (target, false)))
         {
             let served = envelope.served_rows_for(&[target.as_str()], None)?;
-            let served = served.get(target.as_str());
-            let live = served.is_some_and(|row| {
-                row.visibility(kernel::Surface::ExplicitSearch)
-                    == kernel::SurfaceVisibility::Visible
+            let served = served.get(target.as_str()).filter(|row| is_approved(row));
+            let live = served.is_some();
+            let work = earlier.get(target).filter(|row| {
+                whole && served.is_some_and(|served| is_current_work(&served.object, row))
             });
-            let owned = served.is_some_and(|row| is_capture_memory(&row.object));
-            let work = work_in_progress(target).filter(|_| live && owned);
             if !standing && work.is_none() && live {
                 return Err(kernel::KernelError::Conflict);
             }
@@ -8055,6 +8048,12 @@ mod tests {
                 false,
                 false,
             ),
+            stored(
+                "mem_deploys",
+                "User stated: Deploys go out on Thursdays.",
+                true,
+                false,
+            ),
         ];
         let quote = "For this release, raise the retry budget to eight attempts.";
         let messages = [CaptureMessage {
@@ -8148,6 +8147,15 @@ mod tests {
                 vec!["mem_report"],
             ),
             ("current_work", json!({}), CurrentWork, None, vec![]),
+            // A contest of a statement that shares no content word with
+            // the quotation is released, so the plan keeps none.
+            (
+                "current_work",
+                json!({"contests": ["mem_deploys"]}),
+                CurrentWork,
+                None,
+                vec![],
+            ),
             (
                 "status",
                 json!({"replaces": "mem_rule"}),
@@ -10650,6 +10658,147 @@ mod tests {
                 .any(|row| row.0 == stated(rule) && row.1 == kernel::SurfaceVisibility::Visible)
         );
         assert_eq!(after.len(), 3);
+    }
+
+    /// An approved memory another writer stored, whose rationale reads as
+    /// capture's work in progress, is no work in progress of capture's. A
+    /// statement that ends with its task and names it meets a conflict, and
+    /// the memory stays as it was.
+    #[test]
+    fn a_statement_that_ends_with_its_task_ends_only_work_in_progress_capture_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectBinding::new(dir.path());
+        let kernel = kernel::KernelStore::open(dir.path().join("kernel")).unwrap();
+        let publish = |source: &CaptureJob, output: &PreparedCapture| {
+            publish_now(
+                &kernel,
+                &project,
+                source,
+                output,
+                &serde_json::to_string(output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            )
+        };
+        // A first capture creates the project's scope and memory domain.
+        let (source, output) = stated_job(
+            "job-rule",
+            &["The retry budget is five attempts.".to_string()],
+        );
+        publish(&source, &output).unwrap();
+        let foreign = "Next, move the retry budget into the client config.";
+        let id = format!("mem_{}", "f".repeat(32));
+        kernel
+            .commit_before(
+                Instant::now() + COMMIT_WAIT,
+                kernel::CommitIntent {
+                    producer: "test".into(),
+                    operation_key: project.operation_key("test", "foreign-memory").unwrap(),
+                    request_digest: "0".repeat(64),
+                    actor: "test".into(),
+                    cause: "another writer stores an approved memory".into(),
+                },
+                |envelope| {
+                    envelope.insert_decision(kernel::DecisionSpec {
+                        decision_id: format!("dec_{}", "f".repeat(32)),
+                        object_id: id.clone(),
+                        domain_id: "memory".into(),
+                        proposition_id: None,
+                        scope_id: Some(project.scope_id()),
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: "CONFIG_VALUES".into(),
+                        payload: kernel::DecisionPayload {
+                            summary: foreign.into(),
+                            rationale: json!({
+                                "source": CAPTURE_SOURCE_ID,
+                                "lifetime": "current_work",
+                            })
+                            .to_string(),
+                        },
+                        source_kind: "user".into(),
+                        source_id: AGENT_MEMORY_SOURCE_ID.into(),
+                        source_revision: 1,
+                        sensitivity: kernel::Sensitivity::Normal,
+                    })?;
+                    // The memory is approved as capture approves one: on a
+                    // statement record admitted as explicit user text.
+                    let record = format!("stm_{}", "f".repeat(32));
+                    let mut domains = HashSet::new();
+                    kernel_routes::commit::ensure_domain(
+                        envelope,
+                        STATEMENT_DOMAIN_ID,
+                        &mut domains,
+                    )?;
+                    envelope.insert_decision(kernel::DecisionSpec {
+                        decision_id: format!("dst_{}", "f".repeat(32)),
+                        object_id: record.clone(),
+                        domain_id: STATEMENT_DOMAIN_ID.into(),
+                        proposition_id: None,
+                        scope_id: Some(project.scope_id()),
+                        anchor_id: None,
+                        evidence_id: None,
+                        decision_kind: ACCEPTED_DECISION_KIND.into(),
+                        payload: kernel::DecisionPayload {
+                            summary: foreign.into(),
+                            rationale: "{}".into(),
+                        },
+                        source_kind: "user".into(),
+                        source_id: format!("{STATEMENT_SOURCE_ID}:{}", "f".repeat(32)),
+                        source_revision: 1,
+                        sensitivity: kernel::Sensitivity::Normal,
+                    })?;
+                    kernel_routes::commit::accept_statement(envelope, &record)?;
+                    kernel_routes::commit::admit_capture(envelope, &id, Some(&record))?;
+                    Ok("1".into())
+                },
+            )
+            .unwrap();
+        let stored = || {
+            let read = kernel_routes::read::read_visible(
+                &kernel,
+                &project,
+                kernel::Surface::ExplicitSearch,
+                None,
+                kernel_routes::read::RowSelection::DomainDecisions("memory"),
+            )
+            .unwrap();
+            read.rows
+                .iter()
+                .find(|row| row.object.object_id == id)
+                .map(|row| {
+                    (
+                        row.visibility,
+                        row.object.source_revision,
+                        row.object.created_commit_seq,
+                    )
+                })
+                .expect("the memory is live")
+        };
+        let (visibility, source_revision, created_commit_seq) = stored();
+        assert_eq!(visibility, kernel::SurfaceVisibility::Visible);
+
+        let done = "The retry budget is in the client config now.";
+        let (source, mut output) = stated_job("job-done", &[done.to_string()]);
+        output.memories[0].lifetime = Some(Lifetime::Status);
+        output.memories[0].replaces = Some(id.clone());
+        output.existing = vec![
+            serde_json::from_value(json!({
+                "id": id,
+                "category": "CONFIG_VALUES",
+                "content": foreign,
+                "can_replace": true,
+                "source_revision": source_revision,
+                "created_commit_seq": created_commit_seq,
+                "user_statement": true,
+            }))
+            .unwrap(),
+        ];
+        assert!(matches!(
+            publish(&source, &output),
+            Err(kernel::KernelError::Conflict)
+        ));
+        assert_eq!(stored().0, kernel::SurfaceVisibility::Visible);
     }
 
     /// A stored plan whose memory names further targets beside no

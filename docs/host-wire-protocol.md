@@ -1333,7 +1333,8 @@ holds the class under `lifetime` when its proposal carried one. When proposals o
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
 the order `lasting`, `unsettled`, `current_work`, `request`, `status`, and no class when
-one of them carried none. A class on a proposal of an assistant source is
+one of them carried none; the rule above for a `current_work` fact frozen
+contesting a fact served on `auto_inject` applies to the joined fact. A class on a proposal of an assistant source is
 stored in the same way and changes nothing: such a fact is never the user's
 statement. Capture alone writes the `user-statements` domain: a
 `kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
@@ -1467,7 +1468,7 @@ each other such target it names in `replaces` or `also_replaces` becomes a conte
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as one of those three, leave the rule approved
 and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets; the
-exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen with that contest (above). A
+exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen contesting a fact served on `auto_inject` (above). The contest is the one the frozen plan holds: a contest another fact of the source or batch holds (below) is shown with that fact's words. A
 whole statement of the user of any class that names live work in progress as
 its `replaces` target, or as an `also_replaces` target beside a `replaces`
 target it keeps, ends it: a remark that the work is finished, a
@@ -1476,7 +1477,8 @@ statement's stored text leave that judgment as it is, since it reads the
 quotation. The other checks of a replacement apply as they do to any
 statement: a `replaces` target of another category is released with its
 `also_replaces` targets (below), and the statement then contests the work in
-progress when that target is among its first four contest targets, so the
+progress when that target is among its first four contest targets and its
+frozen plan keeps the contest, so the
 work in progress stays delivered with the statement shown on its line. When the
 `replaces` target is a fact served on `auto_inject` that the statement may not
 replace under the rule above, every target becomes a contest, live work in
@@ -1619,7 +1621,7 @@ statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
 its own fact and the contest stays. A statement classed `current_work`, `request`, or
 `status` settles no contest: its word-for-word repeat writes no fact, and its
-statement of another text is stored under its own class. A statement of any
+statement of another text is stored under the class its frozen plan gives it. A statement of any
 class that ends contested work in progress (above) ends that statement, and
 the ended fact holds no contest. The extractor is
 told which reference memories are `contested`; the flag reads the stored
