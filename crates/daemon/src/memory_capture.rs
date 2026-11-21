@@ -6170,6 +6170,7 @@ mod tests {
             ("Use the 'requests' library for HTTP calls.", true),
             ("Ask the 'end-users' group first.", true),
             ("Keep the port at '8080' on staging.", true),
+            ("Keep the limit at '1,000' rows.", true),
             ("Keep the port at \"8080\" on staging.", true),
             ("Name the loop variable \"x_2\" in the examples.", true),
             ("The reviewer said \"no\" to that.", true),
