@@ -1127,7 +1127,7 @@ model/output failure of that source, so later sources are not held behind it.
 Dispatches are capped at nine per source across owners: a model/output failure
 on or after the ninth dispatch abandons the source. A frozen plan the Kernel
 refuses on admission policy, invalid input, or a missing object, and a frozen
-plan the host cannot decode, records one dispatch per refused publication: the
+plan the host cannot decode or whose plan version is another build's, records one dispatch per refused publication: the
 retry delay doubles with the count, and the refusal that reaches the ninth
 dispatch abandons the source with the error `kernel_write_refused` or
 `invalid_preparation`. A Kernel conflict, which means a target moved under the
@@ -1328,9 +1328,11 @@ settled (below), is an instruction for one occasion: it is stored with
 `lifetime` `request`, and the contest rule (below) shows it on the line of
 the fact it contests. A `current_work` fact frozen with no such contest,
 because it names none, contests only labeled facts, or another fact of its
-source or batch holds the contest, keeps its class. A frozen plan commits
-under the rules of the build that commits it, so a plan an earlier build
-froze whose fact carries `current_work` is approved under the rule above. A captured fact's rationale
+source or batch holds the contest, keeps its class. A frozen plan carries
+plan version 2, which names the classes as this section defines them.
+Publication refuses a plan of another version as it refuses one it cannot
+decode (`invalid_preparation`, below), so a class an earlier build froze is
+never read under these rules. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1398,7 +1400,8 @@ statement's place among the statements of other commits that the read
 returned as it was; statements of one commit are in fact-id order, which
 follows the fact's current id. A contested line of it is rendered
 as any contested statement is. The read counts work in progress
-against bounds of its own, a quarter of the read's row and byte bounds,
+against bounds of its own, a quarter of the read's row and byte bounds, each
+rounded down and the row bound at least one,
 taken in the read's order, which is by the commit that wrote each fact's
 current row, so the other facts keep the whole of the read's row and byte
 bounds, and they are selected against the whole token budget first. The

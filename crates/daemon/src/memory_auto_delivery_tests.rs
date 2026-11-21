@@ -1793,7 +1793,7 @@ fn production_waits(handler: &Handler) {
 
 /// A plan that decodes and that the Kernel accepts once it has the writer.
 fn statement_plan(quote: &str) -> String {
-    json!({"version": 1, "model": "test/model", "memories": [{
+    json!({"version": 2, "model": "test/model", "memories": [{
         "category": "PROJECT_RULES",
         "content": stated(quote),
         "quote": quote,
@@ -3328,6 +3328,49 @@ async fn two_proposals_of_one_plan_freeze_as_one_fact_classed_by_its_contest() {
     );
 }
 
+/// A class on a memory of an assistant source changes nothing and is stored
+/// as the proposal carried it: an assistant's report classed `current_work`
+/// that contests a rule keeps that class, is stored labeled, and contests
+/// the rule.
+#[tokio::test]
+async fn an_assistant_report_that_contests_a_rule_keeps_the_class_it_carried() {
+    let report = "The importer merge skipped the integration suite.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE)],
+        |_, _| vec![fact(INTEGRATION_RULE)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "assistant", report)],
+        |_, existing| {
+            vec![Extracted {
+                contests: ids_containing(existing, "before every merge"),
+                ..classed(report, "current_work")
+            }]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let stored = rows
+        .iter()
+        .find(|row| row.1.ends_with(report))
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    assert_eq!(stored.3["lifetime"], "current_work", "{:?}", stored.3);
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
+    assert!(
+        block.contains("contested") && block.contains("skipped the integration suite"),
+        "{block}"
+    );
+}
+
 /// An assistant's message repeats live work in progress and contradicts a
 /// rule. The repeat writes no fact, and the contest is recorded through
 /// the work in progress it repeats, as through any fact a proposal
@@ -3819,10 +3862,12 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
     }
     assert_eq!(lasting_sections(&block), control);
     let work = block_element(&block, "CURRENT_WORK").expect("the section renders");
+    // The section's share counts the whole element, its closing tag too.
+    let section = format!("{work}</CURRENT_WORK>");
     assert!(
-        tokens(work) <= config.memory_budget_tokens / 4.0,
+        tokens(&section) <= config.memory_budget_tokens / 4.0,
         "{}",
-        tokens(work)
+        tokens(&section)
     );
     let delivered = delivered_plans(&block);
     assert!(
@@ -5218,6 +5263,69 @@ fn queue_row(store: &MemoryStore, job: &str) -> QueueRow {
         .unwrap()
 }
 
+/// A plan of another plan version is refused as frozen, so the lifetime
+/// classes of an earlier build are never read under this build's rules: a
+/// version 1 plan that classes an instruction `current_work` writes
+/// nothing and records one dispatch.
+#[tokio::test]
+async fn a_plan_of_another_version_is_refused_and_writes_nothing() {
+    let instruction = "Rename the retry helper to backoff_delay in this module.";
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let digest = kernel_routes::ProjectBinding::new(&project)
+        .digest()
+        .to_owned();
+    let jobs = enqueue(&handler, FIRST, "s1", &[("m1", "user", instruction)]).await;
+    let job = jobs[0].as_str();
+    assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
+    let plan = json!({"version": 1, "model": "test/model", "memories": [{
+        "category": "PROJECT_RULES",
+        "content": stated(instruction),
+        "quote": instruction,
+        "lifetime": "current_work",
+    }]})
+    .to_string();
+    assert!(
+        store
+            .prepare_memory_capture(&digest, job, &plan)
+            .unwrap()
+            .is_some()
+    );
+    let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    assert_eq!(
+        body(
+            handler
+                .handle_native_capture_next(test_route(FIRST), &next)
+                .await
+        )["state"],
+        "pending"
+    );
+    let (attempts, _, error, abandoned, _, frozen) = queue_row(&store, job);
+    assert_eq!(
+        (attempts, error.as_deref(), abandoned),
+        (2, Some("invalid_preparation"), None)
+    );
+    assert_eq!(frozen.as_deref(), Some(plan.as_str()));
+    assert!(memory_rows(&handler, &project).is_empty());
+    assert!(live_statement_records(&handler, &project).is_empty());
+
+    // The same plan under this build's version commits.
+    store
+        .execute_tag_sql_for_test(&format!(
+            "UPDATE memory_capture_jobs SET retry_at_ms=0,prepared_json=replace(prepared_json,'\"version\":1','\"version\":2') WHERE job_id='{job}'"
+        ))
+        .unwrap();
+    handler.native_capture.lock().unwrap().expire_all_for_test();
+    body(
+        handler
+            .handle_native_capture_next(test_route(FIRST), &next)
+            .await,
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(instruction)]
+    );
+}
+
 /// A frozen plan decodes and names a replacement target it was never
 /// offered, which the Kernel refuses as invalid input. Each drain that
 /// commits it records one dispatch and doubles the wait, and the refusal on
@@ -5231,7 +5339,7 @@ async fn a_plan_the_kernel_refuses_spends_a_dispatch_per_commit_and_is_abandoned
     let jobs = enqueue(&handler, FIRST, "s1", &[("m1", "user", THURSDAY)]).await;
     let job = jobs[0].as_str();
     assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
-    let plan = json!({"version": 1, "model": "test/model", "memories": [{
+    let plan = json!({"version": 2, "model": "test/model", "memories": [{
         "category": "PROJECT_RULES",
         "content": stated(THURSDAY),
         "quote": THURSDAY,

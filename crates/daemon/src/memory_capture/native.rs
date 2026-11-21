@@ -873,8 +873,12 @@ impl CaptureWork {
             settled.push((memories, kept_for_contests));
         }
         settle_batch_contests(&mut settled);
-        for (memories, _) in &mut settled {
-            super::class_contesting_work(memories, &plan.existing);
+        // A class changes nothing on a memory of an assistant source, so
+        // such a memory keeps the class its proposal carried.
+        for ((_, job), (memories, _)) in accepted.iter().zip(&mut settled) {
+            if super::is_user_source(job) {
+                super::class_contesting_work(memories, &plan.existing);
+            }
         }
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
@@ -897,7 +901,7 @@ impl CaptureWork {
                 .cloned()
                 .collect();
             let mut output = PreparedCapture {
-                version: CAPTURE_SCHEMA_VERSION,
+                version: super::CAPTURE_PLAN_VERSION,
                 model: plan.model.clone(),
                 existing,
                 memories,

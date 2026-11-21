@@ -43,6 +43,11 @@ use serde::{Deserialize, Serialize};
 use crate::memory_render::MEMORY_CATEGORY_ORDER;
 
 pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
+/// The version of a frozen plan. A plan of version 2 holds the lifetime
+/// classes as this build reads them: `current_work` is work the user leaves
+/// open beyond the turn, and `request` is an instruction the turn answers.
+/// Publication refuses a plan of another version.
+const CAPTURE_PLAN_VERSION: u32 = 2;
 pub const MAX_CAPTURE_MESSAGES: usize = 32;
 pub const MAX_CAPTURE_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_CAPTURE_OUTPUT_BYTES: usize = 128 * 1024;
@@ -180,7 +185,7 @@ fn has_eligible_lifetime(memory: &CapturedMemory) -> bool {
 }
 
 /// Gives the class `request` to each `current_work` memory of a settled
-/// source that contests a memory served automatically. Such a memory is an
+/// user source that contests a memory served automatically. Such a memory is an
 /// instruction for one occasion, shown on the line of the memory it
 /// contests.
 ///
@@ -1822,7 +1827,7 @@ impl CaptureWork {
             Err(_) => return Err((Unpublished::Retained, Some(frozen))),
         };
         let output = match serde_json::from_str::<PreparedCapture>(prepared) {
-            Ok(output) if output.version == CAPTURE_SCHEMA_VERSION => output,
+            Ok(output) if output.version == CAPTURE_PLAN_VERSION => output,
             _ => return Err((Unpublished::Refused("invalid_preparation"), Some(frozen))),
         };
         let settlement = if citation_consent(&self.binding.config) {
@@ -10177,7 +10182,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = ProjectBinding::new(dir.path());
         let output = PreparedCapture {
-            version: CAPTURE_SCHEMA_VERSION,
+            version: CAPTURE_PLAN_VERSION,
             model: "test/model".into(),
             existing: vec![],
             memories: vec![memory("Use port 4321."), memory("Deploy on Fridays.")],
@@ -10213,7 +10218,7 @@ mod tests {
         let mut source = job(key);
         source.text = statements.join(" ");
         let output = PreparedCapture {
-            version: CAPTURE_SCHEMA_VERSION,
+            version: CAPTURE_PLAN_VERSION,
             model: "test/model".into(),
             existing: vec![],
             memories: statements
@@ -10361,7 +10366,7 @@ mod tests {
             source.role = "assistant".into();
             source.text = report.clone();
             let output = PreparedCapture {
-                version: CAPTURE_SCHEMA_VERSION,
+                version: CAPTURE_PLAN_VERSION,
                 model: "test/model".into(),
                 existing: vec![],
                 memories: vec![memory(&report)],
@@ -10465,7 +10470,7 @@ mod tests {
             source.role = "assistant".into();
             source.text = (*report).into();
             let output = PreparedCapture {
-                version: CAPTURE_SCHEMA_VERSION,
+                version: CAPTURE_PLAN_VERSION,
                 model: "test/model".into(),
                 existing: vec![],
                 memories: vec![memory(report)],
@@ -10919,7 +10924,7 @@ mod tests {
         source.role = "assistant".into();
         source.text = "Use port 4321.".into();
         let plan = |memories| PreparedCapture {
-            version: CAPTURE_SCHEMA_VERSION,
+            version: CAPTURE_PLAN_VERSION,
             model: "test/model".into(),
             existing: vec![],
             memories,
@@ -10981,7 +10986,7 @@ mod tests {
             let mut source = job(&format!("job-{run}"));
             source.text = text.clone();
             let output = PreparedCapture {
-                version: CAPTURE_SCHEMA_VERSION,
+                version: CAPTURE_PLAN_VERSION,
                 model: "test/model".into(),
                 existing: vec![],
                 memories: vec![memory("one"), memory("two"), memory("three")],
@@ -11107,7 +11112,7 @@ mod tests {
         existing: Vec<ExistingCaptureMemory>,
     ) -> Result<kernel::CommitReceipt, kernel::KernelError> {
         let output = PreparedCapture {
-            version: CAPTURE_SCHEMA_VERSION,
+            version: CAPTURE_PLAN_VERSION,
             model: "test/model".into(),
             memories: vec![memory],
             existing,
@@ -11128,7 +11133,7 @@ mod tests {
     #[test]
     fn a_plan_frozen_without_a_head_reads_as_head_unavailable() {
         let legacy: PreparedCapture = serde_json::from_value(json!({
-            "version": CAPTURE_SCHEMA_VERSION,
+            "version": CAPTURE_PLAN_VERSION,
             "model": "test/model",
             "existing": [],
             "memories": [],
@@ -11142,7 +11147,7 @@ mod tests {
         let text = serde_json::to_string(&frozen).unwrap();
         let read: PreparedCapture = serde_json::from_str(&text).unwrap();
         assert_eq!(read.head, frozen.head);
-        assert_eq!(read.version, CAPTURE_SCHEMA_VERSION);
+        assert_eq!(read.version, CAPTURE_PLAN_VERSION);
     }
 
     /// Approval decides whether a user's statement of a stored fact is
@@ -11549,7 +11554,7 @@ mod tests {
         let mut proposed = memory("There is no retry policy in this checkout.");
         proposed.replaces = Some(previous.id.clone());
         let prepared = PreparedCapture {
-            version: CAPTURE_SCHEMA_VERSION,
+            version: CAPTURE_PLAN_VERSION,
             model: "test/model".into(),
             existing: vec![previous],
             memories: vec![proposed],

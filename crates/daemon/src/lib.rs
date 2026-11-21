@@ -25225,7 +25225,7 @@ mod tests {
             .pending_memory_captures(&key, "pi", now_ms())
             .unwrap()
             .remove(0);
-        let legacy = json!({"version":1,"model":"custom-native/model","existing":[],"memories":[{
+        let legacy = json!({"version":2,"model":"custom-native/model","existing":[],"memories":[{
             "category":"CONFIG_VALUES",
             "content":"User stated: Use port 4321 for staging.",
             "quote":"Use port 4321 for staging.",
@@ -25645,7 +25645,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
@@ -25800,7 +25800,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
@@ -25988,7 +25988,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
@@ -26706,7 +26706,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":1,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
