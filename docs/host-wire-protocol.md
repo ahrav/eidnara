@@ -1265,30 +1265,39 @@ is the next quotation mark of the line and of the opening mark's style (one of
 `'`, `‘`, `’`, `＇` for a single mark; a mark of the same family for a double
 one), with no letter or digit after it; and the text between the marks is one
 token: at least one character, no whitespace, and every character printable
-ASCII other than a backtick and the ASCII quotation marks, a letter of a
-script with letter case, or an apostrophe between two letters or digits. A
-token holds no space, so it holds no sentence of another speaker, and the
-scripts that write sentences without spaces have no letter case. A token that
-ends in `.`, `!`, or `?` is no literal, as a one-word utterance such as
-`"Wait!"` ends so. A closing mark that the pairing rules above read another
-way closes no literal: a single mark after `s`, `S`, or a number, which may
-be a plural possessive or a feet mark, and a double mark after a number,
-which may be an inch mark, when every character of the token is a letter, a
-digit, an apostrophe, or one of `-`, `.`, `,`, `/`, so `'users'`, `'k8s'`,
-and `"27"` are no literals while `'user_ids'` and `"x_2"` are. The low-9
-mark `‚` and a glyph every script writes on the other side of a quotation
-open or close no literal. A single mark after a letter or digit with no
-letter or digit after it ends a word, as a plural possessive or an elision
-does, and opens and closes nothing. A paragraph that holds any other
-quotation mark, or a quotation mark inside an inline code span that the
-paragraph rule counts, is read by the pairing rules above and is left out.
+ASCII other than a backtick and the ASCII quotation marks, a cased letter of
+another script (lowercase, uppercase, or titlecase), or an apostrophe (`'`,
+`’`, or `＇`) between two letters or digits. A token of several words may be
+what another speaker said, and the scripts that write sentences without
+spaces have no letter case. A token that ends in `.`, `!`, or `?`, behind
+any `)`, `]`, `}`, `*`, or `_`, is a one-word utterance such as `"Wait!"`
+and no literal; a one-word quotation without such a mark, as in
+`He said "no" to that.`, is read as a literal, and its sentence is the
+user's with the speaker in it. The low-9 mark `‚` and a glyph every script
+writes on the other side of a quotation open or close no literal. A single
+mark after a letter or digit with no letter or digit after it ends a word,
+as a plural possessive or an elision does: it opens and closes nothing in a
+paragraph that holds no single-quoted literal before it, and after such a
+literal it may close a quotation that the literal's opening mark opened, so
+the paragraph is read by the pairing rules above. A paragraph that holds
+any other quotation mark, or a quotation mark inside an inline code span
+that the paragraph rule counts, is read by the pairing rules above and is
+left out. A closing mark with a second reading introduces what follows its
+literal: a single mark after `s`, `S`, or a number may be a plural
+possessive or a feet mark, and a double mark after a number an inch mark,
+and under that reading the opening mark opens a quotation that runs on. The
+opening mark of the first such literal of a paragraph is therefore read as
+the paragraph's first colon is (below): a quotation that starts at or
+before it may be a statement, so `Use the 'requests' library.` is one, a
+sentence that starts after it in the paragraph is none, and every later
+paragraph of the message is left out, as after a line that ends in a colon.
 When a quotation of the message is open or unknown, a paragraph of literals
 that is the first one to hold a quotation mark is left out with the later
 ones, since the marks of its literal may stand inside that quotation.
 The rule reads marks by their place and cannot tell every arrangement of
 symmetric marks apart; where it cannot, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
-that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
+that is not lowercase, and no colon and no opening mark of a literal whose closing mark has a second reading (above) comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, whitespace or the
 paragraph's end follows that mark, and no lowercase word
 follows it past any punctuation; a paragraph whose first letter is lowercase
@@ -1334,9 +1343,9 @@ such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 or `Approx` in any letter case before a number, which may follow one character that is no letter, digit, whitespace, or period and then a decimal point, as in `No. 2`, `approx. -5`, or `approx. .5`; a quotation's closing period that ends its paragraph ends the sentence at any of these words; these lists are a heuristic
 for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
-an inline code span, so a quotation may hold a whole span; a sentence boundary follows whitespace or the paragraph's edge and a literal holds no whitespace, so a quotation holds each literal of its paragraph with both of its marks; and its trimmed text holds a letter or digit and contains
+an inline code span, so a quotation may hold a whole span; a quotation starts at the paragraph's start or after whitespace and ends at the paragraph's end, before whitespace, or directly before a closing `.` or `!`, and a literal holds no whitespace and ends in no sentence mark, so a quotation holds a literal with both of its marks or leaves it out; and its trimmed text holds a letter or digit and contains
 no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
-finite), does not start with a backtick or with a quotation mark, single or double, and contains no `.`, `!`, or `,` directly before `'` or `’`. The rule reads sentence ends in `.` and `!` only, so text
+finite) and, behind any leading `(`, `[`, or `{`, does not start with a backtick or with a quotation mark, single or double. The rule reads sentence ends in `.` and `!` only, so text
 in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source may carry `lifetime`, the extractor's class of
 how long the statement holds: `lasting`, a rule, preference, convention,
 decision, constraint, or stable fact that still guides a different task in a
