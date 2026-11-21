@@ -81,8 +81,8 @@ struct NativePlan {
     existing: Vec<ExistingCaptureMemory>,
     /// The stored rows a source's request left out of its prompt after two
     /// recorded failures. Acceptance reads them as the candidates of the
-    /// word-for-word duplicate link, so a statement an approved row of its
-    /// delivery class already holds is stored once.
+    /// word-for-word duplicate link a frozen memory names, which
+    /// publication judges like a link the extractor named.
     withheld: Vec<ExistingCaptureMemory>,
     model: String,
 }
@@ -909,12 +909,12 @@ impl CaptureWork {
             failure_evidence::attach(&job.text, &mut memories);
             let attached = keep_statement_text(&job, &proses[index], &quoted, &mut memories);
             // A source extracted without the stored rows names no target.
-            // Its memory whose frozen text an approved row holds word for
-            // word names that row, so publication stores the statement
-            // once. A memory that gained failure lines the row lacks is
-            // written with them. A statement eligible for approval names a
-            // row of its own delivery class, so ending work in progress
-            // retires only the plan.
+            // Its memory whose frozen text a withheld row served
+            // automatically holds word for word names that row, and
+            // publication judges the link like one the extractor named.
+            // A memory that gained failure lines the row lacks names none.
+            // A statement eligible for approval names a row of its own
+            // delivery class, so ending work in progress retires the plan.
             let states_whole = super::states_whole_message(&job);
             let link_withheld_copies = |memories: &mut [CapturedMemory]| {
                 for memory in memories {
