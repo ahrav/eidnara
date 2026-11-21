@@ -1284,7 +1284,8 @@ the paragraph is read by the pairing rules above. A paragraph that holds
 any other quotation mark, or a quotation mark inside an inline code span
 that the paragraph rule counts, is read by the pairing rules above and is
 left out. A closing mark with a second reading introduces what follows its
-literal: a single mark after `s`, `S`, or a number may be a plural
+literal: a single mark after `s`, `S`, or a number, read behind any `)`,
+`]`, `}`, `*`, or `_` that ends the token, may be a plural
 possessive or a feet mark, and a double mark after a number an inch mark,
 and under that reading the opening mark opens a quotation that runs on. The
 opening mark of the first such literal of a paragraph is therefore read as
@@ -1296,15 +1297,18 @@ Wherever this section reads a paragraph's first colon, in the join of
 sentences quoted one by one, in the sentence quoted alone after it, and in
 the contest a sentence after it keeps, it reads the opening mark of such a
 literal the same way. The rule keeps three readings it cannot rule out, each
-stated here: the sentence that holds a literal with a second reading is
-approved whole, with whatever stands between its marks and after them in
-that sentence; a one-word quotation of speech without a sentence mark is
+stated here: a quotation that starts at or before a literal with a second
+reading and meets every other condition of this section is a statement
+whole, with whatever stands between the literal's marks and after them up
+to the quotation's end, which sentences joined to it extend; a one-word quotation of speech without a sentence mark is
 read as a literal; and a single-quoted first word of a longer quotation
 that closes after a letter other than `s`, as an elision such as `'Goin'`
-does, is read as a literal when no later single mark ends a word in its
-paragraph, so the sentences after it are plain prose, in its paragraph and,
-as the pairing rules above already read a one-word single quotation, in the
-later ones.
+does, is read as a literal when no later single mark that closes no literal ends
+a word in its paragraph, so the sentences after it are plain prose, in its
+paragraph and, as the pairing rules above already read a one-word single
+quotation, in the later ones; a later single-quoted literal, in that
+paragraph or a later one, takes its own marks and leaves this reading as it
+is.
 When a quotation of the message is open or unknown, a paragraph of literals
 that is the first one to hold a quotation mark is left out with the later
 ones, since the marks of its literal may stand inside that quotation.
@@ -1359,7 +1363,7 @@ for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
 an inline code span, so a quotation may hold a whole span; a quotation starts at the paragraph's start or after whitespace and ends at the paragraph's end, before whitespace, or directly before a closing `.` or `!`, and a literal holds no whitespace and ends in no sentence mark, so a quotation holds a literal with both of its marks or leaves it out; and its trimmed text holds a letter or digit and contains
 no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
-finite) and its first letter, digit, backtick, or quotation mark, single or double, is a letter or digit, so brackets or emphasis marks before a leading quotation mark or backtick leave it no statement. The rule reads sentence ends in `.` and `!` only, so text
+finite) and its first letter, digit, backtick, or quotation mark, single or double, is a letter or digit, so brackets or emphasis marks before a leading quotation mark or backtick leave it no statement; a quotation of several sentences is judged at its own first character, as its sentence edges are judged at its two ends. The rule reads sentence ends in `.` and `!` only, so text
 in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source may carry `lifetime`, the extractor's class of
 how long the statement holds: `lasting`, a rule, preference, convention,
 decision, constraint, or stable fact that still guides a different task in a

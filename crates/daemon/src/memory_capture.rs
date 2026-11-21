@@ -3041,7 +3041,10 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
                 && ch != '\u{201a}'
                 && previous.is_none_or(|before| before.is_whitespace() || "([{".contains(before));
             let (token, closer) = opens.then(|| literal_token(single, ch, rest)).flatten()?;
-            if token.ends_with(char::is_numeric) || (single && token.ends_with(['s', 'S'])) {
+            // The word or number may stand behind closing brackets or
+            // emphasis marks, as in `'user(s)'`.
+            let ending = token.trim_end_matches(TOKEN_CLOSERS);
+            if ending.ends_with(char::is_numeric) || (single && ending.ends_with(['s', 'S'])) {
                 found.introduces_from.get_or_insert(start + at);
             }
             single_closed |= single;
@@ -3052,6 +3055,10 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
     }
     Some(found)
 }
+
+/// Closing brackets and emphasis marks that may stand behind the last word
+/// of a token.
+const TOKEN_CLOSERS: [char; 5] = [')', ']', '}', '*', '_'];
 
 /// A single quotation mark that no double-mark family lists.
 fn is_single_mark(ch: char) -> bool {
@@ -3088,7 +3095,7 @@ fn literal_token(single: bool, opener: char, rest: &str) -> Option<(&str, char)>
         if closes {
             let token = &rest[..at];
             let utterance = token
-                .trim_end_matches([')', ']', '}', '*', '_'])
+                .trim_end_matches(TOKEN_CLOSERS)
                 .ends_with(['.', '!', '?']);
             // A mark after a backslash may be an escaped character of
             // quoted text.
@@ -6412,6 +6419,43 @@ mod tests {
                 "Bob wrote 'Goin' home now.\n\nAlways tag the release.",
                 "Always tag the release.",
                 true,
+            ),
+            // A plural or a number behind a closing bracket or an emphasis
+            // mark has the second reading too.
+            (
+                "Bob wrote 'user(s)' data is gone. Never restore it.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote '*Parsers*' are slow.\n\nNever tune them.",
+                "Never tune them.",
+                false,
+            ),
+            // A number outside the word characters, and a double-quoted
+            // literal after a backslash.
+            (
+                "Bob wrote '+6' is the limit. Never raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Join the path with \"C:\\\" on the test host.\n\nNever rename it.",
+                "Never rename it.",
+                false,
+            ),
+            // The introduction is the first literal with a second reading:
+            // a statement that starts between it and a later one is none.
+            (
+                "Use the 'requests' library. Pin 'urllib3' too. Never float them.",
+                "Pin 'urllib3' too.",
+                false,
+            ),
+            // A word-final mark on a later line of the paragraph.
+            (
+                "Call 'it_' the prefix.\nKeep the tests' names short. Never rename them.",
+                "Never rename them.",
+                false,
             ),
             // A question in a literal makes its paragraph one the pairing
             // rules read.
