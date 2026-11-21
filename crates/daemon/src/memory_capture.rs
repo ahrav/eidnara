@@ -9761,6 +9761,7 @@ mod tests {
         for definition in [
             " request: asks for work in the turn at hand,",
             " current_work: work the user leaves open beyond the turn at hand,",
+            " status: what happened or is observed now, and general talk about people, careers, the organisation, or teamwork that leaves the work on this project nothing to follow.",
             "a user source message that reports that work finished, cancels it, or changes its plan names the entry under replaces, whatever lifetime the message's own memory has.",
         ] {
             assert!(CAPTURE_SYSTEM_PROMPT.contains(definition), "{definition}");
