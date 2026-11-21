@@ -18,6 +18,7 @@ import {
     Deadline,
     HostCallError,
     type HostClient,
+    HostClientError,
     type HostClientOptions,
     MODEL_EXECUTION_CREDENTIAL_NAMES,
     MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
@@ -42,6 +43,7 @@ const REPO_ROOT = join(import.meta.dir, "../../../../..");
 
 type TransportInternals = {
     client: HostClient | null;
+    clientCacheOptions: HostClientOptions | null;
     connectionPromise: Promise<unknown> | null;
     connectionCertification: { expectedDaemonId?: Uint8Array } | null;
     routes: Map<string, { route: RouteHandle; generation: number }>;
@@ -812,6 +814,72 @@ describe("possibly sent bodies fence the session lane", () => {
         await second;
         expect(secondSettled).toBe(true);
     });
+
+    test("the lane stays held until a client that a generation read retired has closed", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        let finishClose: (() => void) | undefined;
+        const closing = new Promise<void>((resolve) => {
+            finishClose = resolve;
+        });
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const client = {
+            isClosed: false,
+            closeAsync: () => closing,
+            request: () => {
+                // Another holder closes the shared client while the request is in flight, and a generation read retires it on this transport.
+                client.isClosed = true;
+                expect((transport as unknown as HostModuleTransport).generation).toBe(1);
+                return Promise.reject(
+                    new HostCallError("outcome_unknown", "deadline after send", "request_deadline"),
+                );
+            },
+        };
+        const shared = client as unknown as HostClient;
+        transport.client = shared;
+        transport.clientCacheOptions = transport.clientOptions();
+        const replacement = {
+            isClosed: false,
+            request: async () => ({ ok: true }),
+        } as unknown as HostClient;
+        let routeOpenings = 0;
+        transport.ensureRoute = async () => {
+            routeOpenings += 1;
+            if (routeOpenings === 1) {
+                return { client: shared, route, routeKey: "s\0/tmp", generation: 0 };
+            }
+            // The call after the retirement dials a live client under the generation the retirement advanced to.
+            transport.client = replacement;
+            return { client: replacement, route, routeKey: "s\0/tmp", generation: 1 };
+        };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+            }),
+        ).rejects.toMatchObject({ kind: "outcome_unknown" });
+
+        let secondSettled = false;
+        const second = transport
+            .call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                timeoutMs: 2_000,
+            })
+            .finally(() => {
+                secondSettled = true;
+            });
+        await Bun.sleep(20);
+        expect(secondSettled).toBe(false);
+        finishClose?.();
+        // The second call enters the lane once the retired client has closed and is answered on the replacement; the failure after the send leaves the generation where the retirement put it.
+        await expect(second).resolves.toEqual({ ok: true });
+        expect((transport as unknown as HostModuleTransport).generation).toBe(1);
+    });
 });
 
 describe("call policy is keyed off the body it forwards", () => {
@@ -1026,6 +1094,213 @@ describe("generation-sensitive not-sent outcomes", () => {
                 generationSensitive: true,
             }),
         ).resolves.toMatchObject({ transport_status: "connection_generation_changed" });
+    });
+
+    test("a request the facade refuses on a closed client reports a generation change", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        fakeRoute(transport, () =>
+            Promise.reject(new HostClientError("client closed", "client_closed")),
+        );
+        const before = transport.connectionGeneration;
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: before,
+            current_generation: before + 1,
+        });
+    });
+
+    test("a failure before the route of a connection another holder retired keeps its replacement open", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const retired = { isClosed: true } as unknown as HostClient;
+        const replacement = { isClosed: false } as unknown as HostClient;
+        transport.client = retired;
+        const before = transport.connectionGeneration;
+        transport.ensureRoute = async () => {
+            // While this call waits for its route, a generation read retires the closed client and another call dials its replacement.
+            expect((transport as unknown as HostModuleTransport).generation).toBe(before + 1);
+            transport.client = replacement;
+            throw Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+        };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: before,
+            current_generation: before + 1,
+        });
+        expect(transport.client).toBe(replacement);
+    });
+
+    test("a connection that fails while its route opens is retired after the attempt retired an earlier one", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const rotated = {} as unknown as HostClient;
+        const dialed = {
+            routeOpen: () =>
+                Promise.reject(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })),
+            closeRoute: async () => {},
+        } as unknown as HostClient;
+        transport.client = rotated;
+        const before = transport.connectionGeneration;
+        transport.ensureConnected = async () => {
+            // The attempt finds the cached client's daemon replaced, retires it, and dials.
+            if (transport.client === rotated) {
+                void transport.invalidateConnection(rotated);
+                transport.client = dialed;
+            }
+            if (transport.client !== dialed) throw new Error("no daemon to dial");
+            return { client: dialed };
+        };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: before,
+            current_generation: before + 2,
+        });
+        expect(transport.client).toBeNull();
+    });
+
+    test("a route opening that fails on a client another holder retired keeps the replacement open", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const replacement = {} as unknown as HostClient;
+        const retired = {
+            routeOpen: async () => {
+                // While the route opens, another holder retires this client and a second call dials its replacement.
+                void transport.invalidateConnection(retired);
+                transport.client = replacement;
+                throw Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+            },
+            closeRoute: async () => {},
+        } as unknown as HostClient;
+        transport.client = retired;
+        const before = transport.connectionGeneration;
+        transport.ensureConnected = async () => ({ client: retired });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({
+            transport_status: "connection_generation_changed",
+            previous_generation: before,
+            current_generation: before + 1,
+        });
+        expect(transport.client).toBe(replacement);
+    });
+
+    test("a route the host closes while it opens is opened again on the same connection", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        let opens = 0;
+        const client = {
+            routeOpen: async () => {
+                opens += 1;
+                if (opens === 1) {
+                    throw new HostCallError("terminal", "route closed by the host", "route_gone");
+                }
+                return route;
+            },
+            closeRoute: async () => {},
+            request: async () => ({ ok: true }),
+        } as unknown as HostClient;
+        transport.client = client;
+        const before = transport.connectionGeneration;
+        transport.ensureConnected = async () => ({ client });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).resolves.toEqual({ ok: true });
+        expect(opens).toBe(2);
+        expect(transport.client).toBe(client);
+        expect(transport.connectionGeneration).toBe(before);
+    });
+
+    test("a request the facade refuses on a closed client is sent once on the next connection", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const route = { channel: 7, epoch: 1 } as unknown as RouteHandle;
+        const closed = {
+            request: () => Promise.reject(new HostClientError("client closed", "client_closed")),
+        } as unknown as HostClient;
+        let sent = 0;
+        const live = {
+            request: async () => {
+                sent += 1;
+                return { ok: true };
+            },
+        } as unknown as HostClient;
+        const clients = [closed, live];
+        transport.ensureRoute = async () => {
+            const client = clients.shift() ?? live;
+            transport.client = client;
+            return {
+                client,
+                route,
+                routeKey: "s\0/tmp",
+                generation: transport.connectionGeneration,
+            };
+        };
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+            }),
+        ).resolves.toEqual({ ok: true });
+        expect(sent).toBe(1);
+    });
+
+    test("an answer that arrives after the transport retired its connection is an unknown outcome", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        fakeRoute(transport, async () => {
+            // Another caller retires the connection while the daemon is answering.
+            await transport.invalidateConnection();
+            return { ok: true };
+        });
+
+        await expect(
+            transport.call({
+                sessionId: "s",
+                projectRoot: "/tmp",
+                method: "session.status",
+                body: { method: "session.status" },
+                generationSensitive: true,
+            }),
+        ).rejects.toMatchObject({ kind: "outcome_unknown", code: "connection_changed" });
     });
 
     test("a body built under an older generation is not sent once the route settles on a newer one", async () => {

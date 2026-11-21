@@ -438,6 +438,11 @@ function isStaleRouteHandleFailure(error: unknown): boolean {
     );
 }
 
+/** The facade answers `client_closed` when it refuses work on a closed client, before it writes any byte of the request. */
+function isClosedClientRefusal(error: unknown): boolean {
+    return isRecord(error) && error.name === "HostClientError" && error.code === "client_closed";
+}
+
 /** Attach a bounded cleanup ticket when caller abort can race a possible send. */
 /** Rejects with the signal's reason as soon as it aborts; `operation` itself keeps running. */
 function untilAborted<T>(operation: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -552,6 +557,8 @@ export class HostModuleTransport {
     private clientCacheOptions: HostClientOptions | null = null;
     private routes = new Map<string, CachedRoute>();
     private routeOpenings = new Map<string, OpeningRoute>();
+    // The teardown of each client this transport has retired, so a later failure on that client fences its lane on the same teardown.
+    private readonly teardowns = new WeakMap<HostClient, Promise<void>>();
     private canonicalRootCache = new Map<string, string>();
     // `sessionLanes` preserves request order within each session while independent sessions overlap.
     // Both the aggregate and per-session counts cap queued work; active calls are not waiters.
@@ -829,6 +836,9 @@ export class HostModuleTransport {
             for (;;) {
                 let ensuredRoute: EnsuredRoute | null = null;
                 let requestInvoked = false;
+                // The connection generation at the start of this attempt, and the client the attempt connected with once it has one.
+                const attemptGeneration = this.connectionGeneration;
+                const connected: { client?: HostClient } = {};
                 try {
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
@@ -839,6 +849,7 @@ export class HostModuleTransport {
                         deadline,
                         args.signal,
                         sessionClosedSinceStart,
+                        connected,
                     );
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
@@ -890,8 +901,11 @@ export class HostModuleTransport {
                         this.client !== ensuredRoute.client ||
                         this.connectionGeneration !== ensuredRoute.generation
                     ) {
-                        throw this.connectionChangedError(
+                        // The daemon answered, so the request ran, and the answer belongs to a connection this transport has retired. The caller learns that the outcome is unknown: a write may be applied.
+                        throw new HostCallError(
+                            "outcome_unknown",
                             "daemon connection changed while awaiting the module response",
+                            "connection_changed",
                         );
                     }
                     return response;
@@ -902,14 +916,14 @@ export class HostModuleTransport {
                     // The retry path evicts the route and retries once when the host proves no dispatch.
                     const unknownChannel =
                         kind === "terminal" && errorCodeOf(error) === "unknown_channel";
-                    // The code treats a facade `not_sent`, a stale handle rejected before write, or a failure before `request()` as proven pre-send.
+                    // The code treats a facade `not_sent`, a stale handle rejected before write, a request refused by a closed client, or a failure before `request()` as proven pre-send.
                     const provenNotSent =
                         kind === "not_sent" ||
                         isStaleRouteHandleFailure(error) ||
+                        isClosedClientRefusal(error) ||
                         (!requestInvoked && isConnectionFailure(error));
                     const replayEligible = unknownChannel || provenNotSent;
-                    const previousGeneration =
-                        ensuredRoute?.generation ?? this.connectionGeneration;
+                    const previousGeneration = ensuredRoute?.generation ?? attemptGeneration;
                     let turnedOver = false;
                     if (unknownChannel || isStaleRouteHandleFailure(error)) {
                         // Route-level proof evicts the dead route while retaining the connection; the facade reconnects internally when its generation retires.
@@ -922,11 +936,16 @@ export class HostModuleTransport {
                         // A post-write abort relies on the bounded cleanup ticket instead of resending a possibly sent body.
                         // After a possible send, a post-write abort uses Cancel and the cleanup ticket rather than resending the body.
                         let teardown: Promise<void>;
-                        if (ensuredRoute) {
-                            this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
-                            teardown = this.invalidateConnection(ensuredRoute.client);
-                        } else {
+                        if (ensuredRoute) this.dropRoute(ensuredRoute.routeKey, ensuredRoute.route);
+                        const failed = ensuredRoute?.client ?? connected.client;
+                        if (failed) {
+                            // The failure belongs to the client this attempt connected with, which is retired by identity: a client that has replaced it since stays open.
+                            teardown = this.invalidateConnection(failed);
+                        } else if (this.connectionGeneration === attemptGeneration) {
                             teardown = this.invalidateConnection();
+                        } else {
+                            // The attempt failed before it had a client, and the generation moved since it began: its own dial retired the failed connection, or another holder did. The current client may be a replacement, which stays open.
+                            teardown = Promise.resolve();
                         }
                         turnedOver = true;
                         // A body that may have reached the daemon has no cleanup ticket of its own, so the superseded connection's teardown fences the lane until the daemon has seen the connection go.
@@ -1019,6 +1038,8 @@ export class HostModuleTransport {
         deadline: Deadline = Deadline.start(this.requestTimeoutMs),
         signal?: AbortSignal,
         sessionClosed: () => boolean = () => false,
+        /** Receives the client the route is opened on, so a caller whose opening fails knows which client failed. */
+        connected?: { client?: HostClient },
     ): Promise<EnsuredRoute> {
         // The transport canonicalizes resolvable roots because transform and tool lanes can report symlink and resolved spellings, while the module keys lineage by `(session, root)` in a different filesystem namespace.
         const projectRoot = this.canonicalRoot(rawProjectRoot);
@@ -1026,6 +1047,7 @@ export class HostModuleTransport {
         const routeKey = `${sessionId}\0${projectRoot}`;
         // The cache reads a route only after connection settlement, and its generation must match the current connection.
         const { client, expectedDaemonId } = await this.ensureConnected(deadline, signal);
+        if (connected) connected.client = client;
         // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
         const credentialSourceVersion = managedCredentialSourceVersion(process.env);
         // `closeSession` fences a registered opening through `state.closed`; a close that landed before registration is observed here, so no replacement route is opened for a closed session.
@@ -1152,8 +1174,11 @@ export class HostModuleTransport {
         return this.connectionFile;
     }
 
-    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. */
+    /** Advances on every connection invalidation. A mutation token's `known_as_of` is a position in the event sequence of the daemon that minted it, so an owner caching tokens across calls must discard them when this changes: the daemon behind the same connection file may have been replaced, and a cache that only advances cannot otherwise recover from a token ahead of the new daemon's sequence. Reading it first retires a client another holder closed, so a generation read before a call names the connection that call dials. */
     get generation(): number {
+        // Every transport that dials one daemon holds the same process-wide client, and each holder's invalidation closes it for all of them. A closed client serves no request, so this transport retires it as a superseded connection: its generation advances, its routes are dropped, and its next call dials.
+        const client = this.client;
+        if (client?.isClosed) void this.invalidateConnection(client);
         return this.connectionGeneration;
     }
 
@@ -1438,9 +1463,11 @@ export class HostModuleTransport {
         return error;
     }
 
-    /** Returns the superseded connection's bounded teardown: cache eviction, then `closeAsync`. */
+    /** Returns the superseded connection's bounded teardown: cache eviction, then `closeAsync`. A client this transport retired earlier answers with that teardown. */
     private invalidateConnection(client: HostClient | null = this.client): Promise<void> {
-        if (client && this.client !== client) return Promise.resolve();
+        if (client && this.client !== client) {
+            return this.teardowns.get(client) ?? Promise.resolve();
+        }
         this.connectionGeneration += 1;
         this.connectionCertification = null;
         const superseded = this.client;
@@ -1451,10 +1478,12 @@ export class HostModuleTransport {
         this.routeOpenings.clear();
         // A retained entry holds a resolved client whose channel owns a polling interval and two ring mappings, and `handshakeTimeoutMs` is deadline-derived, so reconnects do not reuse one entry.
         if (superseded && supersededOptions) {
-            return evictProcessHostClient(supersededOptions, superseded).then(
+            const teardown = evictProcessHostClient(supersededOptions, superseded).then(
                 () => superseded.closeAsync().catch(() => undefined),
                 () => undefined,
             );
+            this.teardowns.set(superseded, teardown);
+            return teardown;
         }
         return Promise.resolve();
     }
