@@ -1018,3 +1018,4 @@ pub(super) fn keep_statement_text(
 }
 
 mod failure_evidence;
+pub(super) use failure_evidence::is_output_failure_line;

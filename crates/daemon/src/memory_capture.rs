@@ -6,10 +6,12 @@
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
 pub(crate) mod cite;
+mod failures;
 mod head;
 mod native;
 #[cfg(test)]
 pub(crate) use cite::CITATION_EVENT_KIND;
+pub(crate) use failures::FailureMemo;
 #[cfg(test)]
 pub(crate) use head::fixtures as head_fixtures;
 pub(crate) use head::{FrozenHead, observe_head};

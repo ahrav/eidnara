@@ -922,6 +922,43 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).toContain(`Contested by ${id(2)}: ${JSON.stringify(observation)}`);
     });
 
+    it("serves a failed command's record with its category, label, and text on the route and on the fallback", async () => {
+        const summary =
+            "Tool failure recorded from the result of bash: the command failed with exit code 101.\nCommand: cargo test -p api\nOutput lines:\nthread 'renders' panicked at src/render.rs:9:5:\nwidth is zero";
+        const rationale = JSON.stringify({
+            source: "tool_failure",
+            session: "s1",
+            command: "cargo test -p api",
+            state: "failed",
+            at: "2026-03-02T10:15:00Z",
+        });
+        for (const fallback of [false, true]) {
+            const { kernel, run } = harness();
+            kernel.seedDecision({
+                object_id: id(1),
+                decision_kind: "TOOL_FAILURE",
+                summary,
+                rationale,
+                source_id: "tool_failure",
+                labeled: true,
+            });
+            kernel.routeReply = () =>
+                fallback
+                    ? { kind: "terminal", terminal: "disabled" }
+                    : fused([{ object: id(1), labeled: true }]);
+            const execution = await run({ query: "cargo test failed" });
+            if (execution.status !== "complete") throw new Error(execution.text);
+            expect(execution.prePack.map((result) => result.objectId)).toEqual([id(1)]);
+            const header = execution.text.split("\n").find((line) => line.includes(` id=${id(1)} `));
+            expect(header).toContain(" category=TOOL_FAILURE ");
+            expect(header).toContain(` match=${fallback ? "lexical" : "fused"}`);
+            expect(header).toMatch(/ trust=\[labeled\]$/);
+            expect(execution.text).toContain("the command failed with exit code 101.");
+            expect(execution.text).toContain("width is zero");
+            expect(execution.text).toContain('"state":"failed"');
+        }
+    });
+
     it("refuses a ranking whose daemon connection changes before hydration in both passes", async () => {
         class MovingTransport extends FakeKernelTransport {
             identity = 0;

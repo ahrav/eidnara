@@ -1562,6 +1562,58 @@ claimed. Pi's status line shows pending or unconfirmed capture; OpenCode warns
 only when a checkpoint or drain fails. Notification failure never discards the
 answer.
 
+A later session is asked what went wrong the last time a command failed, and
+the error a command printed stands in its tool result, which capture's
+sources leave out. Each `transform` request of a primary session carries the
+window's tool calls and results, so the daemon reads failed commands there,
+with no model call, when capture is on for the session (`memory.enabled`,
+`memory.auto_promote`, and `memory.auto_capture`). A tool call carries a
+command when its input holds a string, or an array of strings, under
+`command` or `cmd`. The result of such a call is a failure when the last line
+of its output that states an exit code (digits after `exit code`,
+`exit_code`, `exited with code`, or `exit status`, in any letter case) states
+a nonzero one; a stated zero is a pass. With no code stated, the result is a
+failure when the harness marks it as an error (`error_text`, `error_json`, or
+`error_content`), when one of its lines is a failure line as capture reads
+the lines of an output block (above), or when a line holds the shell's
+`command not found`. An output that is one JSON object is read by its
+fields: each string value as its own lines and each number or boolean as
+`name: value`, to two levels of nesting. The last 64 KiB of an output are
+read. Each failed call writes one fact of the `memory` domain: `decision_kind`
+`TOOL_FAILURE`, `source_id` `tool_failure`, admitted as labeled inference, so
+it is served on `explicit_search` with visibility `labeled`, both search
+routes return it, and it reaches no automatic surface: `TOOL_FAILURE` is no
+category the `<project-memory>` block renders, and capture offers no such
+fact to the extractor as an existing memory. Its `summary` is
+`Tool failure recorded from the result of <tool>: <outcome>.`, a `Command: `
+line with the command (whitespace runs as single spaces, at most 512 bytes),
+an `Output lines:` line, and then the kept lines of the output: the first
+eight lines that state an error (a failure line and the line that completes
+it, a line that holds `error`, `errors`, `failed`, `failure`, `fatal`,
+`panic`, `panicked`, `exception`, or `traceback` as a word in any letter
+case, a type name that ends in `Error` or `Exception`, or `command not
+found`) and the last three lines, each at most 240 bytes and cut with `…`,
+the whole at most 2,048 bytes with the last three lines kept, redacted as
+capture's sources are. `<outcome>` is `the command failed with exit code
+<n>`, `the command failed and the tool reported an error`, or `the command
+failed by the failure lines of its output, which states no exit code`. Its
+`rationale` is a JSON object: `source` (`tool_failure`), `session`, `call`
+(the tool call's id), `tool`, `command` (the command without leading
+`cd <dir> &&` steps and `NAME=value` assignments, the key of the record),
+`state` (`failed` or `resolved`), `at_ms` and `at` (the result's time, in
+milliseconds and as UTC text), `place` (the result's position in its
+session's window), `exit_code` when one was stated, and, once resolved,
+`resolved_session` and `resolved_at`. One fact is live per `command` of a
+project. A later failure of the command supersedes the live fact, and a
+later result of the command that reports no failure supersedes it with a
+copy whose `state` is `resolved` and whose `summary` ends with the line
+`Resolved: a later run of this command reported no failure.`; a result
+older than the live fact changes nothing. A fact's id derives from the
+project, the session, and the tool call, so a window sent again, also after
+a restart, writes nothing for a call the Kernel holds. A session writes at
+most 64 such facts. A commit the Kernel refuses leaves the call for the next
+request of the session.
+
 ### 7.10 Transform
 
 This section specifies the `transform` method family on the Context route: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). The family has one shape, and a consumer and daemon of one build speak it together.

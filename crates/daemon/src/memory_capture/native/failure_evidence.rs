@@ -153,6 +153,12 @@ pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) -> bool {
 /// The part of `line` that fits after `content` and a newline within
 /// `MAX_CAPTURE_MEMORY_BYTES`, cut at a character boundary, with the mark that
 /// ends a cut line; `None` when no character fits.
+/// Whether a line of a command's output is a failure line, read as a line
+/// of an output block is.
+pub(in crate::memory_capture) fn is_output_failure_line(line: &str) -> bool {
+    failure_word(line, true).is_some()
+}
+
 fn clip<'a>(content: &str, line: &'a str) -> Option<(&'a str, &'static str)> {
     let room = MAX_CAPTURE_MEMORY_BYTES.saturating_sub(content.len() + 1);
     let (text, mark) = if line.len() <= room {
