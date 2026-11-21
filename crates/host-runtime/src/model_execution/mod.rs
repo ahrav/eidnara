@@ -716,6 +716,7 @@ mod tests {
     async fn a_clear_registry_settles_the_verdicts_only_once_every_filesystem_job_has_returned() {
         let dir = tempfile::tempdir().expect("state root dir");
         let root = StateRoot::resolve(Some(dir.path())).expect("state root resolves");
+        root.run_root().expect("run root");
         let component = ModelExecutionComponent::new(Arc::new(NoRuns), root.clone());
         assert_eq!(
             subprocess::group_registry::own_residue(&root).expect("registry reads"),

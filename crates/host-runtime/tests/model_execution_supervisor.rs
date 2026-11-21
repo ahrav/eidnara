@@ -982,6 +982,8 @@ async fn shutdown_counts_unproven_teardown_after_terminal_cap_eviction() {
 fn own_state_root() -> (tempfile::TempDir, StateRoot) {
     let dir = tempfile::tempdir().expect("state root dir");
     let root = StateRoot::resolve(Some(dir.path())).expect("state root resolves");
+    // Direct component construction makes the test fixture responsible for creating the run root.
+    root.run_root().expect("run root");
     (dir, root)
 }
 
@@ -1386,6 +1388,46 @@ async fn shutdown_keeps_the_runs_verdicts_when_the_registry_cannot_be_read() {
             .contains("1 crash-ownership record(s) could not be removed"),
         "{failure}"
     );
+}
+
+/// A missing directory makes registry residue unknown, so shutdown preserves the runs' removal verdicts.
+#[tokio::test]
+async fn shutdown_keeps_the_runs_verdicts_when_a_registry_directory_has_left_its_path() {
+    for moves_run_root in [false, true] {
+        let (_dir, root) = own_state_root();
+        let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+        let _entries = own_entries(&root);
+        let left = if moves_run_root {
+            root.run_root().expect("run root")
+        } else {
+            root.path().to_owned()
+        };
+        std::fs::rename(&left, left.with_file_name("moved-aside")).expect("the directory moves");
+
+        assert!(
+            group_registry::own_residue(&root).is_err(),
+            "a missing directory answers unknown (run root: {moves_run_root})"
+        );
+        let failure = CompositeComponent::shutdown(&component)
+            .await
+            .expect_err("a registry that left its path keeps the verdicts");
+        assert!(
+            failure
+                .0
+                .contains("1 run(s) could not remove their private run files"),
+            "{failure}"
+        );
+        assert!(
+            failure
+                .0
+                .contains("1 crash-ownership record(s) could not be removed"),
+            "{failure}"
+        );
+        assert!(
+            !left.exists(),
+            "the registry read creates no directory (run root: {moves_run_root})"
+        );
+    }
 }
 
 /// A published record this host cannot interpret may be the one whose removal a run waited on, so the registry read answers unknown and the runs' verdicts are reported. The startup sweep keeps the same record for the same reason.

@@ -2470,6 +2470,7 @@ pub mod group_registry {
     }
 
     pub const STATE_DIR_NAME: &str = "model_execution";
+    const RUN_ROOT_NAME: &str = "runs";
 
     /// Set in every harness child's environment; the startup sweep matches it against the recorded value when the group's leader is gone.
     pub const GROUP_NONCE_ENV: &str = "EIDNARA_MODEL_EXECUTION_GROUP_NONCE";
@@ -2521,9 +2522,19 @@ pub mod group_registry {
         }
 
         pub fn run_root(&self) -> io::Result<PathBuf> {
-            let root = self.registry_dir()?.join("runs");
+            let root = self.registry_dir()?.join(RUN_ROOT_NAME);
             secure_dir(&root)?;
             Ok(root)
+        }
+
+        /// Read-only lookup of the registry directory and its run root.
+        ///
+        /// If either directory is missing, the lookup returns an error and leaves the filesystem unchanged.
+        fn established_dirs(&self) -> io::Result<(PathBuf, PathBuf)> {
+            let run_root = self.dir.join(RUN_ROOT_NAME);
+            established_dir(&self.dir)?;
+            established_dir(&run_root)?;
+            Ok((self.dir.clone(), run_root))
         }
 
         /// The working directory every Pi run starts in: `cwd/`, a directory created empty beside `runs/` that persists across runs and restarts.
@@ -2543,6 +2554,19 @@ pub mod group_registry {
         crate::instance::secure_runtime_dir(dir)
             .map(drop)
             .map_err(|err| io::Error::other(format!("group registry dir is not private: {err}")))
+    }
+
+    /// This check requires current-user ownership and mode `0700`, the state [`secure_dir`] leaves a directory in. A missing path component returns `NotFound`.
+    fn established_dir(dir: &Path) -> io::Result<()> {
+        let pinned = crate::instance::open_secure_dir_existing(dir)
+            .map_err(|err| io::Error::other(format!("group registry dir is not private: {err}")))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "a group registry dir is missing")
+            })?;
+        if !crate::instance::is_owner_only_dir(&rustix::fs::fstat(&pinned)?) {
+            return Err(io::Error::other("group registry dir is not private"));
+        }
+        Ok(())
     }
 
     struct Entry {
@@ -2897,13 +2921,16 @@ pub mod group_registry {
     /// A run reports a cleanup or record failure when the bounded wait on its removal ends first. The removal keeps running on the blocking pool or the cleanup thread and usually completes, so the run's verdict can outlive the files it describes. The registry is the record of what remains: a host whose runs have all returned holds prompt material or coordination state exactly when an entry here still names it.
     ///
     /// The read removes nothing and signals no process. A published record this host cannot interpret fails the read, so the caller keeps the verdicts it counted.
+    ///
+    /// The read also fails when the registry directory or its run root is missing.
     pub fn own_residue(root: &StateRoot) -> io::Result<OwnResidue> {
         let owner_pid = std::process::id() as i32;
         let owner_start = owner_start_time()?;
         let owner_boot = owner_boot_tag()?;
         let record_boot = boot_id()?;
+        let (registry, run_root) = root.established_dirs()?;
         let mut residue = OwnResidue::default();
-        for entry in fs::read_dir(root.run_root()?)? {
+        for entry in fs::read_dir(run_root)? {
             let path = entry?.path();
             if run_dir_owner(&path)
                 .is_none_or(|owner| owner != (owner_boot.as_str(), owner_pid, owner_start))
@@ -2917,7 +2944,7 @@ pub mod group_registry {
                 Err(err) => return Err(err),
             }
         }
-        for entry in fs::read_dir(root.registry_dir()?)? {
+        for entry in fs::read_dir(registry)? {
             let path = entry?.path();
             let published = path
                 .file_name()
