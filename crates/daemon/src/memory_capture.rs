@@ -6540,6 +6540,29 @@ mod tests {
     }
 
     #[test]
+    fn rule_sentences_that_name_a_literal_stay_whole_statements() {
+        let mut wrong = Vec::new();
+        for text in [
+            "Prefix every test name with 'it_'.",
+            "Always add the '@retry' decorator from the 'pedantic' module to every function.",
+            "From now on, end attribute names with '_s'.",
+            "Wrap handlers in '@count_calls' from now on.",
+            "Start function argument names with 'x_' from now on.",
+            "Always import the 'locale' module in your scripts.",
+            "The release branch is \"main\".",
+        ] {
+            if !quotes_whole_statements(&Prose::of(text), text) {
+                wrong.push(format!("{text:?} is no statement"));
+            }
+        }
+        let pair = "Prefix every test name with 'it_'. Never skip the linter.";
+        if !quotes_whole_statements(&Prose::of(pair), "Never skip the linter.") {
+            wrong.push(format!("the second sentence of {pair:?} is no statement"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
     fn a_line_indented_to_the_fourth_column_is_code() {
         let mut wrong = Vec::new();
         for (text, quote, whole, widened) in [
