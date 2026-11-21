@@ -10,8 +10,8 @@ that each anchor's oid equals its plan's frozen head.
 
 ## Evidence trail
 
-`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:755`)
-parses the submission's output, then calls `observe_head` once (`:883`)
+`accept_native_output` (`crates/daemon/src/memory_capture/native.rs:776`)
+parses the submission's output, then calls `observe_head` once (`:904`)
 on the binding's canonical project root before the loop that
 builds and freezes one `PreparedCapture` per job. Each plan carries the
 same `head` value (`crates/daemon/src/memory_capture.rs:1682`), serialized
@@ -30,7 +30,7 @@ digest is the SHA-256 of the frozen text
 (`crates/daemon/src/memory_capture.rs:4261`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
-handler (`crates/daemon/src/memory_capture/native.rs:440`), before `publish`
+handler (`crates/daemon/src/memory_capture/native.rs:445`), before `publish`
 takes the capture commit gate.
 
 A plan frozen with a `head` field is refused by a daemon built before the
