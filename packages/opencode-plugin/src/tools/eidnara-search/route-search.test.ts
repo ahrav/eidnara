@@ -923,15 +923,38 @@ describe("eidnara_search through the fused route", () => {
     });
 
     it("serves a failed command's record with its category, label, and text on the route and on the fallback", async () => {
-        const summary =
-            "Tool failure recorded from the result of bash: the command failed with exit code 101.\nCommand: cargo test -p api\nOutput lines:\nthread 'renders' panicked at src/render.rs:9:5:\nwidth is zero";
+        const bytes = (text: string) => new TextEncoder().encode(text).length;
+        const outcome =
+            "Tool failure recorded from the result of bash: the command failed with exit code 101.";
+        const resolved = " Resolved: a later run of this command reported no failure.";
+        const closing = "test result: FAILED. 1 passed; 1 failed";
+        const summary = [
+            `${outcome}${resolved}`,
+            "Command: cargo test -p api",
+            "Output lines:",
+            ...[0, 1, 2, 3].map((index) => `error: e${index} ${"x".repeat(149)}`),
+            "width is zero",
+            closing,
+        ].join("\n");
         const rationale = JSON.stringify({
-            source: "tool_failure",
-            session: "s1",
-            command: "cargo test -p api",
-            state: "failed",
             at: "2026-03-02T10:15:00Z",
+            at_ms: 1772446500000,
+            at_source: "result",
+            call: "call-1",
+            command: "cargo test -p api",
+            exit_code: 101,
+            place: 5,
+            resolved_at: "2026-03-02T10:20:00Z",
+            resolved_session: "s2",
+            session: "s1",
+            source: "tool_failure",
+            state: "resolved",
+            tool: "bash",
         });
+        // The daemon keeps a summary within 900 bytes, and the tool renders 1,024 bytes of a fact.
+        expect(bytes(summary)).toBeGreaterThan(860);
+        expect(bytes(summary)).toBeLessThanOrEqual(900);
+        expect(bytes(`${summary}\n${rationale}`)).toBeGreaterThan(1024);
         for (const fallback of [false, true]) {
             const { kernel, run } = harness();
             kernel.seedDecision({
@@ -949,13 +972,17 @@ describe("eidnara_search through the fused route", () => {
             const execution = await run({ query: "cargo test failed" });
             if (execution.status !== "complete") throw new Error(execution.text);
             expect(execution.prePack.map((result) => result.objectId)).toEqual([id(1)]);
-            const header = execution.text.split("\n").find((line) => line.includes(` id=${id(1)} `));
-            expect(header).toContain(" category=TOOL_FAILURE ");
-            expect(header).toContain(` match=${fallback ? "lexical" : "fused"}`);
-            expect(header).toMatch(/ trust=\[labeled\]$/);
-            expect(execution.text).toContain("the command failed with exit code 101.");
-            expect(execution.text).toContain("width is zero");
-            expect(execution.text).toContain('"state":"failed"');
+            const lines = execution.text.split("\n");
+            const header = lines.findIndex((line) => line.includes(` id=${id(1)} `));
+            expect(lines[header]).toContain(" category=TOOL_FAILURE ");
+            expect(lines[header]).toContain(` match=${fallback ? "lexical" : "fused"}`);
+            expect(lines[header]).toMatch(/ trust=\[labeled\]$/);
+            // The first line states the outcome and the resolution, and the last kept line is whole.
+            expect(lines[header + 1]).toBe(`${outcome}${resolved}`);
+            expect(lines[header + 2]).toBe("Command: cargo test -p api");
+            expect(execution.text).toContain(
+                `\nwidth is zero\n${closing}\n{"at":"2026-03-02T10:15:00Z"`,
+            );
         }
     });
 
