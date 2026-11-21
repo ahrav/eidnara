@@ -1242,6 +1242,124 @@ async fn shutdown_waits_for_a_removal_that_lands_inside_the_settle_grace() {
     removal.await.expect("removal task");
 }
 
+async fn component_with_an_earlier_verdict_and_a_run_that_drains_for(
+    root: StateRoot,
+    drain: Duration,
+) -> ModelExecutionComponent {
+    let backend = ScriptedBackend::with_behavior(move |request, _events, cancel| {
+        Box::pin(async move {
+            if request.session == "s-late-removal" {
+                return removals_outlasted_their_waits();
+            }
+            cancel.cancelled().await;
+            tokio::time::sleep(drain).await;
+            BackendTerminal::Failed(BackendError {
+                class: ErrorClass::Permanent,
+                message: "backend observed cancellation".to_owned(),
+                retry_after_secs: None,
+                provider_code: None,
+            })
+        })
+    });
+    let component = ModelExecutionComponent::new(backend as Arc<_>, root);
+    let supervisor = component.supervisor();
+    let reported = send(&supervisor, "s-late-removal", "p1");
+    until(
+        || supervisor.status(&key("s-late-removal"), &reported) == Ok("failed"),
+        "the first run commits its failed terminal",
+    )
+    .await;
+    let live = send(&supervisor, "s-draining", "p1");
+    until(
+        || supervisor.status(&key("s-draining"), &live) == Ok("running"),
+        "the second run starts before shutdown cancels it",
+    )
+    .await;
+    assert_eq!(
+        (
+            supervisor.cleanup_unresolved_runs(),
+            supervisor.record_unresolved_runs()
+        ),
+        (1, 1),
+        "the first run alone counted a removal verdict"
+    );
+    component
+}
+
+/// Shutdown measures the five-second settle grace from its start. A three-second drain leaves two seconds for the registry to clear.
+#[tokio::test(start_paused = true)]
+async fn shutdown_spends_one_settle_grace_from_its_start_while_a_run_drains() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_an_earlier_verdict_and_a_run_that_drains_for(
+        root.clone(),
+        Duration::from_secs(3),
+    )
+    .await;
+    let (dir, record) = own_entries(&root);
+
+    let started = tokio::time::Instant::now();
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("residue on disk fails the shutdown");
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_millis(4_900)..=Duration::from_secs(5)).contains(&waited),
+        "the drain and the settle wait share one grace: {waited:?}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("1 crash-ownership record(s) could not be removed"),
+        "{failure}"
+    );
+    dir.cleanup().expect("test cleanup");
+    record.remove().expect("test cleanup");
+}
+
+/// The six-second drain exhausts the five-second settle grace. Shutdown reports both remaining run directories despite the single removal verdict.
+#[tokio::test(start_paused = true)]
+async fn shutdown_reads_the_registry_once_after_a_drain_that_outlasts_the_grace() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_an_earlier_verdict_and_a_run_that_drains_for(
+        root.clone(),
+        Duration::from_secs(6),
+    )
+    .await;
+    let (dir, record) = own_entries(&root);
+    let second = PrivateDir::create(&root, "model_execution-pi").expect("private run dir");
+
+    let started = tokio::time::Instant::now();
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("residue on disk fails the shutdown");
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_secs(6)..Duration::from_millis(6_050)).contains(&waited),
+        "the shutdown ends with a drain that used up the grace: {waited:?}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("2 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    assert!(
+        failure
+            .0
+            .contains("1 crash-ownership record(s) could not be removed"),
+        "{failure}"
+    );
+    dir.cleanup().expect("test cleanup");
+    second.cleanup().expect("test cleanup");
+    record.remove().expect("test cleanup");
+}
+
 /// A registry that cannot be read proves nothing about what remains, so the runs' own verdicts are reported.
 #[tokio::test]
 async fn shutdown_keeps_the_runs_verdicts_when_the_registry_cannot_be_read() {

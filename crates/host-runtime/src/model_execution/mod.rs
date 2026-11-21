@@ -485,6 +485,8 @@ impl CompositeComponent for ModelExecutionComponent {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         // One run can leave several residue classes at once; suppressing any of them would hide
         // caller-private material or registry state, so all are aggregated into one error.
+        // The registry wait and the drain share one settle deadline.
+        let settle_ends = tokio::time::Instant::now() + RESIDUE_SETTLE_GRACE;
         // The verdicts counted before this shutdown stops any run or refresh.
         let earlier = (
             self.supervisor.cleanup_unresolved_runs(),
@@ -529,7 +531,7 @@ impl CompositeComponent for ModelExecutionComponent {
         );
         let (residue, records) = if counted == earlier {
             // Every verdict was counted before this shutdown stopped the runs. The removals behind them have had the time since to finish, so the registry decides what they left.
-            self.residue_on_disk(counted).await
+            self.residue_on_disk(counted, settle_ends).await
         } else {
             // A run or refresh that this shutdown stopped has just reported a removal. The shutdown is non-graceful whatever the registry holds a moment later, so the verdicts stand as counted and the wait for the registry is left out.
             counted
@@ -556,9 +558,11 @@ impl CompositeComponent for ModelExecutionComponent {
     }
 }
 
-/// How long shutdown waits for the filesystem jobs that outlasted their runs to finish: the default [`subprocess::SubprocessLimits::termination_grace`], the bound a run's removal has when the run ends.
+/// The settle grace starts at shutdown, so time spent draining runs counts toward the grace for outstanding filesystem jobs.
 const RESIDUE_SETTLE_GRACE: Duration = Duration::from_secs(5);
 const RESIDUE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// After runs stop, the registry read gets at least one second even if draining exhausted the settle grace.
+const RESIDUE_READ_FLOOR: Duration = Duration::from_secs(1);
 
 impl ModelExecutionComponent {
     /// The crash-ownership records whose removal outlasted its bounded wait: one per run and one per credential refresh that reported it.
@@ -573,17 +577,24 @@ impl ModelExecutionComponent {
     /// The private run directories and crash-ownership records this host still holds once every run has returned.
     ///
     /// `counted` holds the removals of private run files and of records that outlasted their bounded wait. Each count is a verdict reached when its run or refresh ended, and the job it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a clear registry read once every filesystem job of this process has returned proves that the removals completed and that no entry is still to be written. The read repeats until then or until [`RESIDUE_SETTLE_GRACE`] ends, which gives a job still in flight the time to finish. A clear registry beside a job still running at the end of the grace, or a registry that cannot be read inside it, proves nothing, so the counted verdicts stand.
-    async fn residue_on_disk(&self, counted: (usize, usize)) -> (usize, usize) {
+    ///
+    /// Shutdown reserves at least [`RESIDUE_READ_FLOOR`] for the registry check even if the drain consumes the grace.
+    async fn residue_on_disk(
+        &self,
+        counted: (usize, usize),
+        grace_ends: tokio::time::Instant,
+    ) -> (usize, usize) {
         if counted == (0, 0) {
             return counted;
         }
-        let deadline = tokio::time::Instant::now() + RESIDUE_SETTLE_GRACE;
-        let read_deadline = std::time::Instant::now() + RESIDUE_SETTLE_GRACE;
+        let now = tokio::time::Instant::now();
+        let deadline = grace_ends.max(now + RESIDUE_READ_FLOOR);
+        let read_deadline = std::time::Instant::now() + (deadline - now);
         loop {
             // Read before the registry, so a job that finishes between the two has its entry on disk for the read.
             let idle = subprocess::filesystem_jobs_idle();
             let state_root = self.state_root.clone();
-            // The read runs outside the job slots, which `filesystem_jobs_idle` observes. Its blocking job waits for it until the grace ends, so a read that a stalled filesystem holds leaves the runtime free to stop.
+            // The read runs on its own thread outside the job slots that `filesystem_jobs_idle` observes. At `read_deadline`, `within` ends the blocking job's wait even if the filesystem read remains blocked.
             let read = tokio::task::spawn_blocking(move || {
                 let left = read_deadline.saturating_duration_since(std::time::Instant::now());
                 subprocess::within(left, move || {
@@ -596,15 +607,15 @@ impl ModelExecutionComponent {
             if idle && found == subprocess::group_registry::OwnResidue::default() {
                 return (0, 0);
             }
-            tokio::time::sleep(RESIDUE_POLL_INTERVAL).await;
-            if tokio::time::Instant::now() >= deadline {
-                // The grace ended during the wait. Once every job has returned, the entries the last read found are the residue. Beside a job still running, an entry may be yet to land, so each class reports the larger of its verdicts and its entries.
+            if tokio::time::Instant::now() + RESIDUE_POLL_INTERVAL >= grace_ends {
+                // The registry read is authoritative once all jobs return. While a job is running, its entry may appear after the read, so `counted` supplies a lower bound for each residue class.
                 return if idle {
                     (found.run_dirs, found.records)
                 } else {
                     (counted.0.max(found.run_dirs), counted.1.max(found.records))
                 };
             }
+            tokio::time::sleep(RESIDUE_POLL_INTERVAL).await;
         }
     }
 }
@@ -695,6 +706,10 @@ mod tests {
         }
     }
 
+    fn grace() -> tokio::time::Instant {
+        tokio::time::Instant::now() + RESIDUE_SETTLE_GRACE
+    }
+
     /// A creation that a run stopped waiting for is a filesystem job that still holds its slot. While one runs, a clear registry read says nothing about the entry the job will write, so the verdicts stand when the grace ends. Once the job has returned, the next clear read settles them.
     #[cfg(target_os = "linux")]
     #[tokio::test(start_paused = true)]
@@ -719,7 +734,7 @@ mod tests {
         let (running, release, job) = park();
         started(&running).await;
         assert_eq!(
-            settle(component.residue_on_disk((1, 1)), |_| {}).await,
+            settle(component.residue_on_disk((1, 1), grace()), |_| {}).await,
             (1, 1),
             "a job still running at the end of the grace leaves the verdicts as counted"
         );
@@ -727,7 +742,7 @@ mod tests {
         let entry =
             subprocess::PrivateDir::create(&root, "model_execution-pi").expect("private run dir");
         assert_eq!(
-            settle(component.residue_on_disk((0, 1)), |_| {}).await,
+            settle(component.residue_on_disk((0, 1), grace()), |_| {}).await,
             (1, 1),
             "beside a running job each class reports the larger of its verdicts and its entries"
         );
@@ -741,7 +756,7 @@ mod tests {
         )
         .expect("crash-ownership record");
         assert_eq!(
-            settle(component.residue_on_disk((1, 0)), |_| {}).await,
+            settle(component.residue_on_disk((1, 0), grace()), |_| {}).await,
             (1, 1),
             "beside a running job each class reports the larger of its verdicts and its entries"
         );
@@ -751,7 +766,7 @@ mod tests {
 
         let (running, release, job) = park();
         started(&running).await;
-        let settled = settle(component.residue_on_disk((1, 1)), |step| {
+        let settled = settle(component.residue_on_disk((1, 1), grace()), |step| {
             // The job returns a second into the grace. The slots are shared by every test of this process, so the step waits until all of them are free before the settle wait samples them again.
             if step == 20 {
                 release.send(()).expect("the job is released");
