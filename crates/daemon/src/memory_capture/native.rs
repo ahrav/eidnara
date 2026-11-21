@@ -80,9 +80,9 @@ struct NativePlan {
     messages: Vec<CaptureMessage>,
     existing: Vec<ExistingCaptureMemory>,
     /// The stored rows a source's request left out of its prompt after two
-    /// recorded failures. Acceptance reads them for the word-for-word
-    /// duplicate check, so a statement an approved row already holds is
-    /// stored once.
+    /// recorded failures. Acceptance reads them as the candidates of the
+    /// word-for-word duplicate link a frozen memory names, which
+    /// publication judges like a link the extractor named.
     withheld: Vec<ExistingCaptureMemory>,
     model: String,
 }
@@ -477,13 +477,13 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                // One quotation proposed under two classes is stored under
-                // the one that holds longer, so a statement the extractor
-                // read both ways stays eligible for approval.
-                kept.lifetime = match (kept.lifetime, memory.lifetime) {
-                    (Some(kept), Some(joined)) => Some(kept.max(joined)),
-                    _ => None,
-                };
+                // One quotation proposed under two classes is joined under
+                // the one that holds longer, or under none when either
+                // carries none. A run of joined sentences names its copy
+                // by that class before this collapse ([`run_copy`]). A
+                // user's joined memory is classed again by the contests it
+                // keeps.
+                kept.lifetime = joined_class(kept.lifetime, memory.lifetime);
                 if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;
@@ -780,11 +780,8 @@ impl CaptureWork {
         now: i64,
         settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
-        // Whether a memory of the message at `index` that names a target is
-        // eligible for approval as the user's own statement: a whole
-        // statement as quoted whose lifetime class outlives the task or is
-        // absent. Freezing keeps the quotation of such a memory, so this is
-        // the judgment publication makes of it.
+        // If `states` rejects a user quotation, its approved replacement
+        // targets become contests.
         let proses: Vec<super::Prose<'_>> = plan
             .jobs
             .iter()
@@ -792,10 +789,7 @@ impl CaptureWork {
             .collect();
         let states = |index: usize, memory: &CapturedMemory| {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
-            super::is_user_source(job)
-                && !super::cite::is_hashed_source_id(&job.message_id)
-                && super::outlives_its_task(memory)
-                && super::quotes_whole_statements(prose, &memory.quote)
+            super::states_whole_statements(super::states_whole_message(job), prose, &memory.quote)
         };
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
             Ok(decisions) => decisions,
@@ -836,11 +830,11 @@ impl CaptureWork {
             // one clause collapse here; the parse-time check saw the model's
             // paraphrases, which can differ.
             let mut memories = collapse_quotations(attribution, proposed);
-            // A user's statement that repeats an approved memory word for
-            // word duplicates that memory when the extractor named a copy
-            // that is not served automatically, such as an agent's note. A
-            // named copy that is served automatically is kept, so a repeat
-            // of a contested statement reaches that statement.
+            // A statement that repeats an approved memory of its delivery
+            // class ([`copy_of_class`]) word for word duplicates that memory
+            // when the extractor named a copy that is not served
+            // automatically, such as an agent's note. A named copy that is
+            // served automatically is kept, so a repeat of a contested statement reaches it.
             for memory in &mut memories {
                 let Some(named) = memory
                     .duplicate_of
@@ -850,7 +844,7 @@ impl CaptureWork {
                     continue;
                 };
                 if named.is_none_or(|previous| !previous.automatic)
-                    && let Some(approved) = super::approved_copy(&plan.existing, &memory.content)
+                    && let Some(approved) = class_copy(&plan.existing, states_whole, prose, memory)
                 {
                     memory.duplicate_of = Some(approved);
                 } else if widened.contains(&memory.quote)
@@ -861,9 +855,9 @@ impl CaptureWork {
                     // The extractor matched the clause it quoted to an
                     // approved statement. The widened sentence is another
                     // text, such as that clause negated, so it is written
-                    // as the user's own statement, or names the approved
-                    // statement that holds it word for word.
-                    memory.duplicate_of = super::approved_copy(&plan.existing, &memory.content);
+                    // as its own memory, or names the approved statement of
+                    // its delivery class that holds it word for word.
+                    memory.duplicate_of = class_copy(&plan.existing, states_whole, prose, memory);
                 }
                 // A statement that names a contested statement as the memory
                 // that already holds it settles the contest only word for
@@ -900,6 +894,13 @@ impl CaptureWork {
             settled.push((memories, kept_for_contests));
         }
         settle_batch_contests(&mut settled);
+        // A class changes nothing on a memory of an assistant source, so
+        // such a memory keeps the class its proposal carried.
+        for ((_, job), (memories, _)) in accepted.iter().zip(&mut settled) {
+            if super::is_user_source(job) {
+                super::class_contesting_work(memories, &plan.existing);
+            }
+        }
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
         let budget = Instant::now() + self.plan_commit_budget;
@@ -908,14 +909,18 @@ impl CaptureWork {
             failure_evidence::attach(&job.text, &mut memories);
             let attached = keep_statement_text(&job, &proses[index], &quoted, &mut memories);
             // A source extracted without the stored rows names no target.
-            // Its memory whose frozen text an approved row holds word for
-            // word names that row, so publication stores the statement
-            // once. A memory that gained failure lines the row lacks is
-            // written with them.
+            // Its memory whose frozen text a withheld row served
+            // automatically holds word for word names that row, and
+            // publication judges the link like one the extractor named.
+            // A memory that gained failure lines the row lacks names none.
+            // A statement eligible for approval names a row of its own
+            // delivery class ([`copy_of_class`]).
+            let states_whole = super::states_whole_message(&job);
             let link_withheld_copies = |memories: &mut [CapturedMemory]| {
                 for memory in memories {
                     if memory.duplicate_of.is_none() {
-                        memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
+                        memory.duplicate_of =
+                            class_copy(&plan.withheld, states_whole, &proses[index], memory);
                     }
                 }
             };
@@ -936,7 +941,7 @@ impl CaptureWork {
             };
             link_withheld_copies(&mut memories);
             let mut output = PreparedCapture {
-                version: CAPTURE_SCHEMA_VERSION,
+                version: super::CAPTURE_PLAN_VERSION,
                 model: plan.model.clone(),
                 existing: referenced(&memories),
                 memories,
@@ -994,12 +999,9 @@ impl CaptureWork {
     }
 }
 
-/// Restores the quoted text of each memory that is eligible for approval
-/// as the user's own statement: a whole statement whose lifetime class
-/// outlives the task or is absent. A statement is approved as the sentence
-/// the user wrote, so it keeps its exact text and failure lines stay on the
-/// other memories of the source. Returns whether any memory still holds an
-/// appended line.
+/// Restores the quoted text of each memory that passes [`user_attributed`].
+/// Failure lines stay on the source's other memories.
+/// Returns whether any memory still holds an appended line.
 pub(super) fn keep_statement_text(
     job: &CaptureJob,
     prose: &super::Prose<'_>,
@@ -1015,6 +1017,69 @@ pub(super) fn keep_statement_text(
         attached |= memory.content != quoted.content;
     }
     attached
+}
+
+/// The class proposals of one quotation freeze under: the one that holds
+/// longer, or none when either carries none.
+pub(super) fn joined_class(kept: Option<Lifetime>, joined: Option<Lifetime>) -> Option<Lifetime> {
+    kept.zip(joined).map(|(kept, joined)| kept.max(joined))
+}
+
+/// The memory of `rows` that a statement may name as the copy of its text
+/// when the daemon makes that link by text alone: one served automatically
+/// that holds `content` word for word ([`super::approved_copy`]) and is of
+/// the statement's delivery class. `work` is that class for a whole user
+/// statement eligible for approval: whether the statement is work in
+/// progress. Such a statement names live work in progress when it is work
+/// in progress itself, and a row that is none otherwise, so a rule and a
+/// plan of the same words keep a row each and ending the plan retires the
+/// plan alone. `None` is any other memory, which is stored labeled: it names
+/// a row of either class.
+pub(super) fn copy_of_class(
+    rows: &[ExistingCaptureMemory],
+    work: Option<bool>,
+    content: &str,
+) -> Option<String> {
+    let same_class = rows
+        .iter()
+        .filter(|row| work.is_none_or(|work| row.current_work == work));
+    super::approved_copy(same_class, content)
+}
+
+/// [`copy_of_class`] for a collapsed memory of a source, by the class the
+/// memory carries. The `request` class a contest gives work in progress
+/// ([`super::class_contesting_work`]) is decided after the batch is settled
+/// and leaves the link as made.
+fn class_copy(
+    rows: &[ExistingCaptureMemory],
+    states_whole: bool,
+    prose: &super::Prose<'_>,
+    memory: &CapturedMemory,
+) -> Option<String> {
+    let work = user_attributed(states_whole, prose, memory)
+        .then_some(memory.lifetime == Some(Lifetime::CurrentWork));
+    copy_of_class(rows, work, &memory.content)
+}
+
+/// [`copy_of_class`] for the statement the sentences of a run are joined
+/// into, a whole statement of a user message held whole. `members` index
+/// the run's proposals in `memories`; they freeze as one memory under
+/// [`joined_class`], so the run names its copy by that class.
+pub(super) fn run_copy(
+    rows: &[ExistingCaptureMemory],
+    memories: &[CapturedMemory],
+    members: &[usize],
+    content: &str,
+) -> Option<String> {
+    let class = members
+        .iter()
+        .map(|&member| memories[member].lifetime)
+        .reduce(joined_class)
+        .flatten();
+    let work = class
+        .is_none_or(Lifetime::is_eligible)
+        .then_some(class == Some(Lifetime::CurrentWork));
+    copy_of_class(rows, work, content)
 }
 
 mod failure_evidence;
