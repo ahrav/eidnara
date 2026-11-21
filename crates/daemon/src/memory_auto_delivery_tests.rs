@@ -3348,7 +3348,10 @@ async fn two_proposals_of_one_plan_freeze_as_one_fact_classed_by_its_contest() {
             stored[0].0,
             serde_json::to_string(&stated(plan)).unwrap()
         );
-        assert!(rule_line.ends_with(&contest), "{case}: {block}");
+        assert!(
+            rule_line.contains("; contested ") && rule_line.ends_with(&contest),
+            "{case}: {block}"
+        );
     }
 }
 
@@ -3399,7 +3402,10 @@ async fn an_assistant_report_that_contests_a_rule_keeps_the_class_it_carried() {
         stored.0,
         serde_json::to_string(&stored.1).unwrap()
     );
-    assert!(rule_line.ends_with(&contest), "{block}");
+    assert!(
+        rule_line.contains("; contested ") && rule_line.ends_with(&contest),
+        "{block}"
+    );
 }
 
 /// An assistant's message repeats live work in progress and contradicts a
@@ -5382,6 +5388,9 @@ async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made(
         (1, 1),
         "the committed plan's source is complete"
     );
+    // The replayed source spent no further dispatch and holds no error.
+    let (attempts, _, error, abandoned, ..) = queue_row(&store, &jobs[1]);
+    assert_eq!((attempts, error, abandoned), (1, None, None));
 
     // The refused plan under this build's version commits.
     store

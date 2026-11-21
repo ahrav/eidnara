@@ -276,8 +276,9 @@ const WORK_READ_DIVISOR: usize = 4;
 /// session leaves out is kept only while another reader still has room.
 /// Each delivery counts visible rows that pass
 /// [`crate::memory_capture::is_current_work`] against a second pair of
-/// caps, a quarter of the first, so the response holds at most two and a
-/// half times the caps. A delivery ends when a row is refused at its first
+/// caps, a quarter of the first and at least one row, so the response holds
+/// at most two and a half times the caps, or two times the row cap and two
+/// rows when a quarter of it is below one. A delivery ends when a row is refused at its first
 /// pair of caps, so it holds the work in progress among the rows walked up
 /// to that row.
 ///

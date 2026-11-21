@@ -1326,7 +1326,7 @@ below). A `current_work` fact of a user source whose plan is frozen contesting a
 served on `auto_inject`, after the links of its source and its batch are
 settled (below), is an instruction for one occasion: it is stored with
 `lifetime` `request`, and the contest rule (below) shows it on the line of
-the fact it contests. A `current_work` fact frozen with no such contest,
+the fact it contests under that rule's conditions. A `current_work` fact frozen with no such contest,
 because it names none, contests only labeled facts, or another fact of its
 source or batch holds the contest, keeps its class. A frozen plan carries
 plan version 2, which names the classes as this section defines them.

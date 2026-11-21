@@ -187,7 +187,7 @@ fn has_eligible_lifetime(memory: &CapturedMemory) -> bool {
 
 /// Gives the class `request` to each `current_work` memory of a settled
 /// user source that contests a memory served automatically. Such a memory is an
-/// instruction for one occasion, and a contest it records is shown on the
+/// instruction for one occasion, which the contest rule can show on the
 /// line of the memory it contests.
 ///
 /// It runs on the links a source keeps after the batch is settled, so the
@@ -10661,7 +10661,9 @@ mod tests {
         assert_eq!(ended.1, kernel::SurfaceVisibility::Labeled);
         assert_eq!(ended.2["lifetime"], "current_work");
         assert_eq!(ended.2["ended_by"]["session"], source.session_id.as_str());
-        let ending = ended.2["ended_by"]["memory"].as_str().unwrap();
+        // The end record names the remark's stored row.
+        let ending = target(&with_line).id;
+        assert_eq!(ended.2["ended_by"]["memory"], ending.as_str());
         assert_ne!(ending, plan_id);
         // The ended revision's id is derived from the plan it supersedes
         // and the fact that ended it.
