@@ -3225,8 +3225,8 @@ async fn a_newer_plan_replaces_an_older_one() {
 /// hand is never work left open, so it reaches no later session. Work the
 /// user left open and reported finished in the same session, in a remark
 /// whose plan keeps its `replaces` link to that work, is ended there and
-/// reaches no later session. Work of that session that no statement
-/// ended is delivered.
+/// reaches no later session. The plan of that session that no statement
+/// ended stays approved and is delivered.
 #[tokio::test]
 async fn only_work_a_session_left_open_reaches_a_later_session() {
     let rename = "Rename the retry helper to backoff_delay in this module.";
@@ -3295,8 +3295,9 @@ async fn only_work_a_session_left_open_reaches_a_later_session() {
     assert_eq!(rows, expected);
 }
 
-/// Queues one message and records `failures` model failures of its source.
-/// After two, the source's request carries an empty `existing_memories`.
+/// Queues one message, records `failures` model failures of its source, and
+/// returns its job id. After two failures, the source's request carries an
+/// empty `existing_memories`.
 async fn enqueue_after_failures(
     handler: &Handler,
     store: &MemoryStore,
@@ -3304,7 +3305,7 @@ async fn enqueue_after_failures(
     (channel, session): (u16, &str),
     message: (&str, &str, &str),
     failures: usize,
-) {
+) -> String {
     let digest = kernel_routes::ProjectBinding::new(project)
         .digest()
         .to_owned();
@@ -3314,6 +3315,7 @@ async fn enqueue_after_failures(
             .fail_memory_capture(&digest, &jobs[0], "model_failed", 0, true, now_ms())
             .unwrap();
     }
+    jobs.into_iter().next().unwrap()
 }
 
 /// The memory rows on explicit search as `(id, lifetime class)`, in id order.
@@ -3334,28 +3336,48 @@ fn queue_counts(store: &MemoryStore, project: &Path) -> (i64, i64, i64) {
     (status.pending, status.failed, status.completed)
 }
 
-/// Extracts a whole message that repeats [`RETRY_PLAN`] without stored rows,
-/// under the class `repeated`, and returns once its source has completed.
-async fn repeat_plan_without_stored_rows(
+/// Extracts a message whose whole text is `text` without stored rows, under
+/// the class `repeated`. Returns the `duplicate_of` its frozen plan holds,
+/// read before the plan is published and its source completes.
+async fn repeat_without_stored_rows(
     handler: &Handler,
     store: &MemoryStore,
     project: &Path,
     (id, role): (&str, &str),
+    text: &str,
     repeated: &'static str,
-) {
+) -> Option<String> {
     let (_, _, completed) = queue_counts(store, project);
-    let repeat = (id, role, RETRY_PLAN);
-    enqueue_after_failures(handler, store, project, (SECOND, "s2"), repeat, 2).await;
+    let repeat = (id, role, text);
+    let job = enqueue_after_failures(handler, store, project, (SECOND, "s2"), repeat, 2).await;
+    // A spent publication budget leaves the frozen plan in the queue.
+    waits(handler, Duration::ZERO, Duration::ZERO);
     drain(handler, SECOND, "s2", &[repeat], |_, existing| {
         assert!(existing.is_empty(), "{id}, {repeated}: {existing:?}");
-        vec![classed(RETRY_PLAN, repeated)]
+        vec![classed(text, repeated)]
     })
     .await;
+    let frozen = queue_row(store, &job)
+        .5
+        .unwrap_or_else(|| panic!("{id}, {repeated}: the plan is frozen"));
+    let frozen: Value = serde_json::from_str(&frozen).unwrap();
+    let linked = frozen["memories"][0]["duplicate_of"]
+        .as_str()
+        .map(str::to_owned);
+    production_waits(handler);
+    set_retry_at(store, &[&job], 0);
+    let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    body(
+        handler
+            .handle_native_capture_next(test_route(SECOND), &next)
+            .await,
+    );
     assert_eq!(
         queue_counts(store, project),
         (0, 0, completed + 1),
         "{id}, {repeated}: the repeat's plan is published"
     );
+    linked
 }
 
 /// A source extracted without stored rows repeats, word for word, a
@@ -3385,10 +3407,19 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
         )
         .await;
         let first = memory_id(&handler, &project, &stated(RETRY_PLAN));
-        repeat_plan_without_stored_rows(&handler, &store, &project, ("m2", "user"), repeated).await;
+        let linked = repeat_without_stored_rows(
+            &handler,
+            &store,
+            &project,
+            ("m2", "user"),
+            RETRY_PLAN,
+            repeated,
+        )
+        .await;
 
         let rows = rows_by_class(&handler, &project);
         if stored == repeated {
+            assert_eq!(linked.as_ref(), Some(&first), "{stored}, {repeated}");
             assert_eq!(
                 rows,
                 [(first.clone(), stored.to_string())],
@@ -3396,6 +3427,7 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
             );
             continue;
         }
+        assert_eq!(linked, None, "{stored}, {repeated}");
         let second = rows
             .iter()
             .find(|(id, _)| *id != first)
@@ -3409,9 +3441,23 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
         expected.sort();
         assert_eq!(rows, expected);
         // Each class has its row, so a further repeat of either class names
-        // one and adds none, whichever row the daemon reads first.
-        for (id, class) in [("m3", stored), ("m4", repeated)] {
-            repeat_plan_without_stored_rows(&handler, &store, &project, (id, "user"), class).await;
+        // the row of its class and adds none, whichever row the daemon
+        // reads first.
+        for (id, class, row) in [("m3", stored, &first), ("m4", repeated, &second)] {
+            let linked = repeat_without_stored_rows(
+                &handler,
+                &store,
+                &project,
+                (id, "user"),
+                RETRY_PLAN,
+                class,
+            )
+            .await;
+            assert_eq!(
+                linked.as_ref(),
+                Some(row),
+                "{stored}, {repeated}: a further repeat classed {class}"
+            );
             assert_eq!(
                 rows_by_class(&handler, &project),
                 expected,
@@ -3493,7 +3539,10 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
         )
         .await;
         let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
-        repeat_plan_without_stored_rows(&handler, &store, &project, ("m2", role), class).await;
+        let linked =
+            repeat_without_stored_rows(&handler, &store, &project, ("m2", role), RETRY_PLAN, class)
+                .await;
+        assert_eq!(linked.as_ref(), Some(&plan), "{role}, {class}");
         assert_eq!(
             rows_by_class(&handler, &project),
             [(plan, "current_work".to_string())],
@@ -7490,46 +7539,69 @@ async fn a_statement_that_ends_with_its_task_settles_no_contest() {
 /// A source extracted without stored rows repeats a contested statement
 /// word for word under a class that ends with its task. A repeat classed
 /// `request` or `status` names the statement and writes no fact. A repeat
-/// classed `current_work` takes that link only to live work in progress, so
-/// it is stored as work in progress beside the statement. The contest stays
-/// on its observation in each case.
+/// classed `current_work` takes that link only to live work in progress: the
+/// first is stored as live work in progress beside the statement, and a
+/// second names the first. The contest stays on its observation in each
+/// case.
 #[tokio::test]
 async fn a_repeat_extracted_without_stored_rows_settles_no_contest() {
     for lifetime in ["status", "request", "current_work"] {
         let (handler, store, _dir, project, statement, observation) = contested_limit_store().await;
-        let repeat = ("m3", "user", LIMIT_300);
-        enqueue_after_failures(&handler, &store, &project, (SECOND, "s2"), repeat, 2).await;
-        drain(&handler, SECOND, "s2", &[repeat], |_, existing| {
-            assert!(existing.is_empty(), "{lifetime}: {existing:?}");
-            vec![classed(LIMIT_300, lifetime)]
-        })
-        .await;
-        assert_eq!(queue_counts(&store, &project), (0, 0, 3), "{lifetime}");
-
-        let rows = memory_rows(&handler, &project);
-        let contested = rows
-            .iter()
-            .find(|row| row.0 == statement)
-            .unwrap_or_else(|| panic!("{lifetime}: the statement keeps its row: {rows:?}"));
-        assert_eq!(
-            contested.3["contested_by"]["memory"], observation,
-            "{lifetime}: the contest stays on its observation"
-        );
-        let repeats: Vec<_> = rows
-            .iter()
-            .filter(|row| row.1 == stated(LIMIT_300) && row.0 != statement)
-            .collect();
-        if lifetime == "current_work" {
-            assert_eq!(repeats.len(), 1, "{rows:?}");
-            assert_eq!(repeats[0].3["lifetime"], "current_work");
-            assert!(
-                repeats[0].3.get("contested_by").is_none(),
-                "{:?}",
-                repeats[0].3
+        let contest_stays = || {
+            let rows = memory_rows(&handler, &project);
+            let contested = rows
+                .iter()
+                .find(|row| row.0 == statement)
+                .unwrap_or_else(|| panic!("{lifetime}: the statement keeps its row: {rows:?}"));
+            assert_eq!(
+                contested.3["contested_by"]["memory"], observation,
+                "{lifetime}: the contest stays on its observation"
             );
-        } else {
-            assert!(repeats.is_empty(), "{lifetime}: {rows:?}");
+            rows.into_iter()
+                .filter(|row| row.1 == stated(LIMIT_300) && row.0 != statement)
+                .collect::<Vec<_>>()
+        };
+        let repeat = |id: &'static str| {
+            repeat_without_stored_rows(
+                &handler,
+                &store,
+                &project,
+                (id, "user"),
+                LIMIT_300,
+                lifetime,
+            )
+        };
+
+        let linked = repeat("m3").await;
+        let repeats = contest_stays();
+        if lifetime != "current_work" {
+            assert_eq!(linked.as_ref(), Some(&statement), "{lifetime}");
+            assert!(repeats.is_empty(), "{lifetime}: {repeats:?}");
+            continue;
         }
+        assert_eq!(linked, None);
+        assert_eq!(repeats.len(), 1, "{repeats:?}");
+        let plan = &repeats[0];
+        assert_eq!(plan.3["lifetime"], "current_work");
+        assert!(plan.3.get("contested_by").is_none(), "{:?}", plan.3);
+        // The repeat is approved: a later session's block renders it as
+        // work in progress.
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("a later session carries the block");
+        let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+        assert_eq!(
+            work.lines().skip(1).collect::<Vec<_>>(),
+            [format!("{}: {}", plan.0, stated(LIMIT_300))],
+            "{block}"
+        );
+
+        // A second repeat names that plan and adds no row.
+        assert_eq!(repeat("m4").await.as_ref(), Some(&plan.0));
+        let repeats = contest_stays();
+        assert_eq!(
+            repeats.iter().map(|row| &row.0).collect::<Vec<_>>(),
+            [&plan.0]
+        );
     }
 }
 

@@ -80,9 +80,9 @@ struct NativePlan {
     messages: Vec<CaptureMessage>,
     existing: Vec<ExistingCaptureMemory>,
     /// The stored rows a source's request left out of its prompt after two
-    /// recorded failures. Acceptance reads them for the word-for-word
-    /// duplicate check, so a statement an approved row already holds is
-    /// stored once.
+    /// recorded failures. Acceptance reads them as the candidates of the
+    /// word-for-word duplicate link, so a statement an approved row of its
+    /// delivery class already holds is stored once.
     withheld: Vec<ExistingCaptureMemory>,
     model: String,
 }

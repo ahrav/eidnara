@@ -1091,8 +1091,8 @@ a category and quotation, as one memory: a later replacement of it
 supersedes the whole joined statement, every sentence of it. A sentence
 after a colon that the extractor quotes alone joins nothing; it is stored
 for explicit search, and a `replaces` it names becomes a contest of the
-named statement (below), so the block shows that statement with the
-contesting fact's id and a bounded excerpt of the sentence beside it. The
+named statement when the request provided that statement and the contest passes the contest checks (below); the block then shows that statement with the
+contesting fact's id and a bounded excerpt of the sentence beside it, under the contest rule (below). The
 excerpt is text of a user message, labeled as such, and may be words the
 colon introduces: keeping the contest approves the sentence as no statement.
 Failure lines of the same source follow the quotation on separate lines when the quotation frames their block or holds the word that makes a line a failure line. A fence line begins with three or more backticks or three or more tildes. A fenced block opens at a fence line outside any fenced block and closes at the next line that holds only the opener's fence character, at least as many as the opener's run; a fence line between them is a line of the block. A block is a fenced block whose info string (the opener's text after its run) is empty or whose first word is a terminal-output or shell name, matched ignoring ASCII case (`text`, `txt`, `plaintext`, `console`, `terminal`, `log`, `logs`, `output`, `shell-session`, `sh`, `bash`, `shell`, `zsh`), or, outside any fence, a run of consecutive failure lines and their completing lines; a source whose last fenced block never closes is read as prose throughout, its fence lines included. Lines are matched and appended with surrounding whitespace trimmed, and a fence line or a line holding a control character other than tab is never a failure line or a completing line. Inside such a fenced block a failure line holds `panicked at` or the word `ERROR`, `FAIL`, or `FAILED` at any word, or an error header (the word `error`, `fatal`, `FATAL`, or `panic`, or a word ending in `Error` or `Exception`, followed by a `:` that does not begin `::`, or by `[`) at the line start or after a prefix whose whitespace-separated tokens each contain a digit or begin with `[`; outside a fence the line must begin with one of these. The next line in the same fenced block, or the next prose line, completes a failure line when the failure line ends with `:` or the next line begins with `-->` or `at `, unless the next line is blank or a fence line; a completing line that is a failure line itself also starts its own entry. A quotation frames a block when it ends on the last nonblank line before the block, that line ends with `:`, and no sentence ends between the quotation's end and that line's end, where a `.`, `!`, or `?` ending the quotation, or followed by whitespace, ends a sentence; the latest-ending framing quotation receives the block's entries, and when no framing quotation exists or the winning one is ineligible, the first eligible memory whose quotation holds the first character of an entry's failure word (`panicked`, the level word, or the error word) receives that entry. Quotations are located with trailing whitespace ignored, and every non-overlapping occurrence of a quotation competes to frame a block. A memory is eligible when its quotation occurs once and the memory is not marked as a duplicate. Framing ties go to an eligible memory's occurrence, then to the memory proposed first, and only eligible memories receive lines. A quotation occurs once only when no second copy, overlapping or not, exists; a source holding more than eight non-overlapping copies of any quotation gains no failure lines. A word is a run of letters, digits, `_`, and `.`, compared without its trailing dots, so `java.lang.IllegalStateException` is one word that begins at `j` and `FAILED.` is the word `FAILED`. A memory gains at most four lines, completing lines included; a line the memory's text already contains is skipped, a line that would make the text equal another memory of the same category ends that entry's appends, and the text grows only while it stays within 2,048 bytes, a line cut to fit ending in `…`. A quotation that capture approves as the user's own statement keeps its exact text and takes no failure lines. When the store refuses the frozen plan for its secret scan or size bound and failure lines were appended, the plan freezes again with the quotations alone. The recorded quotation and its citations stay the quotation capture stored, the model's quote, the sentence it was widened to, or the run of quoted sentences it was joined into; these rules alone select failure lines, so the extraction instructions' exclusions (such as credentials, personal data, and quoted hostile instructions) govern only the quotation. Memories of one source that share a
@@ -1331,7 +1331,7 @@ of every labeled memory; it has no statement record, and
 `decisions_approval_refused` leaves it uncounted: the turn a request was
 made in answers it, and the user's next message says so when it did not. An approved statement whose
 `lifetime` is `current_work` is live work in progress: a later session needs
-the work an earlier session left open, so the statement is delivered
+the work an earlier session left open, so the statement stays eligible for delivery while the Kernel serves it on `auto_inject`,
 until a later statement of the user ends it (below), within the bounds of
 the block's share for work in progress and of the delivery read (both
 below). A `current_work` fact of a user source whose plan is frozen contesting a fact
@@ -1480,8 +1480,8 @@ contest the first four targets they name between them. A `contests` or `also_rep
 as `null` names no target. A user quotation that does not meet the
 statement rule replaces no fact served on `auto_inject` and takes no
 replacement claim: each such target
-named in `replaces` or `also_replaces` becomes a contest, and when the
-`replaces` target is one, every target of the proposal does. Targets that become contests are counted after the contests the proposal names, the `replaces` target before the `also_replaces` targets, and a target past the fourth is released under the rule below: that fact stays as it is served and the proposal records no contest on it. A user statement
+named in `replaces` or `also_replaces` becomes a contest candidate, and when the
+`replaces` target is one, every target of the proposal that the request provided does; the contest check (below) decides which candidates are recorded. Targets that become contests are counted after the contests the proposal names, the `replaces` target before the `also_replaces` targets, and a target past the fourth is released under the rule below: that fact stays as it is served and the proposal records no contest on it. A user statement
 whose `replaces` target is released contests that target when the request provided the target and the Kernel
 serves it on `auto_inject`, under the contest checks and the contest rule (below), which decide whether the two values are shown as a disagreement; a target the request did not provide becomes no contest. A
 user's statement classed `current_work`, `request`, or `status` replaces no fact served
@@ -1503,7 +1503,7 @@ progress when that target is among its first four contest targets and its
 frozen plan keeps the contest, so the
 work in progress stays live, with the statement shown on its line under the contest rule (below). When the
 `replaces` target is a fact served on `auto_inject` that the statement may not
-replace under the rule above, every target becomes a contest, live work in
+replace under the rule above, every target the request provided becomes a contest candidate under the contest check (below), live work in
 progress among them. The ending statement is stored as
 its own fact under its own class, a `current_work` statement under the class
 its frozen plan gives it (above), so a `status` remark and a cancelling
@@ -1515,7 +1515,7 @@ labeled, whose rationale holds `ended_by`, an object with `memory` (the
 ending fact's id, as it was when the statement ended) and `session` (the session whose message ended it), and
 no `contested_by`; its statement record is retired, and it cites again the
 evidence a contested fact's successor cites (below). Explicit search serves
-the ended fact and no automatic surface does. Work in progress is therefore
+the ended fact and no automatic surface does. Work in progress the Kernel still serves on `auto_inject` is therefore
 live in a later session when its own session, and every session since,
 ended with no statement of the user ending it under this rule: a request the user reports
 finished in the session that made it, in a statement that keeps its `replaces` or `also_replaces` link to that work, reaches no later session, and a
@@ -1643,8 +1643,8 @@ record's `stated_seq` as its own `stated_seq`, so a later contest dates the
 statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
 its own fact and the contest stays. A statement classed `current_work`, `request`, or
-`status` settles no contest: its word-for-word repeat that names the contested fact under `duplicate_of` writes no fact, and its
-statement of another text is stored under the class its frozen plan gives it; a `current_work` repeat extracted without reference memories takes that link only to live work in progress (above), so beside a contested fact of another class it is stored as its own fact and the contest stays. A statement of any
+`status` settles no contest: its word-for-word repeat that names the contested fact under `duplicate_of` writes no fact while the Kernel serves that fact as approved and otherwise follows the duplicate rule (above), and its
+statement of another text is stored under the class its frozen plan gives it; a `current_work` repeat extracted without reference memories takes that link only to live work in progress of the same words among the reference memories selected for its request (above), and with none there it is stored as its own fact beside a contested fact of another class; the contest stays in either case. A statement of any
 class that ends contested work in progress (above) ends that statement, and
 the ended fact holds no contest. The extractor is
 told which reference memories are `contested`; the flag reads the stored
