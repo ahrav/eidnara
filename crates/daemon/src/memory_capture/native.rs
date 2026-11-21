@@ -912,11 +912,20 @@ impl CaptureWork {
             // Its memory whose frozen text an approved row holds word for
             // word names that row, so publication stores the statement
             // once. A memory that gained failure lines the row lacks is
-            // written with them.
+            // written with them. A statement eligible for approval names a
+            // row of its own delivery class, so ending work in progress
+            // retires only the plan.
+            let states_whole = super::states_whole_message(&job);
             let link_withheld_copies = |memories: &mut [CapturedMemory]| {
                 for memory in memories {
                     if memory.duplicate_of.is_none() {
-                        memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
+                        let work = super::user_attributed(states_whole, &proses[index], memory)
+                            .then_some(memory.lifetime == Some(super::Lifetime::CurrentWork));
+                        let same_class = plan
+                            .withheld
+                            .iter()
+                            .filter(|row| work.is_none_or(|work| row.current_work == work));
+                        memory.duplicate_of = super::approved_copy(same_class, &memory.content);
                     }
                 }
             };

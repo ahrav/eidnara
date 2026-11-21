@@ -1126,7 +1126,7 @@ target an answer to that request names is released. The daemon marks a frozen
 memory a duplicate of a reference memory selected for its request when that
 memory is served on `auto_inject` and the two stored texts, appended failure lines
 included, are equal up to the attribution label, edge whitespace, and closing `.` or
-`!`, and writes every other frozen memory as a new row beside any stored row it restates or corrects. Cancellation
+`!`; a whole user statement eligible for approval is marked a duplicate of live work in progress only when its own class is `current_work`, and of any other such memory only when its class is another, so a rule and a plan of the same words are each stored under their own class. The daemon writes every other frozen memory as a new row beside any stored row it restates or corrects. A memory frozen from that request keeps no `replaces`, `also_replaces`, or `contests` target, so it ends no live work in progress and records no contest: work its statement reports finished stays live work in progress until a statement extracted with reference memories ends it. Cancellation
 and unavailable native auth do not consume that allowance. Dispatch counts
 survive restart and drive exponential retry delay from one second to 128
 seconds; issued work carries its deadline, so a lease lost to a restart is
@@ -1517,8 +1517,8 @@ no `contested_by`; its statement record is retired, and it cites again the
 evidence a contested fact's successor cites (below). Explicit search serves
 the ended fact and no automatic surface does. Work in progress is therefore
 live in a later session when its own session, and every session since,
-ended with no statement of the user ending it: a request the user reports
-finished in the session that made it reaches no later session, and a
+ended with no statement of the user ending it under this rule: a request the user reports
+finished in the session that made it, in a statement that keeps its `replaces` or `also_replaces` link to that work, reaches no later session, and a
 `request` reaches none either. A
 user source's contests are kept when the source reaches capture under its
 own message id and its quotation is one or more whole sentences of a

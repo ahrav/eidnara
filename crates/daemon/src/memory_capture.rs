@@ -738,9 +738,12 @@ fn is_another_approved_text(previous: &ExistingCaptureMemory, content: &str) -> 
 
 /// The approved memory that holds `content` word for word: the one
 /// [`is_another_approved_text`] reads as the same statement.
-fn approved_copy(existing: &[ExistingCaptureMemory], content: &str) -> Option<String> {
+fn approved_copy<'a>(
+    existing: impl IntoIterator<Item = &'a ExistingCaptureMemory>,
+    content: &str,
+) -> Option<String> {
     existing
-        .iter()
+        .into_iter()
         .find(|previous| previous.automatic && !is_another_approved_text(previous, content))
         .map(|approved| approved.id.clone())
 }

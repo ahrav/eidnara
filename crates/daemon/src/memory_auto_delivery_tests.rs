@@ -3294,6 +3294,247 @@ async fn only_work_a_session_left_open_reaches_a_later_session() {
     assert_eq!(rows, expected);
 }
 
+/// Queues one message and records `failures` model failures of its source.
+/// After two, the source's request carries an empty `existing_memories`.
+async fn enqueue_after_failures(
+    handler: &Handler,
+    store: &MemoryStore,
+    project: &Path,
+    (channel, session): (u16, &str),
+    message: (&str, &str, &str),
+    failures: usize,
+) {
+    let digest = kernel_routes::ProjectBinding::new(project)
+        .digest()
+        .to_owned();
+    let jobs = enqueue(handler, channel, session, &[message]).await;
+    for _ in 0..failures {
+        store
+            .fail_memory_capture(&digest, &jobs[0], "model_failed", 0, true, now_ms())
+            .unwrap();
+    }
+}
+
+/// The memory rows on explicit search as `(id, lifetime class)`, in id order.
+fn rows_by_class(handler: &Handler, project: &Path) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = memory_rows(handler, project)
+        .into_iter()
+        .map(|row| (row.0, row.3["lifetime"].as_str().unwrap().to_string()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A source extracted without stored rows repeats, word for word, a
+/// statement an approved row holds. The daemon links the repeat to that row
+/// when both are work in progress or neither is, and the repeat is stored
+/// as its own row when one of the two is work in progress. A rule that
+/// repeats a live plan therefore stays delivered after a completion remark
+/// ends the plan.
+#[tokio::test]
+async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery_class() {
+    let done = "The retry budget is in the client config now.";
+    for (stored, repeated) in [
+        ("current_work", "current_work"),
+        ("lasting", "lasting"),
+        ("lasting", "current_work"),
+        ("current_work", "lasting"),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, stored)],
+        )
+        .await;
+        let first = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        let repeat = ("m2", "user", RETRY_PLAN);
+        enqueue_after_failures(&handler, &store, &project, (SECOND, "s2"), repeat, 2).await;
+        drain(&handler, SECOND, "s2", &[repeat], |_, existing| {
+            assert!(existing.is_empty(), "{stored}, {repeated}: {existing:?}");
+            vec![classed(RETRY_PLAN, repeated)]
+        })
+        .await;
+
+        let rows = rows_by_class(&handler, &project);
+        if stored == repeated {
+            assert_eq!(
+                rows,
+                [(first.clone(), stored.to_string())],
+                "a repeat of its own class adds no row"
+            );
+            continue;
+        }
+        let second = rows
+            .iter()
+            .find(|(id, _)| *id != first)
+            .unwrap_or_else(|| panic!("{stored}, {repeated}: the repeat is its own row: {rows:?}"))
+            .0
+            .clone();
+        let mut expected = vec![
+            (first.clone(), stored.to_string()),
+            (second.clone(), repeated.to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected);
+        let (plan, rule) = if stored == "current_work" {
+            (&first, &second)
+        } else {
+            (&second, &first)
+        };
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("a later session carries the block");
+        let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+        assert!(
+            rules.contains(rule.as_str()),
+            "{stored}, {repeated}: {block}"
+        );
+        let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+        assert!(
+            work.contains(plan.as_str()),
+            "{stored}, {repeated}: {block}"
+        );
+
+        // A completion remark that names the plan ends the plan alone.
+        capture(&handler, SECOND, "s2", &[("m3", "user", done)], |_, _| {
+            vec![Extracted {
+                replaces: vec![plan.clone()],
+                ..classed(done, "status")
+            }]
+        })
+        .await;
+        let stored_rows = memory_rows(&handler, &project);
+        let kept = stored_rows
+            .iter()
+            .find(|row| row.0 == *rule)
+            .unwrap_or_else(|| panic!("{stored}, {repeated}: the rule keeps its row"));
+        assert_eq!(kept.3["lifetime"], "lasting");
+        assert!(kept.3.get("ended_by").is_none(), "{:?}", kept.3);
+        let ended = stored_rows
+            .iter()
+            .find(|row| row.3["lifetime"] == "current_work")
+            .expect("the plan stays on explicit search");
+        assert_eq!(
+            ended.3["ended_by"]["memory"],
+            memory_id(&handler, &project, &stated(done)).as_str(),
+            "{stored}, {repeated}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the rule is delivered after the plan ends");
+        let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+        assert!(
+            rules.contains(rule.as_str()),
+            "{stored}, {repeated}: {block}"
+        );
+        assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(RETRY_PLAN)],
+            "{stored}, {repeated}"
+        );
+    }
+
+    // An assistant's echo of the plan is no statement of the user, so it
+    // names the plan under any class and adds no row.
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", RETRY_PLAN)],
+        |_, _| vec![classed(RETRY_PLAN, "current_work")],
+    )
+    .await;
+    let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+    let echo = ("m2", "assistant", RETRY_PLAN);
+    enqueue_after_failures(&handler, &store, &project, (SECOND, "s2"), echo, 2).await;
+    drain(&handler, SECOND, "s2", &[echo], |_, existing| {
+        assert!(existing.is_empty(), "{existing:?}");
+        vec![classed(RETRY_PLAN, "lasting")]
+    })
+    .await;
+    assert_eq!(
+        rows_by_class(&handler, &project),
+        [(plan, "current_work".to_string())]
+    );
+}
+
+/// A completion remark names the live plan under `replaces`. Extracted with
+/// the stored rows, it ends the plan. Extracted without them, after two
+/// failures of its source, its target is released: the remark is stored
+/// labeled, and the plan stays live work in progress for a later session.
+#[tokio::test]
+async fn a_completion_remark_extracted_without_stored_rows_leaves_work_in_progress_live() {
+    let done = "The retry budget is in the client config now.";
+    for failures in [0, 2] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, "current_work")],
+        )
+        .await;
+        let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        let remark = ("m2", "user", done);
+        enqueue_after_failures(&handler, &store, &project, (FIRST, "s1"), remark, failures).await;
+        drain(&handler, FIRST, "s1", &[remark], |_, existing| {
+            assert_eq!(existing.is_empty(), failures == 2, "{existing:?}");
+            vec![Extracted {
+                replaces: vec![plan.clone()],
+                ..classed(done, "status")
+            }]
+        })
+        .await;
+
+        let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+        rows.sort();
+        let plan_state = if failures == 0 { "labeled" } else { "visible" };
+        let mut expected = vec![
+            (stated(RETRY_PLAN), plan_state.to_string()),
+            (stated(done), "labeled".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected, "{failures} failures");
+        let stored = memory_rows(&handler, &project);
+        let served = serve(&handler, SECOND, "s2").await;
+        if failures == 0 {
+            let ended = stored
+                .iter()
+                .find(|row| row.1 == stated(RETRY_PLAN))
+                .expect("the plan stays on explicit search");
+            assert_ne!(ended.0, plan, "the ended plan is a new row");
+            assert_eq!(
+                ended.3["ended_by"]["memory"],
+                memory_id(&handler, &project, &stated(done)).as_str()
+            );
+            assert_eq!(project_memory_block(&served), None, "{served}");
+            continue;
+        }
+        let kept = stored
+            .iter()
+            .find(|row| row.0 == plan)
+            .expect("the plan keeps its row");
+        assert!(kept.3.get("ended_by").is_none(), "{:?}", kept.3);
+        assert!(kept.3.get("contested_by").is_none(), "{:?}", kept.3);
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(RETRY_PLAN)]
+        );
+        let block = project_memory_block(&served).expect("the plan is delivered");
+        let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+        assert_eq!(
+            work.lines().skip(1).collect::<Vec<_>>(),
+            [format!("{plan}: {}", stated(RETRY_PLAN))],
+            "{block}"
+        );
+        assert!(!block.contains(done), "{block}");
+    }
+}
+
 /// A remark that reports the planned work failed carries a failure line of
 /// its message in its stored text. It still ends the plan it names, and its
 /// source completes.
