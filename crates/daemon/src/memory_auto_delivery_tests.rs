@@ -3067,7 +3067,7 @@ async fn a_sentence_that_quotes_one_literal_is_the_users_statement_and_quoted_sp
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     let prefix = "Prefix every test name with 'it_'.";
     let branch = "The release branch is \"main\" in this repository.";
-    let library = "Use the 'requests' library for HTTP calls.";
+    let library = "Wrap every handler in '@count_calls' from now on.";
     let teammate = "My teammate wrote 'always rebase first' in the guide.";
     let reviewer = "The reviewer said \"Skip the flaky tests.\" and I doubt it.";
     let messages = [
