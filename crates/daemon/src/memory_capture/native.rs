@@ -79,6 +79,11 @@ struct NativePlan {
     jobs: Vec<CaptureJob>,
     messages: Vec<CaptureMessage>,
     existing: Vec<ExistingCaptureMemory>,
+    /// The stored rows a source's request left out of its prompt after two
+    /// recorded failures. Acceptance reads them for the word-for-word
+    /// duplicate check, so a statement an approved row already holds is
+    /// stored once.
+    withheld: Vec<ExistingCaptureMemory>,
     model: String,
 }
 
@@ -707,17 +712,32 @@ impl CaptureWork {
         if models.is_empty() {
             return Ok(None);
         }
-        // Fallback stage follows failures; a batch shares one model, so it
-        // holds only sources at the head's stage. The rest wait for the next
-        // drain call rather than skipping their own primary attempt.
+        // The model and the request shape follow the head's failures; a
+        // batch shares both, so it holds only sources at the head's stage.
+        // The rest wait for the next drain call rather than skipping their
+        // own primary attempt.
         let failures = unprepared[0].failures;
         unprepared.retain(|job| job.failures == failures);
+        // A provider that stops an answer judges the whole request, so each
+        // recorded failure sends a smaller one. After one failure the head
+        // source leaves its batch: the sources that failed beside it keep
+        // their place in the queue and are each extracted alone by a later
+        // call. After two, the stored rows leave its prompt as well. The
+        // third failure pauses the source, and the pause ends at a batch.
+        if failures >= 1 {
+            unprepared.truncate(1);
+        }
         let model = models[failures as usize % models.len()].clone();
         if !valid_capture_model(&model) {
             return Err("invalid_model_configuration");
         }
         let mut messages = messages_for(&unprepared);
         let mut existing = self.existing_memories(&messages, &unprepared)?;
+        let withheld = if failures >= 2 {
+            std::mem::take(&mut existing)
+        } else {
+            Vec::new()
+        };
         let prompt = loop {
             let prompt = render_capture_prompt_with_existing(&messages, &existing)?;
             if prompt.len() <= MAX_NATIVE_PROMPT_BYTES {
@@ -746,6 +766,7 @@ impl CaptureWork {
                 jobs: unprepared,
                 messages,
                 existing,
+                withheld,
                 model,
             },
             prompt,
@@ -887,23 +908,38 @@ impl CaptureWork {
             let mut memories = quoted.clone();
             failure_evidence::attach(&job.text, &mut memories);
             let attached = keep_statement_text(&job, &proses[index], &quoted, &mut memories);
-            let existing = plan
-                .existing
-                .iter()
-                .filter(|previous| {
-                    memories.iter().any(|memory| {
-                        memory.replaces.as_deref() == Some(&previous.id)
-                            || memory.also_replaces.contains(&previous.id)
-                            || memory.duplicate_of.as_deref() == Some(&previous.id)
-                            || memory.contests.contains(&previous.id)
+            // A source extracted without the stored rows names no target.
+            // Its memory whose frozen text an approved row holds word for
+            // word names that row, so publication stores the statement
+            // once. A memory that gained failure lines the row lacks is
+            // written with them.
+            let link_withheld_copies = |memories: &mut [CapturedMemory]| {
+                for memory in memories {
+                    if memory.duplicate_of.is_none() {
+                        memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
+                    }
+                }
+            };
+            let referenced = |memories: &[CapturedMemory]| -> Vec<_> {
+                plan.existing
+                    .iter()
+                    .chain(&plan.withheld)
+                    .filter(|previous| {
+                        memories.iter().any(|memory| {
+                            memory.replaces.as_deref() == Some(&previous.id)
+                                || memory.also_replaces.contains(&previous.id)
+                                || memory.duplicate_of.as_deref() == Some(&previous.id)
+                                || memory.contests.contains(&previous.id)
+                        })
                     })
-                })
-                .cloned()
-                .collect();
+                    .cloned()
+                    .collect()
+            };
+            link_withheld_copies(&mut memories);
             let mut output = PreparedCapture {
                 version: super::CAPTURE_PLAN_VERSION,
                 model: plan.model.clone(),
-                existing,
+                existing: referenced(&memories),
                 memories,
                 head: head.clone(),
             };
@@ -921,6 +957,8 @@ impl CaptureWork {
                 )
             {
                 output.memories = quoted;
+                link_withheld_copies(&mut output.memories);
+                output.existing = referenced(&output.memories);
                 let frozen =
                     serde_json::to_string(&output).map_err(|_| "output_encoding_failed")?;
                 prepared = self
