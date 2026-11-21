@@ -8372,3 +8372,310 @@ async fn a_contesting_id_that_is_not_plain_is_shown_quoted() {
     );
     assert!(!block.contains("by mem-agent)"), "{block}");
 }
+
+/// Writes `summary` as the agent's note `mem-agent` with the host memory
+/// tool. The Kernel serves it labeled.
+async fn write_agent_note(handler: &Handler, project: &Path, summary: &str) {
+    let written = body(
+        handler
+            .dispatch_value_for_test(
+                test_route(FIRST),
+                kernel_route_fixtures::commit_request(
+                    project,
+                    "s1",
+                    "agent-write",
+                    vec![json!({"op": "insert_decision", "spec": {
+                        "decision_id": "dec-agent",
+                        "object_id": "mem-agent",
+                        "domain_id": "memory",
+                        "decision_kind": "PROJECT_RULES",
+                        "payload": {"summary": summary, "rationale": ""},
+                        "source_id": "eidnara_memory",
+                        "source_revision": 1,
+                    }})],
+                    Vec::new(),
+                ),
+            )
+            .await,
+    );
+    assert_eq!(written["state"]["kind"], "available", "{written}");
+}
+
+/// The rows capture wrote as `(id, lifetime class)`, in id order. A row
+/// with no class reads as `none`.
+fn captured_rows_by_class(handler: &Handler, project: &Path) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = memory_rows(handler, project)
+        .into_iter()
+        .filter(|row| row.0 != "mem-agent")
+        .map(|row| {
+            let class = row.3["lifetime"].as_str().unwrap_or("none").to_string();
+            (row.0, class)
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A rule and a live plan hold the same words in a row each. A later
+/// session is served both. The completion remark `done` then ends the plan
+/// alone: the rule keeps its row and stays delivered.
+async fn the_rule_outlives_the_plan(
+    handler: &Handler,
+    project: &Path,
+    (rule, plan): (&str, &str),
+    done: &str,
+    case: &str,
+) {
+    let block = project_memory_block(&serve(handler, THIRD, "s3").await)
+        .expect("a later session carries the block");
+    let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+    assert!(rules.contains(rule), "{case}: {block}");
+    let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+    assert!(work.contains(plan), "{case}: {block}");
+
+    capture(handler, SECOND, "s2", &[("done", "user", done)], |_, _| {
+        vec![Extracted {
+            replaces: vec![plan.to_string()],
+            ..classed(done, "status")
+        }]
+    })
+    .await;
+    let rows = memory_rows(handler, project);
+    let kept = rows
+        .iter()
+        .find(|row| row.0 == rule)
+        .unwrap_or_else(|| panic!("{case}: the rule keeps its row: {rows:?}"));
+    assert!(kept.3.get("ended_by").is_none(), "{case}: {:?}", kept.3);
+    let ended = rows
+        .iter()
+        .find(|row| row.3["lifetime"] == "current_work")
+        .unwrap_or_else(|| panic!("{case}: the plan stays on explicit search: {rows:?}"));
+    assert_eq!(
+        ended.3["ended_by"]["memory"],
+        memory_id(handler, project, &stated(done)).as_str(),
+        "{case}"
+    );
+    let block = project_memory_block(&serve(handler, THIRD, "s3").await)
+        .expect("the rule is delivered after the plan ends");
+    let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+    assert!(rules.contains(rule), "{case}: {block}");
+    assert_eq!(
+        block_element(&block, "CURRENT_WORK"),
+        None,
+        "{case}: {block}"
+    );
+}
+
+/// The extractor names an agent's note as the memory that already holds a
+/// statement, and an approved row holds the statement word for word. The
+/// daemon names that row in place of the note. A whole user statement
+/// eligible for approval takes a row of its own delivery class: live work
+/// in progress for a `current_work` statement, a row that is no work in
+/// progress for any other. With no such row it keeps the note, is stored as
+/// its own row, and a rule stored that way stays delivered after the plan of
+/// the same words ends. An assistant's echo and a user's repeat classed
+/// `request` or `status` take the approved row of either class. A row of
+/// another class that the extractor itself names is kept.
+#[tokio::test]
+async fn a_statement_beside_a_note_takes_the_approved_copy_of_its_own_delivery_class() {
+    let done = "The retry budget is in the client config now.";
+    for (stored, role, repeated, links) in [
+        ("current_work", "user", Some("current_work"), true),
+        ("lasting", "user", Some("lasting"), true),
+        ("lasting", "user", Some("unsettled"), true),
+        ("lasting", "user", None, true),
+        ("current_work", "user", Some("request"), true),
+        ("current_work", "user", Some("status"), true),
+        ("current_work", "assistant", Some("lasting"), true),
+        ("current_work", "user", Some("lasting"), false),
+        ("current_work", "user", Some("unsettled"), false),
+        ("current_work", "user", None, false),
+        ("lasting", "user", Some("current_work"), false),
+    ] {
+        let case = format!("{stored}, {role}, {repeated:?}");
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        write_agent_note(
+            &handler,
+            &project,
+            "Retry budget moves into the client config.",
+        )
+        .await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, stored)],
+        )
+        .await;
+        let first = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", role, RETRY_PLAN)],
+            |_, existing| {
+                assert_eq!(
+                    ids_containing(existing, RETRY_PLAN),
+                    std::slice::from_ref(&first)
+                );
+                vec![Extracted {
+                    duplicate_of: Some("mem-agent".to_string()),
+                    lifetime: repeated,
+                    ..fact(RETRY_PLAN)
+                }]
+            },
+        )
+        .await;
+
+        let rows = captured_rows_by_class(&handler, &project);
+        if links {
+            assert_eq!(rows, [(first, stored.to_string())], "{case}");
+            assert_eq!(
+                live_statement_records(&handler, &project),
+                [stated(RETRY_PLAN)],
+                "{case}"
+            );
+            continue;
+        }
+        let second = rows
+            .iter()
+            .find(|(id, _)| *id != first)
+            .unwrap_or_else(|| panic!("{case}: the repeat is its own row: {rows:?}"))
+            .clone();
+        let mut expected = vec![(first.clone(), stored.to_string()), second.clone()];
+        expected.sort();
+        assert_eq!(rows, expected, "{case}");
+        assert_eq!(second.1, repeated.unwrap_or("none"), "{case}");
+        let stored_rows = memory_rows(&handler, &project);
+        let written = stored_rows.iter().find(|row| row.0 == second.0).unwrap();
+        assert_eq!(written.3["restates"], "mem-agent", "{case}");
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(RETRY_PLAN), stated(RETRY_PLAN)],
+            "{case}"
+        );
+        let (rule, plan) = if stored == "current_work" {
+            (&second.0, &first)
+        } else {
+            (&first, &second.0)
+        };
+        the_rule_outlives_the_plan(&handler, &project, (rule, plan), done, &case).await;
+    }
+
+    // The extractor names the stored row itself, which is of the other
+    // class. That link is the extractor's and is kept.
+    for (stored, repeated) in [("current_work", "lasting"), ("lasting", "current_work")] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, stored)],
+        )
+        .await;
+        let first = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", RETRY_PLAN)],
+            |_, _| {
+                vec![Extracted {
+                    duplicate_of: Some(first.clone()),
+                    ..classed(RETRY_PLAN, repeated)
+                }]
+            },
+        )
+        .await;
+        assert_eq!(
+            captured_rows_by_class(&handler, &project),
+            [(first, stored.to_string())],
+            "{stored}, {repeated}"
+        );
+    }
+}
+
+/// The extractor cuts a clause out of a sentence and names the approved
+/// statement of that clause as the memory that already holds it. The
+/// widened sentence is another text, and an approved row holds it word for
+/// word. The statement names that row when the row is of its own delivery
+/// class. With no such row it is stored as its own row, and a rule stored
+/// that way stays delivered after the plan of the same words ends.
+#[tokio::test]
+async fn a_widened_statement_takes_the_approved_copy_of_its_own_delivery_class() {
+    let clause = "move the retry budget into the client config.";
+    let named = "Move the retry budget into the client config.";
+    let done = "The retry budget is in the client config now.";
+    for (stored, repeated, links) in [
+        ("current_work", Some("current_work"), true),
+        ("lasting", Some("lasting"), true),
+        ("lasting", None, true),
+        ("current_work", Some("lasting"), false),
+        ("current_work", None, false),
+        ("lasting", Some("current_work"), false),
+    ] {
+        let case = format!("{stored}, {repeated:?}");
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", named)], |_, _| {
+            vec![classed(named, "lasting")]
+        })
+        .await;
+        let clause_row = memory_id(&handler, &project, &stated(named));
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m2", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, stored)],
+        )
+        .await;
+        let first = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m3", "user", RETRY_PLAN)],
+            |_, existing| {
+                assert_eq!(
+                    ids_containing(existing, RETRY_PLAN),
+                    std::slice::from_ref(&first)
+                );
+                vec![Extracted {
+                    quote: clause.to_string(),
+                    duplicate_of: Some(clause_row.clone()),
+                    lifetime: repeated,
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+
+        let rows = captured_rows_by_class(&handler, &project);
+        let mut expected = vec![
+            (clause_row.clone(), "lasting".to_string()),
+            (first.clone(), stored.to_string()),
+        ];
+        if links {
+            expected.sort();
+            assert_eq!(rows, expected, "{case}");
+            continue;
+        }
+        let second = rows
+            .iter()
+            .find(|(id, _)| *id != first && *id != clause_row)
+            .unwrap_or_else(|| panic!("{case}: the sentence is its own row: {rows:?}"))
+            .clone();
+        assert_eq!(second.1, repeated.unwrap_or("none"), "{case}");
+        expected.push(second.clone());
+        expected.sort();
+        assert_eq!(rows, expected, "{case}");
+        let (rule, plan) = if stored == "current_work" {
+            (&second.0, &first)
+        } else {
+            (&first, &second.0)
+        };
+        the_rule_outlives_the_plan(&handler, &project, (rule, plan), done, &case).await;
+    }
+}

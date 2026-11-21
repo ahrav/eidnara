@@ -510,8 +510,8 @@ fn parse_capture_batch(
 /// given them one category. A memory supersedes one predecessor, so a run
 /// whose members name two replacement targets is left as proposed. The joined text is new, so a member that named an approved statement with
 /// another text as the memory already holding its sentence names the
-/// approved statement that holds the joined text word for word, or none
-/// (see [`is_another_approved_text`]).
+/// approved statement of the run's delivery class that holds the joined text word for word, or none
+/// (see [`is_another_approved_text`] and [`native::run_copy`]).
 ///
 /// Returns the members of each run, by index and in message order.
 fn join_sentence_runs(
@@ -644,14 +644,14 @@ fn join_sentence_runs(
         let joined = &text[run.from..run.to];
         let content = format!("{USER_STATED}: {joined}");
         for &member in &run.members {
-            let memory = &mut memories[member];
-            memory.quote = joined.to_owned();
-            let named = memory
+            memories[member].quote = joined.to_owned();
+            let named = memories[member]
                 .duplicate_of
                 .as_ref()
                 .and_then(|target| existing.iter().find(|previous| previous.id == *target));
             if named.is_some_and(|previous| is_another_approved_text(previous, &content)) {
-                memory.duplicate_of = approved_copy(existing, &content);
+                memories[member].duplicate_of =
+                    native::run_copy(existing, memories, &run.members, &content);
             }
         }
     }
@@ -11721,5 +11721,110 @@ mod tests {
             reserved >= window + walk + other,
             "a worker reserves {reserved} bytes and holds {window} of the window, {walk} of the walk, and {other} besides"
         );
+    }
+
+    /// Sentences quoted one by one are joined, and each named an approved
+    /// statement of the first sentence alone. The joined statement names
+    /// the approved row that holds the joined text only when that row is of
+    /// the delivery class the run freezes under: the class that holds
+    /// longest among its members, or none when a member carries none. A run
+    /// that is work in progress names live work in progress, a run that
+    /// outlives its task or carries no class names a row that is no work in
+    /// progress, and a run stored labeled names the first approved row of
+    /// either class.
+    #[test]
+    fn a_joined_statement_duplicates_an_approved_statement_of_its_own_delivery_class() {
+        let paragraph = format!("{OPEN_TASKS} {RETRY_COUNTER} {DRY_RUN}");
+        let memory = |id: &str, content: &str, current_work: bool| ExistingCaptureMemory {
+            id: id.into(),
+            category: "CONSTRAINTS".into(),
+            content: content.into(),
+            can_replace: true,
+            source_revision: 1,
+            created_commit_seq: 1,
+            automatic: true,
+            contested: false,
+            current_work,
+        };
+        let first_only = memory("mem_first", &format!("User stated: {OPEN_TASKS}"), false);
+        let rule = memory("mem_rule", &format!("User stated: {paragraph}"), false);
+        let plan = memory("mem_plan", &format!("User stated: {paragraph}"), true);
+        let messages = [CaptureMessage {
+            id: "m".into(),
+            role: CaptureRole::User,
+            text: paragraph.clone(),
+            own_id: true,
+        }];
+        let links = |existing: &[&ExistingCaptureMemory], classes: [Option<&str>; 3]| {
+            let existing: Vec<ExistingCaptureMemory> =
+                existing.iter().map(|&row| row.clone()).collect();
+            let memories: Vec<Value> = [OPEN_TASKS, RETRY_COUNTER, DRY_RUN]
+                .iter()
+                .zip(classes)
+                .enumerate()
+                .map(|(index, (quote, class))| {
+                    let mut memory = json!({"category": "CONSTRAINTS", "content": format!("fact {index}"), "quote": quote, "duplicate_of": "mem_first"});
+                    if let Some(class) = class {
+                        memory["lifetime"] = json!(class);
+                    }
+                    memory
+                })
+                .collect();
+            let response =
+                json!({"version": 1, "decisions": [{"message_id": "m", "memories": memories}]});
+            let links: Vec<Option<String>> =
+                parse_batch(&response.to_string(), &messages, &existing)
+                    .unwrap()
+                    .remove(0)
+                    .unwrap()
+                    .memories
+                    .into_iter()
+                    .map(|memory| {
+                        assert_eq!(memory.quote, paragraph);
+                        memory.duplicate_of
+                    })
+                    .collect();
+            assert!(
+                links.iter().all(|link| *link == links[0]),
+                "the members of a run name one row: {links:?}"
+            );
+            links[0].clone()
+        };
+        let (rule_id, plan_id) = (Some("mem_rule".to_string()), Some("mem_plan".to_string()));
+        let only_plan = [&first_only, &plan];
+        let only_rule = [&first_only, &rule];
+        let plan_first = [&first_only, &plan, &rule];
+        let rule_first = [&first_only, &rule, &plan];
+        for class in [Some("lasting"), Some("unsettled"), None] {
+            let classes = [class; 3];
+            assert_eq!(links(&only_plan, classes), None, "{class:?}");
+            assert_eq!(links(&only_rule, classes), rule_id, "{class:?}");
+            assert_eq!(links(&plan_first, classes), rule_id, "{class:?}");
+            assert_eq!(links(&rule_first, classes), rule_id, "{class:?}");
+        }
+        let work = [Some("current_work"); 3];
+        assert_eq!(links(&only_rule, work), None);
+        assert_eq!(links(&only_plan, work), plan_id);
+        assert_eq!(links(&plan_first, work), plan_id);
+        assert_eq!(links(&rule_first, work), plan_id);
+        for class in ["request", "status"] {
+            let classes = [Some(class); 3];
+            assert_eq!(links(&only_plan, classes), plan_id, "{class}");
+            assert_eq!(links(&only_rule, classes), rule_id, "{class}");
+            assert_eq!(links(&plan_first, classes), plan_id, "{class}");
+        }
+        // Members of several classes freeze under one class.
+        let longest = [Some("current_work"), Some("lasting"), Some("status")];
+        assert_eq!(links(&only_plan, longest), None);
+        assert_eq!(links(&plan_first, longest), rule_id);
+        let unclassed = [Some("current_work"), None, Some("current_work")];
+        assert_eq!(links(&only_plan, unclassed), None);
+        assert_eq!(links(&plan_first, unclassed), rule_id);
+        let open = [Some("status"), Some("current_work"), Some("request")];
+        assert_eq!(links(&only_rule, open), None);
+        assert_eq!(links(&rule_first, open), plan_id);
+        let labeled = [Some("request"), Some("status"), Some("status")];
+        assert_eq!(links(&only_plan, labeled), plan_id);
+        assert_eq!(links(&rule_first, labeled), rule_id);
     }
 }

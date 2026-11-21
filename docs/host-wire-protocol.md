@@ -1040,7 +1040,7 @@ correction the extractor quoted in whole sentences meets the statement rule
 and replaces a fact served on `auto_inject`, and a contest shows the
 quotation the extractor judged: a clause of an assistant source, whole
 sentences of a user source. A widened quotation whose `duplicate_of` names
-a fact served on `auto_inject` with another text names the served fact that
+a fact served on `auto_inject` with another text names the served fact of its own delivery class (below) that
 holds the widened sentence, up to its attribution label, edge whitespace,
 and closing `.` or `!`, or drops that link and is
 stored as the user's own statement: the extractor matched the clause it
@@ -1083,7 +1083,7 @@ passed its checks, or else of the run's first sentence; two memories of one
 source that share a category and `content` as proposed refuse the source,
 before the join as after it; a joined memory whose
 `duplicate_of` names a fact served on `auto_inject` with another text names
-the served fact that holds the joined text word for word, up to its
+the served fact of its own delivery class (below) that holds the joined text word for word, up to its
 attribution label, edge whitespace, and closing `.` or `!`, or drops the
 link.
 The joined memories then freeze under the rule below for memories that share
@@ -1103,9 +1103,9 @@ frozen memory names `duplicate_of` only when every memory it joins names the
 same target, or when the rule for a source extracted without reference
 memories (below) names one, and a frozen memory that names under `duplicate_of` a reference
 memory not served on `auto_inject`, and whose stored text equals that of a
-reference memory that is, up to its attribution label, edge whitespace, and
+reference memory of its own delivery class that is, up to its attribution label, edge whitespace, and
 closing `.` or `!`, is a duplicate of the served one; a named target that is
-served on `auto_inject` is kept. Relevant and sufficiently complete quote selection still depends
+served on `auto_inject` is kept, whatever its class. In these three links, which the daemon makes by text on a request that carries the reference memories, a served fact is of a memory's own delivery class when the memory is a whole user statement eligible for approval and the fact is live work in progress exactly when the memory's class is `current_work`; for any other memory, which is stored labeled, every served fact is. The class is the one the memory carries when the link is made, before the rule for a `current_work` fact frozen contesting a fact served on `auto_inject` (below) is applied, and quotations joined into one statement carry the class that holds longest among them, or none when one of them carries none (below). A rule and a plan of the same words are therefore each stored under their own class, and such a statement with no served fact of its class holding its text is stored as its own fact. Relevant and sufficiently complete quote selection still depends
 on model quality. Only user-source proposals may replace capture-owned
 memories; parsing and kernel publication both enforce this rule, and one
 target may be replaced once per batch whichever source claims it. User intent
