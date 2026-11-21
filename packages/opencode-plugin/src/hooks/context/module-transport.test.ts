@@ -837,12 +837,20 @@ describe("possibly sent bodies fence the session lane", () => {
         const shared = client as unknown as HostClient;
         transport.client = shared;
         transport.clientCacheOptions = transport.clientOptions();
-        transport.ensureRoute = async () => ({
-            client: shared,
-            route,
-            routeKey: "s\0/tmp",
-            generation: 0,
-        });
+        const replacement = {
+            isClosed: false,
+            request: async () => ({ ok: true }),
+        } as unknown as HostClient;
+        let routeOpenings = 0;
+        transport.ensureRoute = async () => {
+            routeOpenings += 1;
+            if (routeOpenings === 1) {
+                return { client: shared, route, routeKey: "s\0/tmp", generation: 0 };
+            }
+            // The call after the retirement dials a live client under the generation the retirement advanced to.
+            transport.client = replacement;
+            return { client: replacement, route, routeKey: "s\0/tmp", generation: 1 };
+        };
 
         await expect(
             transport.call({
@@ -860,17 +868,17 @@ describe("possibly sent bodies fence the session lane", () => {
                 projectRoot: "/tmp",
                 method: "session.status",
                 body: { method: "session.status" },
-                timeoutMs: 200,
+                timeoutMs: 2_000,
             })
-            .catch((error: unknown) => error)
             .finally(() => {
                 secondSettled = true;
             });
         await Bun.sleep(20);
         expect(secondSettled).toBe(false);
         finishClose?.();
-        await second;
-        expect(secondSettled).toBe(true);
+        // The second call enters the lane once the retired client has closed and is answered on the replacement; the failure after the send leaves the generation where the retirement put it.
+        await expect(second).resolves.toEqual({ ok: true });
+        expect((transport as unknown as HostModuleTransport).generation).toBe(1);
     });
 });
 
