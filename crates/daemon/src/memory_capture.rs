@@ -3057,7 +3057,9 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
 }
 
 /// Closing brackets and emphasis marks that may stand behind the last word
-/// of a token.
+/// of a token. The utterance check and the second-reading check both read
+/// the token's ending behind them, so `'user(s)'` ends in `s` and `"(No.)"`
+/// ends in a period.
 const TOKEN_CLOSERS: [char; 5] = [')', ']', '}', '*', '_'];
 
 /// A single quotation mark that no double-mark family lists.
