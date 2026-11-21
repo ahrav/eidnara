@@ -1330,11 +1330,13 @@ the fact it contests under that rule's conditions. A `current_work` fact frozen 
 because it names none, contests only labeled facts, or another fact of its
 source or batch holds the contest, keeps its class. A frozen plan carries
 plan version 2, which names the classes as this section defines them.
-The commit of a plan of another version is refused as invalid input
-(`kernel_write_refused`, above), so a class an earlier build froze is
-never read under these rules; a plan of another version that decodes, and
-whose commit an earlier build had already made from the same frozen bytes,
-replays that receipt, which completes its source. A captured fact's rationale
+A plan of another version meets the recoveries above in publication's
+order: frozen bytes that do not decode are `invalid_preparation`; a decoded
+plan whose receipt the Kernel holds for the same source and the same frozen
+bytes replays it, which completes its source; a receipt for the source
+under other bytes is `reconciliation_conflict`; and a decoded plan with no
+receipt is refused as invalid input (`kernel_write_refused`), so a class an
+earlier build froze is never written under these rules. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1476,7 +1478,7 @@ each other such target it names in `replaces` or `also_replaces` becomes a conte
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as one of those three, leave the rule approved
 and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets and the contest is recorded and shown under the contest rule (below); the
-exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen contesting a fact served on `auto_inject` (above). The contest is the one the frozen plan holds: a contest another fact of the source or batch holds (below) is shown with that fact's words. A
+exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen contesting a fact served on `auto_inject` (above). The frozen batch decides which fact holds a contest, and the contest rule (below) decides whether it is shown; a contest that is shown quotes the served text of the fact that holds it. A
 whole statement of the user of any class that names live work in progress as
 its `replaces` target, or as an `also_replaces` target beside a `replaces`
 target it keeps, ends it: a remark that the work is finished, a
