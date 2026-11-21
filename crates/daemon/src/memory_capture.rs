@@ -46,7 +46,7 @@ pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
 /// The version of a frozen plan. A plan of version 2 holds the lifetime
 /// classes as this build reads them: `current_work` is work the user leaves
 /// open beyond the turn, and `request` is an instruction the turn answers.
-/// The commit of a plan of another version is refused as invalid input.
+/// The write closure of a commit refuses a plan of another version.
 const CAPTURE_PLAN_VERSION: u32 = 2;
 pub const MAX_CAPTURE_MESSAGES: usize = 32;
 pub const MAX_CAPTURE_INPUT_BYTES: usize = 64 * 1024;

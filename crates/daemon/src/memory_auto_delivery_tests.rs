@@ -5306,11 +5306,12 @@ fn queue_row(store: &MemoryStore, job: &str) -> QueueRow {
         .unwrap()
 }
 
-/// The commit of a plan of another plan version is refused, so the
-/// lifetime classes of an earlier build are never read under this build's
-/// rules: a version 1 plan that classes an instruction `current_work`
-/// writes nothing and records one dispatch. A version 1 plan whose commit
-/// the Kernel already holds replays its receipt and completes its source.
+/// The write closure of a commit refuses a plan of another plan version,
+/// so the lifetime classes of an earlier build are never written under this
+/// build's rules: a version 1 plan that classes an instruction
+/// `current_work` writes nothing and records one dispatch. A version 1 plan
+/// whose commit the Kernel already holds replays that receipt, and its
+/// source is completed at the receipt's commit.
 #[tokio::test]
 async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made() {
     use sha2::{Digest, Sha256};
@@ -5344,23 +5345,32 @@ async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made(
                 .is_some()
         );
     }
-    // The receipt an earlier build's commit of the second plan left.
-    handler
-        .kernel
-        .kernel_store()
-        .unwrap()
-        .commit_before(
-            std::time::Instant::now() + Duration::from_secs(5),
-            kernel::CommitIntent {
-                producer: "memory_capture".into(),
-                operation_key: binding.operation_key("memory_capture", &jobs[1]).unwrap(),
-                request_digest: format!("{:x}", Sha256::digest(plan(committed).as_bytes())),
-                actor: "agent:memory_capture".into(),
-                cause: "automatic project memory capture".into(),
-            },
-            |_| Ok("0".into()),
-        )
-        .unwrap();
+    // The receipt an earlier build's commit of the second plan left, and
+    // a later commit of another writer, so the receipt is not the tip.
+    let commit = |producer: &str, key: &str, digest: String| {
+        handler
+            .kernel
+            .kernel_store()
+            .unwrap()
+            .commit_before(
+                std::time::Instant::now() + Duration::from_secs(5),
+                kernel::CommitIntent {
+                    producer: producer.into(),
+                    operation_key: binding.operation_key(producer, key).unwrap(),
+                    request_digest: digest,
+                    actor: "agent:memory_capture".into(),
+                    cause: "automatic project memory capture".into(),
+                },
+                |_| Ok("0".into()),
+            )
+            .unwrap()
+    };
+    let seeded = commit(
+        "memory_capture",
+        &jobs[1],
+        format!("{:x}", Sha256::digest(plan(committed).as_bytes())),
+    );
+    commit("test", "another-writer", "0".repeat(64));
 
     let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
     let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
@@ -5388,9 +5398,21 @@ async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made(
         (1, 1),
         "the committed plan's source is complete"
     );
-    // The replayed source spent no further dispatch and holds no error.
+    // The replayed source spent no further dispatch, holds no error, and
+    // is completed at the commit of the receipt it replayed.
     let (attempts, _, error, abandoned, ..) = queue_row(&store, &jobs[1]);
     assert_eq!((attempts, error, abandoned), (1, None, None));
+    let completed_at: i64 = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT commit_seq FROM memory_capture_jobs WHERE job_id=?1",
+                [jobs[1].as_str()],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(completed_at, seeded.commit_seq);
+    assert_ne!(completed_at, tip);
 
     // The refused plan under this build's version commits.
     store

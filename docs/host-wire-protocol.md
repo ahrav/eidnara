@@ -1478,7 +1478,7 @@ each other such target it names in `replaces` or `also_replaces` becomes a conte
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as one of those three, leave the rule approved
 and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets and the contest is recorded and shown under the contest rule (below); the
-exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen contesting a fact served on `auto_inject` (above). The frozen batch decides which fact holds a contest, and the contest rule (below) decides whether it is shown; a contest that is shown quotes the served text of the fact that holds it. A
+exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen contesting a fact served on `auto_inject` (above). The frozen batch decides which proposal keeps each contest link; publication records the fact that holds the contest, which is that proposal's fact, the fact it duplicates, or a successor written in the same commit; and the contest rule (below) decides whether the contest is shown, quoting the served text of the fact the record names. A
 whole statement of the user of any class that names live work in progress as
 its `replaces` target, or as an `also_replaces` target beside a `replaces`
 target it keeps, ends it: a remark that the work is finished, a
