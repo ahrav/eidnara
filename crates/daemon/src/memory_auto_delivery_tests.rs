@@ -3070,15 +3070,18 @@ async fn a_sentence_that_quotes_one_literal_is_the_users_statement_and_quoted_sp
     let library = "Wrap every handler in '@count_calls' from now on.";
     let teammate = "My teammate wrote 'always rebase first' in the guide.";
     let reviewer = "The reviewer said \"Skip the flaky tests.\" and I doubt it.";
+    let derivative = "Bob wrote '(f(x))' is the derivative! Never change the tests.";
     let messages = [
         ("m1", "user", prefix),
         ("m2", "user", branch),
         ("m3", "user", library),
         ("m4", "user", teammate),
         ("m5", "user", reviewer),
+        ("m6", "user", derivative),
     ];
     capture(&handler, FIRST, "s1", &messages, |text, _| {
         vec![fact(match text {
+            text if text == derivative => "Never change the tests.",
             // The extractor cuts the quoted words out of these two.
             text if text == teammate => "always rebase first",
             text if text == reviewer => "Skip the flaky tests.",
@@ -3095,6 +3098,7 @@ async fn a_sentence_that_quotes_one_literal_is_the_users_statement_and_quoted_sp
         (stated(library), "visible".to_string()),
         (stated("always rebase first"), "labeled".to_string()),
         (stated("Skip the flaky tests."), "labeled".to_string()),
+        (stated("Never change the tests."), "labeled".to_string()),
     ];
     expected.sort();
     assert_eq!(rows, expected);
@@ -3110,6 +3114,7 @@ async fn a_sentence_that_quotes_one_literal_is_the_users_statement_and_quoted_sp
     }
     assert!(!block.contains("always rebase first"), "{block}");
     assert!(!block.contains("Skip the flaky tests"), "{block}");
+    assert!(!block.contains("Never change the tests"), "{block}");
 }
 
 /// Text the user quotes from someone else stays labeled: a sentence inside

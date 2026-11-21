@@ -2938,24 +2938,27 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         // A block that holds or follows the first unreadable line is left
         // out with every block after it.
         let readable = unreadable_from.is_none_or(|line| index <= line);
-        unpaired = unpaired
-            || (!literal
-                && (!quotations_close_in_turn(block, &code_spans[kept..])
-                    || leaves_single_quotation_open(block, &code_spans[kept..])));
+        // The pairing rules also check literal paragraphs when a closing
+        // mark has a second reading.
+        let introduction = literals.and_then(|found| found.introduces_from);
+        let open = (!literal || introduction.is_some())
+            && (!quotations_close_in_turn(block, &code_spans[kept..])
+                || leaves_single_quotation_open(block, &code_spans[kept..]));
+        unpaired |= open && !literal;
         if quotes && before_quotation.is_none() {
             before_quotation = Some((paragraphs.len(), kept));
         }
-        // The opening mark of a literal whose closing mark has a second
-        // reading may open a quotation of another speaker, so it
-        // introduces what follows it as a colon line does.
-        let introduction = literals.and_then(|found| found.introduces_from);
         if readable && !structured && !introduces && !lead_in && !unclosed_code {
             paragraphs.push(range);
             introductions.push(introduction.unwrap_or(range.1));
         } else {
             code_spans.truncate(kept);
         }
-        lead_in |= introduces || introduction.is_some();
+        // A closing mark with a second reading can leave its literal's
+        // opening mark open across paragraphs. When the pairing rules
+        // cannot establish that the quotation closes, `lead_in` excludes
+        // subsequent paragraphs as it does after a colon line.
+        lead_in |= introduces || (open && literal);
         unclosed_code |= unclosed;
     }
     // A closing mark inside quoted text passes the pairing rules as the
@@ -2981,11 +2984,10 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
 /// What the quoted literals of one paragraph leave to the statement rule.
 struct Literals {
     /// The offset in the message of the opening mark of the first literal
-    /// whose closing mark has a second reading: a single mark after `s`,
-    /// `S`, or a number may be a plural possessive or a feet mark, and a
-    /// double mark after a number an inch mark, and under that reading the
-    /// opening mark opens a quotation that runs on. `None` when every
-    /// literal of the paragraph closes in one reading.
+    /// whose closing mark has a second reading
+    /// ([`closes_in_one_reading`]). Under that reading the opening mark
+    /// opens a quotation that runs on. `None` when every literal of the
+    /// paragraph closes in one reading.
     introduces_from: Option<usize>,
 }
 
@@ -3004,7 +3006,9 @@ struct Literals {
 /// digit with none after it ends a word, as a plural possessive or an
 /// elision does: it opens and closes nothing in a paragraph without a
 /// single-quoted literal before it, and after one it may close a quotation
-/// that literal's opening mark opened, so the answer is `None`. Any other
+/// that literal opened, so the answer is `None`. An opening
+/// or low-9 single mark directly after a letter or digit can start a
+/// quotation, so the answer is `None`. Any other
 /// mark, and any mark inside an inline code span that the paragraph rule
 /// counts, makes the answer `None` too.
 /// `code_spans` are the paragraph's inline code spans, ascending.
@@ -3030,7 +3034,10 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
                 continue;
             }
             if single && previous.is_some_and(char::is_alphanumeric) {
-                if single_closed && !rest.starts_with(char::is_alphanumeric) {
+                // An opening or low-9 single mark immediately after a
+                // letter or digit can start a quotation.
+                if !is_apostrophe(ch) || (single_closed && !rest.starts_with(char::is_alphanumeric))
+                {
                     return None;
                 }
                 previous = Some(ch);
@@ -3041,10 +3048,7 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
                 && ch != '\u{201a}'
                 && previous.is_none_or(|before| before.is_whitespace() || "([{".contains(before));
             let (token, closer) = opens.then(|| literal_token(single, ch, rest)).flatten()?;
-            // The word or number may stand behind closing brackets or
-            // emphasis marks, as in `'user(s)'`.
-            let ending = token.trim_end_matches(TOKEN_CLOSERS);
-            if ending.ends_with(char::is_numeric) || (single && ending.ends_with(['s', 'S'])) {
+            if !closes_in_one_reading(single, token) {
                 found.introduces_from.get_or_insert(start + at);
             }
             single_closed |= single;
@@ -3056,15 +3060,37 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
     Some(found)
 }
 
+/// Whether the mark that closes the literal `token` has one reading: the
+/// token ends in a letter, and for a single mark in a letter other than
+/// `s` or `S`. The rule ignores trailing underscores when testing the
+/// final character. The pairing rules close a one-word quotation after the
+/// same letters. After any other ending the mark may be a plural
+/// possessive, a measure or prime sign, or the opening mark of a nested
+/// quotation, so the literal's opening mark introduces what follows it.
+fn closes_in_one_reading(single: bool, token: &str) -> bool {
+    token
+        .trim_end_matches('_')
+        .chars()
+        .next_back()
+        .is_some_and(|last| {
+            last.is_alphabetic() && !last.is_numeric() && !(single && matches!(last, 's' | 'S'))
+        })
+}
+
 /// Closing brackets and emphasis marks that may stand behind the last word
-/// of a token. The utterance check and the second-reading check both read
-/// the token's ending behind them, so `'user(s)'` ends in `s` and `"(No.)"`
-/// ends in a period.
+/// of a token. The utterance check reads the token's ending behind them,
+/// so `"(No.)"` ends in a period.
 const TOKEN_CLOSERS: [char; 5] = [')', ']', '}', '*', '_'];
 
 /// A single quotation mark that no double-mark family lists.
 fn is_single_mark(ch: char) -> bool {
     SINGLE_QUOTATION_MARKS.contains(&ch) && !is_quotation_mark(ch)
+}
+
+/// A single mark that writes an apostrophe between two letters or digits
+/// or at a word's end.
+fn is_apostrophe(ch: char) -> bool {
+    matches!(ch, '\'' | '\u{2019}' | '\u{ff07}')
 }
 
 /// The token a quotation holds when it is a literal, and the mark that
@@ -3082,7 +3108,7 @@ fn literal_token(single: bool, opener: char, rest: &str) -> Option<(&str, char)>
     let mut previous: Option<char> = None;
     for (at, ch) in rest.char_indices() {
         let after = rest[at + ch.len_utf8()..].chars().next();
-        if matches!(ch, '\'' | '\u{2019}' | '\u{ff07}')
+        if is_apostrophe(ch)
             && previous.is_some_and(char::is_alphanumeric)
             && after.is_some_and(char::is_alphanumeric)
         {
@@ -6201,6 +6227,9 @@ mod tests {
             ("The reviewer said \"_Wait?_\" and left.", false),
             // A mark after a backslash may be an escaped character.
             ("Join the path with 'C:\\' on the test host.", false),
+            ("Join the path with 'tmp\\\\' on the test host.", false),
+            ("Join the path with \"tmp\\\" on the test host.", false),
+            ("Join the path with 'tmp\\cache' on the test host.", true),
             // An opening or a low-9 single mark between two letters is no
             // apostrophe.
             ("Spell the label 'don\u{2018}t' in the menu.", false),
@@ -6422,8 +6451,61 @@ mod tests {
                 "Always tag the release.",
                 true,
             ),
-            // A plural or a number behind a closing bracket or an emphasis
-            // mark has the second reading too.
+            // The parser pairs the marks around `main` independently of
+            // `'Goin'`, so the sentence containing `'main'` remains
+            // eligible for capture.
+            (
+                "Bob wrote 'Goin' home now. Always tag 'main' first.",
+                "Always tag 'main' first.",
+                true,
+            ),
+            (
+                "Bob wrote 'Goin' home now.\n\nAlways tag 'main' first.",
+                "Always tag 'main' first.",
+                true,
+            ),
+            // U+2018 and U+201A open quotations even immediately after a
+            // letter, so enclosed sentences remain ineligible for capture.
+            (
+                "Bob wrote\u{201a}Use the \"main\" branch! Keep retries off! Logs stay local\u{2018}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{2018}Use the \"main\" branch! Keep retries off! Logs stay local\u{2019}.",
+                "Keep retries off!",
+                false,
+            ),
+            // After either a line break or a paragraph break, the sentence
+            // containing `'requests'` remains eligible for capture; the
+            // following sentence does not.
+            (
+                "Keep the log.\n\nNever pin versions. Use the 'requests' library. Never float it.",
+                "Use the 'requests' library.",
+                true,
+            ),
+            (
+                "Keep the log.\n\nNever pin versions. Use the 'requests' library. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            (
+                "Never pin versions.\nKeep it. Use the 'requests' library. Never float it.",
+                "Use the 'requests' library.",
+                true,
+            ),
+            (
+                "Never pin versions.\nKeep it. Use the 'requests' library. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            (
+                "Call 'it_' the prefix and \"main\" the branch of the tests' names. Never rename them.",
+                "Never rename them.",
+                false,
+            ),
+            // A digit or punctuation before a closing mark can give the
+            // literal a second reading.
             (
                 "Bob wrote 'user(s)' data is gone. Never restore it.",
                 "Never restore it.",
@@ -6434,12 +6516,104 @@ mod tests {
                 "Never tune them.",
                 false,
             ),
-            // A number outside the word characters, and a double-quoted
-            // literal after a backslash.
+            (
+                "Bob wrote '~~Parsers~~' are slow.\n\nNever tune them.",
+                "Never tune them.",
+                false,
+            ),
+            (
+                "Bob wrote '<em>6</em>' is the aisle clearance! Always use the narrow cart.",
+                "Always use the narrow cart.",
+                false,
+            ),
+            (
+                "Bob wrote '[users](accounts.md)' data is gone.\n\nNever restore it.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote '(f(x))' is the derivative! Never change the tests. Just rerun 'em'",
+                "Never change the tests.",
+                false,
+            ),
+            (
+                "Bob wrote '&'_ str is the type in that example.\n\nKeep the lifetime examples.",
+                "Keep the lifetime examples.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}(\u{201c}--force works in dry runs.\n\nAlways preserve both logs.",
+                "Always preserve both logs.",
+                false,
+            ),
+            (
+                "Bob wrote \u{ab}(\u{2039}[Notice] The old data is gone. Never restore it. Ask the owner. \u{203a})\u{bb}",
+                "Never restore it.",
+                false,
+            ),
             (
                 "Bob wrote '+6' is the limit. Never raise it.",
                 "Never raise it.",
                 false,
+            ),
+            (
+                "Bob wrote \"+6\" is the limit. Never raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote '(6)' is the limit. Never raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Prefix boolean getters with 'is_'. Never abbreviate them.",
+                "Never abbreviate them.",
+                false,
+            ),
+            // The containing sentence remains eligible for capture even
+            // when the literal has a second reading.
+            (
+                "Keep the offset at \"+6\" hours. Never raise it.",
+                "Keep the offset at \"+6\" hours.",
+                true,
+            ),
+            (
+                "Keep the limit at '(6)' rows. Never raise it.",
+                "Keep the limit at '(6)' rows.",
+                true,
+            ),
+            (
+                "Prefix boolean getters with 'is_'. Never abbreviate them.",
+                "Prefix boolean getters with 'is_'.",
+                true,
+            ),
+            (
+                "Use the 'requests' library. Never pin it.",
+                "Use the 'requests' library. Never pin it.",
+                true,
+            ),
+            // The pairing rules close a double mark after `]` and a single
+            // mark after a comma, so the later paragraphs stay prose.
+            (
+                "Prefix commit subjects with \"[JIRA-123]\". Never force-push to main.",
+                "Never force-push to main.",
+                false,
+            ),
+            (
+                "Prefix commit subjects with \"[JIRA-123]\".\n\nNever force-push to main.",
+                "Never force-push to main.",
+                true,
+            ),
+            (
+                "Use ',' as the separator. Never use tabs.",
+                "Never use tabs.",
+                false,
+            ),
+            (
+                "Use ',' as the separator.\n\nNever use tabs.",
+                "Never use tabs.",
+                true,
             ),
             (
                 "Join the path with \"C:\\\" on the test host.\n\nNever rename it.",

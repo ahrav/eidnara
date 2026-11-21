@@ -1275,24 +1275,46 @@ any `)`, `]`, `}`, `*`, or `_`, is a one-word utterance such as `"Wait!"`
 and no literal; a one-word quotation without such a mark, as in
 `He said "no" to that.`, is read as a literal, and its sentence is the
 user's with the speaker in it. The low-9 mark `‚` and a glyph every script
-writes on the other side of a quotation open or close no literal. A single
-mark after a letter or digit with no letter or digit after it ends a word,
+writes on the other side of a quotation open or close no literal. An
+apostrophe (`'`, `’`, or `＇`) between two letters or digits stays inside
+its word; a low-9 or opening single mark (`‚`, `‘`) directly after a letter
+or digit may open a quotation there, so its paragraph is read by the
+pairing rules above. An apostrophe
+after a letter or digit with no letter or digit after it ends a word,
 as a plural possessive or an elision does: it opens and closes nothing in a
 paragraph that holds no single-quoted literal before it, and after such a
 literal it may close a quotation that the literal's opening mark opened, so
 the paragraph is read by the pairing rules above. A paragraph that holds
 any other quotation mark, or a quotation mark inside an inline code span
 that the paragraph rule counts, is read by the pairing rules above and is
-left out. A closing mark with a second reading introduces what follows its
-literal: a single mark after `s`, `S`, or a number, read behind any `)`,
-`]`, `}`, `*`, or `_` that ends the token, may be a plural
-possessive or a feet mark, and a double mark after a number an inch mark,
-and under that reading the opening mark opens a quotation that runs on. The
+left out. A closing mark has one reading when its token, read without the
+`_` characters that end it, ends in a letter, and for a single mark in a
+letter other than `s` or `S`; the pairing rules above close a one-word
+quotation after the same letters, and this section adds the `_`, so that
+`'it_'` closes. Any other closing mark has a second reading and introduces
+what follows its
+literal: a single mark after `s`, `S`, or a number may be a plural
+possessive or a feet mark, a double mark after a number an inch mark, a
+mark after a bracket or another character that is no letter a prime, a mark
+of code such as the lifetime in `&'_`, or the opening mark of a nested
+quotation, and markup such as `~~6~~`, `<em>6</em>`, `*Parsers*`, or
+`[users](accounts.md)` hides a plural or a number behind its last
+character; under that reading the opening mark opens a quotation that runs
+on. The
 opening mark of the first such literal of a paragraph is therefore read as
 the paragraph's first colon is (below): a quotation that starts at or
-before it may be a statement, so `Use the 'requests' library.` is one, a
-sentence that starts after it in the paragraph is none, and every later
-paragraph of the message is left out, as after a line that ends in a colon.
+before it may be a statement, so `Use the 'requests' library.` is one, and a
+sentence that starts after it in the paragraph is none, so the second
+sentence of `Prefix boolean getters with 'is_'. Never abbreviate them.`, of
+`Call "init()" first. Never call it twice.`, and of
+`Use ',' as the separator. Never use tabs.` is none. When the pairing rules
+above leave the quotations of that paragraph open or unknown, as they do
+for a single mark after `s`, a number, `_`, or a bracket and for a double
+mark after a number, every later
+paragraph of the message is left out, as after a line that ends in a colon;
+when they close them, as they do for a double mark after `)` or `]` and for
+either mark after `,` or `;`, the later paragraphs are read as the pairing
+rules leave them.
 Wherever this section reads a paragraph's first colon, in the join of
 sentences quoted one by one, in the sentence quoted alone after it, and in
 the contest a sentence after it keeps, it reads the opening mark of such a
@@ -1302,7 +1324,7 @@ reading and meets every other condition of this section is a statement
 whole, with whatever stands between the literal's marks and after them up
 to the quotation's end, which sentences joined to it extend; a one-word quotation of speech without a sentence mark is
 read as a literal; and a single-quoted first word of a longer quotation
-that closes after a letter other than `s`, as an elision such as `'Goin'`
+that closes after a letter other than `s` or `S`, as an elision such as `'Goin'`
 does, is read as a literal when no later single mark that closes no literal ends
 a word in its paragraph, so the sentences after it are plain prose, in its
 paragraph and, as the pairing rules above already read a one-word single
