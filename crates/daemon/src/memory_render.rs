@@ -83,12 +83,37 @@ pub(crate) fn is_positive_memory_category(category: &str) -> bool {
     POSITIVE_MEMORY_CATEGORIES.contains(&category)
 }
 
+pub(crate) const CURRENT_WORK_SECTION: &str = "CURRENT_WORK";
+
+const CURRENT_WORK_NOTE: &str = "Work the user left open in earlier sessions, newest first, which no later statement of the user ended. It sets no standing rule and may be finished already: check the repository before resuming it.";
+
+pub(crate) fn renders_in_block(category: &str) -> bool {
+    memory_category_rank(category).is_some()
+}
+
+/// Appends the opening tag of `category`. The tag of
+/// [`CURRENT_WORK_SECTION`] carries [`CURRENT_WORK_NOTE`].
+pub(crate) fn push_category_open(out: &mut String, category: &str) {
+    out.push('<');
+    push_escaped_xml_attr(out, category);
+    if category == CURRENT_WORK_SECTION {
+        out.push_str(" note=\"");
+        push_escaped_xml_attr(out, CURRENT_WORK_NOTE);
+        out.push('"');
+    }
+    out.push('>');
+}
+
 /// Sort rank of a positive category: its index in [`MEMORY_CATEGORY_ORDER`], or one rank after
 /// them for the other positive categories. `None` marks a category the native surfaces drop.
+/// [`CURRENT_WORK_SECTION`] ranks last.
 ///
 /// [`MEMORY_CATEGORY_ORDER`] is a prefix of [`POSITIVE_MEMORY_CATEGORIES`], so one index serves
 /// both lists.
 fn memory_category_rank(category: &str) -> Option<usize> {
+    if category == CURRENT_WORK_SECTION {
+        return Some(MEMORY_CATEGORY_ORDER.len() + 1);
+    }
     let position = POSITIVE_MEMORY_CATEGORIES
         .iter()
         .position(|positive| *positive == category)?;
@@ -96,6 +121,7 @@ fn memory_category_rank(category: &str) -> Option<usize> {
 }
 
 /// Ranked categories sort by rank, the rest by name after them, and ties by object id.
+/// Rows of [`CURRENT_WORK_SECTION`] compare equal, so a stable sort preserves their input order.
 fn memory_render_order(
     (left_rank, left): &(usize, &CanonicalMemory),
     (right_rank, right): &(usize, &CanonicalMemory),
@@ -109,7 +135,13 @@ fn memory_render_order(
                 Ordering::Equal
             }
         })
-        .then_with(|| left.object_id.cmp(&right.object_id))
+        .then_with(|| {
+            if *left_rank > MEMORY_CATEGORY_ORDER.len() {
+                Ordering::Equal
+            } else {
+                left.object_id.cmp(&right.object_id)
+            }
+        })
 }
 
 /// Content cut to at most 64 KiB at a UTF-8 boundary.
@@ -149,6 +181,7 @@ pub fn render_memory_line(memory: &CanonicalMemory) -> String {
 }
 
 /// Renders positive memories grouped in deterministic category and object-id order.
+/// The `CURRENT_WORK` rows render last, in the supplied order.
 ///
 /// Native surfaces filter non-positive categories because callers can construct
 /// [`CanonicalMemory`] directly and native surfaces lack a warning renderer.
@@ -188,9 +221,8 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
                 block.push('>');
             }
             open_category = Some(&memory.category);
-            block.push_str("\n<");
-            push_escaped_xml_attr(&mut block, &memory.category);
-            block.push('>');
+            block.push('\n');
+            push_category_open(&mut block, &memory.category);
         }
         block.push('\n');
         push_memory_line(&mut block, memory);
@@ -613,6 +645,35 @@ mod tests {
                 "tail {tail:?}"
             );
         }
+    }
+
+    /// `CURRENT_WORK_SECTION` renders after every stored category, under
+    /// its note, with its rows in the supplied order.
+    #[test]
+    fn the_current_work_section_renders_last_with_its_note_in_the_supplied_order() {
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let rows = [
+            row("mem_2", CURRENT_WORK_SECTION, "newest request"),
+            row("mem_9", "WORKFLOW_RULES", "a workflow rule"),
+            row("mem_1", CURRENT_WORK_SECTION, "older request"),
+            row("mem_5", "PROJECT_RULES", "a project rule"),
+        ];
+        assert_eq!(
+            render_memory_block(&rows, "project-memory"),
+            format!(
+                "<project-memory>\n<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 <WORKFLOW_RULES>\nmem_9: a workflow rule\n</WORKFLOW_RULES>\n\
+                 <CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\nmem_2: newest request\nmem_1: older request\n\
+                 </CURRENT_WORK>\n</project-memory>"
+            )
+        );
+        assert!(renders_in_block(CURRENT_WORK_SECTION));
+        assert!(!is_positive_memory_category(CURRENT_WORK_SECTION));
+        assert!(!renders_in_block("WARNING"));
     }
 
     #[test]

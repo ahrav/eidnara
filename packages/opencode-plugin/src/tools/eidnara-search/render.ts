@@ -54,7 +54,13 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
     const contest = result.contestedBy
         ? `\nContested by ${contestMemoryId(result.contestedBy.memory)}${result.contestedBy.excerpt === undefined ? "" : `: ${result.contestedBy.excerpt}`}`
         : "";
-    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${routeFieldsOf(result)}${policy}\n${boundDynamicField(result.content)}${contest}`;
+    const state = result.work?.state ? ` state=${result.work.state}` : "";
+    const work = result.work ? ` lifetime=current_work${state}` : "";
+    const ended =
+        result.work?.endedBy === undefined
+            ? ""
+            : `\nEnded by ${contestMemoryId(result.work.endedBy)}`;
+    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${routeFieldsOf(result)}${policy}${work}\n${boundDynamicField(result.content)}${contest}${ended}`;
 }
 
 const SECTION_SEPARATOR = "\n\n";
