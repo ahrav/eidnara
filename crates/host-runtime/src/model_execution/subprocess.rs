@@ -1078,6 +1078,13 @@ fn blocking_slots() -> &'static Arc<tokio::sync::Semaphore> {
     SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BLOCKING_SLOTS)))
 }
 
+/// Whether every blocking filesystem job of this process has returned.
+///
+/// A waiter that stops waiting for a job leaves it running, and the job keeps its slot until it returns. A private-directory creation or a record publication that a run stopped waiting for is such a job, and its entry reaches the registry when it returns. Free slots therefore mean that every entry this process will write is already on disk.
+pub(crate) fn filesystem_jobs_idle() -> bool {
+    blocking_slots().available_permits() == BLOCKING_SLOTS
+}
+
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
 /// A cancelled or panicked blocking task reads as an unknown answer.
 /// The slot moves into the job, so a stalled job keeps its slot until it returns and callers behind it wait (and time out) instead of adding more.
@@ -1094,6 +1101,37 @@ pub(crate) async fn off_runtime<T: Send + 'static>(
     })
     .await
     .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
+}
+
+/// Runs a filesystem step on a thread of its own and waits for its answer for `bound` at most.
+///
+/// A runtime waits for every job of its blocking pool when it is dropped. A job that runs its step through this function returns at the bound, and a step that a stalled filesystem holds stays on its own thread, which ends with the process.
+pub(crate) fn within<T: Send + 'static>(
+    bound: Duration,
+    step: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let outlasted = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "a filesystem step outlasted its bound",
+        )
+    };
+    // A step starts only while its bound has time left.
+    if bound.is_zero() {
+        return Err(outlasted());
+    }
+    let (answer, answered) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("bounded-fs-step".to_owned())
+        .spawn(move || {
+            let _ = answer.send(step());
+        })?;
+    answered.recv_timeout(bound).map_err(|err| match err {
+        std::sync::mpsc::RecvTimeoutError::Timeout => outlasted(),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            io::Error::other("a filesystem step ended without an answer")
+        }
+    })?
 }
 
 /// Queues a fork on one immortal OS thread and returns the reply channel without waiting.
@@ -2432,6 +2470,7 @@ pub mod group_registry {
     }
 
     pub const STATE_DIR_NAME: &str = "model_execution";
+    const RUN_ROOT_NAME: &str = "runs";
 
     /// Set in every harness child's environment; the startup sweep matches it against the recorded value when the group's leader is gone.
     pub const GROUP_NONCE_ENV: &str = "EIDNARA_MODEL_EXECUTION_GROUP_NONCE";
@@ -2483,9 +2522,19 @@ pub mod group_registry {
         }
 
         pub fn run_root(&self) -> io::Result<PathBuf> {
-            let root = self.registry_dir()?.join("runs");
+            let root = self.registry_dir()?.join(RUN_ROOT_NAME);
             secure_dir(&root)?;
             Ok(root)
+        }
+
+        /// Read-only lookup of the registry directory and its run root.
+        ///
+        /// If either directory is missing, the lookup returns an error and leaves the filesystem unchanged.
+        fn established_dirs(&self) -> io::Result<(PathBuf, PathBuf)> {
+            let run_root = self.dir.join(RUN_ROOT_NAME);
+            established_dir(&self.dir)?;
+            established_dir(&run_root)?;
+            Ok((self.dir.clone(), run_root))
         }
 
         /// The working directory every Pi run starts in: `cwd/`, a directory created empty beside `runs/` that persists across runs and restarts.
@@ -2505,6 +2554,19 @@ pub mod group_registry {
         crate::instance::secure_runtime_dir(dir)
             .map(drop)
             .map_err(|err| io::Error::other(format!("group registry dir is not private: {err}")))
+    }
+
+    /// This check requires current-user ownership and mode `0700`, the state [`secure_dir`] leaves a directory in. A missing path component returns `NotFound`.
+    fn established_dir(dir: &Path) -> io::Result<()> {
+        let pinned = crate::instance::open_secure_dir_existing(dir)
+            .map_err(|err| io::Error::other(format!("group registry dir is not private: {err}")))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "a group registry dir is missing")
+            })?;
+        if !crate::instance::is_owner_only_dir(&rustix::fs::fstat(&pinned)?) {
+            return Err(io::Error::other("group registry dir is not private"));
+        }
+        Ok(())
     }
 
     struct Entry {
@@ -2648,6 +2710,41 @@ pub mod group_registry {
         }
     }
 
+    /// The longest registry record a read accepts. A record this host writes is a few hundred bytes.
+    const RECORD_READ_CAP: u64 = 64 * 1024;
+
+    /// Reads the record at `path` through one descriptor: a regular file owned by this user, opened without following a symlink. A file longer than [`RECORD_READ_CAP`] fails the read, so a record is interpreted whole. `Ok(None)` means another process removed the record after the directory was listed.
+    fn read_pinned_record(path: &Path) -> io::Result<Option<String>> {
+        use std::os::unix::fs::MetadataExt;
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
+            return Err(io::Error::other(
+                "a registry record is not a regular file owned by this user",
+            ));
+        }
+        let mut text = String::new();
+        text.try_reserve_exact(meta.len().min(RECORD_READ_CAP + 1) as usize)?;
+        std::io::Read::read_to_string(
+            &mut std::io::Read::take(file, RECORD_READ_CAP + 1),
+            &mut text,
+        )?;
+        if text.len() as u64 > RECORD_READ_CAP {
+            return Err(io::Error::other(
+                "a registry record is longer than the read cap",
+            ));
+        }
+        Ok(Some(text))
+    }
+
     /// Sweeps one registry entry; `Ok(n)` counts groups killed, `Err` means the record was retained.
     fn sweep_record(path: &Path, current_boot: &str) -> io::Result<usize> {
         let mut killed = 0;
@@ -2677,27 +2774,8 @@ pub mod group_registry {
         }
         // A record names a kill target, so the sweep parses only a pinned regular file owned by this user.
         // A planted foreign-owned file or symlink fails the sweep closed instead of driving `kill_process_group`.
-        let text = {
-            use std::os::unix::fs::MetadataExt;
-            let mut file = match fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(path)
-            {
-                Ok(file) => file,
-                // `NotFound` means another process removed the record after directory enumeration.
-                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
-                Err(err) => return Err(err),
-            };
-            let meta = file.metadata()?;
-            if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
-                return Err(io::Error::other(
-                    "a registry record is not a regular file owned by this user",
-                ));
-            }
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut file, &mut text)?;
-            text
+        let Some(text) = read_pinned_record(path)? else {
+            return Ok(0);
         };
         // A record from a different boot is removed without signaling because its PIDs may be reused. The boot line is trusted only when the record's checksum verifies, so a corrupted boot line cannot masquerade as a stale record.
         if Entry::verified_body(&text)
@@ -2815,16 +2893,7 @@ pub mod group_registry {
         let mut removed = 0;
         for entry in fs::read_dir(&root)? {
             let path = entry?.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let mut fields = name.rsplitn(5, '-');
-            let (Some(_nonce), Some(start), Some(pid), Some(boot)) =
-                (fields.next(), fields.next(), fields.next(), fields.next())
-            else {
-                continue;
-            };
-            let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
+            let Some((boot, pid, start)) = run_dir_owner(&path) else {
                 continue;
             };
             if boot != current_boot {
@@ -2838,6 +2907,93 @@ pub mod group_registry {
             remove_run_dir(&path, &mut removed)?;
         }
         Ok(removed)
+    }
+
+    /// The private run directories and crash-ownership records in a registry that name this process as their owner.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct OwnResidue {
+        pub run_dirs: usize,
+        pub records: usize,
+    }
+
+    /// Counts what this process still holds in `root`.
+    ///
+    /// A run reports a cleanup or record failure when the bounded wait on its removal ends first. The removal keeps running on the blocking pool or the cleanup thread and usually completes, so the run's verdict can outlive the files it describes. The registry is the record of what remains: a host whose runs have all returned holds prompt material or coordination state exactly when an entry here still names it.
+    ///
+    /// The read removes nothing and signals no process. A published record this host cannot interpret fails the read, so the caller keeps the verdicts it counted.
+    ///
+    /// The read also fails when the registry directory or its run root is missing.
+    pub fn own_residue(root: &StateRoot) -> io::Result<OwnResidue> {
+        let owner_pid = std::process::id() as i32;
+        let owner_start = owner_start_time()?;
+        let owner_boot = owner_boot_tag()?;
+        let record_boot = boot_id()?;
+        let (registry, run_root) = root.established_dirs()?;
+        let mut residue = OwnResidue::default();
+        for entry in fs::read_dir(run_root)? {
+            let path = entry?.path();
+            if run_dir_owner(&path)
+                .is_none_or(|owner| owner != (owner_boot.as_str(), owner_pid, owner_start))
+            {
+                continue;
+            }
+            // A removal that finishes after the listing answers `NotFound`, and that directory has left the disk.
+            match fs::symlink_metadata(&path) {
+                Ok(_) => residue.run_dirs += 1,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        for entry in fs::read_dir(registry)? {
+            let path = entry?.path();
+            let published = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.starts_with('.'));
+            if !published {
+                continue;
+            }
+            // The registry holds directories beside its records, and only an entry that resolves to a regular file is read, as in the startup sweep. A symlink to a regular file then fails the pinned read. A removal that finishes between the listing and a read answers `NotFound`.
+            match fs::metadata(&path) {
+                Ok(meta) if meta.is_file() => {}
+                Ok(_) => continue,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            }
+            // The record is read as the startup sweep reads it: through one descriptor, as a regular file owned by this user.
+            let Some(text) = read_pinned_record(&path)? else {
+                continue;
+            };
+            // A record of another boot names another owner, whatever its schema version. The startup sweep removes it.
+            if Entry::verified_body(&text)
+                .and_then(|body| body.lines().nth(1))
+                .is_some_and(|boot| boot != record_boot)
+            {
+                continue;
+            }
+            // A published record this host cannot interpret may be its own, so the read answers unknown, as the startup sweep does for the same record.
+            let Some(record) = Entry::parse(&text) else {
+                return Err(io::Error::other(
+                    "a published registry record cannot be interpreted",
+                ));
+            };
+            if record.owner_pid == owner_pid && record.owner_start == owner_start {
+                residue.records += 1;
+            }
+        }
+        Ok(residue)
+    }
+
+    /// The boot tag, PID, and start time a private run directory's name records for its creator.
+    fn run_dir_owner(path: &Path) -> Option<(&str, i32, u64)> {
+        let mut fields = path.file_name()?.to_str()?.rsplitn(5, '-');
+        let (_nonce, start, pid, boot) = (
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+        );
+        Some((boot, pid.parse().ok()?, start.parse().ok()?))
     }
 
     fn remove_run_dir(path: &Path, removed: &mut usize) -> io::Result<()> {
@@ -2865,6 +3021,58 @@ mod tests {
         CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
         EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
+
+    /// A blocking-pool job whose step is still running at the bound returns a timeout, so the runtime that waits for the job when it is dropped can stop.
+    #[test]
+    fn a_step_still_running_at_its_bound_ends_the_blocking_job_that_waits_for_it() {
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let job = runtime.spawn_blocking(move || {
+            super::within(Duration::from_millis(50), move || {
+                // The step ends when the test releases it, and after ten seconds at the latest.
+                let _ = parked.recv_timeout(Duration::from_secs(10));
+                Ok(())
+            })
+        });
+        let answer = runtime.block_on(job).expect("the job returns");
+        assert_eq!(
+            answer.expect_err("the step is still running").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        drop(runtime);
+        release.send(()).expect("the step is released");
+
+        let answered = super::within(Duration::from_secs(10), || Ok(7)).expect("the step answers");
+        assert_eq!(answered, 7);
+
+        // A step starts only while its bound has time left.
+        let (ran, step_ran) = std::sync::mpsc::channel::<()>();
+        let spent = super::within(Duration::ZERO, move || {
+            let _ = ran.send(());
+            Ok(())
+        });
+        assert_eq!(
+            spent.expect_err("the bound is spent").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(
+            step_ran.recv().is_err(),
+            "the step is dropped without running"
+        );
+
+        // A step that ends without an answer is reported as that, apart from a step still running.
+        let ended = super::within(Duration::from_secs(10), || -> std::io::Result<()> {
+            panic!("the step ends without an answer")
+        });
+        assert_eq!(
+            ended.expect_err("no answer").kind(),
+            std::io::ErrorKind::Other
+        );
+    }
 
     #[test]
     fn discarded_lines_keep_their_newlines_and_the_partial_tail() {
