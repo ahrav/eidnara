@@ -150,15 +150,23 @@ pub(super) fn attach(source: &str, memories: &mut [CapturedMemory]) -> bool {
     changed
 }
 
-/// The part of `line` that fits after `content` and a newline within
-/// `MAX_CAPTURE_MEMORY_BYTES`, cut at a character boundary, with the mark that
-/// ends a cut line; `None` when no character fits.
 /// Whether a line of a command's output is a failure line, read as a line
 /// of an output block is.
 pub(in crate::memory_capture) fn is_output_failure_line(line: &str) -> bool {
     failure_word(line, true).is_some()
 }
 
+/// `next` must immediately follow `line`.
+pub(in crate::memory_capture) fn completes_failure_line(line: &str, next: &str) -> bool {
+    !next.is_empty()
+        && printable(next)
+        && !is_fence(next)
+        && (line.ends_with(':') || next.starts_with("-->") || next.starts_with("at "))
+}
+
+/// The part of `line` that fits after `content` and a newline within
+/// `MAX_CAPTURE_MEMORY_BYTES`, cut at a character boundary, with the mark that
+/// ends a cut line; `None` when no character fits.
 fn clip<'a>(content: &str, line: &'a str) -> Option<(&'a str, &'static str)> {
     let room = MAX_CAPTURE_MEMORY_BYTES.saturating_sub(content.len() + 1);
     let (text, mark) = if line.len() <= room {
@@ -328,13 +336,7 @@ fn scan<'a>(region: &[Line<'a>], block: Option<usize>, items: &mut Vec<Evidence<
         };
         if let Some(next) = region.get(index) {
             let next_text = next.text;
-            if !next_text.is_empty()
-                && printable(next_text)
-                && !is_fence(next_text)
-                && (line.text.ends_with(':')
-                    || next_text.starts_with("-->")
-                    || next_text.starts_with("at "))
-            {
+            if completes_failure_line(line.text, next_text) {
                 evidence.lines.push(next_text);
                 if failure_word(next_text, fenced).is_none() {
                     index += 1;
@@ -370,7 +372,7 @@ fn is_output_fence(opener: &str) -> bool {
 
 /// Evidence lines hold printable text and tabs only, which limits the frozen
 /// plan's JSON escaping to twice the appended bytes.
-fn printable(line: &str) -> bool {
+pub(in crate::memory_capture) fn printable(line: &str) -> bool {
     !line.chars().any(|c| c.is_control() && c != '\t')
 }
 

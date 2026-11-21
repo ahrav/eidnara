@@ -1184,7 +1184,11 @@ prompt block and, under `source_capture.enabled`, retains it; an empty list
 reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
-`memory.auto_promote` gate only model-extracted facts from redacted text.
+`memory.auto_promote` gate two kinds of fact: model-extracted facts from
+redacted text, and the failed-command facts this section specifies below,
+which hold a redacted command and redacted lines of its output and follow
+these two flags and `memory.enabled` alone. `source_capture.enabled` governs
+the retention of exact source bytes.
 A captured fact is the user's statement when its source message has the user
 role and reaches capture under its own message id (a source id of the form
 `<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
@@ -1566,53 +1570,132 @@ A later session is asked what went wrong the last time a command failed, and
 the error a command printed stands in its tool result, which capture's
 sources leave out. Each `transform` request of a primary session carries the
 window's tool calls and results, so the daemon reads failed commands there,
-with no model call, when capture is on for the session (`memory.enabled`,
-`memory.auto_promote`, and `memory.auto_capture`). A tool call carries a
-command when its input holds a string, or an array of strings, under
-`command` or `cmd`. The result of such a call is a failure when the last line
-of its output that states an exit code (digits after `exit code`,
-`exit_code`, `exited with code`, or `exit status`, in any letter case) states
-a nonzero one; a stated zero is a pass. With no code stated, the result is a
-failure when the harness marks it as an error (`error_text`, `error_json`, or
-`error_content`), when one of its lines is a failure line as capture reads
-the lines of an output block (above), or when a line holds the shell's
-`command not found`. An output that is one JSON object is read by its
-fields: each string value as its own lines and each number or boolean as
-`name: value`, to two levels of nesting. The last 64 KiB of an output are
-read. Each failed call writes one fact of the `memory` domain: `decision_kind`
+with no model call, when `memory.enabled`, `memory.auto_promote`, and
+`memory.auto_capture` all permit capture for the session. The handler reads
+the window as the request carries it, before the pass resolves it, as the
+capture checkpoint does. It collects references to the command results that
+the session's earlier passes have left unjudged, the last 256 of the window
+per pass, and a detached task reads their text. A session has one such task at a time: a
+pass that finds one running hands off nothing, and the session's next pass
+carries the results again.
+
+A tool call carries a command when its input holds, under `command`, a
+string or an array of strings with a character other than whitespace; when
+`command` holds none, `cmd` is read the same way. An array's strings are
+joined by single spaces. A result of kind `execution_denied` is skipped. The
+output is read as text: a `text` or `error_text` result is its text, a
+`content` or `error_content` result is its text blocks joined by line
+breaks, and a `json` or `error_json` result is read from its value, a string
+as text, an object by its fields, and any other value as its JSON text. A
+text of at most 64 KiB that is one JSON object is read by its fields too. An
+object is read to two levels of nesting: each string value stands as its own
+lines, in field-name order, and the result's exit code is the first integer
+under `exit_code`, `exitCode`, `exit`, `status_code`, or `code`, an object's
+own fields before those of the objects it nests. Every other number and
+every boolean is left out. The last 64 KiB of an output are read, and a
+longer output is read from the first whole line of those bytes.
+
+The result is a failure when the harness marks it as an error (`error_text`,
+`error_json`, or `error_content`), also when its text states exit code 0.
+Otherwise an exit code decides: a nonzero code is a failure and zero is a
+pass. The code is the exit status the harness reports when it reports one
+(the integer `state.metadata.exit` of an OpenCode `bash` tool part), else the
+exit code field of a structured result, else the code the text states. A
+line states a code as digits after `exit code`, `exit_code`, `exited with
+code`, or `exit status`, in any letter case, past any run of `:`, `=`, `"`,
+and spaces; on one line the last such phrase that digits follow counts. The
+lines read for a code are the first non-empty line of the output and its
+last three non-empty lines, and the last of them that states a code decides.
+With no code, the result is a failure when one of its lines is a failure
+line as capture reads the lines of an output block (above), or when a line
+holds the shell's `command not found`.
+
+The command and the bytes read from the output are redacted whole before a
+line is chosen or cut. The userinfo of a URL (`scheme://user:secret@host`,
+through the last `@` before the first `/`, `?`, `#`, or whitespace) becomes
+`<REDACTED:credential>`, so the text keeps `scheme://` and `@host`. The
+value of a flag or an assignment whose name holds `password`, `passwd`,
+`token`, `secret`, `api-key`, `apikey`, or `api_key` in any letter case
+becomes `<REDACTED:credential>` in the forms `--name value`, `--name=value`,
+and `NAME=value`; a quoted value runs to its closing quote on the same line.
+The text is then redacted as capture's sources are. A result whose command
+or output the scanner fails on writes no fact.
+
+Each failed call writes one fact of the `memory` domain: `decision_kind`
 `TOOL_FAILURE`, `source_id` `tool_failure`, admitted as labeled inference, so
-it is served on `explicit_search` with visibility `labeled`, both search
-routes return it, and it reaches no automatic surface: `TOOL_FAILURE` is no
-category the `<project-memory>` block renders, and capture offers no such
-fact to the extractor as an existing memory. Its `summary` is
-`Tool failure recorded from the result of <tool>: <outcome>.`, a `Command: `
-line with the command (whitespace runs as single spaces, at most 512 bytes),
-an `Output lines:` line, and then the kept lines of the output: the first
-eight lines that state an error (a failure line and the line that completes
-it, a line that holds `error`, `errors`, `failed`, `failure`, `fatal`,
-`panic`, `panicked`, `exception`, or `traceback` as a word in any letter
-case, a type name that ends in `Error` or `Exception`, or `command not
-found`) and the last three lines, each at most 240 bytes and cut with `…`,
-the whole at most 2,048 bytes with the last three lines kept, redacted as
-capture's sources are. `<outcome>` is `the command failed with exit code
-<n>`, `the command failed and the tool reported an error`, or `the command
-failed by the failure lines of its output, which states no exit code`. Its
-`rationale` is a JSON object: `source` (`tool_failure`), `session`, `call`
-(the tool call's id), `tool`, `command` (the command without leading
-`cd <dir> &&` steps and `NAME=value` assignments, the key of the record),
-`state` (`failed` or `resolved`), `at_ms` and `at` (the result's time, in
-milliseconds and as UTC text), `place` (the result's position in its
-session's window), `exit_code` when one was stated, and, once resolved,
-`resolved_session` and `resolved_at`. One fact is live per `command` of a
-project. A later failure of the command supersedes the live fact, and a
-later result of the command that reports no failure supersedes it with a
-copy whose `state` is `resolved` and whose `summary` ends with the line
-`Resolved: a later run of this command reported no failure.`; a result
-older than the live fact changes nothing. A fact's id derives from the
-project, the session, and the tool call, so a window sent again, also after
-a restart, writes nothing for a call the Kernel holds. A session writes at
-most 64 such facts. A commit the Kernel refuses leaves the call for the next
-request of the session.
+it is served on `explicit_search` with visibility `labeled`, the fused search
+route and the snapshot scan of `eidnara_search` return it, and it reaches no
+automatic surface: `TOOL_FAILURE` is no category the `<project-memory>` block
+renders, and capture offers no such fact to the extractor as an existing
+memory. The search tool renders 1,024 bytes of a fact's `summary`, a line
+break, and its `rationale`, so the `summary` is at most 900 bytes and states
+the outcome first. Its first line is
+`Tool failure recorded from the result of <tool>: <outcome>.` with the
+tool's name in at most 64 bytes, and a resolved fact's first line ends with
+` Resolved: a later run of this command reported no failure.` `<outcome>` is
+`the command failed with exit code <n>` for a nonzero code, else
+`the command failed and the tool reported an error` for a result the
+harness marks, else `the command failed by the failure lines of its output,
+which states no exit code`. The second line is `Command: ` and the redacted
+command with whitespace runs as single spaces, in at most 300 bytes. The
+third line is `Output lines:`, and the kept lines of the output follow: the
+first five lines that state an error and then the last two lines, each
+trimmed, each at most 160 bytes, each kept once. A line states an error when
+it is a failure line, when it completes one (the line right after a failure
+line that ends with `:`, or one that begins with `-->` or `at `), when it
+holds `error`, `errors`, `failed`, `failure`, `fatal`, `panic`, `panicked`,
+`exception`, or `traceback` as a word in any letter case, when it holds a
+type name that ends in `Error` or `Exception`, or when it holds `command not
+found`. An empty line and a line with a control character other than a tab
+are left out. A command or a line cut to its limit ends in `…` within the
+limit. The last two lines are kept whole, and the lines that state an error
+fill the bytes that remain.
+
+The fact's `rationale` is a string that holds a JSON object. Its fields are
+`source` (`tool_failure`), `session`, `call` (the tool call's id, in at most
+128 bytes), `tool`, `command` (the key of the fact), `state` (`failed` or
+`resolved`), `at_ms` and `at` (the time of the failed run, in milliseconds
+and as UTC text), `at_source`, `place` (the position of the result's message
+in the window its request carries, from 1), and `exit_code` when the outcome
+names a nonzero code. `at_source` is `result` when the harness gives the
+result message's creation time, which is then the time stored; it is
+`judged` when the harness gives none, and the time stored is that of the
+first judgment. A resolved fact also holds the passing run:
+`resolved_session`, `resolved_call`, `resolved_at_ms`, `resolved_at`,
+`resolved_at_source`, and `resolved_place`. The key is the redacted command
+with whitespace runs as single spaces and without its leading
+`cd <path> &&` and `cd <path>;` steps and `NAME=value` assignments, where a
+path or a value is one shell word that may hold quotes and backslash
+escapes. A key longer than 512 bytes is its first bytes, `…`, and
+` [<n> bytes]`, with `<n>` the byte length of the whole key text, in 512
+bytes together.
+
+One fact is live per `command` of a project. A later failure of the command
+supersedes the live fact, and a later result of the command that reports no
+failure supersedes an unresolved live fact with a copy whose `state` is
+`resolved`; a resolved fact is ordered by its passing run from then on. A run
+is later than the live fact's run when its time is greater. Two runs of one
+session are ordered by `place` when either time is `judged` or the times are
+equal, and two runs of two sessions with equal times keep the live fact. A
+result that is no later than the live fact changes nothing. A fact's id
+derives from the project, the session, and the tool call's id, each hashed
+behind its length: the failed call for a failure and the passing call for a
+resolved copy. A window sent again, also after a restart, therefore writes
+nothing for a call whose id the Kernel holds.
+
+The read of a command's live fact, the commit, and the update of the
+daemon's cache of live facts run under the capture publication gate, one
+result at a time. `session.delete` holds the same gate, and a task handed
+off before a `session.delete` of its session writes nothing after it. A
+session writes at most 64 such facts: the daemon counts the live facts that
+name the session when it reads a project's live facts, and each fact the
+session writes after that. The daemon reads a project's live facts from the
+Kernel once per process and again after a commit the Kernel refuses, in
+pages of 256 facts and at most 64 pages. A project with more live facts gets
+no new fact, which the daemon reports on stderr once. The daemon remembers
+4,096 judged calls for each of 256 sessions; a call past either bound is
+judged again and writes nothing when the Kernel holds its id. A commit the
+Kernel refuses leaves the call for the next request of the session.
 
 ### 7.10 Transform
 
