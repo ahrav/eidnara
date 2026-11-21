@@ -536,6 +536,8 @@ impl CompositeComponent for ModelExecutionComponent {
             // A run or refresh that this shutdown stopped has just reported a removal. The shutdown is non-graceful whatever the registry holds a moment later, so the verdicts stand as counted and the wait for the registry is left out.
             counted
         };
+        // A removal that returned an error left its directory's files in place, under the directory's name or another. The count is read after the registry wait, whose last sample found every job returned, and one run can appear in both numbers, so the larger one is reported.
+        let residue = residue.max(self.state_root.removal_errors());
         // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
         if residue > 0 {
             failures.push(format!(
@@ -576,7 +578,7 @@ impl ModelExecutionComponent {
 
     /// The private run directories and crash-ownership records this host still holds once every run has returned.
     ///
-    /// `counted` holds the removals of private run files and of records that outlasted their bounded wait. Each count is a verdict reached when its run or refresh ended, and the job it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a clear registry read once every filesystem job of this process has returned proves that the removals completed and that no entry is still to be written. The read repeats until then or until [`RESIDUE_SETTLE_GRACE`] ends, which gives a job still in flight the time to finish. A clear registry beside a job still running at the end of the grace, or a registry that cannot be read inside it, proves nothing, so the counted verdicts stand.
+    /// `counted` holds the removals of private run files and of records that outlasted their bounded wait. Each count is a verdict reached when its run or refresh ended, and the job it waited on keeps running, so shutdown reads the registry: an entry that still names this process is residue, and a clear registry read once every filesystem job of this process has returned shows that each removal has returned and that no entry is still to be written. A removal that returned an error is counted where it returns, and `shutdown` reports that count beside this answer. The read repeats until then or until [`RESIDUE_SETTLE_GRACE`] ends, which gives a job still in flight the time to finish. A clear registry beside a job still running at the end of the grace, or a registry that cannot be read inside it, proves nothing, so the counted verdicts stand.
     ///
     /// Shutdown reserves at least [`RESIDUE_READ_FLOOR`] for the registry check even if the drain consumes the grace.
     async fn residue_on_disk(
@@ -761,6 +763,18 @@ mod tests {
             (1, 1),
             "beside a running job each class reports the larger of its verdicts and its entries"
         );
+        // Both classes hold verdicts and entries at once: two run directories beside one verdict, and one record beside three. Each class reports the larger number, and a sum would count a run's entry and its verdict as two.
+        let entries = [(); 2].map(|()| {
+            subprocess::PrivateDir::create(&root, "model_execution-pi").expect("private run dir")
+        });
+        assert_eq!(
+            settle(component.residue_on_disk((1, 3), grace()), |_| {}).await,
+            (2, 3),
+            "beside a running job each class reports the larger of its verdicts and its entries"
+        );
+        for entry in entries {
+            entry.cleanup().expect("private run dir removed");
+        }
         record.remove().expect("record removed");
         release.send(()).expect("the job is released");
         job.await.expect("job task").expect("job result");

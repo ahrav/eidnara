@@ -13,10 +13,10 @@ use host_runtime::model_execution::ModelExecutionComponent;
 use host_runtime::model_execution::backend::{BackendError, BackendTerminal, ErrorClass, Harness};
 use host_runtime::model_execution::config::{self, ModelExecutionLimits, TERMINAL_RETENTION};
 use host_runtime::model_execution::protocol::{self, SendRequest};
-use host_runtime::model_execution::subprocess::PrivateDir;
 use host_runtime::model_execution::subprocess::group_registry::{
     self, GroupRecord, OwnResidue, StateRoot,
 };
+use host_runtime::model_execution::subprocess::{PrivateDir, merge_cleanup};
 use host_runtime::model_execution::supervisor::{
     SessionKey, Subscription, Supervisor, SupervisorMetrics,
 };
@@ -1430,6 +1430,148 @@ async fn shutdown_keeps_the_runs_verdicts_when_a_registry_directory_has_left_its
     }
 }
 
+/// A private run directory that left its path before its run removed it fails the removal at once, and no removal stays in flight to finish later. The registry holds no entry under the directory's name, so its read proves nothing about the files, and the run's verdict stands at shutdown.
+#[tokio::test]
+async fn shutdown_keeps_the_verdict_of_a_run_whose_private_directory_left_its_path() {
+    for leaves_the_run_root in [false, true] {
+        let (data_dir, root) = own_state_root();
+        let (moved, moved_to) = std::sync::mpsc::channel();
+        // The backend resolves the state root for itself, so the removal's error reaches a component that holds another handle to the same directory.
+        let run_root = StateRoot::resolve(Some(data_dir.path())).expect("state root resolves");
+        let backend = ScriptedBackend::with_behavior(move |_request, _events, _cancel| {
+            let dir = PrivateDir::create(&run_root, "model_execution-pi").expect("private run dir");
+            // A harness child that renames its `HOME` moves the run's private files, beside the run root's other entries or out of the run root.
+            let aside = if leaves_the_run_root {
+                run_root.path().join("moved-aside")
+            } else {
+                let mut name = dir.path().file_name().expect("dir name").to_owned();
+                name.push("-bak");
+                dir.path().with_file_name(name)
+            };
+            std::fs::rename(dir.path(), &aside).expect("the directory moves");
+            moved.send(aside).expect("the test reads the new path");
+            let cleanup = dir.cleanup();
+            assert_eq!(
+                cleanup.expect_err("the directory is not at its path").kind,
+                std::io::ErrorKind::NotFound
+            );
+            Box::pin(async move {
+                merge_cleanup(
+                    BackendTerminal::Failed(BackendError {
+                        class: ErrorClass::Transient,
+                        message: "pi run failed".to_owned(),
+                        retry_after_secs: None,
+                        provider_code: None,
+                    }),
+                    cleanup,
+                )
+            })
+        });
+        let component = ModelExecutionComponent::new(backend as Arc<_>, root.clone());
+        let supervisor = component.supervisor();
+        let run_id = send(&supervisor, "s-moved-dir", "p1");
+        until(
+            || supervisor.status(&key("s-moved-dir"), &run_id) == Ok("failed"),
+            "the run commits its failed terminal",
+        )
+        .await;
+        assert_eq!(supervisor.cleanup_unresolved_runs(), 1);
+        let aside = moved_to.recv().expect("the directory's new path");
+        assert_eq!(
+            group_registry::own_residue(&root).expect("registry reads"),
+            OwnResidue::default(),
+            "the registry names no entry of this process (out of the run root: {leaves_the_run_root})"
+        );
+
+        let failure = CompositeComponent::shutdown(&component)
+            .await
+            .expect_err("a removal that failed keeps its verdict");
+        assert!(
+            failure
+                .0
+                .contains("1 run(s) could not remove their private run files"),
+            "{failure}"
+        );
+        assert!(
+            aside.is_dir(),
+            "the run's private files are still on disk (out of the run root: {leaves_the_run_root})"
+        );
+    }
+}
+
+/// A removal that is still running when its run stops waiting can return an error afterwards, and a dropped guard's removal runs on the cleanup thread. The run's terminal says only that its wait ended. The error is counted where the removal returns, so shutdown reports it beside a registry that names no entry of this process.
+#[tokio::test]
+async fn shutdown_reports_a_removal_that_returned_an_error_after_its_run_stopped_waiting() {
+    for dropped in [false, true] {
+        let (_dir, root) = own_state_root();
+        let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+        let dir = PrivateDir::create(&root, "model_execution-pi").expect("private run dir");
+        let aside = root.path().join("moved-aside");
+        std::fs::rename(dir.path(), &aside).expect("the directory moves");
+        if dropped {
+            // The cleanup thread removes a dropped guard's directory, and shutdown waits for that removal as for a job that holds a slot.
+            drop(dir);
+        } else {
+            assert_eq!(
+                dir.cleanup()
+                    .expect_err("the directory is not at its path")
+                    .kind,
+                std::io::ErrorKind::NotFound
+            );
+            assert_eq!(
+                group_registry::own_residue(&root).expect("registry reads"),
+                OwnResidue::default()
+            );
+        }
+
+        let failure = CompositeComponent::shutdown(&component)
+            .await
+            .expect_err("a removal that returned an error is reported");
+        assert!(
+            failure
+                .0
+                .contains("1 run(s) could not remove their private run files"),
+            "{failure} (dropped guard: {dropped})"
+        );
+        assert!(
+            !failure.0.contains("crash-ownership record"),
+            "the record's removal landed, so its verdict settles: {failure}"
+        );
+        assert!(aside.is_dir(), "the run's private files are still on disk");
+    }
+}
+
+/// A removal that returned an error and left an entry under the directory's name is one run's residue: the registry read and the removal's own error describe the same run, and shutdown counts it once.
+#[tokio::test(start_paused = true)]
+async fn shutdown_counts_a_failed_removal_whose_entry_remains_once() {
+    let (_dir, root) = own_state_root();
+    let component = component_with_removals_that_outlasted_their_waits(root.clone()).await;
+    let dir = PrivateDir::create(&root, "model_execution-pi").expect("private run dir");
+    let path = dir.path().to_owned();
+    // A regular file under the directory's name fails the recursive removal and stays where it is.
+    std::fs::remove_dir(&path).expect("empty private run dir");
+    std::fs::write(&path, b"").expect("file in the directory's place");
+    dir.cleanup().expect_err("a regular file is no directory");
+    assert_eq!(
+        group_registry::own_residue(&root).expect("registry reads"),
+        OwnResidue {
+            run_dirs: 1,
+            records: 0
+        }
+    );
+
+    let failure = CompositeComponent::shutdown(&component)
+        .await
+        .expect_err("the entry on disk fails the shutdown");
+    assert!(
+        failure
+            .0
+            .contains("1 run(s) could not remove their private run files"),
+        "{failure}"
+    );
+    std::fs::remove_file(&path).expect("test cleanup");
+}
+
 /// A published record this host cannot interpret may be the one whose removal a run waited on, so the registry read answers unknown and the runs' verdicts are reported. The startup sweep keeps the same record for the same reason.
 #[tokio::test]
 async fn shutdown_keeps_the_runs_verdicts_when_a_published_record_cannot_be_interpreted() {
@@ -1454,6 +1596,12 @@ async fn shutdown_keeps_the_runs_verdicts_when_a_published_record_cannot_be_inte
         group_registry::own_residue(&root).expect("registry reads"),
         OwnResidue::default()
     );
+    // A name that is not UTF-8 is a published name too, as it is for the startup sweep.
+    let unreadable_name = registry
+        .join(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"damaged-\xff"));
+    std::fs::write(&unreadable_name, b"v4\nno record\n").expect("damaged record");
+    assert!(group_registry::own_residue(&root).is_err());
+    std::fs::remove_file(&unreadable_name).expect("damaged record removed");
     std::fs::write(registry.join("damaged"), b"v4\nno record\n").expect("damaged record");
     assert!(group_registry::own_residue(&root).is_err());
 
