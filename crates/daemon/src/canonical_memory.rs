@@ -263,8 +263,8 @@ fn read_at_tip(
 /// the walk, as every bounded read of the domain does.
 const MAX_DELIVERY_PAGES: usize = 8;
 
-/// Each delivery charges work in progress to separate row and byte caps,
-/// each one quarter of the corresponding walk cap.
+/// Each delivery charges work in progress to separate row and byte caps: a
+/// quarter of each walk cap, rounded down, and at least one row.
 const WORK_READ_DIVISOR: usize = 4;
 
 /// The project's injectable memory rows at `tip` that a pass delivers to each
@@ -272,8 +272,8 @@ const WORK_READ_DIVISOR: usize = 4;
 /// caps among the rows whose capture rationale names another session or
 /// none. A reader given as `None` leaves out no row, so its delivery is the
 /// plain newest window. With several readers the response holds the union
-/// of their deliveries, which is at most twice the caps, because a row a
-/// session leaves out is kept only while another reader still has room.
+/// of their deliveries, at most twice the caps in other rows, because a row
+/// a session leaves out is kept only while another reader still has room.
 /// Each delivery counts visible rows that pass
 /// [`crate::memory_capture::is_current_work`] against a second pair of
 /// caps, a quarter of the first and at least one row, so the response holds

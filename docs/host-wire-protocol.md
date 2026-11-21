@@ -1332,9 +1332,9 @@ source or batch holds the contest, keeps its class. A frozen plan carries
 plan version 2, which names the classes as this section defines them.
 The commit of a plan of another version is refused as invalid input
 (`kernel_write_refused`, above), so a class an earlier build froze is
-never read under these rules; a plan of another version that an earlier
-build had already committed replays its receipt, which completes its
-source. A captured fact's rationale
+never read under these rules; a plan of another version that decodes, and
+whose commit an earlier build had already made from the same frozen bytes,
+replays that receipt, which completes its source. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1545,7 +1545,7 @@ proposal that names `duplicate_of` and `contests` and writes no fact records
 the fact it duplicates as the contesting fact, so an observation the store
 already holds, such as a note the agent wrote in the same turn, contests what
 the message contradicts. A contest recorded through live work in progress
-names that fact's id, so it is shown until the work in progress is ended,
+names that fact's id, so the rule below shows it no longer than until the work in progress is ended,
 contested, or settled, each of which supersedes the fact. The contests of a commit are recorded after its
 other writes, and a target the commit replaced, retired, or settled is passed
 over. A contest recorded through a duplicated fact that the commit retires as
