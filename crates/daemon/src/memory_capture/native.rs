@@ -472,9 +472,10 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                // One quotation proposed under two classes is stored under
+                // One quotation proposed under two classes is joined under
                 // the one that holds longer, so a statement the extractor
-                // read both ways stays eligible for approval.
+                // read both ways stays eligible for approval. The joined
+                // memory is classed again by the contests it keeps.
                 kept.lifetime = match (kept.lifetime, memory.lifetime) {
                     (Some(kept), Some(joined)) => Some(kept.max(joined)),
                     _ => None,

@@ -3273,59 +3273,80 @@ async fn a_plan_is_work_in_progress_unless_its_source_keeps_a_contest_of_a_deliv
 }
 
 /// The extractor proposes one plan twice, once naming the rule it departs
-/// from and once naming nothing. The two proposals freeze as one fact,
-/// which keeps the contest of the rule, so the fact takes the class of an
-/// instruction for one occasion and is shown on the rule's line.
+/// from and once naming nothing, in either order and under one class or
+/// two. The two proposals freeze as one fact, which keeps the contest of
+/// the rule, so the fact takes the class of an instruction for one
+/// occasion and the rule's line shows the fact's stored words.
 #[tokio::test]
 async fn two_proposals_of_one_plan_freeze_as_one_fact_classed_by_its_contest() {
     let plan = "For the importer migration, skip the integration suite before each merge.";
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(
-        &handler,
-        FIRST,
-        "s1",
-        &[("m1", "user", INTEGRATION_RULE)],
-        |_, _| vec![fact(INTEGRATION_RULE)],
-    )
-    .await;
-    capture(
-        &handler,
-        SECOND,
-        "s2",
-        &[("m2", "user", plan)],
-        |_, existing| {
-            vec![
-                Extracted {
+    for (naming_first, naming_class) in [
+        (true, "current_work"),
+        (false, "current_work"),
+        (true, "request"),
+        (false, "request"),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", INTEGRATION_RULE)],
+            |_, _| vec![fact(INTEGRATION_RULE)],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", plan)],
+            |_, existing| {
+                let naming = Extracted {
                     replaces: ids_containing(existing, "before every merge"),
                     content: Some("The importer migration skips the integration suite."),
-                    ..classed(plan, "current_work")
-                },
-                Extracted {
+                    ..classed(plan, naming_class)
+                };
+                let plain = Extracted {
                     content: Some("Merges of the importer migration skip the integration suite."),
                     ..classed(plan, "current_work")
-                },
-            ]
-        },
-    )
-    .await;
-    let rows = memory_rows(&handler, &project);
-    let stored: Vec<_> = rows.iter().filter(|row| row.1 == stated(plan)).collect();
-    assert_eq!(stored.len(), 1, "{rows:?}");
-    assert_eq!(stored[0].3["lifetime"], "request", "{:?}", stored[0].3);
-    assert_eq!(
-        live_statement_records(&handler, &project),
-        [stated(INTEGRATION_RULE)]
-    );
-    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
-    assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
-    let rule_line = block
-        .lines()
-        .find(|line| line.contains(&stated(INTEGRATION_RULE)))
-        .unwrap_or_else(|| panic!("{block}"));
-    assert!(
-        rule_line.contains("contested") && rule_line.contains("skip the"),
-        "{block}"
-    );
+                };
+                if naming_first {
+                    vec![naming, plain]
+                } else {
+                    vec![plain, naming]
+                }
+            },
+        )
+        .await;
+        let case = format!("naming first {naming_first}, classed {naming_class}");
+        let rows = memory_rows(&handler, &project);
+        let stored: Vec<_> = rows.iter().filter(|row| row.1 == stated(plan)).collect();
+        assert_eq!(stored.len(), 1, "{case}: {rows:?}");
+        assert_eq!(
+            stored[0].3["lifetime"], "request",
+            "{case}: {:?}",
+            stored[0].3
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(INTEGRATION_RULE)],
+            "{case}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+        assert_eq!(
+            block_element(&block, "CURRENT_WORK"),
+            None,
+            "{case}: {block}"
+        );
+        let rule_line = block
+            .lines()
+            .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+            .unwrap_or_else(|| panic!("{case}: {block}"));
+        assert!(
+            rule_line.contains("contested") && rule_line.contains(&stated(plan)),
+            "{case}: {block}"
+        );
+    }
 }
 
 /// A class on a memory of an assistant source changes nothing and is stored

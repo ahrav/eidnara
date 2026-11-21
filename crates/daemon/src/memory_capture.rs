@@ -111,7 +111,8 @@ pub struct CapturedMemory {
     pub contests: Vec<String>,
     /// How long the statement holds, as the extractor judged it from the
     /// user's wording; `class_contesting_work` gives a settled
-    /// `current_work` memory the class `request`. A plan frozen before the field existed, and a
+    /// `current_work` memory of a user source the class `request` when it
+    /// contests a memory served automatically. A plan frozen before the field existed, and a
     /// proposal that leaves it out or gives `null`, carry no class: such a
     /// memory passes the lifetime check as a [`Lifetime::Lasting`] one does
     /// and its rationale records none.
@@ -10695,6 +10696,7 @@ mod tests {
         publish(&source, &output).unwrap();
         let foreign = "Next, move the retry budget into the client config.";
         let id = format!("mem_{}", "f".repeat(32));
+        let (stating, stated) = stated_job("job-foreign", &[foreign.to_string()]);
         kernel
             .commit_before(
                 Instant::now() + COMMIT_WAIT,
@@ -10730,38 +10732,22 @@ mod tests {
                     })?;
                     // The memory is approved as capture approves one: on a
                     // statement record admitted as explicit user text.
-                    let record = format!("stm_{}", "f".repeat(32));
-                    let mut domains = HashSet::new();
-                    kernel_routes::commit::ensure_domain(
+                    let record = record_statement(
                         envelope,
-                        STATEMENT_DOMAIN_ID,
-                        &mut domains,
+                        &project,
+                        &stating,
+                        &stated.memories[0],
+                        &id,
+                        &mut HashSet::new(),
                     )?;
-                    envelope.insert_decision(kernel::DecisionSpec {
-                        decision_id: format!("dst_{}", "f".repeat(32)),
-                        object_id: record.clone(),
-                        domain_id: STATEMENT_DOMAIN_ID.into(),
-                        proposition_id: None,
-                        scope_id: Some(project.scope_id()),
-                        anchor_id: None,
-                        evidence_id: None,
-                        decision_kind: ACCEPTED_DECISION_KIND.into(),
-                        payload: kernel::DecisionPayload {
-                            summary: foreign.into(),
-                            rationale: "{}".into(),
-                        },
-                        source_kind: "user".into(),
-                        source_id: format!("{STATEMENT_SOURCE_ID}:{}", "f".repeat(32)),
-                        source_revision: 1,
-                        sensitivity: kernel::Sensitivity::Normal,
-                    })?;
-                    kernel_routes::commit::accept_statement(envelope, &record)?;
                     kernel_routes::commit::admit_capture(envelope, &id, Some(&record))?;
                     Ok("1".into())
                 },
             )
             .unwrap();
-        let stored = || {
+        // The live memory whose summary is `summary`, as a later plan
+        // names it, and how explicit search serves it.
+        let stored = |summary: &str| -> (ExistingCaptureMemory, kernel::SurfaceVisibility) {
             let read = kernel_routes::read::read_visible(
                 &kernel,
                 &project,
@@ -10770,42 +10756,58 @@ mod tests {
                 kernel_routes::read::RowSelection::DomainDecisions("memory"),
             )
             .unwrap();
-            read.rows
+            let row = read
+                .rows
                 .iter()
-                .find(|row| row.object.object_id == id)
-                .map(|row| {
-                    (
-                        row.visibility,
-                        row.object.source_revision,
-                        row.object.created_commit_seq,
-                    )
-                })
-                .expect("the memory is live")
-        };
-        let (visibility, source_revision, created_commit_seq) = stored();
-        assert_eq!(visibility, kernel::SurfaceVisibility::Visible);
-
-        let done = "The retry budget is in the client config now.";
-        let (source, mut output) = stated_job("job-done", &[done.to_string()]);
-        output.memories[0].lifetime = Some(Lifetime::Status);
-        output.memories[0].replaces = Some(id.clone());
-        output.existing = vec![
-            serde_json::from_value(json!({
-                "id": id,
+                .find(|row| read.decisions[&row.object.object_id].payload.summary == summary)
+                .expect("the memory is live");
+            let named = serde_json::from_value(json!({
+                "id": row.object.object_id,
                 "category": "CONFIG_VALUES",
-                "content": foreign,
+                "content": summary,
                 "can_replace": true,
-                "source_revision": source_revision,
-                "created_commit_seq": created_commit_seq,
+                "source_revision": row.object.source_revision,
+                "created_commit_seq": row.object.created_commit_seq,
                 "user_statement": true,
             }))
-            .unwrap(),
-        ];
-        assert!(matches!(
-            publish(&source, &output),
-            Err(kernel::KernelError::Conflict)
-        ));
-        assert_eq!(stored().0, kernel::SurfaceVisibility::Visible);
+            .unwrap();
+            (named, row.visibility)
+        };
+        assert_eq!(stored(foreign).1, kernel::SurfaceVisibility::Visible);
+        // A plan capture wrote, which a remark may end.
+        let plan = "Next, chart the retry budget per client.";
+        let (source, mut output) = stated_job("job-plan", &[plan.to_string()]);
+        output.memories[0].lifetime = Some(Lifetime::CurrentWork);
+        publish(&source, &output).unwrap();
+        let plan = format!("{USER_STATED}: {plan}");
+        assert_eq!(stored(&plan).1, kernel::SurfaceVisibility::Visible);
+
+        // The other writer's memory as the replaced target, and as a
+        // further target beside capture's plan.
+        let done = "The retry budget is in the client config now.";
+        for (key, further) in [("job-done", false), ("job-done-further", true)] {
+            let (source, mut output) = stated_job(key, &[done.to_string()]);
+            output.memories[0].lifetime = Some(Lifetime::Status);
+            let other = stored(foreign).0;
+            if further {
+                let ended = stored(&plan).0;
+                output.memories[0].replaces = Some(ended.id.clone());
+                output.memories[0].also_replaces = vec![other.id.clone()];
+                output.existing = vec![ended, other];
+            } else {
+                output.memories[0].replaces = Some(other.id.clone());
+                output.existing = vec![other];
+            }
+            assert!(
+                matches!(
+                    publish(&source, &output),
+                    Err(kernel::KernelError::Conflict)
+                ),
+                "{key}"
+            );
+            assert_eq!(stored(foreign).1, kernel::SurfaceVisibility::Visible);
+            assert_eq!(stored(&plan).1, kernel::SurfaceVisibility::Visible);
+        }
     }
 
     /// A stored plan whose memory names further targets beside no

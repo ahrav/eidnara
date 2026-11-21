@@ -1369,7 +1369,7 @@ duplicates a memory the Kernel does not serve as approved, such as
 an assistant's report or a memory the host memory tool wrote, is recorded as
 its own fact with its statement record, subject to the refusal rule above, or as a labeled fact when it is not eligible for approval, the duplicated memory stays, and the
 new fact's rationale names it under `restates`; a statement whose `lifetime`
-is `current_work`, `request`, or `status` settles no contest, and a `request` or `status` statement writes no fact when the memory it duplicates
+is `current_work`, `request`, or `status` settles no contest, and a statement its frozen plan classes `request` or `status` writes no fact when the memory it duplicates
 is a fact capture wrote under the `User stated` label whose rationale holds
 the same `quote`, so a repeat of such a statement leaves one fact on
 explicit search; the name records which memory
@@ -1472,7 +1472,7 @@ on `auto_inject` except live work in progress:
 each other such target it names in `replaces` or `also_replaces` becomes a contest
 under the rule above. An exception for one occasion that names a rule, and a
 correction the extractor classed as one of those three, leave the rule approved
-and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets; the
+and show it as contested by the user's newer words when the rule is among the proposal's first four contest targets and the contest is recorded and shown under the contest rule (below); the
 exception or correction is stored labeled when its class is `request` or `status`, and when its class is `current_work` and its plan is frozen contesting a fact served on `auto_inject` (above). The contest is the one the frozen plan holds: a contest another fact of the source or batch holds (below) is shown with that fact's words. A
 whole statement of the user of any class that names live work in progress as
 its `replaces` target, or as an `also_replaces` target beside a `replaces`
@@ -1484,7 +1484,7 @@ statement: a `replaces` target of another category is released with its
 `also_replaces` targets (below), and the statement then contests the work in
 progress when that target is among its first four contest targets and its
 frozen plan keeps the contest, so the
-work in progress stays delivered with the statement shown on its line. When the
+work in progress stays delivered, with the statement shown on its line under the contest rule (below). When the
 `replaces` target is a fact served on `auto_inject` that the statement may not
 replace under the rule above, every target becomes a contest, live work in
 progress among them. The ending statement is stored as
