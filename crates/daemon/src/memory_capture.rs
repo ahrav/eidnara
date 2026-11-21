@@ -182,8 +182,10 @@ fn has_eligible_lifetime(memory: &CapturedMemory) -> bool {
 /// Gives the class `request` to each `current_work` memory of a settled
 /// source that contests a memory served automatically. Such a memory is an
 /// instruction for one occasion, shown on the line of the memory it
-/// contests. It runs on the links a source keeps after the batch is
-/// settled, so the class follows the contests the plan is frozen with.
+/// contests.
+///
+/// It runs on the links a source keeps after the batch is settled, so the
+/// class follows the contests the plan is frozen with.
 fn class_contesting_work(memories: &mut [CapturedMemory], existing: &[ExistingCaptureMemory]) {
     for memory in memories {
         if memory.lifetime == Some(Lifetime::CurrentWork)
