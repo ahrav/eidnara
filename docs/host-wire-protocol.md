@@ -1267,9 +1267,10 @@ one), with no letter or digit after it; and the text between the marks is one
 token: at least one character, no whitespace, and every character printable
 ASCII other than a backtick and the ASCII quotation marks, a cased letter of
 another script (lowercase, uppercase, or titlecase), or an apostrophe (`'`,
-`’`, or `＇`) between two letters or digits. A token of several words may be
+`’`, or `＇`) between two letters or digits. A quotation of several words may be
 what another speaker said, and the scripts that write sentences without
-spaces have no letter case. A token that ends in `.`, `!`, or `?`, behind
+spaces have no letter case. A closing mark directly after a backslash may
+be an escaped character of quoted text and closes no literal. A token that ends in `.`, `!`, or `?`, behind
 any `)`, `]`, `}`, `*`, or `_`, is a one-word utterance such as `"Wait!"`
 and no literal; a one-word quotation without such a mark, as in
 `He said "no" to that.`, is read as a literal, and its sentence is the
@@ -1291,11 +1292,24 @@ the paragraph's first colon is (below): a quotation that starts at or
 before it may be a statement, so `Use the 'requests' library.` is one, a
 sentence that starts after it in the paragraph is none, and every later
 paragraph of the message is left out, as after a line that ends in a colon.
+Wherever this section reads a paragraph's first colon, in the join of
+sentences quoted one by one, in the sentence quoted alone after it, and in
+the contest a sentence after it keeps, it reads the opening mark of such a
+literal the same way. The rule keeps three readings it cannot rule out, each
+stated here: the sentence that holds a literal with a second reading is
+approved whole, with whatever stands between its marks and after them in
+that sentence; a one-word quotation of speech without a sentence mark is
+read as a literal; and a single-quoted first word of a longer quotation
+that closes after a letter other than `s`, as an elision such as `'Goin'`
+does, is read as a literal when no later single mark ends a word in its
+paragraph, so the sentences after it are plain prose, in its paragraph and,
+as the pairing rules above already read a one-word single quotation, in the
+later ones.
 When a quotation of the message is open or unknown, a paragraph of literals
 that is the first one to hold a quotation mark is left out with the later
 ones, since the marks of its literal may stand inside that quotation.
-The rule reads marks by their place and cannot tell every arrangement of
-symmetric marks apart; where it cannot, the text is left out. The quotation starts the
+The pairing rules read marks by their place and cannot tell every arrangement of
+symmetric marks apart; where they find a quotation open or unknown, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon and no opening mark of a literal whose closing mark has a second reading (above) comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, whitespace or the
@@ -1345,7 +1359,7 @@ for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
 an inline code span, so a quotation may hold a whole span; a quotation starts at the paragraph's start or after whitespace and ends at the paragraph's end, before whitespace, or directly before a closing `.` or `!`, and a literal holds no whitespace and ends in no sentence mark, so a quotation holds a literal with both of its marks or leaves it out; and its trimmed text holds a letter or digit and contains
 no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
-finite) and, behind any leading `(`, `[`, or `{`, does not start with a backtick or with a quotation mark, single or double. The rule reads sentence ends in `.` and `!` only, so text
+finite) and its first letter, digit, backtick, or quotation mark, single or double, is a letter or digit, so brackets or emphasis marks before a leading quotation mark or backtick leave it no statement. The rule reads sentence ends in `.` and `!` only, so text
 in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source may carry `lifetime`, the extractor's class of
 how long the statement holds: `lasting`, a rule, preference, convention,
 decision, constraint, or stable fact that still guides a different task in a

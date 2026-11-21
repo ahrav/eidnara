@@ -2365,21 +2365,26 @@ const QUESTION_MARKS: [char; 8] = [
 ];
 
 /// Whether trimmed text can be a statement: it holds a letter or digit, no
-/// question mark of [`QUESTION_MARKS`], and no leading backtick or
-/// quotation mark, single or double, behind any opening brackets. A
-/// plain-prose paragraph holds quotation marks only around quoted literals
-/// ([`literals_of`]). A statement starts at its paragraph's start or after
-/// whitespace, and ends at the paragraph's end, before whitespace, or
-/// directly before a closing `.` or `!`; a literal holds no whitespace and
-/// ends in no sentence mark, so a statement holds a literal with both of
-/// its marks or leaves it out.
+/// question mark of [`QUESTION_MARKS`], and its first letter, digit,
+/// backtick, or quotation mark, single or double, is a letter or digit, so
+/// a statement opens with a word of the user's whatever brackets or
+/// emphasis marks stand before it. A plain-prose paragraph holds quotation
+/// marks only around quoted literals ([`literals_of`]). A statement starts
+/// at its paragraph's start or after whitespace, and ends at the
+/// paragraph's end, before whitespace, or directly before a closing `.` or
+/// `!`; a literal holds no whitespace and ends in no sentence mark, so a
+/// statement holds a literal with both of its marks or leaves it out.
 fn reads_as_statement(trimmed: &str) -> bool {
-    let unbracketed = trimmed.trim_start_matches(['(', '[', '{']);
-    trimmed.contains(char::is_alphanumeric)
-        && !(trimmed.contains(QUESTION_MARKS)
-            || unbracketed.starts_with('`')
-            || unbracketed.starts_with(is_quotation_mark)
-            || unbracketed.starts_with(SINGLE_QUOTATION_MARKS))
+    let opens_with_word = trimmed
+        .chars()
+        .find(|&ch| {
+            ch.is_alphanumeric()
+                || ch == '`'
+                || is_quotation_mark(ch)
+                || SINGLE_QUOTATION_MARKS.contains(&ch)
+        })
+        .is_some_and(char::is_alphanumeric);
+    opens_with_word && !trimmed.contains(QUESTION_MARKS)
 }
 
 /// Whether `paragraph[start..end]` starts and ends on sentence boundaries with
@@ -3036,8 +3041,7 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
                 && ch != '\u{201a}'
                 && previous.is_none_or(|before| before.is_whitespace() || "([{".contains(before));
             let (token, closer) = opens.then(|| literal_token(single, ch, rest)).flatten()?;
-            let last = token.chars().next_back()?;
-            if last.is_numeric() || (single && matches!(last, 's' | 'S')) {
+            if token.ends_with(char::is_numeric) || (single && token.ends_with(['s', 'S'])) {
                 found.introduces_from.get_or_insert(start + at);
             }
             single_closed |= single;
@@ -3086,8 +3090,11 @@ fn literal_token(single: bool, opener: char, rest: &str) -> Option<(&str, char)>
             let utterance = token
                 .trim_end_matches([')', ']', '}', '*', '_'])
                 .ends_with(['.', '!', '?']);
+            // A mark after a backslash may be an escaped character of
+            // quoted text.
             let closed = !token.is_empty()
                 && !utterance
+                && !token.ends_with('\\')
                 && !OPENING_ONLY.contains(&ch)
                 && ch != '\u{201a}'
                 && after.is_none_or(|after| !after.is_alphanumeric());
@@ -6120,9 +6127,9 @@ mod tests {
     /// A user names a value, identifier, path, or flag between quotation
     /// marks inside a sentence of their own. The sentence is the user's
     /// statement whole, with the literal and both of its marks. A quotation
-    /// of several words may carry what someone else said, and a closing mark
-    /// that the pairing rules read another way closes no literal, so those
-    /// paragraphs stay out of prose.
+    /// of several words may carry what someone else said, so its paragraph
+    /// stays out of prose. A closing mark with a second reading makes its
+    /// literal's opening mark introduce what follows, as a colon does.
     #[test]
     fn a_quotation_that_holds_one_literal_stays_in_the_users_sentence() {
         let mut wrong = Vec::new();
@@ -6165,6 +6172,8 @@ mod tests {
             ("Keep the port at '8080' on staging.", true),
             ("Keep the port at \"8080\" on staging.", true),
             ("Name the loop variable \"x_2\" in the examples.", true),
+            ("The reviewer said \"no\" to that.", true),
+            ("Use the \"requests\" library for HTTP calls.", true),
             // A token that ends in a comma.
             ("Use ',' as the separator in every export.", true),
             // A single mark directly after an inline code span joins a
@@ -6176,6 +6185,17 @@ mod tests {
             ("The reviewer said \"(Wait!)\" and left.", false),
             ("The reviewer said 'No.' and left.", false),
             ("Tag the build \"v1.\" and publish it.", false),
+            ("The reviewer said \"[Wait!]\" and left.", false),
+            ("The reviewer said \"{Wait!}\" and left.", false),
+            ("The reviewer said \"*Wait!*\" and left.", false),
+            ("The reviewer said \"_Wait?_\" and left.", false),
+            // A mark after a backslash may be an escaped character.
+            ("Join the path with 'C:\\' on the test host.", false),
+            // An opening or a low-9 single mark between two letters is no
+            // apostrophe.
+            ("Spell the label 'don\u{2018}t' in the menu.", false),
+            ("Spell the label \"don\u{201a}t\" in the menu.", false),
+            ("Spell the label 'don\u{ff07}t' in the menu.", true),
             // A word-final single mark after a single-quoted literal may
             // close a quotation the literal's opening mark opened.
             ("Read the 'tmp_cache' table for the users' rows.", false),
@@ -6196,6 +6216,10 @@ mod tests {
             ),
             ("('main') is the release branch.", false),
             ("[\"main\"]", false),
+            ("( \"main\" ) is the release branch.", false),
+            ("**\"main\"** is the release branch.", false),
+            ("=> 'main' is the release branch.", false),
+            ("(`main`) is the release branch.", false),
             // Several words between the marks.
             (
                 "My teammate wrote 'always rebase first' in the guide.",
@@ -6329,6 +6353,63 @@ mod tests {
             (
                 "Never pin versions. Use the 'requests' library.",
                 "Never pin versions.",
+                true,
+            ),
+            // The first literal with a second reading introduces what
+            // follows it, also when a later literal closes in one reading.
+            (
+                "Use the 'requests' library with 'it_' names. Never pin it.",
+                "Never pin it.",
+                false,
+            ),
+            // A literal that closes in one reading before one with a second
+            // reading leaves the sentence between them a statement of the
+            // paragraph's start.
+            (
+                "Prefix names with 'it_'. Use the 'requests' library. Never pin it.",
+                "Prefix names with 'it_'. Use the 'requests' library.",
+                true,
+            ),
+            // A double mark after `s` has one reading.
+            (
+                "Use the \"requests\" library. Never pin it.",
+                "Never pin it.",
+                true,
+            ),
+            // A number behind a prefix, in double marks.
+            (
+                "Pin the runtime to \"v2\" in CI. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            // A word-final mark after a double-quoted literal, and one
+            // inside a word after a single-quoted literal, close nothing.
+            (
+                "Keep \"tmp_cache\" out of the users' rows. Never drop it.",
+                "Never drop it.",
+                true,
+            ),
+            (
+                "Call 'it_' the tests' prefix.\nDon't rename it.",
+                "Don't rename it.",
+                false,
+            ),
+            (
+                "Prefix test names with 'it_'. Don't rename them.",
+                "Don't rename them.",
+                true,
+            ),
+            // A single-quoted first word that closes after a letter other
+            // than `s` is read as a literal, as the pairing rules read a
+            // one-word single quotation: the sentences after it are prose.
+            (
+                "Bob wrote 'Goin' home now. Always tag the release.",
+                "Always tag the release.",
+                true,
+            ),
+            (
+                "Bob wrote 'Goin' home now.\n\nAlways tag the release.",
+                "Always tag the release.",
                 true,
             ),
             // A question in a literal makes its paragraph one the pairing
