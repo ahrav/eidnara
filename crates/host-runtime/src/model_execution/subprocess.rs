@@ -2708,6 +2708,7 @@ pub mod group_registry {
             ));
         }
         let mut text = String::new();
+        text.try_reserve_exact(meta.len().min(RECORD_READ_CAP + 1) as usize)?;
         std::io::Read::read_to_string(
             &mut std::io::Read::take(file, RECORD_READ_CAP + 1),
             &mut text,
