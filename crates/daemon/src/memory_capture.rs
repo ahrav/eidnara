@@ -105,7 +105,7 @@ pub struct CapturedMemory {
     )]
     pub contests: Vec<String>,
     /// How long the statement holds, as the extractor judged it from the
-    /// user's wording; [`class_contesting_work`] gives a settled
+    /// user's wording; `class_contesting_work` gives a settled
     /// `current_work` memory the class `request`. A plan frozen before the field existed, and a
     /// proposal that leaves it out or gives `null`, carry no class: such a
     /// memory passes the lifetime check as a [`Lifetime::Lasting`] one does
