@@ -49,7 +49,7 @@ const MAX_CLOSING_LINES: usize = 2;
 /// One kept line, in bytes, with the mark that ends a cut line.
 const MAX_LINE_BYTES: usize = 160;
 /// The command as the record's text shows it, in bytes.
-const MAX_COMMAND_BYTES: usize = 300;
+const MAX_COMMAND_BYTES: usize = 256;
 /// The key of a command's live record, in bytes.
 const MAX_KEY_BYTES: usize = 512;
 /// The tool's name as the record's text shows it, in bytes.
@@ -813,10 +813,12 @@ fn outcome_of(reading: &Reading, native_exit: Option<i64>) -> Outcome {
 }
 
 /// The record's text within [`MAX_SUMMARY_BYTES`], with room for
-/// [`RESOLVED_NOTE`]: what the result states, the command, and the kept
-/// lines. The closing lines are kept whole, and the lines that state an
+/// [`RESOLVED_NOTE`]: the time of the result and what it states, the
+/// command, and the kept lines. The time stands in the first line, so a
+/// reader of a search result that is cut still orders the failures of a
+/// project. The closing lines are kept whole, and the lines that state an
 /// error fill the bytes that remain.
-fn summary_of(tool: &str, shown: &str, failure: &Failure) -> String {
+fn summary_of(tool: &str, shown: &str, at_ms: i64, failure: &Failure) -> String {
     let stated = match (failure.exit_code, failure.flagged) {
         (Some(code), _) => format!("the command failed with exit code {code}"),
         (None, true) => "the command failed and the tool reported an error".to_owned(),
@@ -828,7 +830,8 @@ fn summary_of(tool: &str, shown: &str, failure: &Failure) -> String {
     let tool = clipped(&collapsed(tool), MAX_TOOL_BYTES);
     let command = clipped(shown, MAX_COMMAND_BYTES);
     let mut summary = format!(
-        "Tool failure recorded from the result of {tool}: {stated}.\nCommand: {command}\nOutput lines:"
+        "Tool failure recorded from the result of {tool} at {}: {stated}.\nCommand: {command}\nOutput lines:",
+        utc_time(at_ms)
     );
     let limit = MAX_SUMMARY_BYTES - RESOLVED_NOTE.len();
     let cost = |line: &Kept| line.text.len() + 1;
@@ -1132,11 +1135,11 @@ pub(crate) fn is_failure_record(object: &kernel::ObjectRow) -> bool {
         && object.source_id == FAILURE_SOURCE_ID
 }
 
-/// The time as the record shows it, in UTC to the second, so a reader can
-/// order the failures of a project.
+/// The time as the record shows it, in UTC to the millisecond, so a reader
+/// can order two failures of one second.
 fn utc_time(at_ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(at_ms)
-        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_default()
 }
 
@@ -1432,7 +1435,7 @@ impl Writer<'_> {
             revision: earlier.as_ref().map_or(1, |earlier| earlier.revision + 1),
             resolved: false,
             run: unit.run.clone(),
-            summary: summary_of(&unit.tool, &unit.shown, failure),
+            summary: summary_of(&unit.tool, &unit.shown, unit.run.at_ms, failure),
             rationale,
         };
         self.commit(&unit.key, earlier.as_ref(), head, true)
@@ -1825,7 +1828,7 @@ mod tests {
             let Outcome::Failed(failure) = judged(&output.join("\n"), true, None) else {
                 panic!("the result failed");
             };
-            let summary = summary_of("bash", command.trim(), &failure);
+            let summary = summary_of("bash", command.trim(), 1_000, &failure);
             assert!(summary.len() <= limit, "{}", summary.len());
             summary
         };
@@ -1861,7 +1864,7 @@ mod tests {
         let Outcome::Failed(failure) = judged(&output.join("\n"), true, None) else {
             panic!("the result failed");
         };
-        let kept = summary_of("bash", "make", &failure);
+        let kept = summary_of("bash", "make", 1_000, &failure);
         assert!(kept.len() <= limit, "{}", kept.len());
         assert!(
             kept.contains("error: e0") && kept.ends_with(&closing),
@@ -2002,8 +2005,8 @@ mod tests {
             lines: vec![line("error[E0308]: mismatched types")],
         };
         assert_eq!(
-            summary_of("bash", "cd api && cargo build", &failure),
-            "Tool failure recorded from the result of bash: the command failed with exit code 101.\nCommand: cd api && cargo build\nOutput lines:\nerror[E0308]: mismatched types"
+            summary_of("bash", "cd api && cargo build", 1_000, &failure),
+            "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 101.\nCommand: cd api && cargo build\nOutput lines:\nerror[E0308]: mismatched types"
         );
         // The longest outcome, tool, command, and closing lines fit with the
         // resolved sentence.
@@ -2018,7 +2021,7 @@ mod tests {
                 MAX_CLOSING_LINES
             ],
         };
-        let summary = summary_of(&"t".repeat(200), &"m".repeat(400), &full);
+        let summary = summary_of(&"t".repeat(200), &"m".repeat(400), 1_000, &full);
         assert!(summary.contains("which states no exit code"));
         assert_eq!(
             summary.matches(&"c".repeat(MAX_LINE_BYTES)).count(),

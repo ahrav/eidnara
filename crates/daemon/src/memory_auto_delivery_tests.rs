@@ -3208,7 +3208,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
     assert_eq!(visibility, "labeled");
     assert_eq!(
         record,
-        "Tool failure recorded from the result of bash: the command failed with exit code 101.\nCommand: cargo test -p api\nOutput lines:\ntest renders ... FAILED\nthread 'renders' panicked at src/render.rs:9:5:\nwidth is zero\nCommand exited with code 101"
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 101.\nCommand: cargo test -p api\nOutput lines:\ntest renders ... FAILED\nthread 'renders' panicked at src/render.rs:9:5:\nwidth is zero\nCommand exited with code 101"
     );
     let row = &served_memory_rows(&handler, (SECOND, "s2"), &project).await[0];
     assert_eq!(row["decision"]["decision_kind"], "TOOL_FAILURE");
@@ -3224,7 +3224,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
             "state": "failed",
             "exit_code": 101,
             "at_ms": 1_000,
-            "at": "1970-01-01T00:00:01Z",
+            "at": "1970-01-01T00:00:01.000Z",
             "at_source": "result",
             // The failed result is the fifth message of the window.
             "place": 5,
@@ -3302,7 +3302,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
     assert_eq!(rationale["resolved_session"], "s3");
     assert_eq!(rationale["resolved_call"], "call-5");
     assert_eq!(rationale["resolved_at_ms"], 3_000);
-    assert_eq!(rationale["resolved_at"], "1970-01-01T00:00:03Z");
+    assert_eq!(rationale["resolved_at"], "1970-01-01T00:00:03.000Z");
     forget_failure_memo(&handler);
     assert_eq!(
         record_failures(&handler, &project, "s3", &[passed()]).await,
@@ -3405,7 +3405,7 @@ async fn a_failed_command_of_a_transform_request_is_recorded_and_a_deleted_sessi
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(
         rows[0].0.starts_with(
-            "Tool failure recorded from the result of bash: the command failed with exit code 101.\nCommand: cargo test -p api\n"
+            "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 101.\nCommand: cargo test -p api\n"
         ),
         "{rows:?}"
     );
@@ -3677,7 +3677,7 @@ async fn the_exit_status_opencode_reports_decides_before_the_output_text() {
     assert_eq!(
         rows[0].0,
         format!(
-            "Tool failure recorded from the result of bash: the command failed with exit code 2.\nCommand: ls build\nOutput lines:\n{missing}"
+            "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 2.\nCommand: ls build\nOutput lines:\n{missing}"
         )
     );
     let rationale = &memory_rationales(&handler, (SECOND, "s2"), &project).await[0];

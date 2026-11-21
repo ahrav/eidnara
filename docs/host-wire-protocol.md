@@ -1630,14 +1630,16 @@ renders, and capture offers no such fact to the extractor as an existing
 memory. The search tool renders 1,024 bytes of a fact's `summary`, a line
 break, and its `rationale`, so the `summary` is at most 900 bytes and states
 the outcome first. Its first line is
-`Tool failure recorded from the result of <tool>: <outcome>.` with the
-tool's name in at most 64 bytes, and a resolved fact's first line ends with
+`Tool failure recorded from the result of <tool> at <time>: <outcome>.` with the
+tool's name in at most 64 bytes and the result's time in UTC to the
+millisecond (the `at` of the rationale, below), so a reader of a cut search
+result orders the failures of a project, and a resolved fact's first line ends with
 ` Resolved: a later run of this command reported no failure.` `<outcome>` is
 `the command failed with exit code <n>` for a nonzero code, else
 `the command failed and the tool reported an error` for a result the
 harness marks, else `the command failed by the failure lines of its output,
 which states no exit code`. The second line is `Command: ` and the redacted
-command with whitespace runs as single spaces, in at most 300 bytes. The
+command with whitespace runs as single spaces, in at most 256 bytes. The
 third line is `Output lines:`, and the kept lines of the output follow: the
 first five lines that state an error and then the last two lines, each
 trimmed, each at most 160 bytes, each kept once. A line states an error when
