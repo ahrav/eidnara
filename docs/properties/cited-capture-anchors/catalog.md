@@ -236,11 +236,11 @@ Reachability: default-production - every native capture submit publishes through
 Status: active
 Exercised: yes - `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` replays a publish; the envelope test replays a receipt and changes its digest
 Guarantee: The capture commit's operation key is the project's `memory_capture` key for the job id and its request digest is the SHA-256 of the frozen prepared plan, so a replay of the same plan returns the stored receipt with no new rows and a changed plan under the same key is `Conflict`.
-Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. Production reaches the digest conflict when a committed source's queue row is pruned and the same message is queued and planned again with another extraction: the plan is released, the source waits out the dispatch backoff, and the ninth dispatch abandons it (`a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap`, `crates/daemon/src/memory_auto_delivery_tests.rs:5848`). Refinement R7 marked the conflict test-only before that path was handled
+Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. Production reaches the digest conflict when a committed source's queue row is pruned and the same message is queued and planned again with another extraction: the plan is released, the source waits out the dispatch backoff, and the ninth dispatch abandons it (`a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap`, `crates/daemon/src/memory_auto_delivery_tests.rs:5857`). Refinement R7 marked the conflict test-only before that path was handled
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
 Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:4322` and the frozen-plan read in `publish` at `:1819`
-Existing check: `crates/daemon/src/memory_capture.rs:11346`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24958` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:11348`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24958` (unaudited)
 Impact: a non-replaying retry would duplicate memories; a digest that omitted plan fields would let a changed plan replay the old receipt
 Open questions: None.
 
@@ -270,7 +270,7 @@ Check: `always` - for every capture job, `job_id == job_id(source, redacted_text
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
 Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:136`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:1066`, and the object id at `:4598`
-Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:9974`, `:10023`, `:11076`, `:11054`, `:11346`, `:10523`; `crates/daemon/src/lib.rs:24958`, `:26418` (unaudited)
+Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:9974`, `:10023`, `:11078`, `:11056`, `:11348`, `:10523`; `crates/daemon/src/lib.rs:24958`, `:26418` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -376,7 +376,7 @@ Check: `always` - for every capture decision a job's extraction writes with `anc
 Fault/timing angle: a retry after a rolled-back or lost commit
 Required faults and enabling state: the same job and plan published into two fresh Kernels; a committed publish whose completion the store refuses, then a retry
 Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:403` and the lazy insert in `write_captured_memories` at `crates/daemon/src/memory_capture.rs:4590`
-Existing check: `crates/daemon/src/memory_capture.rs:10188`, `:10939`; `crates/daemon/src/source_capture_tests.rs:3876`; `crates/daemon/src/source_capture_tests.rs:3528` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:732` for the Kernel refusal of a second row (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:10188`, `:10941`; `crates/daemon/src/source_capture_tests.rs:3876`; `crates/daemon/src/source_capture_tests.rs:3528` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:732` for the Kernel refusal of a second row (unaudited)
 Impact: duplicate anchors per job, or `Conflict` on retry that permanently fails the job
 Open questions:
 - Whether anchors should be shared across jobs at one oid (needs human input; the model keeps per-job identity because `insert_anchor` refuses duplicates and no receipt covers a cross-job row).

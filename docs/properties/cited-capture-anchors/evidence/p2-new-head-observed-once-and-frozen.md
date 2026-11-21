@@ -90,7 +90,7 @@ aliased branch loose and in `packed-refs`.
   writes requires (a plan of another version that decodes and whose commit
   the Kernel holds completes by replay); `head` is `#[serde(default)]`, so a plan of that
   version without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:11153`).
+  (`crates/daemon/src/memory_capture.rs:11155`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 

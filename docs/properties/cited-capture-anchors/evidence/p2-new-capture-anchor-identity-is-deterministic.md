@@ -20,7 +20,7 @@ A retry after a rolled-back commit, or a replay after a lost reply.
 
 ## What a test must construct
 
-One job and plan published into two fresh Kernels, comparing anchor and decision rows (`crates/daemon/src/memory_capture.rs:10188`); a publish refused after its anchor and first decision were written, then retried into the same Kernel (`:10939`); a committed publish whose completion the store refuses, then a retry that replays the receipt (`crates/daemon/src/source_capture_tests.rs:3876`); five jobs in one submission writing five anchors (`crates/daemon/src/source_capture_tests.rs:3528`).
+One job and plan published into two fresh Kernels, comparing anchor and decision rows (`crates/daemon/src/memory_capture.rs:10188`); a publish refused after its anchor and first decision were written, then retried into the same Kernel (`:10941`); a committed publish whose completion the store refuses, then a retry that replays the receipt (`crates/daemon/src/source_capture_tests.rs:3876`); five jobs in one submission writing five anchors (`crates/daemon/src/source_capture_tests.rs:3528`).
 
 ## Investigation log
 
