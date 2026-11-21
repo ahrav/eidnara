@@ -981,7 +981,7 @@ describe("eidnara_search through the fused route", () => {
             expect(lines[header + 1]).toBe(`${outcome}${resolved}`);
             expect(lines[header + 2]).toBe("Command: cargo test -p api");
             expect(execution.text).toContain(
-                `\nwidth is zero\n${closing}\n{"at":"2026-03-02T10:15:00Z"`,
+                `\nwidth is zero\n${closing}\n{"at":"2026-03-02T10:15:00.000Z"`,
             );
         }
     });
