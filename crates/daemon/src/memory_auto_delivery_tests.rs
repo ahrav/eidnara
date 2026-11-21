@@ -3223,8 +3223,9 @@ async fn a_newer_plan_replaces_an_older_one() {
 /// Work left open is live in a later session when its own session ended
 /// with no later statement of the user ending it. A request for the turn at
 /// hand is never work left open, so it reaches no later session. Work the
-/// user left open and reported finished in the same session is ended there
-/// and reaches no later session. Work of that session that no statement
+/// user left open and reported finished in the same session, in a remark
+/// whose plan keeps its `replaces` link to that work, is ended there and
+/// reaches no later session. Work of that session that no statement
 /// ended is delivered.
 #[tokio::test]
 async fn only_work_a_session_left_open_reaches_a_later_session() {
@@ -3325,12 +3326,46 @@ fn rows_by_class(handler: &Handler, project: &Path) -> Vec<(String, String)> {
     rows
 }
 
+/// The capture queue of `project` as `(pending, failed, completed)`.
+fn queue_counts(store: &MemoryStore, project: &Path) -> (i64, i64, i64) {
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(project).digest())
+        .unwrap();
+    (status.pending, status.failed, status.completed)
+}
+
+/// Extracts a whole message that repeats [`RETRY_PLAN`] without stored rows,
+/// under the class `repeated`, and returns once its source has completed.
+async fn repeat_plan_without_stored_rows(
+    handler: &Handler,
+    store: &MemoryStore,
+    project: &Path,
+    (id, role): (&str, &str),
+    repeated: &'static str,
+) {
+    let (_, _, completed) = queue_counts(store, project);
+    let repeat = (id, role, RETRY_PLAN);
+    enqueue_after_failures(handler, store, project, (SECOND, "s2"), repeat, 2).await;
+    drain(handler, SECOND, "s2", &[repeat], |_, existing| {
+        assert!(existing.is_empty(), "{id}, {repeated}: {existing:?}");
+        vec![classed(RETRY_PLAN, repeated)]
+    })
+    .await;
+    assert_eq!(
+        queue_counts(store, project),
+        (0, 0, completed + 1),
+        "{id}, {repeated}: the repeat's plan is published"
+    );
+}
+
 /// A source extracted without stored rows repeats, word for word, a
-/// statement an approved row holds. The daemon links the repeat to that row
-/// when both are work in progress or neither is, and the repeat is stored
-/// as its own row when one of the two is work in progress. A rule that
-/// repeats a live plan therefore stays delivered after a completion remark
-/// ends the plan.
+/// statement an approved row holds. A whole user statement eligible for
+/// approval names that row when both are work in progress or neither is,
+/// and is stored as its own row when one of the two is work in progress.
+/// Once a rule and a plan hold the same words, a further repeat names the
+/// row of its own class. A rule that repeats a live plan therefore stays
+/// delivered after a completion remark ends the plan. An assistant's echo
+/// and a user's repeat classed `request` or `status` name the plan.
 #[tokio::test]
 async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery_class() {
     let done = "The retry budget is in the client config now.";
@@ -3350,13 +3385,7 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
         )
         .await;
         let first = memory_id(&handler, &project, &stated(RETRY_PLAN));
-        let repeat = ("m2", "user", RETRY_PLAN);
-        enqueue_after_failures(&handler, &store, &project, (SECOND, "s2"), repeat, 2).await;
-        drain(&handler, SECOND, "s2", &[repeat], |_, existing| {
-            assert!(existing.is_empty(), "{stored}, {repeated}: {existing:?}");
-            vec![classed(RETRY_PLAN, repeated)]
-        })
-        .await;
+        repeat_plan_without_stored_rows(&handler, &store, &project, ("m2", "user"), repeated).await;
 
         let rows = rows_by_class(&handler, &project);
         if stored == repeated {
@@ -3379,6 +3408,16 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
         ];
         expected.sort();
         assert_eq!(rows, expected);
+        // Each class has its row, so a further repeat of either class names
+        // one and adds none, whichever row the daemon reads first.
+        for (id, class) in [("m3", stored), ("m4", repeated)] {
+            repeat_plan_without_stored_rows(&handler, &store, &project, (id, "user"), class).await;
+            assert_eq!(
+                rows_by_class(&handler, &project),
+                expected,
+                "{stored}, {repeated}: a further repeat classed {class}"
+            );
+        }
         let (plan, rule) = if stored == "current_work" {
             (&first, &second)
         } else {
@@ -3398,7 +3437,7 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
         );
 
         // A completion remark that names the plan ends the plan alone.
-        capture(&handler, SECOND, "s2", &[("m3", "user", done)], |_, _| {
+        capture(&handler, SECOND, "s2", &[("m5", "user", done)], |_, _| {
             vec![Extracted {
                 replaces: vec![plan.clone()],
                 ..classed(done, "status")
@@ -3436,29 +3475,31 @@ async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery
         );
     }
 
-    // An assistant's echo of the plan is no statement of the user, so it
-    // names the plan under any class and adds no row.
-    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(
-        &handler,
-        FIRST,
-        "s1",
-        &[("m1", "user", RETRY_PLAN)],
-        |_, _| vec![classed(RETRY_PLAN, "current_work")],
-    )
-    .await;
-    let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
-    let echo = ("m2", "assistant", RETRY_PLAN);
-    enqueue_after_failures(&handler, &store, &project, (SECOND, "s2"), echo, 2).await;
-    drain(&handler, SECOND, "s2", &[echo], |_, existing| {
-        assert!(existing.is_empty(), "{existing:?}");
-        vec![classed(RETRY_PLAN, "lasting")]
-    })
-    .await;
-    assert_eq!(
-        rows_by_class(&handler, &project),
-        [(plan, "current_work".to_string())]
-    );
+    // A repeat that is stored labeled is no statement eligible for
+    // approval, so it names the plan under any class and adds no row: an
+    // assistant's echo, and a user's repeat classed `request` or `status`.
+    for (role, class) in [
+        ("assistant", "lasting"),
+        ("user", "request"),
+        ("user", "status"),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, "current_work")],
+        )
+        .await;
+        let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        repeat_plan_without_stored_rows(&handler, &store, &project, ("m2", role), class).await;
+        assert_eq!(
+            rows_by_class(&handler, &project),
+            [(plan, "current_work".to_string())],
+            "{role}, {class}"
+        );
+    }
 }
 
 /// A completion remark names the live plan under `replaces`. Extracted with
@@ -7442,6 +7483,52 @@ async fn a_statement_that_ends_with_its_task_settles_no_contest() {
                 block.contains("contested") && block.contains("500 now"),
                 "{block}"
             );
+        }
+    }
+}
+
+/// A source extracted without stored rows repeats a contested statement
+/// word for word under a class that ends with its task. A repeat classed
+/// `request` or `status` names the statement and writes no fact. A repeat
+/// classed `current_work` takes that link only to live work in progress, so
+/// it is stored as work in progress beside the statement. The contest stays
+/// on its observation in each case.
+#[tokio::test]
+async fn a_repeat_extracted_without_stored_rows_settles_no_contest() {
+    for lifetime in ["status", "request", "current_work"] {
+        let (handler, store, _dir, project, statement, observation) = contested_limit_store().await;
+        let repeat = ("m3", "user", LIMIT_300);
+        enqueue_after_failures(&handler, &store, &project, (SECOND, "s2"), repeat, 2).await;
+        drain(&handler, SECOND, "s2", &[repeat], |_, existing| {
+            assert!(existing.is_empty(), "{lifetime}: {existing:?}");
+            vec![classed(LIMIT_300, lifetime)]
+        })
+        .await;
+        assert_eq!(queue_counts(&store, &project), (0, 0, 3), "{lifetime}");
+
+        let rows = memory_rows(&handler, &project);
+        let contested = rows
+            .iter()
+            .find(|row| row.0 == statement)
+            .unwrap_or_else(|| panic!("{lifetime}: the statement keeps its row: {rows:?}"));
+        assert_eq!(
+            contested.3["contested_by"]["memory"], observation,
+            "{lifetime}: the contest stays on its observation"
+        );
+        let repeats: Vec<_> = rows
+            .iter()
+            .filter(|row| row.1 == stated(LIMIT_300) && row.0 != statement)
+            .collect();
+        if lifetime == "current_work" {
+            assert_eq!(repeats.len(), 1, "{rows:?}");
+            assert_eq!(repeats[0].3["lifetime"], "current_work");
+            assert!(
+                repeats[0].3.get("contested_by").is_none(),
+                "{:?}",
+                repeats[0].3
+            );
+        } else {
+            assert!(repeats.is_empty(), "{lifetime}: {rows:?}");
         }
     }
 }

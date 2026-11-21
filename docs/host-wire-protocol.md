@@ -1126,7 +1126,7 @@ target an answer to that request names is released. The daemon marks a frozen
 memory a duplicate of a reference memory selected for its request when that
 memory is served on `auto_inject` and the two stored texts, appended failure lines
 included, are equal up to the attribution label, edge whitespace, and closing `.` or
-`!`; a whole user statement eligible for approval is marked a duplicate of live work in progress only when its own class is `current_work`, and of any other such memory only when its class is another, so a rule and a plan of the same words are each stored under their own class. The daemon writes every other frozen memory as a new row beside any stored row it restates or corrects. A memory frozen from that request keeps no `replaces`, `also_replaces`, or `contests` target, so it ends no live work in progress and records no contest: work its statement reports finished stays live work in progress until a statement extracted with reference memories ends it. Cancellation
+`!`; a whole user statement eligible for approval is marked a duplicate of live work in progress only when its own class is `current_work`, and of any other such memory only when it is classed `lasting` or `unsettled` or carries no class, so a rule and a plan of the same words are each stored under their own class. The daemon writes every other frozen memory as a new row beside any stored row it restates or corrects. A memory frozen from that request keeps no `replaces`, `also_replaces`, or `contests` target, so it ends no live work in progress and records no contest. Cancellation
 and unavailable native auth do not consume that allowance. Dispatch counts
 survive restart and drive exponential retry delay from one second to 128
 seconds; issued work carries its deadline, so a lease lost to a restart is
@@ -1482,8 +1482,8 @@ statement rule replaces no fact served on `auto_inject` and takes no
 replacement claim: each such target
 named in `replaces` or `also_replaces` becomes a contest, and when the
 `replaces` target is one, every target of the proposal does. Targets that become contests are counted after the contests the proposal names, the `replaces` target before the `also_replaces` targets, and a target past the fourth is released under the rule below: that fact stays as it is served and the proposal records no contest on it. A user statement
-whose `replaces` target is released contests that target when the Kernel
-serves it on `auto_inject`, so the two values are shown as a disagreement. A
+whose `replaces` target is released contests that target when the request provided the target and the Kernel
+serves it on `auto_inject`, under the contest checks and the contest rule (below), which decide whether the two values are shown as a disagreement; a target the request did not provide becomes no contest. A
 user's statement classed `current_work`, `request`, or `status` replaces no fact served
 on `auto_inject` except live work in progress:
 each other such target it names in `replaces` or `also_replaces` becomes a contest
@@ -1643,8 +1643,8 @@ record's `stated_seq` as its own `stated_seq`, so a later contest dates the
 statement from its first commit. A user statement
 of another text that names a contested fact under `duplicate_of` is stored as
 its own fact and the contest stays. A statement classed `current_work`, `request`, or
-`status` settles no contest: its word-for-word repeat writes no fact, and its
-statement of another text is stored under the class its frozen plan gives it. A statement of any
+`status` settles no contest: its word-for-word repeat that names the contested fact under `duplicate_of` writes no fact, and its
+statement of another text is stored under the class its frozen plan gives it; a `current_work` repeat extracted without reference memories takes that link only to live work in progress (above), so beside a contested fact of another class it is stored as its own fact and the contest stays. A statement of any
 class that ends contested work in progress (above) ends that statement, and
 the ended fact holds no contest. The extractor is
 told which reference memories are `contested`; the flag reads the stored
