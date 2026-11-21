@@ -145,6 +145,8 @@ fn lifetime_name<'de, D: serde::Deserializer<'de>>(
 #[serde(rename_all = "snake_case")]
 pub enum Lifetime {
     /// What happened or is observed now: progress, a result, a symptom.
+    /// Also general talk about people, careers, the organisation, or
+    /// teamwork that gives the work on the project nothing to follow.
     Status,
     /// An instruction the turn at hand answers.
     Request,
