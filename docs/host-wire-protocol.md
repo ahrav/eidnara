@@ -1127,7 +1127,7 @@ model/output failure of that source, so later sources are not held behind it.
 Dispatches are capped at nine per source across owners: a model/output failure
 on or after the ninth dispatch abandons the source. A frozen plan the Kernel
 refuses on admission policy, invalid input, or a missing object, and a frozen
-plan the host cannot decode or whose plan version is another build's, records one dispatch per refused publication: the
+plan the host cannot decode, records one dispatch per refused publication: the
 retry delay doubles with the count, and the refusal that reaches the ninth
 dispatch abandons the source with the error `kernel_write_refused` or
 `invalid_preparation`. A Kernel conflict, which means a target moved under the
@@ -1322,7 +1322,7 @@ made in answers it, and the user's next message says so when it did not. An appr
 the work an earlier session left open, so the statement is delivered
 until a later statement of the user ends it (below), within the bounds of
 the block's share for work in progress and of the delivery read (both
-below). A `current_work` fact whose plan is frozen contesting a fact
+below). A `current_work` fact of a user source whose plan is frozen contesting a fact
 served on `auto_inject`, after the links of its source and its batch are
 settled (below), is an instruction for one occasion: it is stored with
 `lifetime` `request`, and the contest rule (below) shows it on the line of
@@ -1330,9 +1330,11 @@ the fact it contests. A `current_work` fact frozen with no such contest,
 because it names none, contests only labeled facts, or another fact of its
 source or batch holds the contest, keeps its class. A frozen plan carries
 plan version 2, which names the classes as this section defines them.
-Publication refuses a plan of another version as it refuses one it cannot
-decode (`invalid_preparation`, below), so a class an earlier build froze is
-never read under these rules. A captured fact's rationale
+The commit of a plan of another version is refused as invalid input
+(`kernel_write_refused`, above), so a class an earlier build froze is
+never read under these rules; a plan of another version that an earlier
+build had already committed replays its receipt, which completes its
+source. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1405,8 +1407,9 @@ rounded down and the row bound at least one,
 taken in the read's order, which is by the commit that wrote each fact's
 current row, so the other facts keep the whole of the read's row and byte
 bounds, and they are selected against the whole token budget first. The
-read ends for a session when its bounds on the other facts are reached, so
-the element holds work in progress newer than that point, and the
+read ends for a session when one of the other facts is refused at those
+bounds, so the element holds work in progress the read judged before that
+fact, and the
 eight-page limit above counts every fact the read judges, work in progress
 past its bounds among them. The
 element then takes the newest
@@ -1484,7 +1487,7 @@ statement: a `replaces` target of another category is released with its
 `also_replaces` targets (below), and the statement then contests the work in
 progress when that target is among its first four contest targets and its
 frozen plan keeps the contest, so the
-work in progress stays delivered, with the statement shown on its line under the contest rule (below). When the
+work in progress stays live, with the statement shown on its line under the contest rule (below). When the
 `replaces` target is a fact served on `auto_inject` that the statement may not
 replace under the rule above, every target becomes a contest, live work in
 progress among them. The ending statement is stored as

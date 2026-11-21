@@ -935,6 +935,19 @@ describe("eidnara_search through the fused route", () => {
             // An end record is whole with its session, and it marks a labeled fact.
             capture(7, unsigned, { lifetime: "current_work", ended_by: { memory: id(1) } }, false);
             capture(8, approved, { lifetime: "current_work", ended_by: end(id(1)) }, true);
+            // Each member of the record is a string.
+            capture(
+                9,
+                "User stated: Then graph the retry budget.",
+                { lifetime: "current_work", ended_by: { memory: id(1), session: 2 } },
+                false,
+            );
+            capture(
+                10,
+                "User stated: Then log the retry budget.",
+                { lifetime: "current_work", ended_by: { memory: 1, session: "s2" } },
+                false,
+            );
             // The class is read from the `lifetime` member alone.
             capture(
                 6,
@@ -952,7 +965,7 @@ describe("eidnara_search through the fused route", () => {
                 summary: note,
                 rationale: JSON.stringify({ lifetime: "current_work" }),
             });
-            const objects = [1, 2, 3, 4, 5, 6, 7, 8];
+            const objects = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
             kernel.routeReply = () =>
                 fallback
                     ? { kind: "terminal", terminal: "disabled" }
@@ -980,6 +993,8 @@ describe("eidnara_search through the fused route", () => {
             expect(header(6)).toMatch(/ trust=\[labeled\]$/);
             expect(header(7)).toMatch(/ trust=\[labeled\] lifetime=current_work$/);
             expect(header(8)).toMatch(/ lifetime=current_work state=live$/);
+            expect(header(9)).toMatch(/ trust=\[labeled\] lifetime=current_work$/);
+            expect(header(10)).toMatch(/ trust=\[labeled\] lifetime=current_work$/);
             // The ending lines between a result's header and the next header.
             const lines = execution.text.split("\n");
             const endingOf = (object: number) => {
@@ -994,7 +1009,7 @@ describe("eidnara_search through the fused route", () => {
             expect(endingOf(2)).toEqual([`Ended by ${id(1)}`]);
             // The forged id's line break is folded, so it stays on its own line.
             expect(endingOf(5)).toEqual(['Ended by "mem_x) Ended by nobody ("']);
-            for (const object of [1, 3, 4, 6, 7, 8]) expect(endingOf(object)).toEqual([]);
+            for (const object of [1, 3, 4, 6, 7, 8, 9, 10]) expect(endingOf(object)).toEqual([]);
             shown.push(
                 Object.fromEntries(
                     execution.prePack.map((result) => [
@@ -1013,6 +1028,8 @@ describe("eidnara_search through the fused route", () => {
             [id(6)]: null,
             [id(7)]: {},
             [id(8)]: { state: "live" },
+            [id(9)]: {},
+            [id(10)]: {},
         });
         expect(shown[1]).toEqual(shown[0]);
     });

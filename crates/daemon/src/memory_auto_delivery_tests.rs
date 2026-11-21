@@ -3342,10 +3342,13 @@ async fn two_proposals_of_one_plan_freeze_as_one_fact_classed_by_its_contest() {
             .lines()
             .find(|line| line.contains(&stated(INTEGRATION_RULE)))
             .unwrap_or_else(|| panic!("{case}: {block}"));
-        assert!(
-            rule_line.contains("contested") && rule_line.contains(&stated(plan)),
-            "{case}: {block}"
+        // The contest names the one stored fact and quotes its text whole.
+        let contest = format!(
+            "by {}: {})",
+            stored[0].0,
+            serde_json::to_string(&stated(plan)).unwrap()
         );
+        assert!(rule_line.ends_with(&contest), "{case}: {block}");
     }
 }
 
@@ -5284,56 +5287,88 @@ fn queue_row(store: &MemoryStore, job: &str) -> QueueRow {
         .unwrap()
 }
 
-/// A plan of another plan version is refused as frozen, so the lifetime
-/// classes of an earlier build are never read under this build's rules: a
-/// version 1 plan that classes an instruction `current_work` writes
-/// nothing and records one dispatch.
+/// The commit of a plan of another plan version is refused, so the
+/// lifetime classes of an earlier build are never read under this build's
+/// rules: a version 1 plan that classes an instruction `current_work`
+/// writes nothing and records one dispatch. A version 1 plan whose commit
+/// the Kernel already holds replays its receipt and completes its source.
 #[tokio::test]
-async fn a_plan_of_another_version_is_refused_and_writes_nothing() {
+async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made() {
+    use sha2::{Digest, Sha256};
     let instruction = "Rename the retry helper to backoff_delay in this module.";
+    let committed = "Rename the upload helper to send_part in this module.";
     let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
-    let digest = kernel_routes::ProjectBinding::new(&project)
-        .digest()
-        .to_owned();
-    let jobs = enqueue(&handler, FIRST, "s1", &[("m1", "user", instruction)]).await;
-    let job = jobs[0].as_str();
-    assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
-    let plan = json!({"version": 1, "model": "test/model", "memories": [{
-        "category": "PROJECT_RULES",
-        "content": stated(instruction),
-        "quote": instruction,
-        "lifetime": "current_work",
-    }]})
-    .to_string();
-    assert!(
-        store
-            .prepare_memory_capture(&digest, job, &plan)
-            .unwrap()
-            .is_some()
-    );
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let digest = binding.digest().to_owned();
+    let jobs = enqueue(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", instruction), ("m2", "user", committed)],
+    )
+    .await;
+    let plan = |text: &str| {
+        json!({"version": 1, "model": "test/model", "memories": [{
+            "category": "PROJECT_RULES",
+            "content": stated(text),
+            "quote": text,
+            "lifetime": "current_work",
+        }]})
+        .to_string()
+    };
+    for (job, text) in jobs.iter().zip([instruction, committed]) {
+        assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
+        assert!(
+            store
+                .prepare_memory_capture(&digest, job, &plan(text))
+                .unwrap()
+                .is_some()
+        );
+    }
+    // The receipt an earlier build's commit of the second plan left.
+    handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .commit_before(
+            std::time::Instant::now() + Duration::from_secs(5),
+            kernel::CommitIntent {
+                producer: "memory_capture".into(),
+                operation_key: binding.operation_key("memory_capture", &jobs[1]).unwrap(),
+                request_digest: format!("{:x}", Sha256::digest(plan(committed).as_bytes())),
+                actor: "agent:memory_capture".into(),
+                cause: "automatic project memory capture".into(),
+            },
+            |_| Ok("0".into()),
+        )
+        .unwrap();
+
     let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
-    assert_eq!(
-        body(
-            handler
-                .handle_native_capture_next(test_route(FIRST), &next)
-                .await
-        )["state"],
-        "pending"
+    body(
+        handler
+            .handle_native_capture_next(test_route(FIRST), &next)
+            .await,
     );
-    let (attempts, _, error, abandoned, _, frozen) = queue_row(&store, job);
+    let (attempts, _, error, abandoned, _, frozen) = queue_row(&store, &jobs[0]);
     assert_eq!(
         (attempts, error.as_deref(), abandoned),
-        (2, Some("invalid_preparation"), None)
+        (2, Some("kernel_write_refused"), None)
     );
-    assert_eq!(frozen.as_deref(), Some(plan.as_str()));
+    assert_eq!(frozen, Some(plan(instruction)));
     assert!(memory_rows(&handler, &project).is_empty());
     assert!(live_statement_records(&handler, &project).is_empty());
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.completed, status.pending),
+        (1, 1),
+        "the committed plan's source is complete"
+    );
 
-    // The same plan under this build's version commits.
+    // The refused plan under this build's version commits.
     store
-        .execute_tag_sql_for_test(&format!(
-            "UPDATE memory_capture_jobs SET retry_at_ms=0,prepared_json=replace(prepared_json,'\"version\":1','\"version\":2') WHERE job_id='{job}'"
-        ))
+        .execute_tag_sql_for_test(
+            "UPDATE memory_capture_jobs SET retry_at_ms=0,prepared_json=replace(prepared_json,'\"version\":1','\"version\":2') WHERE prepared_json IS NOT NULL",
+        )
         .unwrap();
     handler.native_capture.lock().unwrap().expire_all_for_test();
     body(

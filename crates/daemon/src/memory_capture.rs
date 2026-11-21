@@ -46,7 +46,7 @@ pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
 /// The version of a frozen plan. A plan of version 2 holds the lifetime
 /// classes as this build reads them: `current_work` is work the user leaves
 /// open beyond the turn, and `request` is an instruction the turn answers.
-/// Publication refuses a plan of another version.
+/// The commit of a plan of another version is refused as invalid input.
 const CAPTURE_PLAN_VERSION: u32 = 2;
 pub const MAX_CAPTURE_MESSAGES: usize = 32;
 pub const MAX_CAPTURE_INPUT_BYTES: usize = 64 * 1024;
@@ -1827,9 +1827,8 @@ impl CaptureWork {
             Ok(kernel) => kernel,
             Err(_) => return Err((Unpublished::Retained, Some(frozen))),
         };
-        let output = match serde_json::from_str::<PreparedCapture>(prepared) {
-            Ok(output) if output.version == CAPTURE_PLAN_VERSION => output,
-            _ => return Err((Unpublished::Refused("invalid_preparation"), Some(frozen))),
+        let Ok(output) = serde_json::from_str::<PreparedCapture>(prepared) else {
+            return Err((Unpublished::Refused("invalid_preparation"), Some(frozen)));
         };
         let settlement = if citation_consent(&self.binding.config) {
             settlement
@@ -4458,6 +4457,12 @@ fn write_captured_memories(
         approval_refused,
         earlier,
     } = plan;
+    // The version is judged inside the commit, so a plan of another
+    // version that an earlier build committed replays its receipt and
+    // completes its source.
+    if output.version != CAPTURE_PLAN_VERSION {
+        return Err(kernel::KernelError::InvalidInput);
+    }
     let mut domains = HashSet::new();
     let mut ready = false;
     let mut refusal = None;
@@ -10657,6 +10662,17 @@ mod tests {
         assert_eq!(ended.2["ended_by"]["session"], source.session_id.as_str());
         let ending = ended.2["ended_by"]["memory"].as_str().unwrap();
         assert_ne!(ending, plan_id);
+        // The ended revision's id is derived from the plan it supersedes
+        // and the fact that ended it.
+        let derived = {
+            use sha2::{Digest, Sha256};
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(format!("{plan_id}:ended:{ending}").as_bytes())
+            );
+            format!("mem_{}", &digest[..32])
+        };
+        assert_eq!(target(&stated(plan)).id, derived);
         let remark = after.iter().find(|row| row.0 == with_line).unwrap();
         assert_eq!(remark.1, kernel::SurfaceVisibility::Labeled);
         assert_eq!(remark.2["lifetime"], "status");

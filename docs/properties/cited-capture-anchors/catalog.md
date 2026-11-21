@@ -264,7 +264,7 @@ Open questions: None.
 Type: safety
 Reachability: default-production - every enqueue and every publish
 Status: active
-Exercised: yes - store and daemon tests enqueue the same source twice, hash out-of-grammar ids, and publish batches
+Exercised: yes - store and daemon tests enqueue the same source twice, hash out-of-grammar ids, and publish batches; `a_stored_plan_ends_work_in_progress_and_conflicts_on_a_standing_statement` derives an ended revision's id
 Guarantee: A capture job id is the SHA-256 of `(project, harness, session_id, message_id, role, redacted text)` with length prefixes, and the object id of each decision a job's extraction writes is derived from `(job_id, memory index)`, so a retried job writes the same ids. A contested, settled, or ended statement's revision takes its id from the statement it supersedes and the contesting fact, the settling job, or the ending fact (`crates/daemon/src/memory_capture.rs:4085`), so a retried commit writes the same revision.
 Check: `always` - for every capture job, `job_id == job_id(source, redacted_text)`, and for every capture decision its extraction writes, `object_id == "mem_" + sha256(job_id + ":" + index)[..32]`; for every revision a rewrite writes, `object_id == "mem_" + sha256(predecessor_id + ":" + kind + ":" + by)[..32]`, where `kind` and `by` are `contested` and the contesting fact's id, `settled` and the settling job's id, or `ended` and the ending fact's id
 Fault/timing angle: none
