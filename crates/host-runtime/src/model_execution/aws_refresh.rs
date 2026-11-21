@@ -131,8 +131,8 @@ struct State {
     failure: Option<SourceError>,
     failures: u32,
     unresolved: bool,
-    /// A refresh retained its crash-ownership record.
-    record_retained: bool,
+    /// How many refreshes stopped waiting for the removal of their helper's crash-ownership record.
+    records_retained: usize,
     closed: bool,
 }
 
@@ -287,12 +287,18 @@ impl SourceOwner {
     }
 
     /// Closes the owner and waits for its refresh to settle physically. Returns whether
-    /// every refresh proved its cleanup, including removal of its crash-ownership record.
+    /// every refresh proved its helper's teardown and cleanup. A helper record whose
+    /// removal outlasted its wait is counted by [`Self::records_retained`].
     pub async fn join(&self) -> bool {
         self.close();
         self.0.tasks.wait().await;
-        let state = self.0.read();
-        !(state.unresolved || state.record_retained)
+        !self.0.read().unresolved
+    }
+
+    /// How many refreshes stopped waiting for the removal of their helper's crash-ownership
+    /// record. Each removal keeps running, so the registry says whether a record remains.
+    pub fn records_retained(&self) -> usize {
+        self.0.read().records_retained
     }
 
     /// Starts the single refresh for the demand that ends at `demand`. The refresh runs
@@ -377,7 +383,7 @@ impl Inner {
         let mut state = self.lock();
         state.in_flight = None;
         state.unresolved |= outcome.failure == Some(TransactionFailure::CleanupUnproven);
-        state.record_retained |= outcome.record_retained;
+        state.records_retained += usize::from(outcome.record_retained);
         let stale = epoch != state.epoch;
         let verdict = if outcome
             .identity
@@ -1085,7 +1091,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_retained_crash_record_keeps_the_source_usable_and_fails_the_join() {
+    async fn a_retained_crash_record_keeps_the_source_usable_and_is_reported_after_the_join() {
         let h = harness();
         let mut retained = h.ok(HOUR);
         retained.record_retained = true;
@@ -1096,7 +1102,12 @@ mod tests {
             .expect("a retained record leaves the source usable");
         assert_eq!(h.fake.calls(), 1);
         assert!(
-            !h.owner.join().await,
+            h.owner.join().await,
+            "the helper's teardown and cleanup were proven"
+        );
+        assert_eq!(
+            h.owner.records_retained(),
+            1,
             "a retained crash record is cleanup debt at shutdown"
         );
     }
