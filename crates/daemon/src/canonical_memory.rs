@@ -265,7 +265,7 @@ const MAX_DELIVERY_PAGES: usize = 8;
 
 /// Each delivery charges work in progress to separate row and byte caps: a
 /// quarter of each walk cap, rounded down, and at least one row.
-const WORK_READ_DIVISOR: usize = 4;
+pub(crate) const WORK_READ_DIVISOR: usize = 4;
 
 /// The project's injectable memory rows at `tip` that a pass delivers to each
 /// of `sessions`: for one session, the newest rows under the row and byte

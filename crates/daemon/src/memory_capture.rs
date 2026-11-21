@@ -55,9 +55,9 @@ pub const MAX_CAPTURE_MEMORIES: usize = 64;
 pub const MAX_CAPTURE_MEMORY_BYTES: usize = 2048;
 const CAPTURE_FRAGMENT_BYTES: usize = 16 * 1024;
 const MAX_CAPTURE_WORKERS: usize = 16;
-/// Per worker: bounded canonical read (8 MiB payload plus row/lookup overhead),
-/// source and response buffers, parsed output, and frozen publication metadata.
-pub(crate) const RETAINED_BYTES_BOUND: u64 = MAX_CAPTURE_WORKERS as u64 * 32 * 1024 * 1024;
+/// Per worker: 4.5 read byte caps for [`select_existing_memories`] and 4 MiB for buffers and plans.
+pub(crate) const RETAINED_BYTES_BOUND: u64 = MAX_CAPTURE_WORKERS as u64
+    * (kernel_routes::read::MAX_READ_ROW_BYTES as u64 * 9 / 2 + 4 * 1024 * 1024);
 
 /// Text roles admitted to extraction. Tool output and reasoning are not memory
 /// instructions and must not be relabeled as user messages by an adapter.
@@ -11700,6 +11700,26 @@ mod tests {
                 json!({"lifetime": "lasting", "category": "NAMING", "contests": others}),
             ),
             others
+        );
+    }
+
+    /// During reference selection, the explicit-search window and the
+    /// delivery walk's in-flight page each retain one read byte cap of
+    /// decision payloads. The walk's response retains two read byte caps of
+    /// other rows and two work byte caps. Each worker reserves another 4 MiB
+    /// for source and response buffers, parsed output, and frozen
+    /// publication metadata.
+    #[test]
+    fn the_worker_reservation_covers_the_payloads_the_reference_reads_hold() {
+        let cap = kernel_routes::read::MAX_READ_ROW_BYTES as u64;
+        let work_cap = cap / crate::canonical_memory::WORK_READ_DIVISOR as u64;
+        let window = cap;
+        let walk = 2 * cap + 2 * work_cap + cap;
+        let other = 4 * 1024 * 1024;
+        let reserved = RETAINED_BYTES_BOUND / MAX_CAPTURE_WORKERS as u64;
+        assert!(
+            reserved >= window + walk + other,
+            "a worker reserves {reserved} bytes and holds {window} of the window, {walk} of the walk, and {other} besides"
         );
     }
 }
