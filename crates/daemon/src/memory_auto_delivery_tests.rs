@@ -1402,8 +1402,9 @@ fn fill_statement_lineage(handler: &Handler, project: &Path, job: &str) {
 }
 
 /// A correction whose statement approval the Kernel refuses is stored
-/// labeled. A labeled fact replaces no approved one: the statement it named
-/// stays live and served, beside the correction on explicit search.
+/// labeled. A labeled fact replaces no approved statement that outlives its
+/// task: the statement it named stays live and served, beside the
+/// correction on explicit search.
 #[tokio::test]
 async fn a_correction_whose_approval_is_refused_leaves_the_approved_statement_live() {
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
@@ -2180,7 +2181,7 @@ fn production_waits(handler: &Handler) {
 
 /// A plan that decodes and that the Kernel accepts once it has the writer.
 fn statement_plan(quote: &str) -> String {
-    json!({"version": 1, "model": "test/model", "memories": [{
+    json!({"version": 2, "model": "test/model", "memories": [{
         "category": "PROJECT_RULES",
         "content": stated(quote),
         "quote": quote,
@@ -2499,15 +2500,14 @@ async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_r
     }
 }
 
-/// The extractor classes each user statement by how long it holds. A rule
-/// and an undecided matter outlive their task and reach the next session's
-/// block. A request for the change in progress and a remark on its state
-/// are stored with the user's words for explicit search, hold no statement
-/// record, and stay out of the block.
-/// Capture stores the assistant report's `lasting` class in its rationale and
-/// keeps the report `labeled` for explicit search.
+/// The extractor classes each user statement by how long it holds. Capture
+/// approves the lasting, unsettled, and current-work ones. A later
+/// session's block holds the first two under their categories and the work
+/// the user left open under `CURRENT_WORK`. The request for the turn at
+/// hand, the remark on the state of the work, and the assistant's report
+/// stay labeled on explicit search.
 #[tokio::test]
-async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_otherwise() {
+async fn a_statement_is_delivered_by_its_lifetime_class_and_kept_for_search_otherwise() {
     let rule = "Run the integration suite before every merge.";
     let undecided = "We have not settled whether the importer keeps the legacy CSV path.";
     let request = "Rename the retry helper to backoff_delay in this module.";
@@ -2521,6 +2521,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
         ("m3", "user", request),
         ("m4", "user", remark),
         ("m5", "assistant", report),
+        ("m6", "user", RETRY_PLAN),
     ];
     capture(&handler, FIRST, "s1", &messages, |text, _| {
         vec![classed(
@@ -2528,7 +2529,8 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
             match text {
                 text if text == rule || text == report => "lasting",
                 text if text == undecided => "unsettled",
-                text if text == request => "current_work",
+                text if text == request => "request",
+                text if text == RETRY_PLAN => "current_work",
                 _ => "status",
             },
         )]
@@ -2540,6 +2542,7 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     let mut expected = vec![
         (stated(rule), "visible".to_string()),
         (stated(undecided), "visible".to_string()),
+        (stated(RETRY_PLAN), "visible".to_string()),
         (stated(request), "labeled".to_string()),
         (stated(remark), "labeled".to_string()),
         (reported, "labeled".to_string()),
@@ -2548,13 +2551,27 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     assert_eq!(rows, expected);
     let mut records = live_statement_records(&handler, &project);
     records.sort();
-    let mut approved = vec![stated(rule), stated(undecided)];
+    let mut approved = vec![stated(rule), stated(undecided), stated(RETRY_PLAN)];
     approved.sort();
     assert_eq!(records, approved);
     let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
-        .expect("the lasting statements are delivered to a later session");
-    assert!(block.contains(&stated(rule)), "{block}");
-    assert!(block.contains(&stated(undecided)), "{block}");
+        .expect("the approved statements are delivered to a later session");
+    let rules = block_element(&block, "PROJECT_RULES").expect("the lasting categories render");
+    assert!(rules.contains(&stated(rule)), "{block}");
+    assert!(rules.contains(&stated(undecided)), "{block}");
+    assert!(!rules.contains(RETRY_PLAN), "{block}");
+    let work = block_element(&block, "CURRENT_WORK").expect("the work in progress renders");
+    assert_eq!(
+        work.lines()
+            .filter(|line| line.contains("User stated"))
+            .collect::<Vec<_>>(),
+        [format!(
+            "{}: {}",
+            memory_id(&handler, &project, &stated(RETRY_PLAN)),
+            stated(RETRY_PLAN)
+        )],
+        "{block}"
+    );
     assert!(!block.contains(request), "{block}");
     assert!(!block.contains(remark), "{block}");
     assert!(!block.contains(report), "{block}");
@@ -2575,7 +2592,8 @@ async fn a_statement_is_delivered_when_it_outlives_its_task_and_kept_for_search_
     let mut expected = vec![
         (rule.to_string(), "lasting".to_string()),
         (undecided.to_string(), "unsettled".to_string()),
-        (request.to_string(), "current_work".to_string()),
+        (request.to_string(), "request".to_string()),
+        (RETRY_PLAN.to_string(), "current_work".to_string()),
         (remark.to_string(), "status".to_string()),
         (report.to_string(), "lasting".to_string()),
     ];
@@ -2660,17 +2678,28 @@ async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_ref
     );
 }
 
-/// A statement the extractor classes as serving the task in progress is
-/// stored for explicit search and supersedes no approved statement. An
-/// exception for one occasion leaves the rule it departs from approved and
-/// delivered. When the extractor names that rule as the fact the statement
-/// replaces, as it does for a correction it classed as work in progress,
-/// the rule is shown as contested by the user's newer words.
+/// A statement that ends with its task supersedes no statement that
+/// outlives its task. An exception for one occasion, classed as a request
+/// for the turn at hand or as work left open, leaves the rule it departs
+/// from approved and delivered. When the extractor names that rule as the
+/// fact the statement replaces, as it does for a correction it classed
+/// short-lived, the rule is shown as contested by the user's newer words,
+/// and the exception is stored labeled whichever class it had. An
+/// exception that names no rule is stored labeled when it is a request,
+/// and delivered under `CURRENT_WORK` when it is work left open.
 #[tokio::test]
-async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
+async fn a_statement_that_ends_with_its_task_replaces_no_statement_that_outlives_it() {
     let exception = "Skip the integration suite for this hotfix.";
     let rule = "Run the integration suite before every merge.";
-    for names_the_rule in [false, true] {
+    for (lifetime, names_the_rule) in [
+        ("request", false),
+        ("request", true),
+        ("current_work", false),
+        ("current_work", true),
+    ] {
+        // Work left open is delivered in its section; work that departs
+        // from the rule is stored labeled and shown on the rule's line.
+        let delivered = lifetime == "current_work" && !names_the_rule;
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
         capture(&handler, FIRST, "s1", &[("m1", "user", rule)], |_, _| {
             vec![classed(rule, "lasting")]
@@ -2690,25 +2719,44 @@ async fn a_statement_that_ends_with_its_task_replaces_no_approved_statement() {
                 );
                 vec![Extracted {
                     replaces: if names_the_rule { targets } else { Vec::new() },
-                    ..classed(exception, "current_work")
+                    ..classed(exception, lifetime)
                 }]
             },
         )
         .await;
 
-        assert_eq!(live_statement_records(&handler, &project), [stated(rule)]);
+        let mut records = live_statement_records(&handler, &project);
+        records.sort();
+        let mut approved = vec![stated(rule)];
+        if delivered {
+            approved.push(stated(exception));
+        }
+        approved.sort();
+        assert_eq!(records, approved, "{lifetime}");
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the rule is still delivered");
-        assert!(block.contains(&stated(rule)), "{block}");
+        let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+        assert!(rules.contains(&stated(rule)), "{lifetime}: {block}");
         assert_eq!(
-            block.contains("contested"),
+            rules.contains("contested"),
             names_the_rule,
-            "the rule is contested only by a statement that names it: {block}"
+            "the rule is contested only by a statement that names it: {lifetime}: {block}"
+        );
+        assert!(
+            !rules.lines().any(|line| line.ends_with(&stated(exception))),
+            "the exception has no line of its own among the rules: {lifetime}: {block}"
+        );
+        assert_eq!(
+            block_element(&block, "CURRENT_WORK")
+                .is_some_and(|work| work.contains(&stated(exception))),
+            delivered,
+            "{lifetime}: {block}"
         );
         let rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        let visibility = if delivered { "visible" } else { "labeled" };
         assert!(
-            rows.contains(&(stated(exception), "labeled".to_string())),
-            "{rows:?}"
+            rows.contains(&(stated(exception), visibility.to_string())),
+            "{lifetime}: {rows:?}"
         );
     }
 }
@@ -2725,7 +2773,7 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
     let report = "The staging port is 1234 in deploy.toml.";
     let echo = "Staging listens on port 1234, the staging port.";
     let change = "Use port 4321 for the staging port during this migration.";
-    for lifetime in ["current_work", "status"] {
+    for lifetime in ["current_work", "request", "status"] {
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
         let config_value = |quote: &str, lifetime: Option<&'static str>| Extracted {
             category: Some("CONFIG_VALUES"),
@@ -2794,6 +2842,7 @@ async fn a_short_lived_correction_retires_labeled_copies_and_contests_the_approv
         );
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the approved statement is delivered");
+        assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
         let line = block
             .lines()
             .find(|line| line.contains(value))
@@ -2888,7 +2937,8 @@ async fn a_repeat_of_a_statement_that_ended_with_its_task_writes_no_second_copy(
     let with_lines = format!("{}\n{logged}", stated(report));
     for (text, quote, stored, repeated_as, approved_beside) in [
         (remark, remark, stated(remark), "status", false),
-        (remark, remark, stated(remark), "current_work", false),
+        (remark, remark, stated(remark), "request", false),
+        (remark, remark, stated(remark), "current_work", true),
         (remark, remark, stated(remark), "lasting", true),
         (logged.as_str(), report, with_lines, "status", false),
     ] {
@@ -2931,6 +2981,1786 @@ async fn a_repeat_of_a_statement_that_ended_with_its_task_writes_no_second_copy(
         }
         assert_eq!(rows, expected, "{repeated_as}: {quote}");
     }
+}
+
+/// The text of block element `name`, from its opening tag to its closing
+/// tag.
+fn block_element<'b>(block: &'b str, name: &str) -> Option<&'b str> {
+    let start = block.find(&format!("<{name}"))?;
+    let end = block[start..].find(&format!("</{name}>"))? + start;
+    Some(&block[start..end])
+}
+
+/// The id of the memory on explicit search whose summary is `summary`.
+fn memory_id(handler: &Handler, project: &Path, summary: &str) -> String {
+    let rows = memory_rows(handler, project);
+    rows.iter()
+        .find(|row| row.1 == summary)
+        .unwrap_or_else(|| panic!("{summary}: {rows:?}"))
+        .0
+        .clone()
+}
+
+const INTEGRATION_RULE: &str = "Run the integration suite before every merge.";
+const RETRY_PLAN: &str = "Next, move the retry budget into the client config.";
+
+/// The user states a rule and the next step of unfinished work in one
+/// session. The next session's block holds the rule under its category and
+/// the plan under `CURRENT_WORK`, which follows the categories and states
+/// what its rows are. The stating session's block holds neither.
+#[tokio::test]
+async fn work_in_progress_reaches_the_next_session_in_its_own_section() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE), ("m2", "user", RETRY_PLAN)],
+        |text, _| {
+            vec![classed(
+                text,
+                if text == RETRY_PLAN {
+                    "current_work"
+                } else {
+                    "lasting"
+                },
+            )]
+        },
+    )
+    .await;
+
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("a later session carries the block");
+    let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+    assert!(rules.contains(&stated(INTEGRATION_RULE)), "{block}");
+    assert!(!rules.contains(RETRY_PLAN), "{block}");
+    let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+    assert!(
+        work.starts_with(
+            "<CURRENT_WORK note=\"Work the user left open in earlier sessions, newest first, which no later statement of the user ended. It sets no standing rule and may be finished already: check the repository before resuming it.\">\n"
+        ),
+        "{work}"
+    );
+    assert_eq!(
+        work.lines().skip(1).collect::<Vec<_>>(),
+        [format!(
+            "{}: {}",
+            memory_id(&handler, &project, &stated(RETRY_PLAN)),
+            stated(RETRY_PLAN)
+        )],
+        "{block}"
+    );
+    assert!(
+        block.find("</PROJECT_RULES>").unwrap() < block.find("<CURRENT_WORK").unwrap(),
+        "the section follows the categories: {block}"
+    );
+    let own = serve(&handler, FIRST, "s1").await;
+    assert_eq!(project_memory_block(&own), None, "{own}");
+}
+
+/// A later session reports the planned work finished. The remark is a
+/// status statement that names the plan as the fact it resolves. The plan
+/// leaves the block, the remark is delivered to no session, and explicit
+/// search serves the plan labeled with a record of the statement that
+/// ended it.
+#[tokio::test]
+async fn a_completion_remark_ends_work_in_progress_and_search_serves_it_as_ended() {
+    ended_by_a_later_statement("The retry budget is in the client config now.", "status").await;
+}
+
+/// A request that cancels the planned work ends it as a completion remark
+/// does.
+#[tokio::test]
+async fn a_cancelling_request_ends_work_in_progress() {
+    ended_by_a_later_statement("Drop the move of the retry budget.", "request").await;
+}
+
+async fn ended_by_a_later_statement(done: &str, lifetime: &'static str) {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", RETRY_PLAN)],
+        |_, _| vec![classed(RETRY_PLAN, "current_work")],
+    )
+    .await;
+    let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", done)],
+        |_, existing| {
+            let offered: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["current_work"] == true)
+                .collect();
+            assert_eq!(offered.len(), 1, "{existing:?}");
+            assert_eq!(offered[0]["id"], plan.as_str());
+            assert_eq!(offered[0]["user_statement"], true);
+            vec![Extracted {
+                replaces: vec![plan.clone()],
+                ..classed(done, lifetime)
+            }]
+        },
+    )
+    .await;
+
+    let served = serve(&handler, THIRD, "s3").await;
+    assert_eq!(
+        project_memory_block(&served),
+        None,
+        "the ended plan and the remark are delivered to no session: {served}"
+    );
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(RETRY_PLAN), "labeled".to_string()),
+        (stated(done), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+    assert!(live_statement_records(&handler, &project).is_empty());
+    let stored = memory_rows(&handler, &project);
+    let ended = stored
+        .iter()
+        .find(|row| row.1 == stated(RETRY_PLAN))
+        .expect("the plan stays on explicit search");
+    assert_ne!(ended.0, plan, "the ended plan is a new row");
+    assert_eq!(ended.3["lifetime"], "current_work");
+    assert_eq!(
+        ended.3["ended_by"],
+        json!({"memory": memory_id(&handler, &project, &stated(done)), "session": "s2"}),
+    );
+
+    // A later capture is offered the ended plan as a labeled memory.
+    capture(
+        &handler,
+        THIRD,
+        "s3",
+        &[("m3", "user", INTEGRATION_RULE)],
+        |_, existing| {
+            let held: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["content"] == stated(RETRY_PLAN).as_str())
+                .collect();
+            assert_eq!(held.len(), 1, "{existing:?}");
+            assert_eq!(held[0]["user_statement"], false);
+            assert!(held[0].get("current_work").is_none(), "{existing:?}");
+            vec![classed(INTEGRATION_RULE, "lasting")]
+        },
+    )
+    .await;
+}
+
+/// The user replaces a plan with a newer one. The newer plan is delivered
+/// as the work in progress, and the older plan stays on explicit search as
+/// ended by it.
+#[tokio::test]
+async fn a_newer_plan_replaces_an_older_one() {
+    let newer = "Put the retry budget in the server config instead.";
+    for lifetime in ["current_work", "lasting"] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, "current_work")],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", newer)],
+            |_, existing| {
+                vec![Extracted {
+                    replaces: ids_containing(existing, "retry budget"),
+                    ..classed(newer, lifetime)
+                }]
+            },
+        )
+        .await;
+
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the newer plan is delivered");
+        assert!(!block.contains(RETRY_PLAN), "{lifetime}: {block}");
+        let element = if lifetime == "current_work" {
+            "CURRENT_WORK"
+        } else {
+            "PROJECT_RULES"
+        };
+        let delivered = block_element(&block, element).expect("the newer plan's element");
+        assert!(delivered.contains(&stated(newer)), "{lifetime}: {block}");
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let mut expected = vec![
+            (stated(RETRY_PLAN), "labeled".to_string()),
+            (stated(newer), "visible".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected, "{lifetime}");
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(newer)],
+            "{lifetime}"
+        );
+        let stored = memory_rows(&handler, &project);
+        let older = stored
+            .iter()
+            .find(|row| row.1 == stated(RETRY_PLAN))
+            .unwrap();
+        assert_eq!(
+            older.3["ended_by"]["memory"],
+            memory_id(&handler, &project, &stated(newer)).as_str(),
+            "{lifetime}"
+        );
+    }
+}
+
+/// Work left open is live in a later session when its own session ended
+/// with no later statement of the user ending it. A request for the turn at
+/// hand is never work left open, so it reaches no later session. Work the
+/// user left open and reported finished in the same session, in a remark
+/// whose plan keeps its `replaces` link to that work, is ended there and
+/// reaches no later session. The plan of that session that no statement
+/// ended stays approved and is delivered.
+#[tokio::test]
+async fn only_work_a_session_left_open_reaches_a_later_session() {
+    let rename = "Rename the retry helper to backoff_delay in this module.";
+    let later = "Later in this session, add a timeout test for the upload path.";
+    let tested = "The timeout test for the upload path is in, thanks.";
+    let open = "Tomorrow we wire the retry budget into the importer.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", rename), ("m2", "user", later)],
+        |text, _| {
+            vec![classed(
+                text,
+                if text == rename {
+                    "request"
+                } else {
+                    "current_work"
+                },
+            )]
+        },
+    )
+    .await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m3", "user", tested)],
+        |_, existing| {
+            vec![Extracted {
+                replaces: ids_containing(existing, "timeout test"),
+                ..classed(tested, "status")
+            }]
+        },
+    )
+    .await;
+    capture(&handler, FIRST, "s1", &[("m4", "user", open)], |_, _| {
+        vec![classed(open, "current_work")]
+    })
+    .await;
+
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the open work is delivered");
+    let work = block_element(&block, "CURRENT_WORK").expect("the open work's section");
+    assert_eq!(
+        work.lines()
+            .filter(|line| line.contains("User stated"))
+            .count(),
+        1,
+        "{block}"
+    );
+    assert!(work.contains(&stated(open)), "{block}");
+    for left_out in [rename, later, tested] {
+        assert!(!block.contains(left_out), "{left_out}: {block}");
+    }
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(open), "visible".to_string()),
+        (stated(rename), "labeled".to_string()),
+        (stated(later), "labeled".to_string()),
+        (stated(tested), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+}
+
+/// Queues one message, records `failures` model failures of its source, and
+/// returns its job id. After two failures, the source's request carries an
+/// empty `existing_memories`.
+async fn enqueue_after_failures(
+    handler: &Handler,
+    store: &MemoryStore,
+    project: &Path,
+    (channel, session): (u16, &str),
+    message: (&str, &str, &str),
+    failures: usize,
+) -> String {
+    let digest = kernel_routes::ProjectBinding::new(project)
+        .digest()
+        .to_owned();
+    let jobs = enqueue(handler, channel, session, &[message]).await;
+    for _ in 0..failures {
+        store
+            .fail_memory_capture(&digest, &jobs[0], "model_failed", 0, true, now_ms())
+            .unwrap();
+    }
+    jobs.into_iter().next().unwrap()
+}
+
+/// The memory rows on explicit search as `(id, lifetime class)`, in id order.
+fn rows_by_class(handler: &Handler, project: &Path) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = memory_rows(handler, project)
+        .into_iter()
+        .map(|row| (row.0, row.3["lifetime"].as_str().unwrap().to_string()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// The capture queue of `project` as `(pending, failed, completed)`.
+fn queue_counts(store: &MemoryStore, project: &Path) -> (i64, i64, i64) {
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(project).digest())
+        .unwrap();
+    (status.pending, status.failed, status.completed)
+}
+
+/// Extracts a message whose whole text is `text` without stored rows, under
+/// the class `repeated` or, for `None`, with no class. Returns the
+/// `duplicate_of` its frozen plan holds, read before the plan is published
+/// and its source completes.
+async fn repeat_without_stored_rows(
+    handler: &Handler,
+    store: &MemoryStore,
+    project: &Path,
+    (id, role): (&str, &str),
+    text: &str,
+    repeated: Option<&'static str>,
+) -> Option<String> {
+    let (_, _, completed) = queue_counts(store, project);
+    let repeat = (id, role, text);
+    let job = enqueue_after_failures(handler, store, project, (SECOND, "s2"), repeat, 2).await;
+    // A spent publication budget leaves the frozen plan in the queue.
+    waits(handler, Duration::ZERO, Duration::ZERO);
+    drain(handler, SECOND, "s2", &[repeat], |_, existing| {
+        assert!(existing.is_empty(), "{id}, {repeated:?}: {existing:?}");
+        vec![Extracted {
+            lifetime: repeated,
+            ..fact(text)
+        }]
+    })
+    .await;
+    let frozen = queue_row(store, &job)
+        .5
+        .unwrap_or_else(|| panic!("{id}, {repeated:?}: the plan is frozen"));
+    let frozen: Value = serde_json::from_str(&frozen).unwrap();
+    let linked = frozen["memories"][0]["duplicate_of"]
+        .as_str()
+        .map(str::to_owned);
+    production_waits(handler);
+    set_retry_at(store, &[&job], 0);
+    let next = json!({"method": "memory.capture.next", "session_id": "s2", "model": "custom-native/model"});
+    body(
+        handler
+            .handle_native_capture_next(test_route(SECOND), &next)
+            .await,
+    );
+    assert_eq!(
+        queue_counts(store, project),
+        (0, 0, completed + 1),
+        "{id}, {repeated:?}: the repeat's plan is published"
+    );
+    linked
+}
+
+/// A source extracted without stored rows repeats, word for word, a
+/// statement an approved row holds. A whole user statement eligible for
+/// approval names that row when both are work in progress or neither is,
+/// and is stored as its own row when one of the two is work in progress.
+/// Once a rule and a plan hold the same words, a further repeat names the
+/// row of its own class. A rule that repeats a live plan therefore stays
+/// delivered after a completion remark ends the plan. A repeat classed
+/// `unsettled` or given no class is stored beside a plan as a rule is. An
+/// assistant's echo and a user's repeat classed `request` or `status` name
+/// the plan.
+#[tokio::test]
+async fn a_repeat_extracted_without_stored_rows_names_a_copy_of_its_own_delivery_class() {
+    let done = "The retry budget is in the client config now.";
+    for (stored, repeated) in [
+        ("current_work", "current_work"),
+        ("lasting", "lasting"),
+        ("lasting", "current_work"),
+        ("current_work", "lasting"),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, stored)],
+        )
+        .await;
+        let first = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        let linked = repeat_without_stored_rows(
+            &handler,
+            &store,
+            &project,
+            ("m2", "user"),
+            RETRY_PLAN,
+            Some(repeated),
+        )
+        .await;
+
+        let rows = rows_by_class(&handler, &project);
+        if stored == repeated {
+            assert_eq!(linked.as_ref(), Some(&first), "{stored}, {repeated}");
+            assert_eq!(
+                rows,
+                [(first.clone(), stored.to_string())],
+                "a repeat of its own class adds no row"
+            );
+            continue;
+        }
+        assert_eq!(linked, None, "{stored}, {repeated}");
+        let second = rows
+            .iter()
+            .find(|(id, _)| *id != first)
+            .unwrap_or_else(|| panic!("{stored}, {repeated}: the repeat is its own row: {rows:?}"))
+            .0
+            .clone();
+        let mut expected = vec![
+            (first.clone(), stored.to_string()),
+            (second.clone(), repeated.to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected);
+        // Each class has its row, so a further repeat of either class names
+        // the row of its class and adds none, whichever row the daemon
+        // reads first.
+        for (id, class, row) in [("m3", stored, &first), ("m4", repeated, &second)] {
+            let linked = repeat_without_stored_rows(
+                &handler,
+                &store,
+                &project,
+                (id, "user"),
+                RETRY_PLAN,
+                Some(class),
+            )
+            .await;
+            assert_eq!(
+                linked.as_ref(),
+                Some(row),
+                "{stored}, {repeated}: a further repeat classed {class}"
+            );
+            assert_eq!(
+                rows_by_class(&handler, &project),
+                expected,
+                "{stored}, {repeated}: a further repeat classed {class}"
+            );
+        }
+        let (plan, rule) = if stored == "current_work" {
+            (&first, &second)
+        } else {
+            (&second, &first)
+        };
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("a later session carries the block");
+        let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+        assert!(
+            rules.contains(rule.as_str()),
+            "{stored}, {repeated}: {block}"
+        );
+        let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+        assert!(
+            work.contains(plan.as_str()),
+            "{stored}, {repeated}: {block}"
+        );
+
+        // A completion remark that names the plan ends the plan alone.
+        capture(&handler, SECOND, "s2", &[("m5", "user", done)], |_, _| {
+            vec![Extracted {
+                replaces: vec![plan.clone()],
+                ..classed(done, "status")
+            }]
+        })
+        .await;
+        let stored_rows = memory_rows(&handler, &project);
+        let kept = stored_rows
+            .iter()
+            .find(|row| row.0 == *rule)
+            .unwrap_or_else(|| panic!("{stored}, {repeated}: the rule keeps its row"));
+        assert_eq!(kept.3["lifetime"], "lasting");
+        assert!(kept.3.get("ended_by").is_none(), "{:?}", kept.3);
+        let ended = stored_rows
+            .iter()
+            .find(|row| row.3["lifetime"] == "current_work")
+            .expect("the plan stays on explicit search");
+        assert_eq!(
+            ended.3["ended_by"]["memory"],
+            memory_id(&handler, &project, &stated(done)).as_str(),
+            "{stored}, {repeated}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the rule is delivered after the plan ends");
+        let rules = block_element(&block, "PROJECT_RULES").expect("the rule's category renders");
+        assert!(
+            rules.contains(rule.as_str()),
+            "{stored}, {repeated}: {block}"
+        );
+        assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(RETRY_PLAN)],
+            "{stored}, {repeated}"
+        );
+    }
+
+    // A repeat classed `unsettled`, or given no class, outlives its task as
+    // a `lasting` one does: it names no plan and is approved beside it.
+    for class in [Some("unsettled"), None] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, "current_work")],
+        )
+        .await;
+        let linked = repeat_without_stored_rows(
+            &handler,
+            &store,
+            &project,
+            ("m2", "user"),
+            RETRY_PLAN,
+            class,
+        )
+        .await;
+        assert_eq!(linked, None, "{class:?}");
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(RETRY_PLAN), stated(RETRY_PLAN)],
+            "{class:?}"
+        );
+    }
+
+    // A repeat that is stored labeled is no statement eligible for
+    // approval, so it names the plan under any class and adds no row: an
+    // assistant's echo, and a user's repeat classed `request` or `status`.
+    for (role, class) in [
+        ("assistant", "lasting"),
+        ("user", "request"),
+        ("user", "status"),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, "current_work")],
+        )
+        .await;
+        let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        let linked = repeat_without_stored_rows(
+            &handler,
+            &store,
+            &project,
+            ("m2", role),
+            RETRY_PLAN,
+            Some(class),
+        )
+        .await;
+        assert_eq!(linked.as_ref(), Some(&plan), "{role}, {class}");
+        assert_eq!(
+            rows_by_class(&handler, &project),
+            [(plan, "current_work".to_string())],
+            "{role}, {class}"
+        );
+    }
+}
+
+/// A completion remark names the live plan under `replaces`. Extracted with
+/// the stored rows, it ends the plan. Extracted without them, after two
+/// failures of its source, its target is released: the remark is stored
+/// labeled, and the plan stays live work in progress for a later session.
+#[tokio::test]
+async fn a_completion_remark_extracted_without_stored_rows_leaves_work_in_progress_live() {
+    let done = "The retry budget is in the client config now.";
+    for failures in [0, 2] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", RETRY_PLAN)],
+            |_, _| vec![classed(RETRY_PLAN, "current_work")],
+        )
+        .await;
+        let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+        let remark = ("m2", "user", done);
+        enqueue_after_failures(&handler, &store, &project, (FIRST, "s1"), remark, failures).await;
+        drain(&handler, FIRST, "s1", &[remark], |_, existing| {
+            assert_eq!(existing.is_empty(), failures == 2, "{existing:?}");
+            vec![Extracted {
+                replaces: vec![plan.clone()],
+                ..classed(done, "status")
+            }]
+        })
+        .await;
+
+        let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+        rows.sort();
+        let plan_state = if failures == 0 { "labeled" } else { "visible" };
+        let mut expected = vec![
+            (stated(RETRY_PLAN), plan_state.to_string()),
+            (stated(done), "labeled".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(rows, expected, "{failures} failures");
+        let stored = memory_rows(&handler, &project);
+        let served = serve(&handler, SECOND, "s2").await;
+        if failures == 0 {
+            let ended = stored
+                .iter()
+                .find(|row| row.1 == stated(RETRY_PLAN))
+                .expect("the plan stays on explicit search");
+            assert_ne!(ended.0, plan, "the ended plan is a new row");
+            assert_eq!(
+                ended.3["ended_by"]["memory"],
+                memory_id(&handler, &project, &stated(done)).as_str()
+            );
+            assert_eq!(project_memory_block(&served), None, "{served}");
+            continue;
+        }
+        let kept = stored
+            .iter()
+            .find(|row| row.0 == plan)
+            .expect("the plan keeps its row");
+        assert!(kept.3.get("ended_by").is_none(), "{:?}", kept.3);
+        assert!(kept.3.get("contested_by").is_none(), "{:?}", kept.3);
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(RETRY_PLAN)]
+        );
+        let block = project_memory_block(&served).expect("the plan is delivered");
+        let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+        assert_eq!(
+            work.lines().skip(1).collect::<Vec<_>>(),
+            [format!("{plan}: {}", stated(RETRY_PLAN))],
+            "{block}"
+        );
+        assert!(!block.contains(done), "{block}");
+    }
+}
+
+/// A remark that reports the planned work failed carries a failure line of
+/// its message in its stored text. It still ends the plan it names, and its
+/// source completes.
+#[tokio::test]
+async fn a_remark_with_an_appended_failure_line_ends_work_in_progress() {
+    let plan = "Next, fix the staging deploy.";
+    let report = "FAILED the staging deploy again after the rollback.";
+    let logged = format!("{report} It broke.\nat the registry step.");
+    let with_lines = format!("{}\n{logged}", stated(report));
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", plan)], |_, _| {
+        vec![classed(plan, "current_work")]
+    })
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", &logged)],
+        |_, existing| {
+            vec![Extracted {
+                replaces: ids_containing(existing, "staging deploy"),
+                ..classed(report, "status")
+            }]
+        },
+    )
+    .await;
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+        .unwrap();
+    assert_eq!((status.completed, status.pending, status.failed), (2, 0, 0));
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(plan), "labeled".to_string()),
+        (with_lines.clone(), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+    let stored = memory_rows(&handler, &project);
+    let ended = stored.iter().find(|row| row.1 == stated(plan)).unwrap();
+    assert_eq!(
+        ended.3["ended_by"]["memory"],
+        memory_id(&handler, &project, &with_lines).as_str()
+    );
+    assert!(live_statement_records(&handler, &project).is_empty());
+    let served = serve(&handler, THIRD, "s3").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+}
+
+/// An assistant's observation contests a plan, and a newer plan is stated
+/// after the contest. The contested plan keeps its place by the commit
+/// that first recorded it, behind the newer plan, and shows the contest on
+/// its line. A repeat of the contested plan extracted without stored rows
+/// names it. A completion remark then ends the contested plan: the ended
+/// fact holds the end record and no contest.
+#[tokio::test]
+async fn contested_work_in_progress_keeps_its_place_and_ends_like_any_other() {
+    let observed = "The retry budget is already read from the server config.";
+    let newer = "After that, add a dry-run flag to the importer.";
+    let done = "The retry budget is in the client config now.";
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", RETRY_PLAN)],
+        |_, _| vec![classed(RETRY_PLAN, "current_work")],
+    )
+    .await;
+    capture(&handler, FIRST, "s1", &[("m2", "user", newer)], |_, _| {
+        vec![classed(newer, "current_work")]
+    })
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "assistant", observed)],
+        |_, existing| {
+            vec![Extracted {
+                contests: ids_containing(existing, "retry budget"),
+                ..fact(observed)
+            }]
+        },
+    )
+    .await;
+
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("both plans are delivered");
+    let work = block_element(&block, "CURRENT_WORK").expect("the section renders");
+    let lines: Vec<&str> = work
+        .lines()
+        .filter(|line| line.contains("User stated"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{block}");
+    assert!(
+        lines[0].ends_with(&stated(newer)),
+        "the newer plan renders first: {block}"
+    );
+    assert!(
+        lines[1].contains(&stated(RETRY_PLAN))
+            && lines[1].contains("contested")
+            && lines[1].contains("server config"),
+        "the contested plan follows with its contest: {block}"
+    );
+
+    // A repeat of the contested plan, extracted without stored rows, names
+    // the contested plan and adds no row, and the contest stays.
+    let contest = || {
+        let rows = memory_rows(&handler, &project);
+        let plans: Vec<_> = rows
+            .iter()
+            .filter(|row| row.1 == stated(RETRY_PLAN))
+            .collect();
+        assert_eq!(plans.len(), 1, "{rows:?}");
+        (plans[0].0.clone(), plans[0].3["contested_by"].clone())
+    };
+    let (contested, observation) = contest();
+    assert!(observation["memory"].is_string(), "{observation}");
+    let linked = repeat_without_stored_rows(
+        &handler,
+        &store,
+        &project,
+        ("m5", "user"),
+        RETRY_PLAN,
+        Some("current_work"),
+    )
+    .await;
+    assert_eq!(linked.as_ref(), Some(&contested));
+    assert_eq!(contest(), (contested, observation));
+
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m4", "user", done)],
+        |_, existing| {
+            let contested: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["content"] == stated(RETRY_PLAN).as_str())
+                .collect();
+            assert_eq!(contested.len(), 1, "{existing:?}");
+            assert_eq!(contested[0]["contested"], true);
+            assert_eq!(contested[0]["current_work"], true);
+            vec![Extracted {
+                replaces: vec![contested[0]["id"].as_str().unwrap().to_string()],
+                ..classed(done, "status")
+            }]
+        },
+    )
+    .await;
+    let stored = memory_rows(&handler, &project);
+    let ended = stored
+        .iter()
+        .find(|row| row.1 == stated(RETRY_PLAN))
+        .expect("the ended plan stays on explicit search");
+    assert!(ended.3.get("contested_by").is_none(), "{:?}", ended.3);
+    assert_eq!(
+        ended.3["ended_by"]["memory"],
+        memory_id(&handler, &project, &stated(done)).as_str()
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(newer)],
+        "the ended plan's statement record is retired"
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the newer plan is still delivered");
+    assert!(!block.contains(RETRY_PLAN), "{block}");
+    assert!(!block.contains("contested"), "{block}");
+    assert!(block.contains(&stated(newer)), "{block}");
+}
+
+/// A plan that departs from a standing statement is an instruction for
+/// one occasion. It is stored labeled with the class of such an
+/// instruction and shown on that statement's line as its contest, so it
+/// takes no place in the section. A later remark that names the plan
+/// replaces it, as any statement replaces a labeled fact; the rule then
+/// renders alone, and capture still offers the rule as contested, since
+/// that flag reads the stored record.
+#[tokio::test]
+async fn a_plan_that_departs_from_a_standing_statement_is_shown_beside_it() {
+    let plan = "For the importer migration, skip the integration suite before each merge.";
+    let done = "The importer migration is merged.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE)],
+        |_, _| vec![fact(INTEGRATION_RULE)],
+    )
+    .await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", plan)],
+        |_, existing| {
+            vec![Extracted {
+                replaces: ids_containing(existing, "before every merge"),
+                ..classed(plan, "current_work")
+            }]
+        },
+    )
+    .await;
+    let rule_line = |block: &str| -> String {
+        block
+            .lines()
+            .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+            .unwrap_or_else(|| panic!("{block}"))
+            .to_string()
+    };
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        rule_line(&block).contains("contested") && rule_line(&block).contains("skip the"),
+        "{block}"
+    );
+    assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(INTEGRATION_RULE)]
+    );
+    let rows = memory_rows(&handler, &project);
+    let stored = rows.iter().find(|row| row.1 == stated(plan)).unwrap();
+    assert_eq!(stored.3["lifetime"], "request", "{:?}", stored.3);
+    let mut found = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            (stated(plan), "labeled".to_string()),
+            (stated(INTEGRATION_RULE), "visible".to_string()),
+        ]
+    );
+
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "user", done)],
+        |_, existing| {
+            let rule: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["content"] == stated(INTEGRATION_RULE).as_str())
+                .collect();
+            assert_eq!(rule.len(), 1, "{existing:?}");
+            assert_eq!(rule[0]["contested"], true);
+            vec![Extracted {
+                replaces: ids_containing(existing, "importer migration"),
+                ..classed(done, "status")
+            }]
+        },
+    )
+    .await;
+    let mut found = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            (stated(INTEGRATION_RULE), "visible".to_string()),
+            (stated(done), "labeled".to_string()),
+        ]
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(!rule_line(&block).contains("contested"), "{block}");
+    let note = "The importer reads its batch size from the environment.";
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m4", "assistant", note)],
+        |_, existing| {
+            let rule: Vec<&Value> = existing
+                .iter()
+                .filter(|memory| memory["content"] == stated(INTEGRATION_RULE).as_str())
+                .collect();
+            assert_eq!(rule.len(), 1, "{existing:?}");
+            assert_eq!(rule[0]["contested"], true);
+            vec![fact(note)]
+        },
+    )
+    .await;
+}
+
+/// The class of a plan follows the contests its source keeps. A plan that
+/// contradicts an assistant's report, which is a labeled fact, stays work
+/// in progress and is delivered. In one batch a remark and a plan both
+/// name a rule: the first source holds the rule's contest, so the plan
+/// keeps none, stays work in progress, and is delivered beside the rule.
+#[tokio::test]
+async fn a_plan_is_work_in_progress_unless_its_source_keeps_a_contest_of_a_delivered_fact() {
+    let report = "The retry budget is read from the server config.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "assistant", report)],
+        |_, _| vec![fact(report)],
+    )
+    .await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", RETRY_PLAN)],
+        |_, existing| {
+            let named = ids_containing(existing, "server config");
+            assert_eq!(named.len(), 1, "{existing:?}");
+            vec![Extracted {
+                contests: named,
+                ..classed(RETRY_PLAN, "current_work")
+            }]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let stored = rows.iter().find(|row| row.1 == stated(RETRY_PLAN)).unwrap();
+    assert_eq!(stored.3["lifetime"], "current_work", "{:?}", stored.3);
+    assert_eq!(stored.3["contests"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(RETRY_PLAN)]
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert!(
+        block_element(&block, "CURRENT_WORK").is_some_and(|work| work.contains(RETRY_PLAN)),
+        "{block}"
+    );
+
+    let remark = "The integration suite failed before the merge again.";
+    let plan = "Tomorrow, skip the integration suite before the importer merge.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE)],
+        |_, _| vec![fact(INTEGRATION_RULE)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", remark), ("m3", "user", plan)],
+        |text, existing| {
+            let rule = ids_containing(existing, "before every merge");
+            assert_eq!(rule.len(), 1, "{existing:?}");
+            vec![Extracted {
+                replaces: rule,
+                ..classed(
+                    text,
+                    if text == remark {
+                        "status"
+                    } else {
+                        "current_work"
+                    },
+                )
+            }]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let class = |text: &str| {
+        rows.iter()
+            .find(|row| row.1 == stated(text))
+            .unwrap_or_else(|| panic!("{text}: {rows:?}"))
+            .3["lifetime"]
+            .clone()
+    };
+    assert_eq!(
+        (class(remark), class(plan)),
+        (json!("status"), json!("current_work"))
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let rule_line = block
+        .lines()
+        .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+        .unwrap_or_else(|| panic!("{block}"));
+    assert!(
+        rule_line.contains("contested") && rule_line.contains("failed before the merge"),
+        "{block}"
+    );
+    assert!(
+        block_element(&block, "CURRENT_WORK").is_some_and(|work| work.contains(plan)),
+        "{block}"
+    );
+}
+
+/// The extractor proposes one plan twice, once naming the rule it departs
+/// from and once naming nothing, in either order and under one class or
+/// two. The two proposals freeze as one fact, which keeps the contest of
+/// the rule, so the fact takes the class of an instruction for one
+/// occasion and the rule's line shows the fact's stored words.
+#[tokio::test]
+async fn two_proposals_of_one_plan_freeze_as_one_fact_classed_by_its_contest() {
+    let plan = "For the importer migration, skip the integration suite before each merge.";
+    for (naming_first, naming_class) in [
+        (true, "current_work"),
+        (false, "current_work"),
+        (true, "request"),
+        (false, "request"),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", INTEGRATION_RULE)],
+            |_, _| vec![fact(INTEGRATION_RULE)],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", plan)],
+            |_, existing| {
+                let naming = Extracted {
+                    replaces: ids_containing(existing, "before every merge"),
+                    content: Some("The importer migration skips the integration suite."),
+                    ..classed(plan, naming_class)
+                };
+                let plain = Extracted {
+                    content: Some("Merges of the importer migration skip the integration suite."),
+                    ..classed(plan, "current_work")
+                };
+                if naming_first {
+                    vec![naming, plain]
+                } else {
+                    vec![plain, naming]
+                }
+            },
+        )
+        .await;
+        let case = format!("naming first {naming_first}, classed {naming_class}");
+        let rows = memory_rows(&handler, &project);
+        let stored: Vec<_> = rows.iter().filter(|row| row.1 == stated(plan)).collect();
+        assert_eq!(stored.len(), 1, "{case}: {rows:?}");
+        assert_eq!(
+            stored[0].3["lifetime"], "request",
+            "{case}: {:?}",
+            stored[0].3
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(INTEGRATION_RULE)],
+            "{case}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+        assert_eq!(
+            block_element(&block, "CURRENT_WORK"),
+            None,
+            "{case}: {block}"
+        );
+        let rule_line = block
+            .lines()
+            .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+            .unwrap_or_else(|| panic!("{case}: {block}"));
+        // The contest names the one stored fact and quotes its text whole.
+        let contest = format!(
+            "by {}: {})",
+            stored[0].0,
+            serde_json::to_string(&stated(plan)).unwrap()
+        );
+        assert!(
+            rule_line.contains("; contested ") && rule_line.ends_with(&contest),
+            "{case}: {block}"
+        );
+    }
+}
+
+/// A class on a memory of an assistant source changes nothing and is stored
+/// as the proposal carried it: an assistant's report classed `current_work`
+/// that contests a rule keeps that class, is stored labeled, and contests
+/// the rule.
+#[tokio::test]
+async fn an_assistant_report_that_contests_a_rule_keeps_the_class_it_carried() {
+    let report = "The importer merge skipped the integration suite.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE)],
+        |_, _| vec![fact(INTEGRATION_RULE)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "assistant", report)],
+        |_, existing| {
+            vec![Extracted {
+                contests: ids_containing(existing, "before every merge"),
+                ..classed(report, "current_work")
+            }]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let stored = rows
+        .iter()
+        .find(|row| row.1.ends_with(report))
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    assert_eq!(stored.3["lifetime"], "current_work", "{:?}", stored.3);
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    assert_eq!(block_element(&block, "CURRENT_WORK"), None, "{block}");
+    // The rule's contest names the report's fact and quotes its text whole.
+    let rule_line = block
+        .lines()
+        .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+        .unwrap_or_else(|| panic!("{block}"));
+    let contest = format!(
+        "by {}: {})",
+        stored.0,
+        serde_json::to_string(&stored.1).unwrap()
+    );
+    assert!(
+        rule_line.contains("; contested ") && rule_line.ends_with(&contest),
+        "{block}"
+    );
+}
+
+/// An assistant's message repeats live work in progress and contradicts a
+/// rule. The repeat writes no fact, and the contest is recorded through
+/// the work in progress it repeats, as through any fact a proposal
+/// duplicates: the rule is shown beside the plan's words.
+#[tokio::test]
+async fn a_repeat_of_live_work_in_progress_records_its_contest_through_it() {
+    let echo =
+        "As planned, the retry budget moves into the client config without the integration suite.";
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", INTEGRATION_RULE)],
+        |_, _| vec![fact(INTEGRATION_RULE)],
+    )
+    .await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", RETRY_PLAN)],
+        |_, _| vec![classed(RETRY_PLAN, "current_work")],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "assistant", echo)],
+        |_, existing| {
+            let plan = ids_containing(existing, "retry budget");
+            let rule = ids_containing(existing, "before every merge");
+            assert_eq!((plan.len(), rule.len()), (1, 1), "{existing:?}");
+            vec![Extracted {
+                duplicate_of: plan.into_iter().next(),
+                contests: rule,
+                ..fact(echo)
+            }]
+        },
+    )
+    .await;
+    let status = store
+        .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+        .unwrap();
+    assert_eq!((status.completed, status.pending, status.failed), (3, 0, 0));
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(RETRY_PLAN), "visible".to_string()),
+            (stated(INTEGRATION_RULE), "visible".to_string()),
+        ]
+    );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let rule_line = block
+        .lines()
+        .find(|line| line.contains(&stated(INTEGRATION_RULE)))
+        .unwrap_or_else(|| panic!("{block}"));
+    assert!(
+        rule_line.contains("contested") && rule_line.contains("move the retry budget"),
+        "{block}"
+    );
+    assert!(
+        block_element(&block, "CURRENT_WORK").is_some_and(|work| work.contains(RETRY_PLAN)),
+        "{block}"
+    );
+}
+
+/// One completion remark names two live plans that state the same work.
+/// The second is a further target of the proposal, and both are ended:
+/// each stays on explicit search with the remark's id, and no session is
+/// delivered either.
+#[tokio::test]
+async fn a_completion_remark_ends_a_further_plan_it_names() {
+    let first = "Next, move the retry budget into the client config.";
+    let second = "Then move the retry budget into the client config for the importer.";
+    let done = "The retry budget is in the client config now.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    for (id, plan) in [("m1", first), ("m2", second)] {
+        capture(&handler, FIRST, "s1", &[(id, "user", plan)], |_, _| {
+            vec![classed(plan, "current_work")]
+        })
+        .await;
+    }
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let work = block_element(&block, "CURRENT_WORK").unwrap();
+    assert!(work.contains(first) && work.contains(second), "{block}");
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "user", done)],
+        |_, existing| {
+            let mut targets = ids_containing(existing, "Next, move the retry budget");
+            targets.extend(ids_containing(existing, "Then move the retry budget"));
+            assert_eq!(targets.len(), 2, "{existing:?}");
+            vec![Extracted {
+                replaces: targets,
+                ..classed(done, "status")
+            }]
+        },
+    )
+    .await;
+    let remark = memory_id(&handler, &project, &stated(done));
+    let rows = memory_rows(&handler, &project);
+    for plan in [first, second] {
+        let ended = rows
+            .iter()
+            .find(|row| row.1 == stated(plan))
+            .unwrap_or_else(|| panic!("{plan}: {rows:?}"));
+        assert_eq!(ended.3["ended_by"]["memory"], remark.as_str(), "{plan}");
+        assert_eq!(ended.3["ended_by"]["session"], "s2", "{plan}");
+    }
+    assert!(live_statement_records(&handler, &project).is_empty());
+    let mut found = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    found.sort();
+    let mut expected: Vec<(String, String)> = [first, second, done]
+        .iter()
+        .map(|text| (stated(text), "labeled".to_string()))
+        .collect();
+    expected.sort();
+    assert_eq!(found, expected);
+    let served = serve(&handler, THIRD, "s3").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+}
+
+/// A completion remark the extractor files under another category than
+/// the plan's replaces nothing, as any replacement of another category. It
+/// contests the plan, so the plan stays in the section with the remark
+/// shown on its line.
+#[tokio::test]
+async fn a_completion_remark_of_another_category_is_shown_beside_the_plan() {
+    let done = "The retry budget now lives in the client config.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", RETRY_PLAN)],
+        |_, _| {
+            vec![Extracted {
+                category: Some("CONSTRAINTS"),
+                ..classed(RETRY_PLAN, "current_work")
+            }]
+        },
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", done)],
+        |_, existing| {
+            vec![Extracted {
+                replaces: ids_containing(existing, "retry budget"),
+                category: Some("CONFIG_VALUES"),
+                ..classed(done, "status")
+            }]
+        },
+    )
+    .await;
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await).unwrap();
+    let work = block_element(&block, "CURRENT_WORK").expect("the plan is still delivered");
+    let line = work
+        .lines()
+        .find(|line| line.contains(&stated(RETRY_PLAN)))
+        .unwrap_or_else(|| panic!("{block}"));
+    assert!(
+        line.contains("contested") && line.contains("now lives in the client config"),
+        "{block}"
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(RETRY_PLAN)]
+    );
+    // Each fact keeps the category its own proposal gave it.
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let read = kernel_routes::read::read_visible(
+        &kernel,
+        &kernel_routes::ProjectBinding::new(&project),
+        kernel::Surface::ExplicitSearch,
+        None,
+        kernel_routes::read::RowSelection::DomainDecisions("memory"),
+    )
+    .unwrap();
+    let mut categories: Vec<(&str, &str)> = read
+        .decisions
+        .values()
+        .map(|decision| {
+            (
+                decision.payload.summary.as_str(),
+                decision.decision_kind.as_str(),
+            )
+        })
+        .collect();
+    categories.sort_unstable();
+    assert_eq!(
+        categories,
+        [
+            (stated(RETRY_PLAN).as_str(), "CONSTRAINTS"),
+            (stated(done).as_str(), "CONFIG_VALUES"),
+        ]
+    );
+}
+
+/// A newer plan whose statement approval the Kernel refuses is stored
+/// labeled. It still ends the plan it names, as any whole statement of the
+/// user does, so no session is delivered the older plan.
+#[tokio::test]
+async fn a_newer_plan_whose_approval_is_refused_still_ends_the_older_plan() {
+    let newer = "Put the retry budget in the server config instead.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", RETRY_PLAN)],
+        |_, _| vec![classed(RETRY_PLAN, "current_work")],
+    )
+    .await;
+    let messages = [("m2", "user", newer)];
+    let jobs = enqueue(&handler, SECOND, "s2", &messages).await;
+    fill_statement_lineage(&handler, &project, &jobs[0]);
+    drain(&handler, SECOND, "s2", &messages, |_, existing| {
+        vec![Extracted {
+            replaces: ids_containing(existing, "retry budget"),
+            ..classed(newer, "current_work")
+        }]
+    })
+    .await;
+    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(RETRY_PLAN), "labeled".to_string()),
+        (stated(newer), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+    assert_eq!(capture_counter(&handler, "decisions_approval_refused"), 1);
+    let stored = memory_rows(&handler, &project);
+    let ended = stored
+        .iter()
+        .find(|row| row.1 == stated(RETRY_PLAN))
+        .unwrap();
+    assert_eq!(
+        ended.3["ended_by"]["memory"],
+        memory_id(&handler, &project, &stated(newer)).as_str()
+    );
+    assert!(
+        !live_statement_records(&handler, &project).contains(&stated(RETRY_PLAN)),
+        "the ended plan's statement record is retired"
+    );
+    let served = serve(&handler, THIRD, "s3").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+}
+
+/// The summaries the delivery read returns to a session that captured
+/// none of the project's facts, in the read's order, and whether the read
+/// reports a cut.
+fn delivery_read(handler: &Handler, project: &Path, caps: (usize, usize)) -> (Vec<String>, bool) {
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let response = crate::canonical_memory::read_other_sessions(
+        &kernel,
+        &kernel_routes::ProjectBinding::new(project),
+        &[Some("reader")],
+        kernel.tip().unwrap(),
+        caps,
+    )
+    .unwrap();
+    let summaries = response
+        .rows
+        .iter()
+        .map(|row| {
+            response.decisions[&row.object.object_id]
+                .payload
+                .summary
+                .clone()
+        })
+        .collect();
+    (summaries, response.truncated)
+}
+
+/// The delivery read counts work in progress against caps of its own, a
+/// quarter of the read's row cap, and at least one row, and a quarter of
+/// its byte cap. The newest plans fill them, and the lasting statements,
+/// which are older than every plan, are read against the read's caps.
+#[tokio::test]
+async fn work_in_progress_is_read_under_its_own_caps() {
+    const PLANS: usize = 5;
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let rules = numbered(4, "billing");
+    capture_statements(&handler, FIRST, "s1", &rules).await;
+    for index in 0..PLANS {
+        let id = format!("plan-{index}");
+        let text = format!("Next, migrate importer number {index} to the new queue.");
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[(id.as_str(), "user", text.as_str())],
+            |text, _| vec![classed(text, "current_work")],
+        )
+        .await;
+    }
+    let kernel = handler.kernel.kernel_store().unwrap();
+    // The plan numbers the read returns, in its order, the number of
+    // lasting statements, and whether the read reports a cut.
+    let read = |rows: usize, bytes: usize| {
+        let (summaries, truncated) = delivery_read(&handler, &project, (rows, bytes));
+        let plans: Vec<usize> = summaries
+            .iter()
+            .filter_map(|summary| {
+                let (_, rest) = summary.split_once("importer number ")?;
+                rest.split_once(' ')?.0.parse().ok()
+            })
+            .collect();
+        let lasting = summaries
+            .iter()
+            .filter(|summary| summary.contains("billing service"))
+            .count();
+        assert_eq!(plans.len() + lasting, summaries.len());
+        (plans, lasting, truncated)
+    };
+    const ROOMY: usize = 1 << 20;
+    assert_eq!(read(20, ROOMY), (vec![4, 3, 2, 1, 0], 4, false));
+    assert_eq!(read(16, ROOMY), (vec![4, 3, 2, 1], 4, true));
+    assert_eq!(read(4, ROOMY), (vec![4], 4, true));
+    // A row cap whose quarter is below one row still reads one plan.
+    assert_eq!(read(2, ROOMY), (vec![4], 2, true));
+
+    // A byte cap whose quarter holds the two newest plans exactly, and
+    // one a byte short of that.
+    let size = |index: usize| -> usize {
+        let id = memory_id(
+            &handler,
+            &project,
+            &stated(&format!(
+                "Next, migrate importer number {index} to the new queue."
+            )),
+        );
+        let sizes = kernel
+            .decision_payload_sizes_as_of(std::slice::from_ref(&id), kernel.tip().unwrap())
+            .unwrap();
+        usize::try_from(sizes[0].1).unwrap()
+    };
+    let two = size(4) + size(3);
+    assert_eq!(read(100, 4 * two), (vec![4, 3], 4, true));
+    assert_eq!(read(100, 4 * two - 4), (vec![4], 4, true));
+}
+
+/// The delivery read takes its rows in serving order, by the commit that
+/// wrote each fact's current row, and bounds three things. It ends for a
+/// reader when a lasting statement is refused at the reader's caps, so a
+/// plan older than that statement is left out, and a plan behind
+/// statements that fill the caps exactly is read. A contest writes a plan's row
+/// again, so at a full work cap a contested older plan is read before a
+/// newer one. The page limit counts every row the read judges, so enough
+/// newer plans end the read before it reaches an older statement.
+#[tokio::test]
+async fn the_delivery_read_bounds_the_work_in_progress_it_returns() {
+    let read = |handler: &Handler, project: &Path, rows: usize| {
+        delivery_read(handler, project, (rows, 1 << 20))
+    };
+    let plan = |index: usize| format!("Next, migrate importer number {index} to the new queue.");
+    let one_by_one = |statements: Vec<(String, &'static str)>| async move {
+        let (handler, _store, dir, project) = delivery_handler(capture_config()).await;
+        for (index, (text, lifetime)) in statements.iter().enumerate() {
+            let id = format!("m{index}");
+            capture(
+                &handler,
+                FIRST,
+                "s1",
+                &[(id.as_str(), "user", text.as_str())],
+                |text, _| vec![classed(text, lifetime)],
+            )
+            .await;
+        }
+        (handler, dir, project)
+    };
+    let rule = |index: usize| numbered(index + 1, "billing")[index].1.clone();
+
+    // A plan older than five lasting statements, read four rows at a time.
+    let mut statements = vec![(plan(0), "current_work")];
+    statements.extend((0..5).map(|index| (rule(index), "lasting")));
+    let (handler, _dir, project) = one_by_one(statements).await;
+    let newest_four: Vec<String> = (1..5).rev().map(|index| stated(&rule(index))).collect();
+    assert_eq!(read(&handler, &project, 4), (newest_four, true));
+    let (all, truncated) = read(&handler, &project, 8);
+    assert!(all.contains(&stated(&plan(0))) && all.len() == 6 && !truncated);
+    // Five statements fill a cap of five exactly, so none is refused and
+    // the plan behind them is read.
+    let mut filled: Vec<String> = (0..5).rev().map(|index| stated(&rule(index))).collect();
+    filled.push(stated(&plan(0)));
+    assert_eq!(read(&handler, &project, 5), (filled, false));
+
+    // Two plans, the older one contested after the newer was stated, read
+    // with room for one plan.
+    let observed = "Importer number 0 already reads from the new queue.";
+    let (handler, _dir, project) =
+        one_by_one(vec![(plan(0), "current_work"), (plan(1), "current_work")]).await;
+    assert_eq!(read(&handler, &project, 4), (vec![stated(&plan(1))], true));
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("o1", "assistant", observed)],
+        |_, existing| {
+            vec![Extracted {
+                contests: ids_containing(existing, "importer number 0"),
+                ..fact(observed)
+            }]
+        },
+    )
+    .await;
+    let (rows, truncated) = read(&handler, &project, 4);
+    assert!(truncated);
+    assert_eq!(
+        rows.iter()
+            .filter(|summary| summary.starts_with("User stated"))
+            .collect::<Vec<_>>(),
+        [&stated(&plan(0))]
+    );
+
+    // Thirty-three plans newer than one lasting statement, read four rows
+    // at a time: eight pages hold thirty-two rows.
+    let mut statements = vec![(rule(0), "lasting")];
+    statements.extend((0..33).map(|index| (plan(index), "current_work")));
+    let (handler, _dir, project) = one_by_one(statements).await;
+    assert_eq!(read(&handler, &project, 4), (vec![stated(&plan(32))], true));
+    let (all, _) = read(&handler, &project, 64);
+    assert!(all.contains(&stated(&rule(0))), "{all:?}");
+}
+
+/// The block's budget is 4,000 tokens, and the work in progress takes at
+/// most a quarter of it, newest first. Eighty plans, each stated in its
+/// own commit, exceed that quarter: the section holds the newest of them
+/// as one unbroken run in that order, and every lasting statement stays.
+/// When the lasting statements leave less than a quarter, the section
+/// holds a shorter newest run. Under every load the block's lasting
+/// sections equal the block of a session that is served no work in
+/// progress, byte for byte.
+#[tokio::test]
+async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting_statement() {
+    const PLANS: usize = 80;
+    const WORK: u16 = 70;
+    let config = capture_config();
+    let (handler, _store, _dir, project) = delivery_handler(config.clone()).await;
+    // The plans are captured from their own session, which is served none
+    // of them, so its block is the block without work in progress.
+    bind(&handler, WORK, &project, "work", config.clone());
+    let rules = numbered(6, "billing");
+    capture_statements(&handler, FIRST, "s1", &rules).await;
+    for index in 0..PLANS {
+        let id = format!("plan-{index}");
+        let text = format!("Next, update the changelog entry number {index} before the release.");
+        capture(
+            &handler,
+            WORK,
+            "work",
+            &[(id.as_str(), "user", text.as_str())],
+            |text, _| vec![classed(text, "current_work")],
+        )
+        .await;
+    }
+    let tokens = |text: &str| crate::token_cache::cached_estimate_tokens(text) as f64;
+    // The plan numbers of the section's lines, in rendered order.
+    let delivered_plans = |block: &str| -> Vec<usize> {
+        block_element(block, "CURRENT_WORK")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (_, rest) = line.split_once("entry number ")?;
+                rest.split_once(' ')?.0.parse().ok()
+            })
+            .collect()
+    };
+    // The block with its work in progress element removed.
+    let lasting_sections = |block: &str| -> String {
+        match block_element(block, "CURRENT_WORK") {
+            Some(work) => block.replace(&format!("\n{work}</CURRENT_WORK>"), ""),
+            None => block.to_string(),
+        }
+    };
+
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("a later session carries the block");
+    assert!(tokens(&block) <= config.memory_budget_tokens, "{block}");
+    let control = project_memory_block(&serve(&handler, WORK, "work").await)
+        .expect("the plans' own session carries the lasting statements");
+    assert_eq!(block_element(&control, "CURRENT_WORK"), None, "{control}");
+    for (_, rule) in &rules {
+        assert!(control.contains(&stated(rule)), "{rule}: {control}");
+    }
+    assert_eq!(lasting_sections(&block), control);
+    let work = block_element(&block, "CURRENT_WORK").expect("the section renders");
+    // The section's share counts the whole element, its closing tag too.
+    let section = format!("{work}</CURRENT_WORK>");
+    assert!(
+        tokens(&section) <= config.memory_budget_tokens / 4.0,
+        "{}",
+        tokens(&section)
+    );
+    let delivered = delivered_plans(&block);
+    assert!(
+        !delivered.is_empty() && delivered.len() < PLANS,
+        "the section holds part of the plans: {delivered:?}"
+    );
+    assert_eq!(
+        delivered,
+        (PLANS - delivered.len()..PLANS).rev().collect::<Vec<_>>(),
+        "the section holds the newest plans as one run, newest first"
+    );
+
+    // Lasting statements that leave less than a quarter of the budget: the
+    // lasting sections are the ones a session with no work in progress is
+    // served, and the section holds a shorter newest run, inside what they
+    // left.
+    let more_rules = numbered(95, "search");
+    capture_statements(&handler, FIRST, "s1", &more_rules).await;
+    let pressed =
+        project_memory_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
+    assert!(tokens(&pressed) <= config.memory_budget_tokens, "{pressed}");
+    let control = project_memory_block(&serve(&handler, WORK, "work").await)
+        .expect("the plans' own session carries the lasting statements");
+    assert_eq!(block_element(&control, "CURRENT_WORK"), None, "{control}");
+    for (_, rule) in rules.iter().chain(&more_rules) {
+        assert!(control.contains(&stated(rule)), "{rule}: {control}");
+    }
+    let left_over = config.memory_budget_tokens - tokens(&control);
+    assert!(
+        0.0 < left_over && left_over < config.memory_budget_tokens / 4.0,
+        "the lasting statements leave {left_over} tokens"
+    );
+    assert_eq!(lasting_sections(&pressed), control);
+    let left = delivered_plans(&pressed);
+    assert!(
+        !left.is_empty() && left.len() < delivered.len(),
+        "the section holds a shorter run: {pressed}"
+    );
+    assert_eq!(
+        left,
+        (PLANS - left.len()..PLANS).rev().collect::<Vec<_>>(),
+        "what the section holds is still the newest run"
+    );
+
+    // More lasting statements than the budget holds: the lasting sections
+    // are again the ones served with no work in progress.
+    let extra_rules = numbered(80, "ledger");
+    capture_statements(&handler, FIRST, "s1", &extra_rules).await;
+    let full =
+        project_memory_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
+    assert!(tokens(&full) <= config.memory_budget_tokens, "{full}");
+    let control = project_memory_block(&serve(&handler, WORK, "work").await)
+        .expect("the plans' own session carries the lasting statements");
+    let kept = more_rules
+        .iter()
+        .chain(&extra_rules)
+        .filter(|(_, rule)| control.contains(&stated(rule)))
+        .count();
+    assert!(
+        kept < more_rules.len() + extra_rules.len(),
+        "the lasting statements exceed the budget: {kept}"
+    );
+    assert_eq!(lasting_sections(&full), control);
+    assert!(delivered_plans(&full).len() <= left.len(), "{full}");
 }
 
 /// The extractor proposes one sentence twice, once as work in progress that
@@ -4262,6 +6092,132 @@ fn queue_row(store: &MemoryStore, job: &str) -> QueueRow {
         .unwrap()
 }
 
+/// The write closure of a commit refuses a plan of another plan version,
+/// so the lifetime classes of an earlier build are never written under this
+/// build's rules: a version 1 plan that classes an instruction
+/// `current_work` writes nothing and records one dispatch. A version 1 plan
+/// whose commit the Kernel already holds replays that receipt, and its
+/// source is completed at the receipt's commit.
+#[tokio::test]
+async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made() {
+    use sha2::{Digest, Sha256};
+    let instruction = "Rename the retry helper to backoff_delay in this module.";
+    let committed = "Rename the upload helper to send_part in this module.";
+    let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+    let binding = kernel_routes::ProjectBinding::new(&project);
+    let digest = binding.digest().to_owned();
+    let jobs = enqueue(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", instruction), ("m2", "user", committed)],
+    )
+    .await;
+    let plan = |text: &str| {
+        json!({"version": 1, "model": "test/model", "memories": [{
+            "category": "PROJECT_RULES",
+            "content": stated(text),
+            "quote": text,
+            "lifetime": "current_work",
+        }]})
+        .to_string()
+    };
+    for (job, text) in jobs.iter().zip([instruction, committed]) {
+        assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
+        assert!(
+            store
+                .prepare_memory_capture(&digest, job, &plan(text))
+                .unwrap()
+                .is_some()
+        );
+    }
+    // The receipt an earlier build's commit of the second plan left, and
+    // a later commit of another writer, so the receipt is not the tip.
+    let commit = |producer: &str, key: &str, digest: String| {
+        handler
+            .kernel
+            .kernel_store()
+            .unwrap()
+            .commit_before(
+                std::time::Instant::now() + Duration::from_secs(5),
+                kernel::CommitIntent {
+                    producer: producer.into(),
+                    operation_key: binding.operation_key(producer, key).unwrap(),
+                    request_digest: digest,
+                    actor: "agent:memory_capture".into(),
+                    cause: "automatic project memory capture".into(),
+                },
+                |_| Ok("0".into()),
+            )
+            .unwrap()
+    };
+    let seeded = commit(
+        "memory_capture",
+        &jobs[1],
+        format!("{:x}", Sha256::digest(plan(committed).as_bytes())),
+    );
+    commit("test", "another-writer", "0".repeat(64));
+
+    let next = json!({"method": "memory.capture.next", "session_id": "s1", "model": "custom-native/model"});
+    let tip = handler.kernel.kernel_store().unwrap().tip().unwrap();
+    body(
+        handler
+            .handle_native_capture_next(test_route(FIRST), &next)
+            .await,
+    );
+    assert_eq!(
+        handler.kernel.kernel_store().unwrap().tip().unwrap(),
+        tip,
+        "the replay and the refusal commit nothing"
+    );
+    let (attempts, _, error, abandoned, _, frozen) = queue_row(&store, &jobs[0]);
+    assert_eq!(
+        (attempts, error.as_deref(), abandoned),
+        (2, Some("kernel_write_refused"), None)
+    );
+    assert_eq!(frozen, Some(plan(instruction)));
+    assert!(memory_rows(&handler, &project).is_empty());
+    assert!(live_statement_records(&handler, &project).is_empty());
+    let status = store.memory_capture_status(&digest).unwrap();
+    assert_eq!(
+        (status.completed, status.pending),
+        (1, 1),
+        "the committed plan's source is complete"
+    );
+    // The replayed source spent no further dispatch, holds no error, and
+    // is completed at the commit of the receipt it replayed.
+    let (attempts, _, error, abandoned, ..) = queue_row(&store, &jobs[1]);
+    assert_eq!((attempts, error, abandoned), (1, None, None));
+    let completed_at: i64 = store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT commit_seq FROM memory_capture_jobs WHERE job_id=?1",
+                [jobs[1].as_str()],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(completed_at, seeded.commit_seq);
+    assert_ne!(completed_at, tip);
+
+    // The refused plan under this build's version commits.
+    store
+        .execute_tag_sql_for_test(
+            "UPDATE memory_capture_jobs SET retry_at_ms=0,prepared_json=replace(prepared_json,'\"version\":1','\"version\":2') WHERE prepared_json IS NOT NULL",
+        )
+        .unwrap();
+    handler.native_capture.lock().unwrap().expire_all_for_test();
+    body(
+        handler
+            .handle_native_capture_next(test_route(FIRST), &next)
+            .await,
+    );
+    assert_eq!(
+        live_statement_records(&handler, &project),
+        [stated(instruction)]
+    );
+}
+
 /// A frozen plan decodes and names a replacement target it was never
 /// offered, which the Kernel refuses as invalid input. Each drain that
 /// commits it records one dispatch and doubles the wait, and the refusal on
@@ -4275,7 +6231,7 @@ async fn a_plan_the_kernel_refuses_spends_a_dispatch_per_commit_and_is_abandoned
     let jobs = enqueue(&handler, FIRST, "s1", &[("m1", "user", THURSDAY)]).await;
     let job = jobs[0].as_str();
     assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
-    let plan = json!({"version": 1, "model": "test/model", "memories": [{
+    let plan = json!({"version": 2, "model": "test/model", "memories": [{
         "category": "PROJECT_RULES",
         "content": stated(THURSDAY),
         "quote": THURSDAY,
@@ -5558,12 +7514,13 @@ async fn contested_limit_store() -> (
 /// A statement that ends with its task settles no contest. Its
 /// word-for-word repeat of the contested statement writes no fact and the
 /// contest stays. A sentence of another value that names the contested
-/// statement as the memory holding it is stored labeled, with no statement
-/// record, and the contest stays on its observation.
+/// statement as the memory holding it is stored under its own class,
+/// labeled for a request or a status remark and approved as work left
+/// open, and the contest stays on its observation.
 #[tokio::test]
 async fn a_statement_that_ends_with_its_task_settles_no_contest() {
     let other = "The gateway admits at most 400 clients at once during this load test.";
-    for lifetime in ["status", "current_work"] {
+    for lifetime in ["status", "request", "current_work"] {
         for repeats in [true, false] {
             let (handler, store, _dir, project, _statement, observation) =
                 contested_limit_store().await;
@@ -5610,16 +7567,25 @@ async fn a_statement_that_ends_with_its_task_settles_no_contest() {
                 ),
                 (stated(LIMIT_300), "visible".to_string()),
             ];
+            // Another value classed as work in progress is approved as
+            // such; the contest stays either way.
+            let delivered = !repeats && lifetime == "current_work";
             if !repeats {
-                expected.push((stated(other), "labeled".to_string()));
+                expected.push((
+                    stated(other),
+                    if delivered { "visible" } else { "labeled" }.to_string(),
+                ));
             }
             expected.sort();
             assert_eq!(rows, expected, "{lifetime}, repeats {repeats}");
-            assert_eq!(
-                live_statement_records(&handler, &project),
-                [stated(LIMIT_300)],
-                "{lifetime}, repeats {repeats}"
-            );
+            let mut records = live_statement_records(&handler, &project);
+            records.sort();
+            let mut approved = vec![stated(LIMIT_300)];
+            if delivered {
+                approved.push(stated(other));
+            }
+            approved.sort();
+            assert_eq!(records, approved, "{lifetime}, repeats {repeats}");
             let contested = memory_rows(&handler, &project)
                 .into_iter()
                 .find(|row| row.1 == stated(LIMIT_300))
@@ -5634,6 +7600,75 @@ async fn a_statement_that_ends_with_its_task_settles_no_contest() {
                 "{block}"
             );
         }
+    }
+}
+
+/// A source extracted without stored rows repeats a contested statement
+/// word for word under a class that ends with its task. A repeat classed
+/// `request` or `status` names the statement and writes no fact. A repeat
+/// classed `current_work` takes that link only to live work in progress: the
+/// first is stored as live work in progress beside the statement, and a
+/// second names the first. The contest stays on its observation in each
+/// case.
+#[tokio::test]
+async fn a_repeat_extracted_without_stored_rows_settles_no_contest() {
+    for lifetime in ["status", "request", "current_work"] {
+        let (handler, store, _dir, project, statement, observation) = contested_limit_store().await;
+        let contest_stays = || {
+            let rows = memory_rows(&handler, &project);
+            let contested = rows
+                .iter()
+                .find(|row| row.0 == statement)
+                .unwrap_or_else(|| panic!("{lifetime}: the statement keeps its row: {rows:?}"));
+            assert_eq!(
+                contested.3["contested_by"]["memory"], observation,
+                "{lifetime}: the contest stays on its observation"
+            );
+            rows.into_iter()
+                .filter(|row| row.1 == stated(LIMIT_300) && row.0 != statement)
+                .collect::<Vec<_>>()
+        };
+        let repeat = |id: &'static str| {
+            repeat_without_stored_rows(
+                &handler,
+                &store,
+                &project,
+                (id, "user"),
+                LIMIT_300,
+                Some(lifetime),
+            )
+        };
+
+        let linked = repeat("m3").await;
+        let repeats = contest_stays();
+        if lifetime != "current_work" {
+            assert_eq!(linked.as_ref(), Some(&statement), "{lifetime}");
+            assert!(repeats.is_empty(), "{lifetime}: {repeats:?}");
+            continue;
+        }
+        assert_eq!(linked, None);
+        assert_eq!(repeats.len(), 1, "{repeats:?}");
+        let plan = &repeats[0];
+        assert_eq!(plan.3["lifetime"], "current_work");
+        assert!(plan.3.get("contested_by").is_none(), "{:?}", plan.3);
+        // The repeat is approved: a later session's block renders it as
+        // work in progress.
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("a later session carries the block");
+        let work = block_element(&block, "CURRENT_WORK").expect("the plan's section renders");
+        assert_eq!(
+            work.lines().skip(1).collect::<Vec<_>>(),
+            [format!("{}: {}", plan.0, stated(LIMIT_300))],
+            "{block}"
+        );
+
+        // A second repeat names that plan and adds no row.
+        assert_eq!(repeat("m4").await.as_ref(), Some(&plan.0));
+        let repeats = contest_stays();
+        assert_eq!(
+            repeats.iter().map(|row| &row.0).collect::<Vec<_>>(),
+            [&plan.0]
+        );
     }
 }
 

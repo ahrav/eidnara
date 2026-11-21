@@ -80,9 +80,9 @@ struct NativePlan {
     messages: Vec<CaptureMessage>,
     existing: Vec<ExistingCaptureMemory>,
     /// The stored rows a source's request left out of its prompt after two
-    /// recorded failures. Acceptance reads them for the word-for-word
-    /// duplicate check, so a statement an approved row already holds is
-    /// stored once.
+    /// recorded failures. Acceptance reads them as the candidates of the
+    /// word-for-word duplicate link a frozen memory names, which
+    /// publication judges like a link the extractor named.
     withheld: Vec<ExistingCaptureMemory>,
     model: String,
 }
@@ -477,9 +477,9 @@ pub(super) fn collapse_quotations(
                     || kept.replaces == memory.replaces)
         }) {
             Some(kept) => {
-                // One quotation proposed under two classes is stored under
-                // the one that holds longer, so a statement the extractor
-                // read both ways stays eligible for approval.
+                // One quotation proposed under two classes is joined under
+                // the one that holds longer. A user's joined memory is
+                // classed again by the contests it keeps.
                 kept.lifetime = match (kept.lifetime, memory.lifetime) {
                     (Some(kept), Some(joined)) => Some(kept.max(joined)),
                     _ => None,
@@ -780,11 +780,8 @@ impl CaptureWork {
         now: i64,
         settlements: &JobSettlements,
     ) -> Result<(), &'static str> {
-        // Whether a memory of the message at `index` that names a target is
-        // eligible for approval as the user's own statement: a whole
-        // statement as quoted whose lifetime class outlives the task or is
-        // absent. Freezing keeps the quotation of such a memory, so this is
-        // the judgment publication makes of it.
+        // If `states` rejects a user quotation, its approved replacement
+        // targets become contests.
         let proses: Vec<super::Prose<'_>> = plan
             .jobs
             .iter()
@@ -792,10 +789,7 @@ impl CaptureWork {
             .collect();
         let states = |index: usize, memory: &CapturedMemory| {
             let (job, prose) = (&plan.jobs[index], &proses[index]);
-            super::is_user_source(job)
-                && !super::cite::is_hashed_source_id(&job.message_id)
-                && super::outlives_its_task(memory)
-                && super::quotes_whole_statements(prose, &memory.quote)
+            super::states_whole_statements(super::states_whole_message(job), prose, &memory.quote)
         };
         let decisions = match parse_capture_batch(output, &plan.messages, &plan.existing, &states) {
             Ok(decisions) => decisions,
@@ -900,6 +894,13 @@ impl CaptureWork {
             settled.push((memories, kept_for_contests));
         }
         settle_batch_contests(&mut settled);
+        // A class changes nothing on a memory of an assistant source, so
+        // such a memory keeps the class its proposal carried.
+        for ((_, job), (memories, _)) in accepted.iter().zip(&mut settled) {
+            if super::is_user_source(job) {
+                super::class_contesting_work(memories, &plan.existing);
+            }
+        }
         // One read per submission, so every plan it freezes names one HEAD.
         let head = observe_head(self.binding.kernel_project.root());
         let budget = Instant::now() + self.plan_commit_budget;
@@ -908,14 +909,23 @@ impl CaptureWork {
             failure_evidence::attach(&job.text, &mut memories);
             let attached = keep_statement_text(&job, &proses[index], &quoted, &mut memories);
             // A source extracted without the stored rows names no target.
-            // Its memory whose frozen text an approved row holds word for
-            // word names that row, so publication stores the statement
-            // once. A memory that gained failure lines the row lacks is
-            // written with them.
+            // Its memory whose frozen text a withheld row served
+            // automatically holds word for word names that row, and
+            // publication judges the link like one the extractor named.
+            // A memory that gained failure lines the row lacks names none.
+            // A statement eligible for approval names a row of its own
+            // delivery class, so ending work in progress retires the plan.
+            let states_whole = super::states_whole_message(&job);
             let link_withheld_copies = |memories: &mut [CapturedMemory]| {
                 for memory in memories {
                     if memory.duplicate_of.is_none() {
-                        memory.duplicate_of = super::approved_copy(&plan.withheld, &memory.content);
+                        let work = super::user_attributed(states_whole, &proses[index], memory)
+                            .then_some(memory.lifetime == Some(super::Lifetime::CurrentWork));
+                        let same_class = plan
+                            .withheld
+                            .iter()
+                            .filter(|row| work.is_none_or(|work| row.current_work == work));
+                        memory.duplicate_of = super::approved_copy(same_class, &memory.content);
                     }
                 }
             };
@@ -936,7 +946,7 @@ impl CaptureWork {
             };
             link_withheld_copies(&mut memories);
             let mut output = PreparedCapture {
-                version: CAPTURE_SCHEMA_VERSION,
+                version: super::CAPTURE_PLAN_VERSION,
                 model: plan.model.clone(),
                 existing: referenced(&memories),
                 memories,
@@ -994,12 +1004,9 @@ impl CaptureWork {
     }
 }
 
-/// Restores the quoted text of each memory that is eligible for approval
-/// as the user's own statement: a whole statement whose lifetime class
-/// outlives the task or is absent. A statement is approved as the sentence
-/// the user wrote, so it keeps its exact text and failure lines stay on the
-/// other memories of the source. Returns whether any memory still holds an
-/// appended line.
+/// Restores the quoted text of each memory that passes [`user_attributed`].
+/// Failure lines stay on the source's other memories.
+/// Returns whether any memory still holds an appended line.
 pub(super) fn keep_statement_text(
     job: &CaptureJob,
     prose: &super::Prose<'_>,
