@@ -777,20 +777,30 @@ describe("eidnara_search through the fused route", () => {
         );
     });
 
-    it("refuses a search whose daemon connection changed before the contest read, on the route and on the fallback", async () => {
+    it("runs a search once more when the daemon connection changed under its contest read, and refuses one whose connection changes under both passes, on the route and on the fallback", async () => {
         const observation = "Assistant reported: The client limit is 500 now.";
-        for (const fallback of [false, true]) {
+        for (const [fallback, replacements] of [
+            [false, 1],
+            [true, 1],
+            [false, 2],
+            [true, 2],
+        ] as const) {
             class MovingTransport extends FakeKernelTransport {
-                identity = "first";
-                reads = 0;
+                identity = 0;
+                passReads = 0;
                 connectionIdentity(): string {
-                    return this.identity;
+                    return String(this.identity);
                 }
                 async call(args: Parameters<FakeKernelTransport["call"]>[0]): Promise<unknown> {
+                    if (args.method === "retrieval.query") this.passReads = 0;
                     const reply = await super.call(args);
-                    // The daemon is replaced after the read that returns the statement.
-                    if (args.method === "kernel.read" && ++this.reads === 1)
-                        this.identity = "second";
+                    // The daemon is replaced after the contest read, the second read of a pass, in each of the first `replacements` passes.
+                    if (
+                        args.method === "kernel.read" &&
+                        ++this.passReads === 2 &&
+                        this.identity < replacements
+                    )
+                        this.identity += 1;
                     return reply;
                 }
             }
@@ -816,6 +826,14 @@ describe("eidnara_search through the fused route", () => {
             kernel.routeReply = () =>
                 fallback ? { kind: "terminal", terminal: "disabled" } : fused([{ object: id(1) }]);
             const execution = await run({ query: fallback ? id(1) : "gateway clients" });
+            const rankings = methods(transport).filter((method) => method === "retrieval.query");
+            expect(rankings).toHaveLength(2);
+            if (replacements === 1) {
+                // The second pass ranks and reads on the connection that replaced the first.
+                expect(execution.status).toBe("complete");
+                expect(execution.text).toContain("500 now");
+                continue;
+            }
             expect(execution.status).toBe("invalid");
             expect(execution.text).toContain("the known snapshot is ahead of the store");
             expect(execution.text).not.toContain("500 now");
@@ -1034,7 +1052,36 @@ describe("eidnara_search through the fused route", () => {
         expect(shown[1]).toEqual(shown[0]);
     });
 
-    it("refuses a ranking whose daemon connection changed before hydration", async () => {
+    it("refuses a ranking whose daemon connection changes before hydration in both passes", async () => {
+        class MovingTransport extends FakeKernelTransport {
+            identity = 0;
+            connectionIdentity(): string {
+                return String(this.identity);
+            }
+        }
+        const transport = new MovingTransport(new FakeKernel());
+        const { kernel, run } = harness(transport);
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Old daemon text.",
+        });
+        kernel.routeReply = () => {
+            transport.identity += 1;
+            return fused([{ object: id(1) }]);
+        };
+        const execution = await run({ query: "anything" });
+        expect(execution.status).toBe("invalid");
+        expect(execution.text).not.toContain("Old daemon text.");
+        expect(methods(transport)).toEqual([
+            "retrieval.query",
+            "kernel.read",
+            "retrieval.query",
+            "kernel.read",
+        ]);
+    });
+
+    it("asks the route again when the daemon connection changed after the route reported itself disabled", async () => {
         class MovingTransport extends FakeKernelTransport {
             identity = "first";
             connectionIdentity(): string {
@@ -1046,14 +1093,57 @@ describe("eidnara_search through the fused route", () => {
         kernel.seedDecision({
             object_id: id(1),
             decision_kind: "NAMING",
-            summary: "Old daemon text.",
+            summary: "Live daemon text.",
         });
+        const askedUnder: string[] = [];
         kernel.routeReply = () => {
-            transport.identity = "second";
+            askedUnder.push(transport.identity);
+            if (transport.identity === "first") {
+                // The first connection reports the route disabled and is replaced before the scan reads.
+                transport.identity = "second";
+                return { kind: "terminal", terminal: "disabled" };
+            }
             return fused([{ object: id(1) }]);
         };
         const execution = await run({ query: "anything" });
-        expect(execution.status).toBe("invalid");
-        expect(execution.text).not.toContain("Old daemon text.");
+        expect(execution.status).toBe("complete");
+        expect(execution.text).toContain("Live daemon text.");
+        expect(askedUnder).toEqual(["first", "second"]);
+        // The first pass sends no scan read: the second route query follows the first.
+        expect(methods(transport).slice(0, 2)).toEqual(["retrieval.query", "retrieval.query"]);
+    });
+
+    it("hydrates a second ranking on the connection that replaced the first ranking's", async () => {
+        class MovingTransport extends FakeKernelTransport {
+            identity = "first";
+            connectionIdentity(): string {
+                return this.identity;
+            }
+        }
+        const transport = new MovingTransport(new FakeKernel());
+        const { kernel, run } = harness(transport);
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Live daemon text.",
+        });
+        const rankedUnder: string[] = [];
+        const budgets: number[] = [];
+        kernel.routeReply = (body) => {
+            rankedUnder.push(transport.identity);
+            budgets.push(body.remaining_ms as number);
+            transport.identity = "second";
+            const until = performance.now() + 40;
+            while (performance.now() < until) {
+                // Each ranking spends 40 ms of the search's budget.
+            }
+            return fused([{ object: id(1) }]);
+        };
+        const execution = await run({ query: "anything" });
+        expect(execution.status).toBe("complete");
+        expect(execution.text).toContain("Live daemon text.");
+        expect(rankedUnder).toEqual(["first", "second"]);
+        // The second ranking has what the first left of the one route budget.
+        expect(budgets[1] ?? Infinity).toBeLessThanOrEqual(ROUTE_SEARCH_DEADLINE_MS - 35);
     });
 });
