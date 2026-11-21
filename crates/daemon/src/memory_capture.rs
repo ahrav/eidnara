@@ -2030,6 +2030,9 @@ struct ProseLayout {
     paragraphs: Vec<(usize, usize)>,
     /// The inline code spans that lie in `paragraphs`.
     code_spans: Vec<(usize, usize)>,
+    /// The quoted literals that lie in `paragraphs`, each with its marks
+    /// ([`quoted_literals`]).
+    literals: Vec<(usize, usize)>,
 }
 
 impl<'a> Prose<'a> {
@@ -2053,6 +2056,10 @@ impl<'a> Prose<'a> {
 
     fn code_spans(&self) -> &[(usize, usize)] {
         &self.layout().code_spans
+    }
+
+    fn literals(&self) -> &[(usize, usize)] {
+        &self.layout().literals
     }
 
     /// For each paragraph, whether it is written without sentence capitals
@@ -2283,6 +2290,7 @@ pub(super) fn whole_sentences(prose: &Prose<'_>, quote: &str, after_colon: bool)
     let lead = quote.len() - quote.trim_start().len();
     let paragraphs = prose.paragraphs();
     let code_spans = prose.code_spans();
+    let literals = prose.literals();
     let mut letters = NextAlphanumeric { text, scan: None };
     text.match_indices(quote).any(|(at, _)| {
         let start = at + lead;
@@ -2297,6 +2305,7 @@ pub(super) fn whole_sentences(prose: &Prose<'_>, quote: &str, after_colon: bool)
                 end <= last
                     && !inside_code_span(code_spans, start)
                     && !inside_code_span(code_spans, end)
+                    && quotes_literals_alone(text, (start, end), literals)
                     && bounds_sentences(
                         &text[first..last],
                         start - first,
@@ -2355,17 +2364,46 @@ const QUESTION_MARKS: [char; 8] = [
     '?', '\u{ff1f}', '\u{61f}', '\u{203d}', '\u{2047}', '\u{2048}', '\u{2049}', '\u{fe56}',
 ];
 
-/// Whether trimmed text can be a statement: it holds a letter or digit, no question mark of
-/// [`QUESTION_MARKS`], no quotation mark of [`QUOTATION_FAMILIES`], no
-/// leading backtick, and neither starting nor closing a single quotation.
+/// Whether trimmed text can be a statement: it holds a letter or digit, no
+/// question mark of [`QUESTION_MARKS`], and no leading backtick or
+/// quotation mark. [`quotes_literals_alone`] judges the quotation marks
+/// inside it where it stands in its paragraph.
 fn reads_as_statement(trimmed: &str) -> bool {
     trimmed.contains(char::is_alphanumeric)
         && !(trimmed.contains(QUESTION_MARKS)
-            || trimmed.contains(is_quotation_mark)
             || trimmed.starts_with(['\'', '\u{2018}', '`'])
-            || [".'", "!'", ",'", ".\u{2019}", "!\u{2019}", ",\u{2019}"]
-                .iter()
-                .any(|close| trimmed.contains(close)))
+            || trimmed.starts_with(is_quotation_mark))
+}
+
+/// The marks that close a single quotation after sentence punctuation.
+const SINGLE_CLOSINGS: [&str; 6] = [".'", "!'", ",'", ".\u{2019}", "!\u{2019}", ",\u{2019}"];
+
+/// Whether every quotation mark of `text[start..end]` belongs to a quoted
+/// literal that the range holds whole. `literals` are the message's quoted
+/// literals ([`quoted_literals`]), ascending and disjoint. The text between
+/// them holds no double quotation mark and closes no single quotation, and
+/// neither edge of the range falls inside a literal, so a statement holds a
+/// literal with both of its marks or leaves it out.
+fn quotes_literals_alone(
+    text: &str,
+    (start, end): (usize, usize),
+    literals: &[(usize, usize)],
+) -> bool {
+    let plain = |segment: &str| {
+        !segment.contains(is_quotation_mark)
+            && !SINGLE_CLOSINGS.iter().any(|close| segment.contains(close))
+    };
+    let mut at = start;
+    for &(open, close) in &literals[literals.partition_point(|&(_, close)| close <= start)..] {
+        if open >= end {
+            break;
+        }
+        if open < start || close > end || !plain(&text[at..open]) {
+            return false;
+        }
+        at = close;
+    }
+    plain(&text[at..end])
 }
 
 /// Whether `paragraph[start..end]` starts and ends on sentence boundaries with
@@ -2561,6 +2599,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
     let paragraphs = prose.paragraphs();
     let colons = prose.colons();
     let code_spans = prose.code_spans();
+    let literals = prose.literals();
     let mut cursor = 0;
     let mut judged = 0;
     let mut found: Option<&'t str> = None;
@@ -2659,6 +2698,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
             && reads_as_statement(statement)
             && !inside_code_span(code_spans, first + from)
             && !inside_code_span(code_spans, first + to)
+            && quotes_literals_alone(text, (first + from, first + to), literals)
             && bounds_sentences(
                 paragraph,
                 from,
@@ -2875,9 +2915,14 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
     // parser excludes all subsequent paragraphs.
     let mut unclosed_code = false;
     let mut unpaired = false;
-    // The paragraph and code span counts at the first block that holds a
-    // quotation mark.
+    // The paragraph, code span, and literal counts at the first block that
+    // holds a quotation mark.
     let mut before_quotation = None;
+    let mut literals = Vec::new();
+    // Whether a single-quoted literal of the message ends where a plural
+    // possessive or a measure mark could stand, and whether a single mark
+    // of the message ends a word and closes no literal.
+    let (mut possessive_shape, mut word_final_mark) = (false, false);
     for (first, index) in blocks {
         let block = &lines[first..index];
         let (at, last) = block[block.len() - 1];
@@ -2890,7 +2935,16 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         let quotes = block.iter().any(|&(start, line)| {
             line.contains(is_quotation_mark) || opens_single_quotation(start, line, &mut spans)
         });
-        let structured = quotes
+        // A paragraph whose every quotation holds one literal is the
+        // user's prose with those literals in it.
+        let found = quoted_literals(block, &code_spans[kept..]);
+        word_final_mark |= found.as_ref().map_or_else(
+            || ends_word_with_single_mark(block),
+            |found| found.word_final_mark,
+        );
+        let found = found.filter(|found| quotes && !found.spans.is_empty());
+        possessive_shape |= found.as_ref().is_some_and(|found| found.possessive_shape);
+        let structured = (quotes && found.is_none())
             || bordered
             || block.iter().any(|(_, line)| {
                 let start = line.trim_start();
@@ -2910,33 +2964,188 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         // out with every block after it.
         let readable = unreadable_from.is_none_or(|line| index <= line);
         unpaired = unpaired
-            || !quotations_close_in_turn(block, &code_spans[kept..])
-            || leaves_single_quotation_open(block, &code_spans[kept..]);
+            || (found.is_none()
+                && (!quotations_close_in_turn(block, &code_spans[kept..])
+                    || leaves_single_quotation_open(block, &code_spans[kept..])));
+        if quotes && before_quotation.is_none() {
+            before_quotation = Some((paragraphs.len(), kept, literals.len()));
+        }
         if readable && !structured && !introduces && !lead_in && !unclosed_code {
             paragraphs.push(range);
+            literals.extend(found.into_iter().flat_map(|found| found.spans));
         } else {
             code_spans.truncate(kept);
-        }
-        if quotes && before_quotation.is_none() {
-            before_quotation = Some((paragraphs.len(), code_spans.len()));
         }
         lead_in |= introduces;
         unclosed_code |= unclosed;
     }
+    // A literal such as `'users'` reads as well as an opening mark before a
+    // plural possessive, and the quotation that reading opens then closes
+    // at a later word-final mark.
+    unpaired |= possessive_shape && word_final_mark;
     // A closing mark inside quoted text passes the pairing rules as the
     // mark that closes its quotation, and the mark that closes the
     // quotation then fails them in a later block. A failure in any block
     // therefore leaves out every paragraph after the first block that
     // holds a quotation mark. A block that fails holds a mark, so the
     // counts are recorded whenever one fails.
-    if unpaired && let Some((prose, spans)) = before_quotation {
+    if unpaired && let Some((prose, spans, quoted)) = before_quotation {
         paragraphs.truncate(prose);
         code_spans.truncate(spans);
+        literals.truncate(quoted);
     }
     ProseLayout {
         paragraphs,
         code_spans,
+        literals,
     }
+}
+
+/// The quotations of one paragraph that each hold one literal.
+struct QuotedLiterals {
+    /// Each literal with its two marks, as byte ranges of the message,
+    /// ascending and disjoint.
+    spans: Vec<(usize, usize)>,
+    /// A single-quoted literal is all letters and ends in `s`, or is a
+    /// number, so its closing mark stands where a plural possessive or a
+    /// feet mark could.
+    possessive_shape: bool,
+    /// A single mark ends a word and closes no literal, as a plural
+    /// possessive or an elision does.
+    word_final_mark: bool,
+}
+
+/// The quoted literals of one paragraph, when every quotation mark in it
+/// opens or closes one. A user who writes `prefix test names with 'it_'`
+/// or `the branch is "main"` names a value, identifier, path, flag, or key
+/// inside a sentence of their own, and the sentence is theirs whole. A
+/// quotation that carries what someone else said holds several words.
+///
+/// A quotation holds a literal when its opening mark follows the line
+/// start, whitespace, or an opening bracket, its closing mark is the next
+/// quotation mark of the line and of the opening mark's style, no letter or
+/// digit follows the closing mark, and the text between the marks is one
+/// token: no whitespace, at least one character, and every character of it
+/// printable ASCII other than a backtick or a letter of a script with
+/// letter case ([`is_literal_char`]). A token holds no space, so it holds no
+/// sentence of another speaker; scripts that write sentences without spaces
+/// have no letter case.
+///
+/// A single mark between two letters or digits is an apostrophe, and so is
+/// one that [`joins_suffix_to_code`] accepts. A single mark that ends a word
+/// and closes no literal is recorded as `word_final_mark`. Any other mark,
+/// and any mark inside an inline code span that the paragraph rule counts,
+/// leaves the paragraph to the pairing rules, and the answer is `None`.
+/// `code_spans` are the paragraph's inline code spans, ascending.
+fn quoted_literals(
+    block: &[(usize, &str)],
+    code_spans: &[(usize, usize)],
+) -> Option<QuotedLiterals> {
+    let mut found = QuotedLiterals {
+        spans: Vec::new(),
+        possessive_shape: false,
+        word_final_mark: false,
+    };
+    let mut spans = CodeSpanCursor::new(code_spans);
+    for &(start, line) in block {
+        let mut previous: Option<char> = None;
+        let mut chars = line.char_indices().peekable();
+        while let Some((at, ch)) = chars.next() {
+            let single = SINGLE_QUOTATION_MARKS.contains(&ch) && !is_quotation_mark(ch);
+            if !single && !is_quotation_mark(ch) {
+                previous = Some(ch);
+                continue;
+            }
+            let place = spans.place(start + at);
+            let rest = &line[at + ch.len_utf8()..];
+            let after_word = previous.is_some_and(char::is_alphanumeric);
+            if single && (after_word || joins_suffix_to_code(place, ch, rest)) {
+                // Inside a span an apostrophe is code. In prose it ends a
+                // word unless a letter or digit follows it.
+                found.word_final_mark |= place != CodePlace::Code
+                    && after_word
+                    && !rest.starts_with(char::is_alphanumeric);
+                previous = Some(ch);
+                continue;
+            }
+            let opens = place != CodePlace::Code
+                && !CLOSING_ONLY.contains(&ch)
+                && ch != '\u{201a}'
+                && previous.is_none_or(|before| before.is_whitespace() || "([{".contains(before));
+            let token = opens.then(|| literal_token(ch, rest)).flatten()?;
+            let close = at + ch.len_utf8() + token.len();
+            let closer = line[close..].chars().next()?;
+            found
+                .spans
+                .push((start + at, start + close + closer.len_utf8()));
+            found.possessive_shape |= single
+                && (token.chars().all(|ch| ch.is_ascii_digit() || ch == '.')
+                    || (token.ends_with(['s', 'S']) && token.chars().all(char::is_alphabetic)));
+            while chars.next_if(|&(next, _)| next <= close).is_some() {}
+            previous = Some(closer);
+        }
+    }
+    Some(found)
+}
+
+/// Whether a single mark of the paragraph follows a letter or digit with no
+/// letter or digit after it, as a plural possessive, an elision, or the
+/// closing mark of a quotation does.
+fn ends_word_with_single_mark(block: &[(usize, &str)]) -> bool {
+    block.iter().any(|(_, line)| {
+        line.char_indices().any(|(at, ch)| {
+            SINGLE_QUOTATION_MARKS.contains(&ch)
+                && line[..at].ends_with(char::is_alphanumeric)
+                && !line[at + ch.len_utf8()..].starts_with(char::is_alphanumeric)
+        })
+    })
+}
+
+/// The token a quotation holds when it is a literal: `rest` follows the
+/// opening mark `opener`, and the token runs to the mark that closes it.
+/// See [`quoted_literals`] for the rule.
+fn literal_token(opener: char, rest: &str) -> Option<&str> {
+    let single = SINGLE_QUOTATION_MARKS.contains(&opener) && !is_quotation_mark(opener);
+    let mut previous: Option<char> = None;
+    for (at, ch) in rest.char_indices() {
+        let after = rest[at + ch.len_utf8()..].chars().next();
+        let closes = if single {
+            SINGLE_QUOTATION_MARKS.contains(&ch) && !is_quotation_mark(ch)
+        } else {
+            quotation_family(ch) == quotation_family(opener)
+        };
+        if closes {
+            // An apostrophe inside the token joins two letters or digits.
+            if single
+                && previous.is_some_and(char::is_alphanumeric)
+                && after.is_some_and(char::is_alphanumeric)
+            {
+                previous = Some(ch);
+                continue;
+            }
+            let closed = at > 0
+                && !OPENING_ONLY.contains(&ch)
+                && ch != '\u{201a}'
+                && after.is_none_or(|after| !after.is_alphanumeric());
+            return closed.then(|| &rest[..at]);
+        }
+        if !is_literal_char(ch) {
+            return None;
+        }
+        previous = Some(ch);
+    }
+    None
+}
+
+/// A character a quoted literal may hold: printable ASCII other than a
+/// backtick and the quotation marks, or a letter of a script with letter
+/// case. Whitespace, a mark of another quotation, and a letter of a script
+/// that writes no spaces between words are outside it.
+fn is_literal_char(ch: char) -> bool {
+    if ch.is_ascii() {
+        return ch.is_ascii_graphic() && !matches!(ch, '`' | '"' | '\'');
+    }
+    ch.is_alphabetic() && !ch.is_numeric() && (ch.is_lowercase() || ch.is_uppercase())
 }
 
 /// A run of backticks opens a code span that the next run of the same length
@@ -5936,6 +6145,268 @@ mod tests {
         );
         if widened.is_some() {
             wrong.push(format!("widened to {widened:?}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A user names a value, identifier, path, or flag between quotation
+    /// marks inside a sentence of their own. The sentence is the user's
+    /// statement whole, with the literal and both of its marks. A quotation
+    /// of several words may carry what someone else said, so its paragraph
+    /// stays out of prose.
+    #[test]
+    fn a_quotation_that_holds_one_literal_stays_in_the_users_sentence() {
+        let mut wrong = Vec::new();
+        for (text, quote, whole) in [
+            // One token between single or double marks of any style.
+            (
+                "Prefix every test name with 'it_'.",
+                "Prefix every test name with 'it_'.",
+                true,
+            ),
+            (
+                "The release branch is \"main\".",
+                "The release branch is \"main\".",
+                true,
+            ),
+            (
+                "Name the config file \u{201c}app.toml\u{201d} in every service.",
+                "Name the config file \u{201c}app.toml\u{201d} in every service.",
+                true,
+            ),
+            (
+                "Name the lock file \u{2018}deps.lock\u{2019} in every service.",
+                "Name the lock file \u{2018}deps.lock\u{2019} in every service.",
+                true,
+            ),
+            (
+                "Rename 'tmp' to 'cache' in the build scripts.",
+                "Rename 'tmp' to 'cache' in the build scripts.",
+                true,
+            ),
+            (
+                "Pass the fast flag ('--release') to every benchmark.",
+                "Pass the fast flag ('--release') to every benchmark.",
+                true,
+            ),
+            // An apostrophe inside the token joins two letters.
+            (
+                "Spell the label 'don't' in the menu.",
+                "Spell the label 'don't' in the menu.",
+                true,
+            ),
+            // A literal that ends in `s`, and a number, with no other
+            // word-final mark in the message.
+            (
+                "Use the 'requests' library for HTTP calls.",
+                "Use the 'requests' library for HTTP calls.",
+                true,
+            ),
+            (
+                "Keep the port at '8080' on staging.",
+                "Keep the port at '8080' on staging.",
+                true,
+            ),
+            // The sentences beside the one that holds the literal.
+            (
+                "Prefix every test name with 'it_'. Never skip the linter.",
+                "Never skip the linter.",
+                true,
+            ),
+            (
+                "Prefix every test name with 'it_'. Never skip the linter.",
+                "Prefix every test name with 'it_'.",
+                true,
+            ),
+            (
+                "Prefix every test name with 'it_'.\n\nNever skip the linter.",
+                "Never skip the linter.",
+                true,
+            ),
+            // A period inside the literal ends no sentence, and the
+            // paragraph is one statement.
+            (
+                "Tag the build 'v1.' Then publish it.",
+                "Then publish it.",
+                false,
+            ),
+            (
+                "Tag the build 'v1.' Then publish it.",
+                "Tag the build 'v1.' Then publish it.",
+                true,
+            ),
+            // A statement holds a literal with both marks or leaves it out.
+            ("Call the flag 'fast' in the docs.", "fast", false),
+            (
+                "Call the flag 'fast' in the docs.",
+                "Call the flag 'fast",
+                false,
+            ),
+            (
+                "Call the flag 'fast' in the docs.",
+                "fast' in the docs.",
+                false,
+            ),
+            // A statement starts with no quotation mark.
+            (
+                "'it_' is the prefix of every test name.",
+                "'it_' is the prefix of every test name.",
+                false,
+            ),
+            (
+                "\"main\" is the release branch.",
+                "\"main\" is the release branch.",
+                false,
+            ),
+            // Several words between the marks.
+            (
+                "My teammate wrote 'always rebase first' in the guide.",
+                "My teammate wrote 'always rebase first' in the guide.",
+                false,
+            ),
+            (
+                "The reviewer said \"skip the tests\" yesterday.",
+                "The reviewer said \"skip the tests\" yesterday.",
+                false,
+            ),
+            (
+                "The guide says \"Always rebase first.\" Follow it.",
+                "Follow it.",
+                false,
+            ),
+            // One literal beside a quotation of several words.
+            (
+                "Set 'mode' as the reviewer said \"only this once\" today.",
+                "Set 'mode' as the reviewer said \"only this once\" today.",
+                false,
+            ),
+            // A token of a script that writes no spaces between words can
+            // be a sentence.
+            (
+                "The note says '\u{5e38}\u{306b}\u{30ea}\u{30d9}\u{30fc}\u{30b9}\u{3059}\u{308b}' here.",
+                "The note says '\u{5e38}\u{306b}\u{30ea}\u{30d9}\u{30fc}\u{30b9}\u{3059}\u{308b}' here.",
+                false,
+            ),
+            // A mark directly after another character, a mark before a
+            // letter, a backtick or another mark inside the token, and an
+            // empty pair.
+            (
+                "Set key='value' in the file.",
+                "Set key='value' in the file.",
+                false,
+            ),
+            ("Set 'a'b in the file.", "Set 'a'b in the file.", false),
+            ("Set '`a`' in the file.", "Set '`a`' in the file.", false),
+            (
+                "Set '\"a\"' in the file.",
+                "Set '\"a\"' in the file.",
+                false,
+            ),
+            ("Set '' in the file.", "Set '' in the file.", false),
+            ("Set \"\" in the file.", "Set \"\" in the file.", false),
+            // Marks of two styles around one token, and a glyph on the
+            // side it never takes.
+            ("Set \"a' in the file.", "Set \"a' in the file.", false),
+            (
+                "Set \u{201e}a\u{201e} in the file.",
+                "Set \u{201e}a\u{201e} in the file.",
+                false,
+            ),
+            (
+                "Set 'a\u{201a} in the file.",
+                "Set 'a\u{201a} in the file.",
+                false,
+            ),
+            // A mark inside an inline code span keeps its paragraph out.
+            (
+                "Set `'a'` and 'b' in the file.",
+                "Set `'a'` and 'b' in the file.",
+                false,
+            ),
+            // `'users'` reads as well as an opening mark before a plural
+            // possessive. A later word-final mark may close that
+            // quotation, in the same paragraph or a later one.
+            (
+                "Bob wrote 'users' data is gone. Never restore it. Really' and left.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote 'users' data is gone.\n\nNever restore it.\n\nThat is all' and left.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "The teams' notes moved.\n\nBob wrote 'users' data is gone.\n\nNever restore it.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote '6' is the limit.\n\nNever raise it.\n\nThat is all' and left.",
+                "Never raise it.",
+                false,
+            ),
+            // A literal that no possessive reading fits keeps its
+            // paragraphs beside a possessive.
+            (
+                "Prefix every test name with 'it_'.\n\nNever rename the users' table.",
+                "Never rename the users' table.",
+                true,
+            ),
+            (
+                "Use the 'user_ids' column.\n\nNever rename the users' table.",
+                "Use the 'user_ids' column.",
+                true,
+            ),
+            // A quotation left open in a later paragraph leaves out the
+            // paragraph with the literal too: the literal's marks may
+            // stand inside that quotation.
+            (
+                "Prefix every test name with 'it_'.\n\nBob wrote \"Hi team.\n\nAlways skip the CI tests.",
+                "Prefix every test name with 'it_'.",
+                false,
+            ),
+            (
+                "Prefix every test name with 'it_'.\n\nBob wrote \"Hi team.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            // A closing mark after sentence punctuation with nothing open.
+            (
+                "Bob wrote 'it_' is the prefix. Always use it.' Then he left.",
+                "Always use it.",
+                false,
+            ),
+        ] {
+            let found = quotes_whole_statements(&Prose::of(text), quote);
+            if found != whole {
+                wrong.push(format!("{quote:?} in {text:?}: {found}"));
+            }
+        }
+        // A cut quotation widens to the sentence that holds the literal.
+        for (text, quote, widened) in [
+            (
+                "Please prefix every test name with 'it_' from now on.",
+                "prefix every test name with 'it_'",
+                Some("Please prefix every test name with 'it_' from now on."),
+            ),
+            (
+                "My teammate wrote 'always rebase first' in the guide.",
+                "always rebase first",
+                None,
+            ),
+            // A quotation cut from inside the marks widens to the user's
+            // sentence around the literal, as one cut from a code span does.
+            (
+                "Call the flag 'fast' in the docs.",
+                "fast",
+                Some("Call the flag 'fast' in the docs."),
+            ),
+        ] {
+            let found = enclosing_statement(&Prose::of(text), quote);
+            if found != widened {
+                wrong.push(format!("{quote:?} in {text:?} widened to {found:?}"));
+            }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
