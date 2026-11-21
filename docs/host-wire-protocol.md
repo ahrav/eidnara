@@ -1328,7 +1328,9 @@ settled (below), is an instruction for one occasion: it is stored with
 `lifetime` `request`, and the contest rule (below) shows it on the line of
 the fact it contests. A `current_work` fact frozen with no such contest,
 because it names none, contests only labeled facts, or another fact of its
-source or batch holds the contest, keeps its class. A captured fact's rationale
+source or batch holds the contest, keeps its class. A frozen plan commits
+under the rules of the build that commits it, so a plan an earlier build
+froze whose fact carries `current_work` is approved under the rule above. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in
@@ -1598,8 +1600,9 @@ of that fact's served text; when the contesting fact cannot be read, the line
 is `Contested by <fact id>` and a note says so. `eidnara_search` renders a
 fact capture stored with `lifetime` `current_work` with ` lifetime=current_work`
 at the end of its header line, followed by ` state=live` when the Kernel
-serves the fact as approved and by ` state=ended` when its rationale holds
-`ended_by`, in which case a line `Ended by <fact id>` follows its text, the
+serves the fact as approved and by ` state=ended` when it is labeled and its
+rationale holds `ended_by` with a string `memory` and a string `session`, in
+which case a line `Ended by <fact id>` follows its text, the
 fact id shown by the block's rule for a fact id; a fact stored labeled with
 no `ended_by` carries the class alone. Both search routes build a result
 from the fact's row as `explicit_search` serves it, so they render one

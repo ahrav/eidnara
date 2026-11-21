@@ -60,7 +60,7 @@ export interface MemorySearchResult {
     work?: WorkInProgress;
 }
 
-/** A string `ended_by.memory` sets `state` to `ended` and supplies `endedBy`. Otherwise, unlabeled rows report `live` and labeled rows omit `state`. */
+/** A labeled row whose `ended_by` holds a string `memory` and a string `session` reports `ended` and supplies `endedBy`. Otherwise, unlabeled rows report `live` and labeled rows omit `state`. */
 export interface WorkInProgress {
     state?: "live" | "ended";
     endedBy?: string;
@@ -290,7 +290,13 @@ function workInProgressOf(row: ReadRow, decision: ReadDecision): WorkInProgress 
     }
     if (!isRecord(parsed) || parsed.lifetime !== "current_work") return undefined;
     const end = parsed.ended_by;
-    if (isRecord(end) && typeof end.memory === "string") {
+    // The whole record, as the daemon writes it: the ending fact's id and the session whose message ended the work, on a labeled fact.
+    if (
+        row.labeled &&
+        isRecord(end) &&
+        typeof end.memory === "string" &&
+        typeof end.session === "string"
+    ) {
         return { state: "ended", endedBy: end.memory };
     }
     return row.labeled ? {} : { state: "live" };
