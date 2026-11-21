@@ -53,7 +53,7 @@ that only another repository's pack holds, reached through the hint and
 through a symlinked index (`:568`); a HEAD whose branch alias is cyclic or
 names an unborn branch (`:373`); and the route-level
 submission over unborn, plain, and SHA-256 roots, asserting the frozen value
-and that both jobs publish (`crates/daemon/src/lib.rs:25101`).
+and that both jobs publish (`crates/daemon/src/lib.rs:25119`).
 
 ## Investigation log
 
@@ -85,7 +85,7 @@ and that both jobs publish (`crates/daemon/src/lib.rs:25101`).
 - Findings: a `HeadUnavailable` plan builds no anchor spec, every decision
   records `anchor: "head_unavailable"` with `anchor_id` empty, and
   `decisions_head_unavailable` counts each; `crates/daemon/src/source_capture_tests.rs:3700` checks a plain and
-  an unborn root, and `crates/daemon/src/lib.rs:25211` a plan without
+  an unborn root, and `crates/daemon/src/lib.rs:25229` a plan without
   `head`.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
