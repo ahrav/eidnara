@@ -14,24 +14,30 @@ revision.
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
-  per positive row (`crates/daemon/src/canonical_memory.rs:55-58`).
+  per rendered row: the positive-category rows in object-id order, then the
+  `CURRENT_WORK` rows in the supplied order, which is the order the block
+  renders them in (`crates/daemon/src/canonical_memory.rs:54-61`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:705`)).
-- The four tests named under Existing check are unchanged since `a0e3f2993`; the
-  spec cited their `fn` lines, and the production code was not cited.
+  (`crates/daemon/src/canonical_memory.rs:742`)).
+- The first four tests named under Existing check are unchanged since
+  `a0e3f2993`; the spec cited their `fn` lines, and the production code was not
+  cited. The fifth covers the order of the `CURRENT_WORK` rows.
 
 - Guarantee under test: The composition revision is a digest over exactly the
-  rendered positive-category rows, sorted by object id, after the token-budget
-  trim.
+  rendered rows after the token-budget trim: the positive-category rows sorted
+  by object id, then the `CURRENT_WORK` rows in the order the block renders
+  them.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1202`);
+  (`crates/daemon/src/canonical_memory.rs:1264`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1260`);
+  (`crates/daemon/src/canonical_memory.rs:1498`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1277`);
+  (`crates/daemon/src/canonical_memory.rs:1515`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1299`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1537`);
+  `the_revision_reads_the_current_work_section_in_the_supplied_order`
+  (`crates/daemon/src/canonical_memory.rs:1464`). Status: unaudited.
 
 ## Failure scenario
 
@@ -44,10 +50,11 @@ None.
 
 ## What a test must construct
 
-The four unit tests already construct each input class.
+The five unit tests already construct each input class.
 
 Required faults and enabling state: Snapshots that differ only in rows the
-renderer drops, bytes past the render cap, or rows past the memory budget.
+renderer drops, bytes past the render cap, rows past the memory budget, or
+the order of the `CURRENT_WORK` rows.
 
 ## Investigation log
 

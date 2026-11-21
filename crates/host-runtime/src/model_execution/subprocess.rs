@@ -1078,6 +1078,46 @@ fn blocking_slots() -> &'static Arc<tokio::sync::Semaphore> {
     SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(BLOCKING_SLOTS)))
 }
 
+/// Whether every blocking filesystem job of this process has returned.
+///
+/// A waiter that stops waiting for a job leaves it running, and the job keeps its slot until it returns. A private-directory creation or a record publication that a run stopped waiting for is such a job, and its entry reaches the registry when it returns. Free slots therefore mean that every entry this process will write is already on disk.
+///
+/// A dropped [`PrivateDir`] hands its removal to the cleanup thread, which holds no slot, so the removals that thread still owes are counted beside the slots.
+pub(crate) fn filesystem_jobs_idle() -> bool {
+    blocking_slots().available_permits() == BLOCKING_SLOTS
+        && DEFERRED_REMOVALS.load(std::sync::atomic::Ordering::Acquire) == 0
+}
+
+/// The removals the cleanup thread has accepted and has yet to finish.
+static DEFERRED_REMOVALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The removals of private directories that returned an error, counted under the directory that held each one, for the life of the process.
+///
+/// A removal that returns an error leaves the directory's files wherever they are, and no later job removes them. A directory that left its path before the removal ran is no longer under its own name, so the registry cannot answer for it. The removal's own result is the evidence, and it is counted where the removal returns, whether or not its run is still waiting. The count is kept by path, so every handle to one state root reads the same count.
+fn removal_errors() -> &'static Mutex<std::collections::HashMap<PathBuf, usize>> {
+    static ERRORS: OnceLock<Mutex<std::collections::HashMap<PathBuf, usize>>> = OnceLock::new();
+    ERRORS.get_or_init(Mutex::default)
+}
+
+/// Removes a private directory and counts an error under the directory that holds it.
+fn remove_private_dir(path: &Path) -> io::Result<()> {
+    let removed = fs::remove_dir_all(path);
+    if removed.is_err() {
+        count_removal_error(path);
+    }
+    removed
+}
+
+fn count_removal_error(path: &Path) {
+    if let Some(holder) = path.parent() {
+        *removal_errors()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(holder.to_owned())
+            .or_default() += 1;
+    }
+}
+
 /// Runs a synchronous `/proc` or filesystem step on the blocking pool so it never stalls a runtime worker.
 /// A cancelled or panicked blocking task reads as an unknown answer.
 /// The slot moves into the job, so a stalled job keeps its slot until it returns and callers behind it wait (and time out) instead of adding more.
@@ -1094,6 +1134,37 @@ pub(crate) async fn off_runtime<T: Send + 'static>(
     })
     .await
     .map_err(|err| io::Error::other(format!("blocking task failed: {err}")))
+}
+
+/// Runs a filesystem step on a thread of its own and waits for its answer for `bound` at most.
+///
+/// A runtime waits for every job of its blocking pool when it is dropped. A job that runs its step through this function returns at the bound, and a step that a stalled filesystem holds stays on its own thread, which ends with the process.
+pub(crate) fn within<T: Send + 'static>(
+    bound: Duration,
+    step: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let outlasted = || {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "a filesystem step outlasted its bound",
+        )
+    };
+    // A step starts only while its bound has time left.
+    if bound.is_zero() {
+        return Err(outlasted());
+    }
+    let (answer, answered) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("bounded-fs-step".to_owned())
+        .spawn(move || {
+            let _ = answer.send(step());
+        })?;
+    answered.recv_timeout(bound).map_err(|err| match err {
+        std::sync::mpsc::RecvTimeoutError::Timeout => outlasted(),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            io::Error::other("a filesystem step ended without an answer")
+        }
+    })?
 }
 
 /// Queues a fork on one immortal OS thread and returns the reply channel without waiting.
@@ -1403,7 +1474,7 @@ impl PrivateDir {
     /// `merge_cleanup` propagates cleanup failures to the run terminal.
     pub fn cleanup(mut self) -> Result<(), CleanupFailure> {
         let path = self.path.take().expect("cleanup runs once");
-        fs::remove_dir_all(&path).map_err(|err| CleanupFailure { kind: err.kind() })
+        remove_private_dir(&path).map_err(|err| CleanupFailure { kind: err.kind() })
     }
 
     /// The child controls the size of the tree under `HOME`, so the recursive delete runs on the blocking pool.
@@ -1429,7 +1500,9 @@ impl Drop for PrivateDir {
 
 /// One immortal thread performs best-effort removals for dropped [`PrivateDir`] guards.
 /// The queue is bounded like the spawn queue; a directory that cannot be queued stays for the startup run-dir sweep, which is the same fallback a failed `remove_dir_all` already relies on.
+/// A removal that returns an error and a directory that cannot be queued are both counted as removal errors.
 fn defer_remove_dir(path: PathBuf) {
+    use std::sync::atomic::Ordering;
     static CLEANUP: OnceLock<std::sync::mpsc::SyncSender<PathBuf>> = OnceLock::new();
     let sender = CLEANUP.get_or_init(|| {
         let (sender, paths) = std::sync::mpsc::sync_channel::<PathBuf>(BLOCKING_SLOTS);
@@ -1437,13 +1510,23 @@ fn defer_remove_dir(path: PathBuf) {
             .name("model_execution-cleanup".to_owned())
             .spawn(move || {
                 while let Ok(path) = paths.recv() {
-                    let _ = fs::remove_dir_all(path);
+                    // The error is counted before the removal leaves the outstanding count, so a reader that sees no removal outstanding also sees the error.
+                    let _ = remove_private_dir(&path);
+                    DEFERRED_REMOVALS.fetch_sub(1, Ordering::Release);
                 }
             })
             .expect("spawn the model_execution-cleanup thread");
         sender
     });
-    let _ = sender.try_send(path);
+    DEFERRED_REMOVALS.fetch_add(1, Ordering::Release);
+    if let Err(
+        std::sync::mpsc::TrySendError::Full(path)
+        | std::sync::mpsc::TrySendError::Disconnected(path),
+    ) = sender.try_send(path)
+    {
+        count_removal_error(&path);
+        DEFERRED_REMOVALS.fetch_sub(1, Ordering::Release);
+    }
 }
 
 /// A cleanup failure converts a completed run to a failure because sensitive files may remain.
@@ -2432,6 +2515,7 @@ pub mod group_registry {
     }
 
     pub const STATE_DIR_NAME: &str = "model_execution";
+    const RUN_ROOT_NAME: &str = "runs";
 
     /// Set in every harness child's environment; the startup sweep matches it against the recorded value when the group's leader is gone.
     pub const GROUP_NONCE_ENV: &str = "EIDNARA_MODEL_EXECUTION_GROUP_NONCE";
@@ -2483,9 +2567,29 @@ pub mod group_registry {
         }
 
         pub fn run_root(&self) -> io::Result<PathBuf> {
-            let root = self.registry_dir()?.join("runs");
+            let root = self.registry_dir()?.join(RUN_ROOT_NAME);
             secure_dir(&root)?;
             Ok(root)
+        }
+
+        /// The removals of private directories under this root's run root that returned an error in this process.
+        pub(crate) fn removal_errors(&self) -> usize {
+            super::removal_errors()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&self.dir.join(RUN_ROOT_NAME))
+                .copied()
+                .unwrap_or(0)
+        }
+
+        /// Read-only lookup of the registry directory and its run root.
+        ///
+        /// If either directory is missing, the lookup returns an error and leaves the filesystem unchanged.
+        fn established_dirs(&self) -> io::Result<(PathBuf, PathBuf)> {
+            let run_root = self.dir.join(RUN_ROOT_NAME);
+            established_dir(&self.dir)?;
+            established_dir(&run_root)?;
+            Ok((self.dir.clone(), run_root))
         }
 
         /// The working directory every Pi run starts in: `cwd/`, a directory created empty beside `runs/` that persists across runs and restarts.
@@ -2505,6 +2609,19 @@ pub mod group_registry {
         crate::instance::secure_runtime_dir(dir)
             .map(drop)
             .map_err(|err| io::Error::other(format!("group registry dir is not private: {err}")))
+    }
+
+    /// This check requires current-user ownership and mode `0700`, the state [`secure_dir`] leaves a directory in. A missing path component returns `NotFound`.
+    fn established_dir(dir: &Path) -> io::Result<()> {
+        let pinned = crate::instance::open_secure_dir_existing(dir)
+            .map_err(|err| io::Error::other(format!("group registry dir is not private: {err}")))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "a group registry dir is missing")
+            })?;
+        if !crate::instance::is_owner_only_dir(&rustix::fs::fstat(&pinned)?) {
+            return Err(io::Error::other("group registry dir is not private"));
+        }
+        Ok(())
     }
 
     struct Entry {
@@ -2648,6 +2765,50 @@ pub mod group_registry {
         }
     }
 
+    /// The longest registry record a read accepts. A record this host writes is a few hundred bytes.
+    const RECORD_READ_CAP: u64 = 64 * 1024;
+
+    /// Reads the record at `path` through one descriptor: a regular file owned by this user, opened without following a symlink. A file longer than [`RECORD_READ_CAP`] fails the read, so a record is interpreted whole. `Ok(None)` means another process removed the record after the directory was listed.
+    ///
+    /// The open returns at once for a FIFO that took the record's place after the directory was listed, and the regular-file check then refuses it. `O_NONBLOCK` leaves a regular file's read as it is.
+    pub(super) fn read_pinned_record(path: &Path) -> io::Result<Option<String>> {
+        use std::os::unix::fs::MetadataExt;
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
+            return Err(io::Error::other(
+                "a registry record is not a regular file owned by this user",
+            ));
+        }
+        let mut text = String::new();
+        text.try_reserve_exact(meta.len().min(RECORD_READ_CAP + 1) as usize)?;
+        std::io::Read::read_to_string(
+            &mut std::io::Read::take(file, RECORD_READ_CAP + 1),
+            &mut text,
+        )?;
+        if text.len() as u64 > RECORD_READ_CAP {
+            return Err(io::Error::other(
+                "a registry record is longer than the read cap",
+            ));
+        }
+        Ok(Some(text))
+    }
+
+    /// A record still being written sits under a dot-prefixed name until its rename publishes it. Every other name is a published record's, including a name that is not UTF-8.
+    fn is_unpublished_temp(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+    }
+
     /// Sweeps one registry entry; `Ok(n)` counts groups killed, `Err` means the record was retained.
     fn sweep_record(path: &Path, current_boot: &str) -> io::Result<usize> {
         let mut killed = 0;
@@ -2657,11 +2818,7 @@ pub mod group_registry {
         }
         // Hosts sharing one state root sweep concurrently with each other's record writes.
         // Deleting a dot-prefixed temp younger than `UNPUBLISHED_TEMP_GRACE` could unlink an in-flight write, causing its publishing rename to fail with `ENOENT`.
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with('.'))
-        {
+        if is_unpublished_temp(path) {
             let stale = fs::symlink_metadata(path)
                 .and_then(|meta| meta.modified())
                 .map(|modified| {
@@ -2677,27 +2834,8 @@ pub mod group_registry {
         }
         // A record names a kill target, so the sweep parses only a pinned regular file owned by this user.
         // A planted foreign-owned file or symlink fails the sweep closed instead of driving `kill_process_group`.
-        let text = {
-            use std::os::unix::fs::MetadataExt;
-            let mut file = match fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(path)
-            {
-                Ok(file) => file,
-                // `NotFound` means another process removed the record after directory enumeration.
-                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
-                Err(err) => return Err(err),
-            };
-            let meta = file.metadata()?;
-            if !meta.is_file() || meta.uid() != rustix::process::geteuid().as_raw() {
-                return Err(io::Error::other(
-                    "a registry record is not a regular file owned by this user",
-                ));
-            }
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut file, &mut text)?;
-            text
+        let Some(text) = read_pinned_record(path)? else {
+            return Ok(0);
         };
         // A record from a different boot is removed without signaling because its PIDs may be reused. The boot line is trusted only when the record's checksum verifies, so a corrupted boot line cannot masquerade as a stale record.
         if Entry::verified_body(&text)
@@ -2815,16 +2953,7 @@ pub mod group_registry {
         let mut removed = 0;
         for entry in fs::read_dir(&root)? {
             let path = entry?.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let mut fields = name.rsplitn(5, '-');
-            let (Some(_nonce), Some(start), Some(pid), Some(boot)) =
-                (fields.next(), fields.next(), fields.next(), fields.next())
-            else {
-                continue;
-            };
-            let (Ok(pid), Ok(start)) = (pid.parse::<i32>(), start.parse::<u64>()) else {
+            let Some((boot, pid, start)) = run_dir_owner(&path) else {
                 continue;
             };
             if boot != current_boot {
@@ -2838,6 +2967,89 @@ pub mod group_registry {
             remove_run_dir(&path, &mut removed)?;
         }
         Ok(removed)
+    }
+
+    /// The private run directories and crash-ownership records in a registry that name this process as their owner.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct OwnResidue {
+        pub run_dirs: usize,
+        pub records: usize,
+    }
+
+    /// Counts what this process still holds in `root`.
+    ///
+    /// A run reports a cleanup or record failure when the bounded wait on its removal ends first. The removal keeps running on the blocking pool or the cleanup thread and usually completes, so the run's verdict can outlive the files it describes. The registry is the record of what such a removal left: once it has returned without an error, the host holds that run's prompt material or coordination state exactly when an entry here still names it. A removal that returned an error is counted apart (`StateRoot::removal_errors`), because its directory may have left its name.
+    ///
+    /// The read removes nothing and signals no process. A published record this host cannot interpret fails the read, so the caller keeps the verdicts it counted.
+    ///
+    /// The read also fails when the registry directory or its run root is missing.
+    pub fn own_residue(root: &StateRoot) -> io::Result<OwnResidue> {
+        let owner_pid = std::process::id() as i32;
+        let owner_start = owner_start_time()?;
+        let owner_boot = owner_boot_tag()?;
+        let record_boot = boot_id()?;
+        let (registry, run_root) = root.established_dirs()?;
+        let mut residue = OwnResidue::default();
+        for entry in fs::read_dir(run_root)? {
+            let path = entry?.path();
+            if run_dir_owner(&path)
+                .is_none_or(|owner| owner != (owner_boot.as_str(), owner_pid, owner_start))
+            {
+                continue;
+            }
+            // A removal that finishes after the listing answers `NotFound`, and that directory has left the disk.
+            match fs::symlink_metadata(&path) {
+                Ok(_) => residue.run_dirs += 1,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        for entry in fs::read_dir(registry)? {
+            let path = entry?.path();
+            if is_unpublished_temp(&path) {
+                continue;
+            }
+            // The registry holds directories beside its records, and only an entry that resolves to a regular file is read, as in the startup sweep. A symlink to a regular file then fails the pinned read. A removal that finishes between the listing and a read answers `NotFound`.
+            match fs::metadata(&path) {
+                Ok(meta) if meta.is_file() => {}
+                Ok(_) => continue,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            }
+            // The record is read as the startup sweep reads it: through one descriptor, as a regular file owned by this user.
+            let Some(text) = read_pinned_record(&path)? else {
+                continue;
+            };
+            // A record of another boot names another owner, whatever its schema version. The startup sweep removes it.
+            if Entry::verified_body(&text)
+                .and_then(|body| body.lines().nth(1))
+                .is_some_and(|boot| boot != record_boot)
+            {
+                continue;
+            }
+            // A published record this host cannot interpret may be its own, so the read answers unknown, as the startup sweep does for the same record.
+            let Some(record) = Entry::parse(&text) else {
+                return Err(io::Error::other(
+                    "a published registry record cannot be interpreted",
+                ));
+            };
+            if record.owner_pid == owner_pid && record.owner_start == owner_start {
+                residue.records += 1;
+            }
+        }
+        Ok(residue)
+    }
+
+    /// The boot tag, PID, and start time a private run directory's name records for its creator.
+    fn run_dir_owner(path: &Path) -> Option<(&str, i32, u64)> {
+        let mut fields = path.file_name()?.to_str()?.rsplitn(5, '-');
+        let (_nonce, start, pid, boot) = (
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+        );
+        Some((boot, pid.parse().ok()?, start.parse().ok()?))
     }
 
     fn remove_run_dir(path: &Path, removed: &mut usize) -> io::Result<()> {
@@ -2865,6 +3077,89 @@ mod tests {
         CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
         EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
+
+    /// A removal the cleanup thread still owes is a filesystem job that has yet to return, whatever the slots hold.
+    #[test]
+    fn a_removal_the_cleanup_thread_owes_keeps_the_filesystem_jobs_busy() {
+        use std::sync::atomic::Ordering;
+
+        super::DEFERRED_REMOVALS.fetch_add(1, Ordering::Release);
+        let idle = super::filesystem_jobs_idle();
+        super::DEFERRED_REMOVALS.fetch_sub(1, Ordering::Release);
+        assert!(!idle);
+    }
+
+    /// A FIFO that takes a record's place after the directory was listed has no writer, and a blocking open of it never returns. The pinned read opens without blocking and refuses the FIFO as no regular file.
+    #[test]
+    fn a_fifo_in_a_records_place_fails_the_pinned_read_without_blocking() {
+        let dir = tempfile::tempdir().expect("registry dir");
+        let path = dir.path().join("record");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            path.as_path(),
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .expect("fifo");
+        let read = super::within(std::time::Duration::from_secs(2), move || {
+            super::group_registry::read_pinned_record(&path)
+        });
+        assert_eq!(
+            read.expect_err("a FIFO is no record").to_string(),
+            "a registry record is not a regular file owned by this user"
+        );
+    }
+
+    /// A blocking-pool job whose step is still running at the bound returns a timeout, so the runtime that waits for the job when it is dropped can stop.
+    #[test]
+    fn a_step_still_running_at_its_bound_ends_the_blocking_job_that_waits_for_it() {
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let (release, parked) = std::sync::mpsc::channel::<()>();
+        let job = runtime.spawn_blocking(move || {
+            super::within(Duration::from_millis(50), move || {
+                // The step ends when the test releases it, and after ten seconds at the latest.
+                let _ = parked.recv_timeout(Duration::from_secs(10));
+                Ok(())
+            })
+        });
+        let answer = runtime.block_on(job).expect("the job returns");
+        assert_eq!(
+            answer.expect_err("the step is still running").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        drop(runtime);
+        release.send(()).expect("the step is released");
+
+        let answered = super::within(Duration::from_secs(10), || Ok(7)).expect("the step answers");
+        assert_eq!(answered, 7);
+
+        // A step starts only while its bound has time left.
+        let (ran, step_ran) = std::sync::mpsc::channel::<()>();
+        let spent = super::within(Duration::ZERO, move || {
+            let _ = ran.send(());
+            Ok(())
+        });
+        assert_eq!(
+            spent.expect_err("the bound is spent").kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(
+            step_ran.recv().is_err(),
+            "the step is dropped without running"
+        );
+
+        // A step that ends without an answer is reported as that, apart from a step still running.
+        let ended = super::within(Duration::from_secs(10), || -> std::io::Result<()> {
+            panic!("the step ends without an answer")
+        });
+        assert_eq!(
+            ended.expect_err("no answer").kind(),
+            std::io::ErrorKind::Other
+        );
+    }
 
     #[test]
     fn discarded_lines_keep_their_newlines_and_the_partial_tail() {

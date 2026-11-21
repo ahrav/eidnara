@@ -13,9 +13,9 @@ References are verified at the #1157 branch tip, the commit that carries this
 revision.
 
 - Tip capture and bound read: `read_project_memory`
-  (`crates/daemon/src/canonical_memory.rs:205`).
+  (`crates/daemon/src/canonical_memory.rs:208`).
 - Snapshot copy into the composition:
-  `crates/daemon/src/canonical_memory.rs:34`.
+  `crates/daemon/src/canonical_memory.rs:37`.
 - R8 applied: the read is an as-of read; the Kernel answers rows visible at the
   requested sequence, so a commit after the tip capture is not reflected and
   `known_as_of` stays the captured tip.
