@@ -2964,6 +2964,15 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
     // The paragraph and code span counts at the first block that holds a
     // quotation mark.
     let mut before_quotation = None;
+    // Whether an earlier paragraph holds a literal whose closing mark has
+    // a second reading.
+    let mut after_second_reading = false;
+    // Whether the pairing rules leave a paragraph of literals open or
+    // unknown.
+    let mut literal_open = false;
+    // `literal_paragraphs[i]` records the literal classification of
+    // `paragraphs[i]`.
+    let mut literal_paragraphs = Vec::new();
     let mut introductions = Vec::new();
     for (first, index) in blocks {
         let block = &lines[first..index];
@@ -2980,7 +2989,7 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         // A paragraph whose every quotation holds one literal is the
         // user's prose with those literals in it; the pairing rules judge
         // every other paragraph that holds a mark.
-        let literals = if quotes {
+        let literals = if quotes && !after_second_reading {
             literals_of(block, &code_spans[kept..])
         } else {
             None
@@ -3012,12 +3021,14 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
             && (!quotations_close_in_turn(block, &code_spans[kept..])
                 || leaves_single_quotation_open(block, &code_spans[kept..]));
         unpaired |= open && !literal;
+        literal_open |= open && literal;
         if quotes && before_quotation.is_none() {
             before_quotation = Some((paragraphs.len(), kept));
         }
         if readable && !structured && !introduces && !lead_in && !unclosed_code {
             paragraphs.push(range);
             introductions.push(introduction.unwrap_or(range.1));
+            literal_paragraphs.push(literal);
         } else {
             code_spans.truncate(kept);
         }
@@ -3026,6 +3037,10 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         // cannot establish that the quotation closes, `lead_in` excludes
         // subsequent paragraphs as it does after a colon line.
         lead_in |= introduces || (open && literal);
+        // A literal whose closing mark has a second reading may open a
+        // quotation that runs on, so the pairing rules alone classify each
+        // later paragraph that holds a quotation mark.
+        after_second_reading |= introduction.is_some();
         unclosed_code |= unclosed;
     }
     // A closing mark inside quoted text passes the pairing rules as the
@@ -3040,6 +3055,29 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         paragraphs.truncate(prose);
         introductions.truncate(prose);
         code_spans.truncate(spans);
+    } else if literal_open && let Some((prose, _)) = before_quotation {
+        // Keeping an unmarked paragraph as prose requires every earlier
+        // quotation to have closed.
+        let keep: Vec<bool> = literal_paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, literal)| index < prose || *literal)
+            .collect();
+        let dropped: Vec<(usize, usize)> = paragraphs
+            .iter()
+            .zip(&keep)
+            .filter(|(_, keep)| !**keep)
+            .map(|(range, _)| *range)
+            .collect();
+        let mut kept = keep.iter();
+        paragraphs.retain(|_| kept.next().is_some_and(|keep| *keep));
+        let mut kept = keep.iter();
+        introductions.retain(|_| kept.next().is_some_and(|keep| *keep));
+        code_spans.retain(|&(open, _)| {
+            !dropped
+                .iter()
+                .any(|&(start, end)| start <= open && open < end)
+        });
     }
     ProseLayout {
         paragraphs,
@@ -3115,7 +3153,8 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
                 && ch != '\u{201a}'
                 && previous.is_none_or(|before| before.is_whitespace() || "([{".contains(before));
             let (token, closer) = opens.then(|| literal_token(single, ch, rest)).flatten()?;
-            if !closes_in_one_reading(single, token) {
+            let after = rest[token.len() + closer.len_utf8()..].chars().next();
+            if !closes_in_one_reading(single, token, after) {
                 found.introduces_from.get_or_insert(start + at);
             }
             single_closed |= single;
@@ -3131,17 +3170,21 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
 /// token ends in a letter, and for a single mark in a letter other than
 /// `s` or `S`. The rule ignores trailing underscores when testing the
 /// final character. The pairing rules close a one-word quotation after the
-/// same letters. After any other ending the mark may be a plural
-/// possessive, a measure or prime sign, or the opening mark of a nested
-/// quotation, so the literal's opening mark introduces what follows it.
-fn closes_in_one_reading(single: bool, token: &str) -> bool {
-    token
-        .trim_end_matches('_')
-        .chars()
-        .next_back()
-        .is_some_and(|last| {
-            last.is_alphabetic() && !last.is_numeric() && !(single && matches!(last, 's' | 'S'))
-        })
+/// same letters. `after` is the character after the mark, and the mark
+/// has one reading when `after` is `None` at line end or contains
+/// whitespace or one of `.,;:!?)]}`. After any other ending the mark may
+/// be a plural possessive, a measure or prime sign, or the opening mark of
+/// a nested quotation, so the literal's opening mark introduces what
+/// follows it.
+fn closes_in_one_reading(single: bool, token: &str, after: Option<char>) -> bool {
+    after.is_none_or(|next| next.is_whitespace() || ".,;:!?)]}".contains(next))
+        && token
+            .trim_end_matches('_')
+            .chars()
+            .next_back()
+            .is_some_and(|last| {
+                last.is_alphabetic() && !last.is_numeric() && !(single && matches!(last, 's' | 'S'))
+            })
 }
 
 /// Closing brackets and emphasis marks that may stand behind the last word
@@ -3164,8 +3207,9 @@ fn is_apostrophe(ch: char) -> bool {
 /// closes it. `rest` follows the opening mark `opener`, a single mark when
 /// `single` is set. The closing mark is the next quotation mark of the
 /// line and of the opener's style, single or of the same double family,
-/// with no letter or digit after it; a glyph every script writes at a
-/// quotation's start, and the low-9 mark, close nothing. The token between
+/// with no letter or digit after it. The parser treats `\u{2018}`,
+/// `\u{201a}`, and every glyph of [`OPENING_ONLY`] as openers. The token
+/// between
 /// the marks is at least one character, every one of them a
 /// [`is_literal_char`] or an apostrophe (`'`, `’`, or `＇`) between two
 /// letters or digits. A token that ends in `.`, `!`, or `?`, behind any
@@ -3198,7 +3242,8 @@ fn literal_token(single: bool, opener: char, rest: &str) -> Option<(&str, char)>
                 && !utterance
                 && !token.ends_with('\\')
                 && !OPENING_ONLY.contains(&ch)
-                && ch != '\u{201a}'
+                && !matches!(ch, '\u{201a}' | '\u{2018}')
+                && (ch != '\u{201c}' || opener == '\u{201e}')
                 && after.is_none_or(|after| !after.is_alphanumeric());
             return closed.then_some((token, ch));
         }
@@ -3517,7 +3562,7 @@ fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, u
                     // An outer quotation that held a nested one holds
                     // several words.
                     several_words = open > 0;
-                } else if previous.is_none_or(|before| !before.is_alphanumeric()) {
+                } else if can_open_single(ch, previous) {
                     open += 1;
                     several_words = false;
                 }
@@ -3562,7 +3607,8 @@ fn fence_opener(line: &str) -> Option<&str> {
 }
 
 /// A single quotation mark opens a quotation when it starts a word after the
-/// line start, whitespace, or `(`. The apostrophe that
+/// line start, whitespace, or `(`; `\u{2018}` and `\u{201a}` open one
+/// after a letter or digit too. The apostrophe that
 /// [`joins_suffix_to_code`] accepts starts no word. `start` is the line's
 /// offset in the message and `spans` walks its paragraph's inline code
 /// spans, so the lines of a paragraph are asked in order. A mark inside a
@@ -3571,15 +3617,25 @@ fn fence_opener(line: &str) -> Option<&str> {
 fn opens_single_quotation(start: usize, line: &str, spans: &mut CodeSpanCursor<'_>) -> bool {
     let mut previous = None;
     for (at, ch) in line.char_indices() {
+        let rest = &line[at + ch.len_utf8()..];
         if SINGLE_QUOTATION_MARKS.contains(&ch)
-            && previous.is_none_or(|before: char| !before.is_alphanumeric())
-            && !joins_suffix_to_code(spans.place(start + at), ch, &line[at + ch.len_utf8()..])
+            && can_open_single(ch, previous)
+            && !joins_suffix_to_code(spans.place(start + at), ch, rest)
         {
             return true;
         }
         previous = Some(ch);
     }
     false
+}
+
+/// `\u{2018}` and `\u{201a}` signal the start of a quotation, so either
+/// may open one directly after a letter or digit, as in
+/// `wrote\u{2018}Use`. The parser accepts every other single mark as an
+/// opener only at the start of input or after a non-alphanumeric character,
+/// which keeps an apostrophe inside its word.
+fn can_open_single(ch: char, before: Option<char>) -> bool {
+    matches!(ch, '\u{2018}' | '\u{201a}') || before.is_none_or(|before| !before.is_alphanumeric())
 }
 
 fn is_list_item(line: &str) -> bool {
@@ -6814,6 +6870,176 @@ mod tests {
                 "Always skip the CI tests.",
                 false,
             ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "Use the 'main' branch.",
+                true,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "Keep the offset at '+6' hours.",
+                true,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.",
+                "Never raise it.",
+                true,
+            ),
+            (
+                "Never raise it.\n\nKeep the offset at '+6' hours.",
+                "Never raise it.",
+                true,
+            ),
+            (
+                "Bob wrote \"(6)\" is the limit.\n\nNever raise it.\n\nKeep the offset at \"+6\" hours.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the limit.\n\nNever raise it.\n\nPrefix tests with 'it_'.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the clearance!\n\nAlways use the narrow cart! Label it 'cart'.",
+                "Always use the narrow cart!",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the clearance!\n\nAlways use the narrow cart! Label it 'cart'.",
+                "Label it 'cart'.",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the clearance!\n\nAlways use the narrow cart!",
+                "Always use the narrow cart!",
+                true,
+            ),
+            (
+                "Bob wrote\u{201a}Use the staging host!\n\nKeep retries off! Use the \"main\" branch.\n\nLogs stay local\u{2018}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{2018}Use the staging host!\n\nKeep retries off! Use the \"main\" branch.\n\nLogs stay local\u{2019}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{201a}Use the staging host!\n\nKeep retries off!",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{2018}Use the staging host!\n\nKeep retries off!",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{201a}Use the \"main\" branch! Keep retries off!",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Don\u{2019}t rename 'main'. Keep the log.",
+                "Keep the log.",
+                true,
+            ),
+            (
+                "Don\u{ff07}t rename 'main'. Keep the log.",
+                "Keep the log.",
+                true,
+            ),
+            (
+                "Bob wrote \u{ab}_Notice_\u{ab}[Draft] Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote '_Notice_'[Draft] Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{ab}_Notice_\u{ab}[Draft] Keep both manifests!\n\nNever restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Use 'main'-style names. Keep them short.",
+                "Keep them short.",
+                false,
+            ),
+            (
+                "Use 'main'-style names. Keep them short.",
+                "Use 'main'-style names.",
+                true,
+            ),
+            (
+                "Use the 'main' branch (or 'dev'). Keep them short.",
+                "Keep them short.",
+                true,
+            ),
+            (
+                "Bob wrote \u{201c}_Heads-up_\u{201c}[Draft] Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}Heads-up\u{201c} Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{2018}Heads-up\u{2018} Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Nenne den Zweig \u{201e}main\u{201c} hier. Halte ihn kurz.",
+                "Halte ihn kurz.",
+                true,
+            ),
+            (
+                "Name the module '__' here. Keep it short.",
+                "Keep it short.",
+                false,
+            ),
+            (
+                "Order the 'caf\u{e9}' blend. Keep it short.",
+                "Keep it short.",
+                true,
+            ),
+            (
+                "Keep the log.\nUse `pip` with the 'requests' library. Never float it.",
+                "Use `pip` with the 'requests' library.",
+                true,
+            ),
+            (
+                "Keep the log.\nUse `pip` with the 'requests' library. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            (
+                "Use the 'requests' library. Pin it like this: always. Never float it.",
+                "Pin it like this: always.",
+                false,
+            ),
+            (
+                "Set the tag to \"v\\\\\" in the file. Keep it.",
+                "Keep it.",
+                false,
+            ),
+            (
+                "Set the depth to \"((6))\" in the file.",
+                "Set the depth to \"((6))\" in the file.",
+                true,
+            ),
             // A closing mark after sentence punctuation with nothing open.
             (
                 "Bob wrote 'it_' is the prefix. Always use it.' Then he left.",
@@ -6844,6 +7070,21 @@ mod tests {
                 "Call the flag 'fast' in the docs.",
                 "fast",
                 Some("Call the flag 'fast' in the docs."),
+            ),
+            (
+                "Use the 'requests' library. Never float it.",
+                "the 'requests' library",
+                Some("Use the 'requests' library."),
+            ),
+            (
+                "Use the 'requests' library. Never float it.",
+                "float it",
+                None,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "raise it",
+                None,
             ),
         ] {
             let found = enclosing_statement(&Prose::of(text), quote);
