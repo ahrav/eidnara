@@ -432,6 +432,33 @@ mod trim_memories_tests {
         }
     }
 
+    /// The section's charge is its rendered bytes, tags and line breaks
+    /// included: a quarter that equals the bytes of four rows' element holds
+    /// the four, and a quarter one byte below holds three.
+    #[test]
+    fn the_sections_charge_is_the_bytes_its_element_renders() {
+        let bytes = |text: &str| text.len();
+        let requests: Vec<CanonicalMemory> = (0..10)
+            .map(|id| work(id, &format!("request number {id}")))
+            .collect();
+        let element = section_tokens(&requests[..4], bytes);
+        let exact = (element * 4) as f64;
+        assert_eq!(
+            trim_block_to_budget(&[], &requests, exact, bytes),
+            requests[..4]
+        );
+        assert_eq!(
+            trim_block_to_budget(&[], &requests, exact - 4.0, bytes),
+            requests[..3]
+        );
+        // A lasting category's wrapper is charged as it renders too: the
+        // block of one row fits a budget of its bytes, and no smaller one.
+        let row = [memory("ARCHITECTURE", "alpha")];
+        let block = bytes(&render_delivered_memory_block(&row)) as f64;
+        assert_eq!(trim_block_to_budget(&row, &[], block, bytes), row);
+        assert!(trim_block_to_budget(&row, &[], block - 1.0, bytes).is_empty());
+    }
+
     #[test]
     fn a_row_that_exceeds_the_sections_budget_ends_the_section() {
         let bytes = |text: &str| text.len();

@@ -4756,7 +4756,7 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
     capture_statements(&handler, FIRST, "s1", &extra_rules).await;
     let full =
         project_memory_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
-    assert!(tokens(&full) <= config.memory_budget_tokens, "{full}");
+    assert!(block_tokens(&full) <= config.memory_budget_tokens, "{full}");
     let control = project_memory_block(&serve(&handler, WORK, "work").await)
         .expect("the plans' own session carries the lasting statements");
     let kept = more_rules

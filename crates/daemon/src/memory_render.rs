@@ -759,6 +759,14 @@ mod tests {
                  </CURRENT_WORK>\n{note}\n</project-memory>"
             )
         );
+        // Work in progress alone: the block still ends with the note.
+        assert_eq!(
+            render_delivered_memory_block(&mixed[..1]),
+            format!(
+                "<project-memory>\n<CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\n\
+                 mem_2: newest request\n</CURRENT_WORK>\n{note}\n</project-memory>"
+            )
+        );
         assert!(!render_memory_block(&rows, "project-memory").contains(note));
         assert_eq!(render_delivered_memory_block(&[]), "");
         assert!(
