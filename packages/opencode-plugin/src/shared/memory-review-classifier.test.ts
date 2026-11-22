@@ -14,10 +14,10 @@ function work(overrides: Record<string, unknown> = {}) {
         state: "work",
         lease: LEASE,
         classifier: "typesafe/jev-latest",
-        request: {
+        request: JSON.stringify({
             state: { memory: { text: "User stated: Deploy from the release branch." } },
             questions: { changes: { type: "bool" } },
-        },
+        }),
         max_duration_ms: 10_000,
         ...overrides,
     };
@@ -41,6 +41,20 @@ function daemon(replies: unknown[]) {
 }
 
 describe("reviewClassifierWork", () => {
+    it("keeps the members of the request in the order of its text", () => {
+        const text =
+            '{"state":{"memory":{},"source":[],"later":[]},"questions":{"changes":{"criteria":{"true":"a","false":"b"}},"relation":{},"work_ended":{},"strongest":{}}}';
+        const parsed = reviewClassifierWork(work({ request: text }));
+        expect(Object.keys(parsed?.state ?? {})).toEqual(["memory", "source", "later"]);
+        expect(Object.keys(parsed?.questions ?? {})).toEqual([
+            "changes",
+            "relation",
+            "work_ended",
+            "strongest",
+        ]);
+        expect(JSON.stringify({ state: parsed?.state, questions: parsed?.questions })).toBe(text);
+    });
+
     it("reads a work response and caps the duration it states", () => {
         expect(reviewClassifierWork(work({ max_duration_ms: 60_000 }))).toEqual({
             lease: LEASE,
@@ -55,8 +69,10 @@ describe("reviewClassifierWork", () => {
         for (const broken of [
             work({ lease: "short" }),
             work({ classifier: "jev" }),
-            work({ request: { state: [], questions: {} } }),
-            work({ request: { state: {} } }),
+            work({ request: JSON.stringify({ state: [], questions: {} }) }),
+            work({ request: JSON.stringify({ state: {} }) }),
+            work({ request: { state: {}, questions: {} } }),
+            work({ request: "{" }),
             work({ max_duration_ms: 0 }),
             null,
         ]) {

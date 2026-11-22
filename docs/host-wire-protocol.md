@@ -1840,21 +1840,24 @@ immediate.
 The response `state` is one of:
 
 - `work`: `lease` (32 lowercase hexadecimal characters), `classifier` (the
-  configured reference), `request` with `state` (a JSON object, at most 96 KiB
-  serialized) and `questions` (an object of typed questions by id), and
+  configured reference), `request` (a string of at most 128 KiB holding one
+  JSON object with the members `state` and `questions`), and
   `max_duration_ms: 10000`.
 - `ready`: no request of this project waits.
 - `disabled`: the project's user tier leaves the review switch off, names no
   classifier, or names another one than `classifier`.
 
-`request.state` holds `memory` (`text`, `said_by`, `category`,
-`work_in_progress`), `source` (the references the memory cites), and `later`
-(the references written after them); each reference has `id`, `writer`, `time`
-(RFC 3339 or `null`), and `text`. `request.questions` holds `changes` and
-`work_ended` (type `bool`), `relation` (type `choice` over `replaces`, `adds`,
-`restates`, `unrelated`), and `strongest` (type `choice` over the `id` of each
-`later` reference and `none`); each question carries `type`, `instructions`, and
-`criteria`. Every text in the state is redacted source or memory text the
+`request` is JSON text, and the order of the members in that text is part of
+the request: a classifier's answers depend on the order it reads them in. The
+harness parses the text with a parser that keeps member order and passes
+`state` and `questions` to the classifier in that order. `state` holds, in
+order, `memory` (`text`, `said_by`, `category`, `work_in_progress`), `source`
+(the references the memory cites), and `later` (the references written after
+them); each reference has `id`, `writer`, `time` (RFC 3339 or `null`), and
+`text`. `questions` holds, in order, `changes` (type `bool`), `relation` (type
+`choice` over `replaces`, `adds`, `restates`, `unrelated`), `work_ended` (type
+`bool`), and `strongest` (type `choice` over the `id` of each `later` reference
+and then `none`); each question carries `type`, `instructions`, and `criteria`. Every text in the state is redacted source or memory text the
 configured model destination admits, and the daemon runs its render check over
 the assembled request before it parks it.
 

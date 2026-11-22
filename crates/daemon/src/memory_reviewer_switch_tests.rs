@@ -234,7 +234,9 @@ impl Rig {
                 continue;
             }
             assert_eq!(work["classifier"], CLASSIFIER);
-            let strongest = work["request"]["state"]["later"][0]["id"].clone();
+            // The request travels as JSON text so its members keep their order.
+            let request: Value = serde_json::from_str(work["request"].as_str().unwrap()).unwrap();
+            let strongest = request["state"]["later"][0]["id"].clone();
             let submitted = self
                 .call(json!({
                     "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
@@ -248,7 +250,7 @@ impl Rig {
                 }))
                 .await;
             assert_eq!(submitted, json!({"state": "processed"}));
-            requests.push(work["request"].clone());
+            requests.push(request);
         }
         (drain.await.unwrap(), requests)
     }

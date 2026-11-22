@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::{Map, Value, json};
+use serde::Serialize;
+use serde_json::Value;
 use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +20,8 @@ pub const LEASE_DURATION: Duration = Duration::from_secs(30);
 pub const MAX_NEXT_WAIT_MS: u64 = 20_000;
 pub const MAX_CLASSIFY_DURATION_MS: u64 = 10_000;
 pub const MAX_PARKED_REQUESTS: usize = 64;
-pub const MAX_STATE_BYTES: usize = 96 * 1024;
+/// The largest request text one review parks.
+pub const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_RECORDS: usize = 1024;
 pub const FLAG_THRESHOLD: f64 = 0.5;
 
@@ -52,17 +54,6 @@ pub struct StateReference {
     pub text: String,
 }
 
-impl StateReference {
-    fn value(&self) -> Value {
-        json!({
-            "id": self.alias,
-            "writer": self.writer.as_str(),
-            "time": self.time,
-            "text": self.text,
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewState {
     pub memory: String,
@@ -83,61 +74,143 @@ impl ReviewState {
         self.later.iter().any(|reference| self.eligible(reference))
     }
 
-    pub fn state(&self) -> Value {
-        json!({
-            "memory": {
-                "text": self.memory,
-                "said_by": self.said_by.as_str(),
-                "category": self.category,
-                "work_in_progress": self.work_in_progress,
-            },
-            "source": self.source.iter().map(StateReference::value).collect::<Vec<_>>(),
-            "later": self.later.iter().map(StateReference::value).collect::<Vec<_>>(),
-        })
-    }
-
-    pub fn questions(&self) -> Value {
-        let mut strongest = Map::new();
-        for reference in &self.later {
-            strongest.insert(
-                reference.alias.clone(),
-                Value::String(format!(
-                    "the entry of `later` whose id is {}",
-                    reference.alias
-                )),
-            );
+    /// The request as JSON text: `{"state": ..., "questions": ...}`. A classifier reads the text in order, and its answers move with the order of the members, so the text is written member by member in one fixed order (the memory, its source, the later references; then `changes`, `relation`, `work_ended`, `strongest`) and travels to the harness as text. `strongest` offers each later reference by its alias, in order, and then `none`.
+    pub fn request_json(&self) -> String {
+        fn references(references: &[StateReference]) -> Vec<WireReference<'_>> {
+            references
+                .iter()
+                .map(|reference| WireReference {
+                    id: &reference.alias,
+                    writer: reference.writer.as_str(),
+                    time: reference.time.as_deref(),
+                    text: &reference.text,
+                })
+                .collect()
         }
-        strongest.insert(
-            "none".to_string(),
-            Value::String(STRONGEST_NONE.to_string()),
-        );
-        json!({
-            "changes": {
-                "type": "bool",
-                "instructions": CHANGES_INSTRUCTIONS,
-                "criteria": { "true": CHANGES_TRUE, "false": CHANGES_FALSE },
+        let request = WireRequest {
+            state: WireState {
+                memory: WireMemory {
+                    text: &self.memory,
+                    said_by: self.said_by.as_str(),
+                    category: &self.category,
+                    work_in_progress: self.work_in_progress,
+                },
+                source: references(&self.source),
+                later: references(&self.later),
             },
-            "relation": {
-                "type": "choice",
-                "instructions": RELATION_INSTRUCTIONS,
-                "criteria": {
-                    "replaces": RELATION_REPLACES,
-                    "adds": RELATION_ADDS,
-                    "restates": RELATION_RESTATES,
-                    "unrelated": RELATION_UNRELATED,
+            questions: WireQuestions {
+                changes: WireQuestion {
+                    kind: "bool",
+                    instructions: CHANGES_INSTRUCTIONS,
+                    criteria: BoolCriteria {
+                        yes: CHANGES_TRUE,
+                        no: CHANGES_FALSE,
+                    },
+                },
+                relation: WireQuestion {
+                    kind: "choice",
+                    instructions: RELATION_INSTRUCTIONS,
+                    criteria: RelationCriteria {
+                        replaces: RELATION_REPLACES,
+                        adds: RELATION_ADDS,
+                        restates: RELATION_RESTATES,
+                        unrelated: RELATION_UNRELATED,
+                    },
+                },
+                work_ended: WireQuestion {
+                    kind: "bool",
+                    instructions: WORK_ENDED_INSTRUCTIONS,
+                    criteria: BoolCriteria {
+                        yes: WORK_ENDED_TRUE,
+                        no: WORK_ENDED_FALSE,
+                    },
+                },
+                strongest: WireQuestion {
+                    kind: "choice",
+                    instructions: STRONGEST_INSTRUCTIONS,
+                    criteria: StrongestCriteria(&self.later),
                 },
             },
-            "work_ended": {
-                "type": "bool",
-                "instructions": WORK_ENDED_INSTRUCTIONS,
-                "criteria": { "true": WORK_ENDED_TRUE, "false": WORK_ENDED_FALSE },
-            },
-            "strongest": {
-                "type": "choice",
-                "instructions": STRONGEST_INSTRUCTIONS,
-                "criteria": Value::Object(strongest),
-            },
-        })
+        };
+        serde_json::to_string(&request).expect("the request serializes")
+    }
+}
+
+#[derive(Serialize)]
+struct WireRequest<'a> {
+    state: WireState<'a>,
+    questions: WireQuestions<'a>,
+}
+
+#[derive(Serialize)]
+struct WireState<'a> {
+    memory: WireMemory<'a>,
+    source: Vec<WireReference<'a>>,
+    later: Vec<WireReference<'a>>,
+}
+
+#[derive(Serialize)]
+struct WireMemory<'a> {
+    text: &'a str,
+    said_by: &'a str,
+    category: &'a str,
+    work_in_progress: bool,
+}
+
+#[derive(Serialize)]
+struct WireReference<'a> {
+    id: &'a str,
+    writer: &'a str,
+    time: Option<&'a str>,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct WireQuestions<'a> {
+    changes: WireQuestion<BoolCriteria>,
+    relation: WireQuestion<RelationCriteria>,
+    work_ended: WireQuestion<BoolCriteria>,
+    strongest: WireQuestion<StrongestCriteria<'a>>,
+}
+
+#[derive(Serialize)]
+struct WireQuestion<C> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    instructions: &'static str,
+    criteria: C,
+}
+
+#[derive(Serialize)]
+struct BoolCriteria {
+    #[serde(rename = "true")]
+    yes: &'static str,
+    #[serde(rename = "false")]
+    no: &'static str,
+}
+
+#[derive(Serialize)]
+struct RelationCriteria {
+    replaces: &'static str,
+    adds: &'static str,
+    restates: &'static str,
+    unrelated: &'static str,
+}
+
+struct StrongestCriteria<'a>(&'a [StateReference]);
+
+impl Serialize for StrongestCriteria<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len() + 1))?;
+        for reference in self.0 {
+            map.serialize_entry(
+                &reference.alias,
+                &format!("the entry of `later` whose id is {}", reference.alias),
+            )?;
+        }
+        map.serialize_entry("none", STRONGEST_NONE)?;
+        map.end()
     }
 }
 
@@ -259,8 +332,8 @@ pub struct Stage1Record {
 pub struct ClassifierWork {
     pub lease: String,
     pub classifier: String,
-    pub state: Arc<Value>,
-    pub questions: Arc<Value>,
+    /// The request as [`ReviewState::request_json`] wrote it.
+    pub request: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -279,8 +352,7 @@ struct Parked {
     id: u64,
     project: String,
     classifier: String,
-    state: Arc<Value>,
-    questions: Arc<Value>,
+    request: Arc<str>,
     reply: Option<oneshot::Sender<Result<Value, ClassifyError>>>,
     lease: Option<(String, Instant)>,
 }
@@ -318,8 +390,7 @@ impl ClassifierExchange {
         &self,
         project: &str,
         classifier: &str,
-        state: Value,
-        questions: Value,
+        request: String,
         wait: Duration,
         cancel: &CancellationToken,
     ) -> Result<Value, ClassifyError> {
@@ -335,8 +406,7 @@ impl ClassifierExchange {
                 id,
                 project: project.to_string(),
                 classifier: classifier.to_string(),
-                state: Arc::new(state),
-                questions: Arc::new(questions),
+                request: request.into(),
                 reply: Some(reply),
                 lease: None,
             });
@@ -399,8 +469,7 @@ impl ClassifierExchange {
         Some(ClassifierWork {
             lease,
             classifier: parked.classifier.clone(),
-            state: Arc::clone(&parked.state),
-            questions: Arc::clone(&parked.questions),
+            request: Arc::clone(&parked.request),
         })
     }
 
@@ -448,6 +517,8 @@ impl ClassifierExchange {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn reference(alias: &str, writer: Writer, text: &str) -> StateReference {
@@ -483,51 +554,34 @@ mod tests {
         })
     }
 
+    /// The request text is the one the offline replay sent for the same review: the members of every object in their fixed order, each later reference offered to `strongest` in order, and `none` last.
     #[test]
-    fn the_request_carries_the_state_and_the_four_typed_questions() {
-        let state = user_statement(vec![reference(
-            "ref-3",
-            Writer::User,
-            "Deploy from main from now on.",
-        )]);
-        let value = state.state();
-        assert_eq!(
-            value["memory"],
-            json!({
-                "text": "User stated: Deploy from the release branch.",
-                "said_by": "user",
-                "category": "PROJECT_RULES",
-                "work_in_progress": false,
-            })
-        );
-        assert_eq!(
-            value["later"],
-            json!([{
-                "id": "ref-3",
-                "writer": "user",
-                "time": "2026-03-01T10:00:00Z",
-                "text": "Deploy from main from now on.",
-            }])
-        );
-        assert_eq!(value["source"][0]["id"], "ref-2");
-        let questions = state.questions();
-        let names = |value: &Value| -> Vec<String> {
-            let mut names: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
-            names.sort();
-            names
+    fn the_request_text_keeps_the_order_the_classifier_was_measured_with() {
+        let state = ReviewState {
+            later: vec![
+                StateReference {
+                    alias: "ref-3".to_string(),
+                    writer: Writer::User,
+                    time: Some("2026-03-02T09:30:00Z".to_string()),
+                    text: "Deploy from \"main\" from now on.".to_string(),
+                },
+                StateReference {
+                    alias: "ref-4".to_string(),
+                    writer: Writer::Assistant,
+                    time: None,
+                    text: "Understood.".to_string(),
+                },
+            ],
+            ..user_statement(Vec::new())
         };
+        let request = state.request_json();
+        assert_eq!(request, include_str!("classifier_request.golden.json"));
+        let value: Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(value["state"]["memory"]["said_by"], "user");
+        assert_eq!(value["state"]["later"][1]["time"], Value::Null);
         assert_eq!(
-            names(&questions),
-            ["changes", "relation", "strongest", "work_ended"]
-        );
-        assert_eq!(questions["changes"]["type"], "bool");
-        assert_eq!(
-            names(&questions["relation"]["criteria"]),
-            ["adds", "replaces", "restates", "unrelated"]
-        );
-        assert_eq!(
-            names(&questions["strongest"]["criteria"]),
-            ["none", "ref-3"]
+            value["questions"]["strongest"]["criteria"]["none"],
+            STRONGEST_NONE
         );
     }
 
@@ -621,8 +675,7 @@ mod tests {
                     .classify(
                         "project",
                         "typesafe/jev-latest",
-                        json!({"memory": {}}),
-                        json!({"changes": {}}),
+                        r#"{"state":{},"questions":{}}"#.to_string(),
                         Duration::from_secs(5),
                         &CancellationToken::new(),
                     )
@@ -647,7 +700,7 @@ mod tests {
             .next("project", "typesafe/jev-latest", Duration::from_secs(5))
             .await
             .expect("the parked request");
-        assert_eq!(*work.state, json!({"memory": {}}));
+        assert_eq!(&*work.request, r#"{"state":{},"questions":{}}"#);
         assert!(exchange.present("project", "typesafe/jev-latest"));
         assert_eq!(
             exchange
@@ -673,7 +726,7 @@ mod tests {
             let exchange = Arc::clone(&exchange);
             async move {
                 exchange
-                    .classify("project", "c/m", json!({}), json!({}), wait, &cancel)
+                    .classify("project", "c/m", "{}".to_string(), wait, &cancel)
                     .await
             }
         };

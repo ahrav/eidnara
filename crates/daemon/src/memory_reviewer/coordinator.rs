@@ -841,8 +841,8 @@ impl Run<'_> {
         if cancel.is_cancelled() {
             return Err(InvestigationError::Cancelled);
         }
-        let answers = match classified {
-            Ok(answers) => answers,
+        let (answers, request) = match classified {
+            Ok(classified) => classified,
             Err(DisclosureRefusal::Cancelled) => return Err(InvestigationError::Cancelled),
             Err(DisclosureRefusal::Unavailable) => return Err(InvestigationError::Unavailable),
             Err(DisclosureRefusal::Store(error)) => return Err(InvestigationError::Store(error)),
@@ -876,8 +876,9 @@ impl Run<'_> {
         };
         let decision = decide(review, &answers);
         eprintln!(
-            "daemon: memory_reviewer stage 1 job={} decision={} changes={:.2} relation={} work_ended={:.2} strongest={} later={}",
+            "daemon: memory_reviewer stage 1 job={} request={} decision={} changes={:.2} relation={} work_ended={:.2} strongest={} later={}",
             &self.context.job.causal_identity[..16.min(self.context.job.causal_identity.len())],
+            &request[..16.min(request.len())],
             decision.as_str(),
             answers.changes,
             answers.relation,

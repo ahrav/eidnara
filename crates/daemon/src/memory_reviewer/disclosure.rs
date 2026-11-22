@@ -23,7 +23,7 @@ use super::broker::{
     BrokerId, EvidenceBroker, OriginClass, ProvenanceTag, Refusal, RefusalCode, RenderedBuffer,
     check_render, hold_refusal,
 };
-use super::classifier::{Answers, ClassifierRoute, ClassifyError, MAX_STATE_BYTES, ReviewState};
+use super::classifier::{Answers, ClassifierRoute, ClassifyError, MAX_REQUEST_BYTES, ReviewState};
 use super::model_request::{
     AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role,
     SIGNED_REQUEST_WINDOW_MS, SendError, Sender, Signed,
@@ -650,7 +650,7 @@ impl Disclosure<'_> {
         Ok(())
     }
 
-    /// One stage-1 attempt: the review state and its questions go to the project's classifier through the harness, under the same marker, claim, deadline, and allowance checks as a chat attempt. Every alias the state quotes is revalidated and the hold is checked first, and the assembled request passes the render check as a whole, so the classifier receives only bytes a chat request of this run could carry. The attempt's terminal is recorded on every path past the marker.
+    /// One stage-1 attempt, which returns the answers with the SHA-256 of the request text: the review state and its questions go to the project's classifier through the harness, under the same marker, claim, deadline, and allowance checks as a chat attempt. Every alias the state quotes is revalidated and the hold is checked first, and the assembled request passes the render check as a whole, so the classifier receives only bytes a chat request of this run could carry. The attempt's terminal is recorded on every path past the marker.
     pub async fn classify(
         &self,
         route: &ClassifierRoute,
@@ -658,7 +658,7 @@ impl Disclosure<'_> {
         aliases: &[String],
         cancel: &CancellationToken,
         deadline: Instant,
-    ) -> Result<Answers, DisclosureRefusal> {
+    ) -> Result<(Answers, String), DisclosureRefusal> {
         if self.broker.binding().destination != ArtifactDestination::ConfiguredModel {
             return Err(DisclosureRefusal::DestinationNotRemote);
         }
@@ -681,18 +681,26 @@ impl Disclosure<'_> {
             error,
             sent: false,
         };
-        let state = review.state();
-        let questions = review.questions();
-        let state_bytes =
-            serde_json::to_vec(&state).map_err(|_| unsent(SendError::RequestTooLarge))?;
-        if state_bytes.len() > MAX_STATE_BYTES {
+        let request = review.request_json();
+        if request.len() > MAX_REQUEST_BYTES {
             return Err(unsent(SendError::RequestTooLarge));
         }
-        let body =
-            serde_json::to_vec(&serde_json::json!({ "state": state, "questions": questions }))
-                .map_err(|_| unsent(SendError::RequestTooLarge))?;
-        // Each quoted text passed the render check when the broker read it; the request is checked whole so a secret or marker formed where two fields meet stays with the host.
-        check_render(&body, None).map_err(|_| DisclosureRefusal::RenderCheck)?;
+        // Each quoted text passed the render check when the broker read it. The request is checked whole in both forms it takes: as the JSON text the harness receives, and as the plain texts in order, which is what the classifier reads once the text is parsed. A secret or marker formed where two fields meet stays with the host.
+        let plain: String = std::iter::once(review.memory.as_str())
+            .chain(
+                review
+                    .source
+                    .iter()
+                    .map(|reference| reference.text.as_str()),
+            )
+            .chain(review.later.iter().map(|reference| reference.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        check_render(request.as_bytes(), None).map_err(|_| DisclosureRefusal::RenderCheck)?;
+        check_render(plain.as_bytes(), None).map_err(|_| DisclosureRefusal::RenderCheck)?;
+        let body_digest = format!("{:x}", Sha256::digest(request.as_bytes()));
+        let request_bytes =
+            u64::try_from(request.len()).map_err(|_| unsent(SendError::RequestTooLarge))?;
         let union = self
             .broker
             .ledger
@@ -700,9 +708,8 @@ impl Disclosure<'_> {
             .encode()
             .map_err(|_| DisclosureRefusal::PolicyUnion)?;
         let marker = AttemptMarker {
-            body_digest: format!("{:x}", Sha256::digest(&body)),
-            request_bytes: u64::try_from(body.len())
-                .map_err(|_| unsent(SendError::RequestTooLarge))?,
+            body_digest: body_digest.clone(),
+            request_bytes,
             provider: CLASSIFIER_PROVIDER.to_string(),
             model: route.classifier.clone(),
             credential_id: self.sender.credential_id().to_string(),
@@ -762,14 +769,7 @@ impl Disclosure<'_> {
             .saturating_duration_since(Instant::now());
         let answered = route
             .exchange
-            .classify(
-                &route.project,
-                &route.classifier,
-                state,
-                questions,
-                wait,
-                cancel,
-            )
+            .classify(&route.project, &route.classifier, request, wait, cancel)
             .await;
         let failed = |error| DisclosureRefusal::Send {
             attempt_index: Some(attempt_index),
@@ -824,7 +824,7 @@ impl Disclosure<'_> {
             error,
             cause: None,
         })?;
-        Ok(answers)
+        Ok((answers, body_digest))
     }
 
     /// Re-judges every disclosed alias at the current clock, once per alias, and collects the evidence ids they name.

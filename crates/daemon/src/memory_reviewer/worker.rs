@@ -601,16 +601,21 @@ impl Worker {
                                     .note_pending(&route.project, object_id, &job.causal_identity);
                             }
                             match &applied {
-                                Applied::Left => {}
+                                Applied::Left => eprintln!(
+                                    "daemon: memory_reviewer left a change proposal for a reader: job={}",
+                                    &job.causal_identity[..16.min(job.causal_identity.len())]
+                                ),
                                 // A proposal that keeps its memory is accepted in every mode and changes nothing worth a line.
                                 Applied::Accepted(settlement)
                                     if settlement.effect == kernel::SettlementEffect::Unchanged => {
                                 }
                                 Applied::Refused(reason) => eprintln!(
-                                    "daemon: memory_reviewer left a published proposal unapplied: {reason}"
+                                    "daemon: memory_reviewer left a published proposal unapplied: job={} {reason}",
+                                    &job.causal_identity[..16.min(job.causal_identity.len())]
                                 ),
                                 applied => eprintln!(
-                                    "daemon: memory_reviewer applied a proposal: {}",
+                                    "daemon: memory_reviewer applied a proposal: job={} {}",
+                                    &job.causal_identity[..16.min(job.causal_identity.len())],
                                     applied.kind()
                                 ),
                             }

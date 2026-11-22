@@ -95,7 +95,7 @@ impl HandlerCore {
                 "state": "work",
                 "lease": work.lease,
                 "classifier": work.classifier,
-                "request": { "state": &*work.state, "questions": &*work.questions },
+                "request": &*work.request,
                 "max_duration_ms": MAX_CLASSIFY_DURATION_MS,
             })),
             None => respond(json!({"state":"ready"})),

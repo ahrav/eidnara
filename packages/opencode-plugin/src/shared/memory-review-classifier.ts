@@ -44,6 +44,8 @@ const NEXT_WAIT_MS = 20_000;
 /** The transport outlives the daemon's wait. */
 const NEXT_TIMEOUT_MS = NEXT_WAIT_MS + 10_000;
 const SUBMIT_TIMEOUT_MS = 10_000;
+/** The largest request text the harness parses. */
+const MAX_REQUEST_BYTES = 128 * 1024;
 /** The longest classifier call the harness makes, whatever the work states. */
 const MAX_DURATION_MS = 10_000;
 const RETRY_DELAY_MS = 5_000;
@@ -56,10 +58,20 @@ function record(value: unknown): Record<string, unknown> | undefined {
         : undefined;
 }
 
+/** The request text of a work response as the classifier call takes it. Parsing keeps the members of every object in the order of the text, which is the order the daemon chose for the classifier. */
+function parsedRequest(text: unknown): Record<string, unknown> | undefined {
+    if (typeof text !== "string" || Buffer.byteLength(text) > MAX_REQUEST_BYTES) return undefined;
+    try {
+        return record(JSON.parse(text));
+    } catch {
+        return undefined;
+    }
+}
+
 /** The work of a `next` response in state `work`, or `undefined` when its shape is outside the contract. */
 export function reviewClassifierWork(response: unknown): ReviewClassifierWork | undefined {
     const value = record(response);
-    const request = record(value?.request);
+    const request = parsedRequest(value?.request);
     const state = record(request?.state);
     const questions = record(request?.questions);
     if (
