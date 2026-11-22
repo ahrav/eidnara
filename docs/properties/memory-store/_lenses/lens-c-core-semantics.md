@@ -1032,7 +1032,7 @@ Open questions:
 
 1. Is a subnormal or otherwise pathological `history_budget` reachable from the
    configuration surface? Tracing `history_budget_tokens` from config through
-   `memory_render.rs:304` is `daemon` work, outside this lens's files.
+   `memory_render.rs:330` is `daemon` work, outside this lens's files.
    (unresolved, needs an `daemon` config trace)
 2. Is `context_core::classify` dead code awaiting adoption, or has `daemon`
    grown a second copy of the routing logic? A silent divergence between an

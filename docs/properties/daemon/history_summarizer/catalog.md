@@ -1324,7 +1324,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - `history_summarizer_prompt.rs:430-431` tests the escape direction
+Exercised: not yet - `history_summarizer_prompt.rs:431-432` tests the escape direction
 only; nothing tests the round trip.
 Guarantee: Text that survives the gate is the text the model wrote: applying
 `unescape_xml` to correctly escaped input reproduces the original exactly.
@@ -1339,7 +1339,7 @@ Confidence: high - [evidence](evidence/hv-unescape-xml-double-decodes-entities.m
 becomes `&lt;` becomes `<`. The counterpart `escape_xml_content`
 (`decay_render.rs:80-84`, `history_summarizer_prompt.rs:104-108`) escapes `&` first and is
 therefore correct; only the inverse is wrong.
-Existing check: `history_summarizer_prompt.rs:427-432` asserts the escape functions, never
+Existing check: `history_summarizer_prompt.rs:428-433` asserts the escape functions, never
 the inverse.
 Impact: Model text that legitimately discusses entity syntax is corrupted, and
 specifically GAINS raw `<`/`>` that were not markup in the source. The m0 renderer

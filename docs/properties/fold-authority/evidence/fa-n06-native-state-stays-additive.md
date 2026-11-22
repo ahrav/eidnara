@@ -144,7 +144,7 @@ Ticket #1061; PR #1068 (head `f04c54e4d`). References are verified at
   `newest_live_ordinal` against the pass's own rows and usage. It runs after
   every native commit in the tests at
   `crates/daemon/src/pi_native_serving_tests.rs:652` (`:701`), `:778`
-  (`:787`, `:836`), and `:843` (`:854`, `:914` after the memory HARD, `:937`
+  (`:787`, `:836`), and `:843` (`:854`, `:921` after the memory HARD, `:944`
   after the state-sync epoch bump, `:947`), and each history holds at least
   one committed pass.
 

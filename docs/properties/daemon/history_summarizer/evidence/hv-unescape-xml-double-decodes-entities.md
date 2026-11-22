@@ -48,7 +48,7 @@ The same holds for the other four entities: `&amp;amp;` decodes to `&`,
 `&amp;gt;` to `>`, `&amp;quot;` to `"`, `&amp;apos;` to `'`.
 
 Existing test coverage checks only the forward direction.
-`history_summarizer_prompt.rs:427-432`:
+`history_summarizer_prompt.rs:428-433`:
 
 ```rust
 assert_eq!(escape_xml_attr("&\"'<>"), "&amp;&quot;&apos;&lt;&gt;");

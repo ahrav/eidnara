@@ -77,10 +77,10 @@ earlier PR renamed the test.
 | `cancelled_pass_keeps_its_lane_place_until_its_blocked_unit_finishes` | `crates/daemon/src/transform_unit/tests.rs:1083` | WP-P04 | #875 | unaudited |
 | `emergency_cancellation_between_units_preserves_commit_and_releases_scratch` | `crates/daemon/src/transform_unit/tests.rs:791` | WP-P04 | #875 | unaudited |
 | `waiting_unpaged_pass_is_refused_when_a_page_stream_started_meanwhile` | `crates/daemon/src/transform_unit/tests.rs:1241` | WP-P04 | #875 | unaudited |
-| `bounded_fold_matches_the_full_read_over_the_store_shape_fixture` | `crates/daemon/src/m0_compose.rs:565` | WP-P08 | #873 | unaudited |
-| `bounded_fold_matches_the_full_read_over_sixty_thousand_segments` | `crates/daemon/src/m0_compose.rs:636` | WP-P08 | #873 | unaudited |
-| `bounded_fold_work_is_independent_of_history_length` | `crates/daemon/src/m0_compose.rs:710` | WP-P07, WP-P08 | #873 | unaudited |
-| `bounded_m1_matches_the_full_read_and_withholds_an_overflowing_body` | `crates/daemon/src/m0_compose.rs:742` | WP-P08 | #873 | unaudited |
+| `bounded_fold_matches_the_full_read_over_the_store_shape_fixture` | `crates/daemon/src/m0_compose.rs:569` | WP-P08 | #873 | unaudited |
+| `bounded_fold_matches_the_full_read_over_sixty_thousand_segments` | `crates/daemon/src/m0_compose.rs:640` | WP-P08 | #873 | unaudited |
+| `bounded_fold_work_is_independent_of_history_length` | `crates/daemon/src/m0_compose.rs:714` | WP-P07, WP-P08 | #873 | unaudited |
+| `bounded_m1_matches_the_full_read_and_withholds_an_overflowing_body` | `crates/daemon/src/m0_compose.rs:746` | WP-P08 | #873 | unaudited |
 | `additive_soft_retries_when_rows_past_the_m1_cap_land_mid_pass` | `crates/daemon/src/transform.rs:15101` | WP-P08 | #873 | unaudited |
 | `writers_that_add_a_legacy_row_clear_the_persisted_legacy_list` | `crates/memory-store/src/lib.rs:22858` | WP-P08 | #873 | unaudited |
 | `per_pass_history_reads_do_constant_work_as_history_grows` | `crates/memory-store/src/lib.rs:22466` | WP-P07 | #873 | unaudited |

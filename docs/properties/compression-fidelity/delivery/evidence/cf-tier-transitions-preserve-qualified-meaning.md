@@ -18,7 +18,7 @@ integrity, lifecycle, compatibility. Inspected 2026-09-19 at
   checks P1-only acceptance and these exact fallback values; status unaudited.
 - [m1_compose.rs:202-207](../../../../../crates/daemon/src/m1_compose.rs#L202-L207)
   selects rows beyond `folded_history_segment_seq`.
-  [memory_render.rs:261-276](../../../../../crates/daemon/src/memory_render.rs#L261-L276)
+  [memory_render.rs:287-302](../../../../../crates/daemon/src/memory_render.rs#L287-L302)
   renders those new rows at explicit P1 without an age-based choice.
 - [m0_compose.rs:188-238](../../../../../crates/daemon/src/m0_compose.rs#L188-L238)
   reloads durable history and composes the decayed baseline.

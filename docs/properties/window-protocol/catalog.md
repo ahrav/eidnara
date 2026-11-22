@@ -1171,7 +1171,7 @@ Existing check: `crates/daemon/src/transform_read_bound.rs:627` (at `3ebfc3b9`)
 `per_pass_history_reads_do_constant_work_as_history_grows` (#873);
 `crates/daemon/src/window_coverage/tests.rs:591`
 `intersection_and_page_work_is_independent_of_history_length` (#875);
-`crates/daemon/src/m0_compose.rs:710`
+`crates/daemon/src/m0_compose.rs:714`
 `bounded_fold_work_is_independent_of_history_length` (#873).
 Impact: High. One residual scan defeats the window design.
 Open questions: None. Revert truncation is the declared exception (C3).
@@ -1214,7 +1214,7 @@ witnesses (`fold_capture_refuses_stored_ranges_out_of_order`,
 `crates/memory-store/src/lib.rs:22796`;
 `a_fold_over_stored_ranges_out_of_order_fails_closed`,
 `crates/daemon/src/transform.rs:20060`) ran in the #881 and #833 gates.
-Existing check: `crates/daemon/src/m0_compose.rs:565`, `:636`, `:710`, `:742`
+Existing check: `crates/daemon/src/m0_compose.rs:569`, `:640`, `:714`, `:746`
 (#873); `crates/daemon/src/transform.rs:14955`
 `additive_soft_retries_when_rows_past_the_m1_cap_land_mid_pass`;
 `crates/memory-store/src/lib.rs:22858`
