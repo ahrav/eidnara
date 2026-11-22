@@ -246,10 +246,10 @@ pub(crate) const PROJECT_MEMORY_NOTE: &str = "The lines above are a partial reco
 const DELIVERED_OPEN: &str = "<project-memory>\n";
 const DELIVERED_CLOSE: &str = "</project-memory>";
 
-/// The delivered block of no rows: its opening line, [`PROJECT_MEMORY_NOTE`],
-/// and its closing tag. The budget charges these bytes, and
-/// [`render_delivered_memory_block`] writes the rows' elements after the
-/// opening line.
+/// The frame of a delivered block: its opening line, [`PROJECT_MEMORY_NOTE`],
+/// and its closing tag. The budget charges these bytes for a block that
+/// holds a row, and [`render_delivered_memory_block`] writes the rows'
+/// elements after the opening line.
 pub(crate) fn delivered_memory_frame() -> String {
     delivered_block("")
 }
@@ -738,9 +738,26 @@ mod tests {
             delivered_memory_frame(),
             "the frame the budget charges is the frame the block renders"
         );
+        // Two categories and work in progress: the note follows the last
+        // element.
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let mixed = [
+            row("mem_2", CURRENT_WORK_SECTION, "newest request"),
+            row("mem_9", "WORKFLOW_RULES", "a workflow rule"),
+            row("mem_5", "PROJECT_RULES", "a project rule"),
+        ];
         assert_eq!(
-            delivered_memory_frame(),
-            format!("<project-memory>\n{note}\n</project-memory>")
+            render_delivered_memory_block(&mixed),
+            format!(
+                "<project-memory>\n<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 <WORKFLOW_RULES>\nmem_9: a workflow rule\n</WORKFLOW_RULES>\n\
+                 <CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\nmem_2: newest request\n\
+                 </CURRENT_WORK>\n{note}\n</project-memory>"
+            )
         );
         assert!(!render_memory_block(&rows, "project-memory").contains(note));
         assert_eq!(render_delivered_memory_block(&[]), "");

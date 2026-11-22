@@ -489,6 +489,12 @@ mod trim_memories_tests {
         pressed.push(memory("PROJECT_RULES", &"x".repeat(budget as usize)));
         let (kept_lasting, unspent) = trim_memories_to_budget(&pressed, budget, bytes);
         assert_eq!(kept_lasting, some);
+        // The charges are the rendered bytes: the block of the kept rows
+        // and the unspent budget make up the budget.
+        assert_eq!(
+            bytes(&render_delivered_memory_block(&kept_lasting)) as u64 + unspent,
+            budget as u64
+        );
         assert!(unspent > 0 && (unspent as f64) < budget / 4.0, "{unspent}");
         let kept = trim_block_to_budget(&pressed, &requests, budget, bytes);
         assert_eq!(&kept[..some.len()], some);

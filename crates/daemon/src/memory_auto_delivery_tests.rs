@@ -220,6 +220,12 @@ async fn serve(handler: &Handler, channel: u16, session: &str) -> Value {
     call_transform_request_on_channel(handler, channel, request).await
 }
 
+/// The tokens of a served block that [`project_memory_block`] returned, with
+/// the closing tag the block ends with.
+fn block_tokens(block: &str) -> f64 {
+    crate::token_cache::cached_estimate_tokens(&format!("{block}</project-memory>")) as f64
+}
+
 fn project_memory_block(response: &Value) -> Option<String> {
     let served = serde_json::to_string(response).unwrap();
     let start = served.find("<project-memory>")?;
@@ -1180,7 +1186,7 @@ async fn a_long_session_carries_one_bounded_block_that_changes_only_with_other_s
         let block = project_memory_block(&response).expect("every pass carries the block");
         rows.push((
             turn,
-            crate::token_cache::cached_estimate_tokens(&block),
+            block_tokens(&block) as usize,
             block,
             response["action"].as_str().unwrap_or_default().to_string(),
             response["materialize_reason"]
@@ -1302,8 +1308,7 @@ async fn hundreds_of_statements_across_projects_are_all_approved_and_delivered_w
         let block = project_memory_block(&serve(&handler, reader, &session).await)
             .expect("a later session carries the block");
         assert!(
-            crate::token_cache::cached_estimate_tokens(&block) as f64
-                <= config.memory_budget_tokens,
+            block_tokens(&block) <= config.memory_budget_tokens,
             "{subject}: {block}"
         );
         let delivered = block.matches("User stated: ").count();
@@ -1333,10 +1338,7 @@ async fn hundreds_of_statements_across_projects_are_all_approved_and_delivered_w
         );
         let block = project_memory_block(&serve(&handler, tight, &session).await)
             .expect("a smaller budget still carries a block");
-        assert!(
-            crate::token_cache::cached_estimate_tokens(&block) as f64 <= SMALL_BUDGET,
-            "{subject}: {block}"
-        );
+        assert!(block_tokens(&block) <= SMALL_BUDGET, "{subject}: {block}");
         let newest = format!("The {subject} service number {} listens", PER_PROJECT - 1);
         let oldest = format!("The {subject} service number 0 listens");
         assert!(block.contains(&newest), "{block}");
@@ -4682,7 +4684,10 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
 
     let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
         .expect("a later session carries the block");
-    assert!(tokens(&block) <= config.memory_budget_tokens, "{block}");
+    assert!(
+        block_tokens(&block) <= config.memory_budget_tokens,
+        "{block}"
+    );
     let control = project_memory_block(&serve(&handler, WORK, "work").await)
         .expect("the plans' own session carries the lasting statements");
     assert_eq!(block_element(&control, "CURRENT_WORK"), None, "{control}");
@@ -4691,8 +4696,9 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
     }
     assert_eq!(lasting_sections(&block), control);
     let work = block_element(&block, "CURRENT_WORK").expect("the section renders");
-    // The section's share counts the whole element, its closing tag too.
-    let section = format!("{work}</CURRENT_WORK>");
+    // The section's share counts the whole element, its closing tag and the
+    // line break after it too.
+    let section = format!("{work}</CURRENT_WORK>\n");
     assert!(
         tokens(&section) <= config.memory_budget_tokens / 4.0,
         "{}",
@@ -4717,14 +4723,17 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
     capture_statements(&handler, FIRST, "s1", &more_rules).await;
     let pressed =
         project_memory_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
-    assert!(tokens(&pressed) <= config.memory_budget_tokens, "{pressed}");
+    assert!(
+        block_tokens(&pressed) <= config.memory_budget_tokens,
+        "{pressed}"
+    );
     let control = project_memory_block(&serve(&handler, WORK, "work").await)
         .expect("the plans' own session carries the lasting statements");
     assert_eq!(block_element(&control, "CURRENT_WORK"), None, "{control}");
     for (_, rule) in rules.iter().chain(&more_rules) {
         assert!(control.contains(&stated(rule)), "{rule}: {control}");
     }
-    let left_over = config.memory_budget_tokens - tokens(&control);
+    let left_over = config.memory_budget_tokens - block_tokens(&control);
     assert!(
         0.0 < left_over && left_over < config.memory_budget_tokens / 4.0,
         "the lasting statements leave {left_over} tokens"
