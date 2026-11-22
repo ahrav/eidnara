@@ -7069,11 +7069,8 @@ impl HandlerCore {
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
-                // A failure recorder task handed off before this delete reads its memo entry under the same gate, so the entry goes before the delete changes either store: a delete that ends partway leaves that task with nothing to write.
-                core.failure_memo
-                    .lock()
-                    .expect("failure memo mutex")
-                    .forget_session(&session_id);
+                // A failure recorder task reads its memo entry under the same gate. The fence retires the session's entry before the delete changes either store and again on every way out of this block, ahead of the gate's release, so a task handed off before the delete or while it runs has nothing to write, also when the delete ends partway.
+                let _fence = memory_capture::DeleteFence::raise(&core.failure_memo, &session_id);
                 // Captured sources retire and the session's use-outcome records are marked deleted before the memory rows go, so no deleted session keeps a live descriptor or reads as live.
                 core.delete_kernel_step(&binding, &session_id)?;
                 #[cfg(test)]

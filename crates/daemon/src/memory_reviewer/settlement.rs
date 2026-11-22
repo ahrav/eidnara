@@ -1114,19 +1114,6 @@ pub fn accept_selected_proposal(
     if run.kernel_incarnation != live_kernel {
         return Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch));
     }
-    // The failure recorder alone writes the rows of a failure lineage, so a proposal whose target stands on one settles nothing. An object's source lineage is fixed at its insert, so this read decides as a read inside the acceptance would.
-    if let kernel::ProposalTarget::Memory(memory) = target {
-        let (_, states) = store
-            .object_states(std::slice::from_ref(&memory.object_id))
-            .map_err(|error| AcceptRefusal::Receipt(ReadRefusal::Store(error.to_string())))?;
-        let recorded = states
-            .into_iter()
-            .flatten()
-            .any(|state| crate::memory_capture::is_failure_lineage(&state.object.source_id));
-        if recorded {
-            return Err(AcceptRefusal::Kernel(kernel::AcceptanceRefusal::Changed));
-        }
-    }
     let scope_id = format!("project:{}", run.project_digest);
     let acceptance = kernel::ProposalAcceptance {
         intent: caller_intent(&run, causal_identity, operation_key, target),

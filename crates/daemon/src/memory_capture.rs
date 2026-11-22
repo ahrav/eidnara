@@ -11,7 +11,7 @@ mod head;
 mod native;
 #[cfg(test)]
 pub(crate) use cite::CITATION_EVENT_KIND;
-pub(crate) use failures::{FailureMemo, is_failure_lineage};
+pub(crate) use failures::{DeleteFence, FailureMemo, is_failure_lineage};
 #[cfg(test)]
 pub(crate) use head::fixtures as head_fixtures;
 pub(crate) use head::{FrozenHead, observe_head};

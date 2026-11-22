@@ -5443,14 +5443,13 @@ async fn a_record_holds_no_credential_of_its_command_or_its_output() {
     );
 }
 
-/// A command line that hides its exit status reports success to the tool.
-/// The status the command line printed decides as the tool's status does,
-/// the shell's report of a program it did not find is a failure, and a
-/// failure line is one where a pipe or a list hides the status. A single
-/// command that the tool reports as passed is a pass whatever its output
-/// holds.
+/// A record states the exit status the tool reports for its command line.
+/// A command line whose final labeled `echo` prints its exit status reports
+/// by that number: a nonzero one is recorded and a later zero resolves it.
+/// A failure that a pipe or a list hides from the tool writes no record,
+/// whatever the output holds, and a status of 0 is a pass.
 #[tokio::test]
-async fn a_failure_behind_a_hidden_exit_status_is_recorded_on_stated_grounds() {
+async fn a_printed_exit_status_is_recorded_and_a_hidden_failure_writes_no_record() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
     let unmarked = |call: &'static str, command: &'static str, output: &'static str, at_ms| Run {
         call,
@@ -5467,6 +5466,7 @@ async fn a_failure_behind_a_hidden_exit_status_is_recorded_on_stated_grounds() {
             "error: could not compile `api`\nexit=101",
             1_000,
         ),
+        // The tool reports the status of `tail`, of `tee`, and of `true`.
         unmarked(
             "call-2",
             "cargo build -p web 2>&1 | tail -n 40",
@@ -5479,63 +5479,56 @@ async fn a_failure_behind_a_hidden_exit_status_is_recorded_on_stated_grounds() {
             "bash: line 1: pnpm: command not found",
             3_000,
         ),
+        unmarked("call-4", "cargo build -p cli || true", BUILD, 4_000),
         // A search through a log prints failure lines and passes.
-        unmarked("call-4", "grep -rn error: logs/build.log", BUILD, 4_000),
-        // The command line printed status 0.
-        unmarked(
-            "call-5",
-            "cargo build -p cli; echo \"exit=$?\"",
-            "error: could not compile `api`\nexit=0",
-            5_000,
-        ),
+        unmarked("call-5", "grep -rn error: logs/build.log", BUILD, 5_000),
     ];
-    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 3);
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 1);
     let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
-    let grounds = |call: &str| {
-        let rationale = rationales
-            .iter()
-            .find(|rationale| rationale["call"] == call)
-            .unwrap_or_else(|| panic!("{call}: {rationales:?}"));
+    assert_eq!(rationales.len(), 1, "{rationales:?}");
+    assert_eq!(
         (
-            rationale["evidence"].as_str().unwrap().to_owned(),
-            rationale["exit_code"].as_i64(),
-        )
-    };
-    assert_eq!(grounds("call-1"), ("printed_status".to_owned(), Some(101)));
-    assert_eq!(grounds("call-2"), ("failure_lines".to_owned(), None));
-    assert_eq!(grounds("call-3"), ("shell_report".to_owned(), None));
+            &rationales[0]["call"],
+            &rationales[0]["evidence"],
+            &rationales[0]["exit_code"]
+        ),
+        (&json!("call-1"), &json!("printed_status"), &json!(101))
+    );
     let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
     assert!(
-        rows.iter().any(|(record, _)| record.contains(
+        rows[0].0.contains(
             ": the command failed: its command line printed exit status 101.\nCommand: cargo build [arguments left out]\n"
-        )),
+        ),
         "{rows:?}"
     );
-    assert!(
-        rows.iter().any(|(record, _)| record.contains(
-            ": the output holds failure lines and the command line hides its exit status from the tool.\n"
-        )),
-        "{rows:?}"
-    );
-    // A later run of the piped build without a failure line resolves its
-    // record.
-    let passed = unmarked(
+    // A run whose last line is no line of the echo changes nothing, and
+    // the run that prints a zero resolves the record.
+    let unread = unmarked(
         "call-6",
-        "cargo build -p web 2>&1 | tail -n 40",
-        "Finished `dev` profile",
+        "cargo build -p api; echo \"exit=$?\"",
+        "exit=0\nwarning: trailing output",
         6_000,
+    );
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[unread]).await,
+        0
+    );
+    let passed = unmarked(
+        "call-7",
+        "cargo build -p api; echo \"exit=$?\"",
+        "Finished `dev` profile\nexit=0",
+        7_000,
     );
     assert_eq!(
         record_failures(&handler, &project, "s1", &[passed]).await,
         1
     );
     let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
-    let resolved: Vec<&Value> = rationales
-        .iter()
-        .filter(|rationale| rationale["state"] == "resolved")
-        .collect();
-    assert_eq!(resolved.len(), 1, "{rationales:?}");
-    assert_eq!(resolved[0]["call"], "call-2");
+    assert_eq!(rationales.len(), 1, "{rationales:?}");
+    assert_eq!(
+        (&rationales[0]["state"], &rationales[0]["resolved_call"]),
+        (&json!("resolved"), &json!("call-7"))
+    );
 }
 
 /// The transform handler derives a Pi window from the request's native rows
@@ -6012,24 +6005,78 @@ async fn results_of_one_window_are_judged_in_run_order_and_a_shared_call_id_is_l
     assert_eq!(rationales[0]["state"], "resolved");
     assert_eq!(rationales[0]["call"], "call-1");
     assert_eq!(rationales[0]["resolved_call"], "call-2");
-    // A call that two results answer is left out too: its passing result
-    // and the marked result after it write nothing.
-    let mut window = command_window("s1", &[passed_run("call-twice", "npm run deploy", 4_000)]);
-    let second = IngressMessage {
-        mid: "m-second".into(),
-        ordinal: 9,
-        ck: serde_json::from_value(json!({
-            "role": "tool",
-            "content": [{ "kind": {
-                "type": "tool_result", "id": "call-twice", "tool_name": "bash",
-                "output": { "kind": { "type": "error_text", "text": PANIC_OUTPUT } },
-            } }],
-            "meta": { "harness_id": "m-second", "created_at_ms": 4_100 },
-        }))
-        .unwrap(),
+    // A call that two results answer is left out too, in either order of a
+    // passing and a marked result: the pass hands off no result of it.
+    let binding = failure_binding(&project, "pi", "s1");
+    let message = |mid: &str, role: &str, block: Value, at_ms: i64| {
+        Arc::new(IngressMessage {
+            mid: mid.into(),
+            ordinal: 9,
+            ck: serde_json::from_value(json!({
+                "role": role,
+                "content": [{ "kind": block }],
+                "meta": { "harness_id": mid, "created_at_ms": at_ms },
+            }))
+            .unwrap(),
+        })
     };
-    window.messages.0.push(Arc::new(second));
-    assert_eq!(record_window(&handler, &project, "s1", &window).await, 0);
+    let result = |mid: &str, id: &str, marked: bool, at_ms: i64| {
+        let (kind, text) = match marked {
+            true => ("error_text", PANIC_OUTPUT),
+            false => ("text", "test result: ok."),
+        };
+        message(
+            mid,
+            "tool",
+            json!({
+                "type": "tool_result", "id": id, "tool_name": "bash",
+                "output": { "kind": { "type": kind, "text": text } },
+            }),
+            at_ms,
+        )
+    };
+    for (call, marked_first) in [("call-twice-a", false), ("call-twice-b", true)] {
+        let mut window = command_window("s1", &[]);
+        window.messages.0.extend([
+            message(
+                "m-call",
+                "assistant",
+                json!({ "type": "tool_call", "id": call, "name": "bash", "input": { "command": "npm run deploy" } }),
+                4_000,
+            ),
+            result("m-first", call, marked_first, 4_100),
+            result("m-second", call, !marked_first, 4_200),
+        ]);
+        assert!(
+            handler.failure_checkpoint(&binding, &window).is_none(),
+            "{call}"
+        );
+    }
+    // A result that arrives after its call's turn has closed answers no
+    // call of the turn under way: a user message, or the assistant's next
+    // message, stands between them.
+    for (call, between) in [("call-late-a", "user"), ("call-late-b", "assistant")] {
+        let mut window = command_window("s1", &[]);
+        window.messages.0.extend([
+            message(
+                "m-call",
+                "assistant",
+                json!({ "type": "tool_call", "id": call, "name": "bash", "input": { "command": "npm run deploy" } }),
+                4_000,
+            ),
+            message(
+                "m-between",
+                between,
+                json!({ "type": "text", "text": "Go on." }),
+                4_050,
+            ),
+            result("m-late", call, true, 4_100),
+        ]);
+        assert!(
+            handler.failure_checkpoint(&binding, &window).is_none(),
+            "{call}"
+        );
+    }
     assert_eq!(
         memory_rationales(&handler, (SECOND, "s2"), &project)
             .await
@@ -6037,7 +6084,7 @@ async fn results_of_one_window_are_judged_in_run_order_and_a_shared_call_id_is_l
         1
     );
     // The positive control: the same marked result as the one answer of
-    // its call is recorded.
+    // its call, right after it, is recorded.
     let once = [failed_run("call-once", "npm run deploy", 5_000)];
     assert_eq!(record_failures(&handler, &project, "s1", &once).await, 1);
 }
@@ -6722,6 +6769,12 @@ async fn the_generic_commit_route_writes_no_row_on_a_failure_lineage() {
                 .await,
         );
         assert_eq!(begun["state"]["kind"], kind, "{upload}: {begun}");
+        if kind == "invalid" {
+            assert_eq!(
+                begun["state"]["reason"], "invalid_input",
+                "{upload}: {begun}"
+            );
+        }
     }
     // The positive control: the same row on another lineage is written, also
     // on one whose name only begins like the failure lineage's.

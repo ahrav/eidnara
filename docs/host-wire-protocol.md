@@ -1711,46 +1711,56 @@ judges it or settles it (below). A session has one such task at a time and the
 daemon eight: a pass that finds its session's task running, or eight tasks
 running, hands off nothing, and so does a pass while the Kernel is not ready.
 A result that a pass leaves unjudged is judged by a later pass of the session
-whose window still carries the call and its result. A result under an id that
-two tool calls or two tool results of the window carry is left out, since the
-id names no one execution. A daemon that shuts down ends a task before its
-next result, ends the task's wait for the capture publication gate and for the
-Kernel, and starts no task that was handed off and not yet running.
+whose window still carries the call and its result. A result is paired with
+the call it answers in the tool turn under way: a command call of the
+assistant message before it, with no message of another role between them, so
+a result that arrives after its call's turn has closed is paired with no call.
+A result under an id that two tool calls or two tool results of the window
+carry is left out, since the id names no one execution. A daemon that shuts
+down ends a task before its next result, ends the task's wait for the capture
+publication gate and for the Kernel, and starts no task that was handed off
+and not yet running.
 
 A tool call carries a command when its input holds, under `command`, a string
 or an array of strings with a character other than whitespace; when `command`
-holds none, `cmd` is read the same way. An array's strings are joined by
-single spaces, and a string that is empty or holds a character other than
-ASCII letters, digits, and `_`, `.`, `/`, `+`, `-`, `:`, `@`, `%`, `,` stands
-in single quotes, with `'\''` for a quote it holds, so the joined text reads
-as the words the array holds. The result's text is the text of a `text` or
-`error_text` result, and the text blocks of a `content` or `error_content`
-result joined by line breaks; a text that is a JSON value is read as text.
-These results change no fact, and their calls are settled: a `json`,
-`error_json`, or `execution_denied` result; a result whose text, or whose
-command line, is longer than 64 KiB, the largest tool span source capture
-retains; a result whose tool call id or tool name is longer than 1,024 bytes;
-a result whose message carries no creation time, or one outside the years a
-UTC date renders; a result whose tool name, tool call id, or session id the
-redactor would change, or holds a control character, U+2028, or U+2029, each
-judged whole; a command line on which the redactor's scan does not finish; and
-a result that the harness marks as an error when the harness ended or refused
-the call itself, which is when its last non-empty line begins with `Command
-aborted`, `Operation aborted`, `Tool execution aborted`, `Command timed out
-after `, or `Command terminated without an exit code`, when its whole text is
-`Tool execution was blocked` or `Tool <name> not found`, or when it begins
-with `Validation failed for tool "`, with `Working directory does not exist:
-`, with `Extension failed, blocking execution: `, or with `Tool call "<name>"`
-and then ` was not executed: the response hit the output token limit`. Pi
-writes these texts, and they are read as written, so a marked result of a
-command that prints one of them in that place is skipped too; a call that a Pi
-extension blocks with a reason of its own carries that reason as its text and
-is read as a failed command. Pi's shell tool writes a note after an output it
-cut, `[Showing lines <range> of <count>. Full output: <path>]`, with the byte
-limit in parentheses before the `.` when that cut the output, or `[Showing
-last <size> of line <number> (line is <size>). Full output: <path>]`. The note
-is the harness's text: when it is one of the output's last two non-empty lines
-it is read as no line of the output.
+holds none, `cmd` is read the same way. A string is a command line. An array
+is the arguments of one program, at most 1,024 strings, and is read as no
+command line. The result's text is the text of a `text` or `error_text`
+result, and the text blocks of a `content` or `error_content` result joined by
+line breaks; a text that is a JSON value is read as text. These results change
+no fact, and their calls are settled: a `json`, `error_json`, or
+`execution_denied` result; a `content` or `error_content` result with no text
+block, such as an image alone; a result whose text, or whose command, is
+longer than 64 KiB, the largest tool span source capture retains; a result
+whose tool call id or tool name is longer than 1,024 bytes; a result whose
+message carries no creation time, or one outside the years a UTC date renders;
+a result whose tool name, tool call id, or session id the redactor would
+change, or holds a control character, U+2028, or U+2029, each judged whole; a
+command on which the redactor's scan does not finish; and a result that the
+harness marks as an error when the harness ended or refused the call itself.
+That is when its last non-empty line begins with `Command aborted`, `Operation
+aborted`, `Tool execution aborted`, `Command timed out after `, or `Command
+terminated without an exit code`, when its whole text is `Tool execution was
+blocked` or `Tool <name> not found`, or when it begins with `Validation failed
+for tool "`, with `Working directory does not exist: `, with `Custom shell
+path not found: `, with `Invalid timeout: `, with `Extension failed, blocking
+execution: `, or with `Tool call "<name>"` and then ` was not executed: the
+response hit the output token limit`. These are texts Pi writes, and the
+reading is by text: a marked result of a command that prints one of them in
+that place is skipped too. Two refusals carry no such text and are read as
+failed commands: a call that a Pi extension blocks with a reason of its own
+carries that reason as its text, and a call whose extension hook threw an
+error object carries that error's message (`Extension failed, blocking
+execution: ` opens the text for a thrown value of any other kind). A Pi
+release that writes no `Command terminated without an exit code` line returns
+the result of a shell that ended without an exit code unmarked, and the daemon
+reads it as a status of 0. Pi's shell tool writes a note after an output it
+cut: `[Showing lines <first>-<last> of <count>. Full output: <path>]`, the
+same with ` (<size> limit)` before the `.`, or `[Showing last <size> of line
+<number> (line is <size>). Full output: <path>]`, where the numbers are ASCII
+digits and a size is digits and `B`, or digits, `.`, one digit, and `KB` or
+`MB`. The note is the harness's text: when it is one of the output's last two
+non-empty lines it is read as no line of the output.
 
 The tool's own status decides first. The result is a failure when the
 harness marks it as an error (`error_text` or `error_content`), and when a
@@ -1773,178 +1783,175 @@ first non-empty line of the output, when it ends within the output's first
 1,024 bytes, and its last three non-empty lines, and the last of them that
 states a code decides.
 
-A result without that status, or with status 0, is read with its command line.
-The daemon reads a command line in one grammar: words, single and double
-quotes, backslash escapes, `$NAME` and `${NAME}` parameters, redirections to a
-file or a descriptor (such as `>`, `<`, `2>&1`, `>&2`, and `&>`), comments,
-which run from a `#` that begins a word to the end of its line, one
-here-document to a line, and the operators `&&`, `||`, `|`, `;`, and a line
-break between commands, with at most 64 commands and 1,024 words. A
-here-document is read when its delimiter is one word of ASCII letters, digits,
-and `_`, bare or inside one pair of quotes, after `<<` or `<<-`, and its
-closing line follows: its body, to that line, is one word of the last command
-of the line that opens it. A command line that holds anything else is outside
-the grammar: a command or process substitution, a subshell or a brace group, a
-here-string, a here-document of another form or without its closing line,
-`$'…'` or `$"…"` quoting, a `${…}` that holds more than a name, a background
-`&`, `|&`, `>|`, `;;`, an open quote, a backslash that ends the text, an
-operator with no command on one of its sides, or `if`, `then`, `else`, `elif`,
-`fi`, `for`, `while`, `until`, `do`, `done`, `case`, `esac`, `select`,
-`function`, `coproc`, `!`, or `[[` as a command's first word. Such a form can
-hide a command or an exit status from the reader, so a status of 0 for such a
-command line states no outcome, and the result changes no fact: it records no
-failure and resolves none. The tool's own status (above) decides for every
-command line.
+A fact states the exit status of its command as the tool reports it. A result
+without that status, or with status 0, reports no failure, with the one
+exception below. The shell reports a pipeline or a list by its last command,
+so a failure of an earlier command that the command line hides from the tool
+(behind `|`, `||`, `;`, or a line break, inside a script given to another
+shell, or in the background) writes no fact, whatever the output holds: a
+failure line, a test runner's or a build's summary, and a shell's report of a
+missing program in the output of a command whose status is 0 state no failure.
+A status of 0 resolves a live fact of the same command, which a nonzero status
+of that command wrote.
 
-The commands that decide are the commands after each leading `cd <directory>`
-that `&&`, `;`, or a line break joins to a later command. A status of 0 over
-one command or over an `&&` chain, which ends at its first failure, is a pass.
-A `|`, a `||`, a `;`, or a line break between two commands hides the status of
-the earlier one: the shell reports a pipeline or a list by its later command,
-so the status of 0 is the last command's, and the output is the only report of
-the others. Behind such a hidden status two things in the output are a
-failure. The first is a shell's report that the program of one of the commands
-is missing: a whole line `<shell>: <program>: command not found`, with `line
-<number>:` before the program for a script, or `<shell>: command not found:
-<program>`, where the shell and the program are one word each without a `:`,
-and the program is the first word of a command after its leading `NAME=value`
-assignments. The second is a failure line, as capture reads the lines of an
-output block (above). An output with neither is a pass. The failure-line
-ground is a heuristic with a stated limit: a search that prints the failure
-lines of a log through a pipe is recorded as failed, and the fact names its
-ground. A failure line or a shell's report in the output of one command or of
-an `&&` chain whose status is 0, such as a search through a log, is that
-command's ordinary output and states no failure. Summary lines of a test
-runner or a build outside these grounds state none either.
+The exception is a command line that reports its own exit status by a final
+`echo`, which the daemon follows in one form. Its last command is an `echo`
+that `;` or a line break joins to the command before it, so the echo runs
+whatever that command reported. The echo's words hold the command line's only
+status parameter, `$?` or `${?}`, where the shell expands it, which is outside
+single quotes and behind no backslash; `$PIPESTATUS`, `${PIPESTATUS}`, and
+`${PIPESTATUS[<index>]}` count as status parameters too, and a command line
+that holds one is followed in no form. The echo holds no redirection, its
+first word after `echo` begins with no `-`, and its words hold no other `$`
+that the shell expands and no `*`, `?`, `[`, or `~` outside quotes and behind
+no backslash, so the text it prints is fixed: its words without quote
+characters and escaping backslashes, joined by single spaces, with whitespace
+runs as single spaces. The text before the parameter holds a character other
+than a digit and a space, so digits that an earlier command left on the line
+are no part of the number. The echo is read from the output's last non-empty
+line alone: that line, with whitespace runs as single spaces, equals the
+echo's text with a number from 0 to 255, of one to three digits, in the
+parameter's place. The shell printed that number for the commands before the
+`echo`, so it stands for the tool's status: a nonzero one is a failure, and a
+zero is a pass. An output whose last line is no such line states no outcome,
+so the result records no failure and resolves none. The reading is by the
+line's text: a command that prints that text itself as its last line is read
+the same way. Every other command line, an echo behind `&&`, `||`, or `|` and
+an echo without such a label among them, reports by the tool's status alone.
 
-A command line that reads its own exit status is followed in one form. Its
-last command is an `echo` whose words hold the line's only status parameter:
-`$?`, `${?}`, or `${PIPESTATUS[<index>]}` with an index of digits, `@`, or
-`*`, where the shell expands it, which is outside single quotes and backslash
-escapes. The echo holds no redirection, its first word after `echo` begins
-with no `-`, and its words hold no other `$` outside single quotes and no `*`,
-`?`, `[`, or `~` outside quotes, so the text it prints is fixed: its words
-without quote characters and escaping backslashes, joined by single spaces,
-with whitespace runs as single spaces. The echo is read from the output's last
-non-empty line alone: that line, with whitespace runs as single spaces, equals
-the echo's text with one number in the parameter's place, or with several that
-single spaces part, and the greatest is the printed status. The shell printed
-it for the commands before the `echo`, so it stands for the tool's status: a
-nonzero one is a failure, and a zero is a status of 0 for the commands before
-the `echo`, read as above. A command line that reads a status parameter in any
-other way, and one whose output's last line is no line of its echo, states no
-outcome at a status of 0.
+The daemon reads a command line in one grammar, to find that echo and to name
+the command (below): words that spaces and tabs part, single and double
+quotes, backslash escapes, a backslash and line break between two words, a `$`
+before a name or a special parameter, `${NAME}`, redirections to a file or a
+descriptor (such as `>`, `<`, `2>&1`, `>&2`, and `&>`), comments, which run
+from a `#` that begins a word to the end of its line, and the operators `&&`,
+`||`, `|`, `;`, and a line break between commands, with at most 64 commands
+and 1,024 words. A `;` or a line break that ends the command line, a blank
+line, and a line break after an operator join nothing. A command line that
+holds anything else is outside the grammar: a `(`, `)`, `{`, `}`, or backtick
+outside quotes, a backtick or a `$(` inside double quotes, `$(`, `$[`, `$'`,
+`$"`, a `${…}` that holds more than a name, `<<`, a `&` that is no part of
+`&&` or of a redirection, `|&`, `>|`, `;;`, a carriage return outside quotes,
+a backslash and line break inside a word or inside double quotes, an open
+quote, a backslash that ends the text, an operator with no command on one of
+its sides, or `if`, `then`, `else`, `elif`, `fi`, `for`, `while`, `until`,
+`do`, `done`, `case`, `esac`, `select`, `function`, `coproc`, `!`, or `[[` as
+a command's first word. A command line outside the grammar reports by the
+tool's status alone.
 
-A fact holds text of the output under source capture's rule for a tool
-span: text in which the durable-text redactor finds nothing is kept as it
-is, and text with a finding is withheld whole. With no finding the fact
-keeps the output's chosen lines: the first five lines that state an error,
-in output order, and then those of the last two lines that are none of
-them, each trimmed, each at most 160 bytes with `…` ending a cut line, a
-text that several lines share once. A line states an error when it is a
-failure line, when it completes one (the line right after a failure line
-that ends with `:`, or one that begins with `-->` or `at `, and that is no
-code fence line), when it holds `error`, `errors`, `failed`, `failure`,
-`fatal`, `panic`, `panicked`, `exception`, or `traceback` as a word in any
-letter case, when it holds a type name that ends in `Error` or `Exception`,
-or when it holds `command not found`. An empty line, a line with a control
-character other than a tab, and a line with U+2028 or U+2029 are left out.
-With a finding the fact keeps no line of the output and says that the text
-is withheld and that the whole output stands in the result of its tool call
-in its session while that session's history holds it. A fact also names,
-from its chosen lines, the first path and the first error they hold: a path
-is a word of ASCII letters, digits, and `_`, `.`, `/`, `-` with a file
-extension of one to five letters and digits, at least one a letter, and
-with a directory, a position (`:` or `(`, then digits, `:`, and `,`), or a
-test's name (`::`, then letters, digits, `_`, and `:`); an error is a type
-name that ends in `Error` or `Exception`, or a code of one to four ASCII
-capitals and two to six digits (`E0308`, `TS2307`); each is at most 96
-bytes. With a finding the path and the error come from lines that hold no
+A fact holds text of the output under source capture's rule for a tool span:
+text in which the durable-text redactor finds nothing is kept as it is, and
+text with a finding is withheld whole. With no finding the fact keeps the
+output's chosen lines: the first five lines that state an error, in output
+order, and then those of the last two lines that are none of them, each
+trimmed, each at most 160 bytes with `…` ending a cut line, a text that
+several lines share once. A line states an error when it is a failure line,
+when it completes one (the line right after a failure line that ends with `:`,
+or one that begins with `-->` or `at `, and that is no code fence line), when
+it holds `error`, `errors`, `failed`, `failure`, `fatal`, `panic`, `panicked`,
+`exception`, or `traceback` as a word in any letter case, when it holds a type
+name that ends in `Error` or `Exception`, or when it holds `command not
+found`. An empty line, a line with a control character other than a tab, and a
+line with U+2028 or U+2029 are left out. With a finding the fact keeps no line
+of the output and says that the text is withheld and that the whole output
+stands in the result of its tool call in its session while that session's
+history holds it. A fact also names, from its chosen lines, the first path and
+the first error they hold: a path is a word of ASCII letters, digits, and `_`,
+`.`, `/`, `-` with a file extension of one to five letters and digits, at
+least one a letter, and with a directory, a position (`:` or `(`, then digits,
+`:`, and `,`), or a test's name (`::`, then letters, digits, `_`, and `:`); an
+error is a type name that ends in `Error` or `Exception`, or a code of one to
+four ASCII capitals and two to six digits (`E0308`, `TS2307`); each is at most
+96 bytes. With a finding the path and the error come from lines that hold no
 finding. When the redactor's scan does not finish, no text of the output
 reaches the fact. The grounds of a failure are tried from the strongest: the
-harness's mark, a stated exit code, a printed exit status, a shell's report,
-and a failure line. An exit code counts when the redactor finds nothing in
-its line: a code whose line holds a finding, or whose output was left
-unscanned, gives way to the next ground, and a result whose only grounds are
-such codes changes no fact. A result the harness marks stays a failure
-without that code.
+harness's mark, a stated exit code, and a printed exit status. A stated code
+or a printed status counts when the redactor finds nothing in its line. A
+stated code whose line holds a finding, or whose output was left unscanned,
+gives way to the printed status, a printed zero in such a line is no pass, and
+a result whose only grounds are such lines changes no fact: it is no failure
+and no pass. A result the harness marks stays a failure without that code.
 
 A fact names its command by the program and its first plain operand and leaves
-every other argument out. The command line passes the redactor first. A
-redacted command line inside the grammar above is normalized to what stays the
-same between runs of one operation: its commands after the leading `cd` steps,
-the first of them without its leading `NAME=value` assignments when a word
-follows them, each command's words as written joined by single spaces, and
-each operator in one spelling with a space on each side, a line break as `;`.
-The fact shows the first word of that text when it is a plain word (ASCII
-letters, digits, and `_`, `.`, `/`, `+`, `-`, at most 64 bytes), the word
-after it when that is a plain word that begins with no `-`, and ` [arguments
-left out]` when the text holds more; a text that begins with no plain word is
-shown as `[left out]`. A redacted command line outside the grammar is kept as
-written, without the whitespace at its ends, and the fact shows the word it
-begins with, up to the first whitespace, when that is a plain word and none of
-the first words listed above, then ` [arguments left out]`. The command's
-digest is the first 32 hexadecimal digits of the SHA-256 of the project's
-digest and that text, each behind its length, so two command lines that differ
-in a credential the redactor finds are one command. The digest follows the
-redactor's rules and this normalization: a daemon build that changes either
-names a command's later facts by a new `source_id` and leaves the facts of the
-earlier one as they stand. The redactor is the fact's only judge of text: the
-words shown and the chosen lines of an output hold whatever the redactor's
-rules pass, as a tool span that source capture retains does.
+every other argument out. The command passes the redactor first. For a
+redacted command line inside the grammar above, the words that name it are the
+words of its commands after each leading `cd <directory>` that `&&`, `;`, or a
+line break joins to a later command, the first of those commands without its
+leading `NAME=value` assignments when a word follows them. The fact shows the
+first of these words when it is a plain word (ASCII letters, digits, and `_`,
+`.`, `/`, `+`, `-`, at most 64 bytes), the word after it in the same command
+when that is a plain word that begins with no `-`, and ` [arguments left out]`
+when the command line holds more; a command line whose first word is no plain
+word is shown as `[left out]`. A redacted command line outside the grammar
+shows the word it begins with, up to the first whitespace, when that is a
+plain word and none of the first words listed above, then ` [arguments left
+out]` when more follows. An array shows its first two strings by the same
+rule, each redacted alone. The command's digest is the first 32 hexadecimal
+digits of a SHA-256 over the project's digest and the command, each part
+behind its length. For a command line inside the grammar the parts are a mark
+of this form, the naming words as written, each apart, and after each command
+its operator in one spelling, a line break as `;`, so the width of the
+whitespace between two words is no part of the command and the place of a word
+boundary is. For a command line outside the grammar the parts are a mark of
+its own and the redacted line as written, without the whitespace at its ends.
+For an array the parts are a mark and its strings, each apart, when the
+redactor finds nothing in them and in their text joined by single spaces; when
+it finds something, the parts are another mark and that joined redacted text.
+Two commands that differ in a credential the redactor finds are one command.
+The digest follows the redactor's rules and this grammar: a daemon build that
+changes either names a command's later facts by a new `source_id` and leaves
+the facts of the earlier one as they stand. The redactor is the fact's only
+judge of text: the words shown and the chosen lines of an output hold whatever
+the redactor's rules pass, as a tool span that source capture retains does.
 
 Each failed call writes one fact of the `memory` domain: `decision_kind`
-`TOOL_FAILURE`, `source_id` `tool_failure:<digest>` with the command's
-digest, `source_kind` that of capture's facts, admitted as labeled
-inference, so it is served on `explicit_search` with visibility `labeled`,
-the fused search route and the snapshot scan of `eidnara_search` return it,
-and it reaches no automatic surface: `TOOL_FAILURE` is no category the
-`<project-memory>` block renders, and capture offers no such fact to the
-extractor as an existing memory. The facts count among the memory rows that
-capture's reference read and the contradiction candidate pass load. The
-search tool renders the first 1,024 bytes of a fact's `summary`, a line
-break, and its `rationale` together, so the `summary` is at most 900 bytes
-and states the outcome first. Its first line is
-`Tool failure recorded from the result of <tool> at <time>: <outcome>.` with
-the tool's name in at most 32 bytes, whitespace runs as single spaces, and
-the result's creation time in UTC to the millisecond, so a reader of a cut
-search result orders the failures of a project, and a resolved fact's first
-line ends with ` Resolved: a later run of this command reported no failure.`
-`<outcome>` is `the command failed with exit code <n>` for a nonzero code
-the tool states, `the command failed and the tool reported an error` for a
-marked result without one, `the command failed: its command line printed
-exit status <n>`, `the command failed: the shell found no program of a name
-in its command line`, or `the output holds failure lines and the command
-line hides its exit status from the tool`. The second line is `Command: `
-and the command as shown. A line `Failing path: <path>` and a line
-`Error: <error>` follow when the output names them and they fit beside the
-lines after them. Then `Output lines:` and the chosen lines follow, each
-behind `> `, the mark of quoted tool output, the last two whole and the
-lines that state an error in the bytes that remain; or one line
-`Output text withheld: <reason>. The whole output stands in the result of
-tool call <call> of session <session> while that session's history holds
-it.`, with each id in at most 96 bytes and `<reason>` either `the redactor
-found credential-shaped content in the output` or `the redactor's scan of
-the output did not finish`.
+`TOOL_FAILURE`, `source_id` `tool_failure:<digest>` with the command's digest,
+`source_kind` that of capture's facts, admitted as labeled inference, so it is
+served on `explicit_search` with visibility `labeled`, the fused search route
+and the snapshot scan of `eidnara_search` return it, and it reaches no
+automatic surface: `TOOL_FAILURE` is no category the `<project-memory>` block
+renders, and capture offers no such fact to the extractor as an existing
+memory. The facts count among the memory rows that capture's reference read
+and the contradiction candidate pass load. The search tool renders the first
+1,024 bytes of a fact's `summary`, a line break, and its `rationale` together,
+so the `summary` is at most 900 bytes and states the outcome first. Its first
+line is `Tool failure recorded from the result of <tool> at <time>:
+<outcome>.` with the tool's name in at most 32 bytes, whitespace runs as
+single spaces, and the result's creation time in UTC to the millisecond, so a
+reader of a cut search result orders the failures of a project, and a resolved
+fact's first line ends with ` Resolved: a later run of this command reported
+no failure.` `<outcome>` is `the command failed with exit code <n>` for a
+nonzero code the tool states, `the command failed and the tool reported an
+error` for a marked result without one, or `the command failed: its command
+line printed exit status <n>`. The second line is `Command: ` and the command
+as shown. A line `Failing path: <path>` and a line `Error: <error>` follow
+when the output names them and they fit beside the lines after them. Then
+`Output lines:` and the chosen lines follow, each behind `> `, the mark of
+quoted tool output, the last two whole and the lines that state an error in
+the bytes that remain; or one line `Output text withheld: <reason>. The whole
+output stands in the result of tool call <call> of session <session> while
+that session's history holds it.`, with each id in at most 96 bytes and
+`<reason>` either `the redactor found credential-shaped content in the output`
+or `the redactor's scan of the output did not finish`.
 
 The fact's `rationale` is a string that holds a JSON object. Its fields are
 `source` (`tool_failure`), `session`, `call` (the tool call's native id),
 `tool`, `command` (the command as shown), `digest` (the command's digest),
-`state` (`failed` or `resolved`), `evidence` (`tool_status`,
-`printed_status`, `shell_report`, or `failure_lines`), `output_text` (`kept`
-or `withheld`), `at_ms` and `at` (the creation time of the failed run's
-result, in milliseconds and as UTC text), and, when the outcome or the
-output names them, `exit_code`, `path`, and `error`. A resolved fact also
-holds the passing run: `resolved_session`, `resolved_call`,
-`resolved_at_ms`, and `resolved_at`. The Kernel stores the text and the
-rationale through the durable-text redactor; a `summary` or a `rationale`
-that the redactor would change writes no fact, so the stored fact is the
-fact the daemon composed.
+`state` (`failed` or `resolved`), `evidence` (`tool_status` or
+`printed_status`), `output_text` (`kept` or `withheld`), `at_ms` and `at` (the
+creation time of the failed run's result, in milliseconds and as UTC text),
+and, when the outcome or the output names them, `exit_code`, `path`, and
+`error`. A resolved fact also holds the passing run: `resolved_session`,
+`resolved_call`, `resolved_at_ms`, and `resolved_at`. The Kernel stores the
+text and the rationale through the durable-text redactor; a `summary` or a
+`rationale` that the redactor would change writes no fact, so the stored fact
+is the fact the daemon composed.
 
 One fact is live per command of a project, within the daemon builds that share
-a redactor and a normalization. The command's fact is the newest decision on
-its `source_id`, the one of the greatest `source_revision`, live or retired,
-when the recorder wrote it: it is a `TOOL_FAILURE` decision of the project,
+a redactor and a grammar. The command's fact is the newest decision on its
+`source_id`, the one of the greatest `source_revision`, live or retired, when
+the recorder wrote it: its id has the form of a fact's id (`mem_` and 32
+lowercase hexadecimal digits), it is a `TOOL_FAILURE` decision of the project,
 its rationale states its run (a `state` of `failed` or `resolved`, the session
 of that run, and its time, which a UTC date renders), and the Kernel's commit
 log holds the recorder's commit of that fact for that session. A result
@@ -1990,39 +1997,40 @@ on one answers `invalid:admission_policy` once it has found the replaced fact
 in the bound project; a replaced fact that is missing or stands in another
 project answers `invalid:not_found` as on any `source_id`. A
 `kernel.artifact.ingest.begin` whose `source_id` is one answers
-`invalid:invalid_input`. The MemoryReviewer refuses a proposal that targets a
-fact on one, and `review.accept` of a proposal whose target stands on one
-answers `changed`. Retiring a fact and recording a disposition on it stay
-open.
+`invalid:invalid_input`. The MemoryReviewer forms no proposal that targets a
+fact on one. Retiring a fact and recording a disposition on it stay open.
 
 The task reads each result ahead of the capture publication gate and judges it
 under the gate, which it takes by polling: it reads the Kernel's log for the
 call's commit, the two newest decisions on the command's `source_id`, the
 newest one's text as it stood while live, the log for that fact's commit, and
-the session's count, and commits. The waits for a Kernel connection and the
-reads of one judgment end at one 5 s deadline, and a daemon shutdown ends
-them. `session.delete` holds the same gate and retires the session's place in
-the daemon's memo of judged calls before it changes either store, so a task
-handed off before a `session.delete` of its session writes nothing after it,
+the session's count, and commits. The waits for a Kernel connection of one
+judgment end at one 5 s deadline, its reads of the log and of the lineage stop
+at that deadline between steps of their statements, and a daemon shutdown ends
+them the same way. `session.delete` holds the same gate and retires the
+session's place in the daemon's memo of judged calls before it changes either
+store and again before it releases the gate, so a task handed off before a
+`session.delete` of its session, or while it runs, writes nothing after it,
 also when the delete ends partway. A fact committed before the delete stands,
-and a later pass of the session writes as before. A session writes at most 64
-such facts in a project, resolved copies included. The count is the number of
-the session's commits under the recorder's producer name that the Kernel's
-commit log holds for the project, read from the log's index up to 64 entries
-at each write, so a fact that another session supersedes, a retired fact, and
-a restart leave the count as it is. The daemon remembers 1,024 judged calls,
-by project, for each of 256 sessions, and a full session entry gives up the
-call it learned first; a session past the 256 takes the place of the oldest
-session that runs no task, whose results are judged again on its next request,
-where the Kernel's log stops a second write of a call that wrote a fact. A
-busy or failing Kernel, and a fact another writer changed under the judgment,
-end the task with the call unlearned; any other refusal of the Kernel settles
-the call. A result that writes nothing for a reason an operator can act on is
-reported on stderr by a fixed sentence that holds no text of the result: a
-tool name, an id, a command line, or a composed fact that the redactor
-refuses, a newest decision the recorder did not write, and a refusal of the
-Kernel. A panic of the task is reported through the daemon's redacting panic
-boundary with the gate released, and its call stays unjudged.
+and a pass of the session that hands off after the delete writes as before. A
+session writes at most 64 such facts in a project, resolved copies included.
+The count is the number of the session's commits under the recorder's producer
+name that the Kernel's commit log holds for the project, read from the log's
+index up to 64 entries at each write, so a fact that another session
+supersedes, a retired fact, and a restart leave the count as it is. The daemon
+remembers 1,024 judged calls, by project, for each of 256 sessions, and a full
+session entry gives up the call it learned first; a session past the 256 takes
+the place of the oldest session that runs no task, whose results are judged
+again on its next request, where the Kernel's log stops a second write of a
+call that wrote a fact. A busy or failing Kernel, and a fact another writer
+changed under the judgment, end the task with the call unlearned; any other
+refusal of the Kernel settles the call. A result that writes nothing for a
+reason an operator can act on is reported on stderr by a fixed sentence that
+holds no text of the result: a tool name, an id, a command line, or a composed
+fact that the redactor refuses, a newest decision the recorder did not write,
+and a refusal of the Kernel. A panic of the task is reported through the
+daemon's redacting panic boundary with the gate released, and its call stays
+unjudged.
 
 ### 7.10 Transform
 
