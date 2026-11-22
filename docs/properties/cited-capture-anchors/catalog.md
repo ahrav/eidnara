@@ -255,7 +255,7 @@ Check: `always` - for every prepared memory, `source.text.contains(quote)` for t
 Fault/timing angle: none
 Required faults and enabling state: a quote taken from another message of the batch; an invented `message_id`; a duplicate `message_id`; an empty quote; quotations of one user message that join into one statement
 Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:580` and `validate_capture_memories` at `:1182`; the prompt states the rule at `:494` (offset corrected by refinement R8)
-Existing check: `crates/daemon/src/memory_capture.rs:4968`, `:5001`, `:5032`, `:5177`, `:7904`, `:10943-10944`; `crates/daemon/src/lib.rs:25366` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:4968`, `:5001`, `:5032`, `:5177`, `:7904`, `:10943`; `crates/daemon/src/lib.rs:25366` (unaudited)
 Impact: a quote from another message would cite evidence for a statement the source never made
 Open questions: None.
 

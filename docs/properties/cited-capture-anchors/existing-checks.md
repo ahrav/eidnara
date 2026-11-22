@@ -68,7 +68,7 @@ part.
 | `crates/daemon/src/memory_capture.rs:12412` `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` | `p2-capture-commit-replays-by-job-key-and-frozen-digest`; `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` | unaudited |
 | `crates/kernel/tests/kernel_envelope.rs:160` `receipt_replay_is_effect_free_and_digest_conflict_is_typed` | `p2-capture-commit-replays-by-job-key-and-frozen-digest` | unaudited |
 | `crates/daemon/src/lib.rs:24958` `automatic_capture_commits_once_and_is_explicitly_retrievable` | same; identity record | unaudited |
-| `crates/daemon/src/memory_capture.rs:4968`, `:5001`, `:5032`, `:5177`, `:10943-10944` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
+| `crates/daemon/src/memory_capture.rs:4968`, `:5001`, `:5032`, `:5177`, `:10943` | `p2-capture-quote-is-an-exact-substring-of-its-own-batch-source` | unaudited |
 | `crates/daemon/src/memory_capture.rs:7904` `sentences_quoted_one_by_one_after_a_colon_join_the_statement_they_follow` | same; a parse-level check that each joined quotation is a slice of its source text | unaudited |
 | `crates/daemon/src/lib.rs:25366` `automatic_capture_rejection_stays_pending_not_successful_empty_memory` | same | unaudited |
 | `crates/daemon/src/memory_capture.rs:11513` `a_stored_plan_ends_work_in_progress_and_conflicts_on_a_standing_statement` | `p2-capture-job-and-decision-identity-derive-from-the-source-tuple` (an ended revision's id) | unaudited |
