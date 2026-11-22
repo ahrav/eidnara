@@ -202,7 +202,8 @@ fn eligibility_for(
     let Some((sensitivity, egress)) = stored_class else {
         return match destination {
             ArtifactDestination::Local => ArtifactEligibility::Allowed,
-            ArtifactDestination::Remote => {
+            // Bytes no live evidence row classes may hold a secret, so every model destination is denied them.
+            ArtifactDestination::Remote | ArtifactDestination::ConfiguredModel => {
                 ArtifactEligibility::Denied(EligibilityDeniedReason::UnknownSensitive)
             }
         };

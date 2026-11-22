@@ -45,7 +45,9 @@ fn expected(references: &[usize], destination: ArtifactDestination) -> ArtifactE
     if references.is_empty() {
         return match destination {
             ArtifactDestination::Local => Allowed,
-            ArtifactDestination::Remote => Denied(Reason::UnknownSensitive),
+            ArtifactDestination::Remote | ArtifactDestination::ConfiguredModel => {
+                Denied(Reason::UnknownSensitive)
+            }
         };
     }
     let classes = references.iter().map(|&index| CLASSES[index]);
@@ -56,7 +58,8 @@ fn expected(references: &[usize], destination: ArtifactDestination) -> ArtifactE
         return Denied(Reason::Secret);
     }
     match destination {
-        ArtifactDestination::Local => Allowed,
+        // The configured model reads what a local reader does once a class is stored.
+        ArtifactDestination::Local | ArtifactDestination::ConfiguredModel => Allowed,
         ArtifactDestination::Remote if sensitive => Denied(Reason::SensitiveRemote),
         ArtifactDestination::Remote if local_only => Denied(Reason::ProviderRestricted),
         ArtifactDestination::Remote => Allowed,

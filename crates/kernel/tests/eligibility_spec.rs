@@ -385,6 +385,8 @@ fn destination(destination: ArtifactDestination) -> Destination {
     match destination {
         ArtifactDestination::Local => Destination::Local,
         ArtifactDestination::Remote => Destination::Remote,
+        // The configured model is the daemon's own destination, outside the mirrored route vocabulary; `kernel_cas` holds its table.
+        ArtifactDestination::ConfiguredModel => unreachable!("a route names local or remote"),
     }
 }
 
