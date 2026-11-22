@@ -522,11 +522,11 @@ that no related check exists anywhere in the repository.
 [historical-read]: ../../../crates/daemon/tests/kernel_routes.rs#L1875
 [object-filter]: ../../../crates/daemon/tests/kernel_routes.rs#L2016
 [selection-reference]: ../../../crates/daemon/tests/kernel_routes.rs#L2080
-[render-category]: ../../../crates/daemon/src/memory_render.rs#L283
-[render-markup]: ../../../crates/daemon/src/memory_render.rs#L310
-[render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L334
-[render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L378
-[render-order]: ../../../crates/daemon/src/memory_render.rs#L401
+[render-category]: ../../../crates/daemon/src/memory_render.rs#L257
+[render-markup]: ../../../crates/daemon/src/memory_render.rs#L284
+[render-content-cap]: ../../../crates/daemon/src/memory_render.rs#L308
+[render-vocabulary]: ../../../crates/daemon/src/memory_render.rs#L352
+[render-order]: ../../../crates/daemon/src/memory_render.rs#L375
 [parse-admission]: ../../../crates/daemon/src/lib.rs#L16379-L16392
 [byte-charge]: ../../../crates/host-runtime/src/wire.rs#L430-L481
 [decode-admission]: ../../../crates/daemon/src/kernel_routes/ingest.rs#L406-L425
