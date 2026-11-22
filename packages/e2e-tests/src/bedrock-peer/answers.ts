@@ -130,7 +130,14 @@ export function captureAnswer(prompt: string): string {
             message_id: source.id,
             memories:
                 source.role === "user" && source.text.includes(CAPTURED_FACT)
-                    ? [{ category: "CONFIG_VALUES", content: CAPTURED_FACT, quote: CAPTURED_FACT }]
+                    ? [
+                          {
+                              category: "CONFIG_VALUES",
+                              content: CAPTURED_FACT,
+                              quote: CAPTURED_FACT,
+                              speaker: "user",
+                          },
+                      ]
                     : [],
         })),
     });
