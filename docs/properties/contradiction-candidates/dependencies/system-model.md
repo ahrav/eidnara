@@ -100,7 +100,7 @@ kernel store, budget, units, memo, commit gate mutex (`:811`),
 `publish_locked` (`:883-975`): delete epoch, scope, budget,
 `publish_screened_between` for the window (`:907-915`), then
 `capture_documents` in its own batch (`:905-...`). `capture_after_response`
-(`crates/daemon/src/lib.rs:9258-9275`). The request owner runs the
+(`crates/daemon/src/lib.rs:9312-9329`). The request owner runs the
 `AfterResponse` after `settle_prepared` (`lib.rs:13660-13664`;
 `crates/daemon/src/dispatch.rs:24-35`, `:422-437`). `publish_batch`
 (`crates/daemon/src/harness_sources.rs:1292-1298`), `Published` (`:549-562`),
@@ -119,7 +119,7 @@ Activation gate: `identity_terms` (`crates/daemon/src/memory_reviewer/activation
 includes `("memory store baseline", live.memstore_baseline_digest)`;
 `evaluate` (`:218-240`) returns `Closed::IdentityMismatch(field)` on the first
 differing term; the live value is `memory_store::baseline_digest()`
-(`worker.rs:167`).
+(`worker.rs:243`).
 
 S6 harness-capture retention. `HARNESS_CAPTURE_RETENTION_CLASS =
 "harness_capture"` (`crates/kernel/src/cas/mod.rs:155`); evidence ingest sets
@@ -136,7 +136,7 @@ edges). Descriptor retirement is `retire_capture_observation`
 (`write.rs:569-577`) -> `retire_slice_object` (`:627-666`) which sets
 `invalidated_commit_seq`. Caller: `kernel_slice` in
 `crates/daemon/src/memory_reviewer/lifecycle.rs:313-338`, from
-`sweep_and_sample` (`:363`), from `run` (`:471-539`), spawned once the store
+`sweep_and_sample` (`:363`), from `run` (`:479-547`), spawned once the store
 is installed (`lib.rs:4000-4008`), with `SAMPLE_INTERVAL = 30 s` and
 `SAMPLE_RETRY_INTERVAL = 5 s` (`lifecycle.rs:16-18`).
 
@@ -151,7 +151,7 @@ before `parse_request_body` (`:470-481`, removes `ENVELOPE_KEYS` `:468`:
 (`wire.rs:131-139`) maps NotModule to `disabled`, store error to
 `store_unavailable`. Observational harness `cli`
 (`crates/daemon/src/lib.rs:275-282`), excluded from background views
-(`:414-418`). `kernel.read` header `read.rs:1-4`.
+(`:425-429`). `kernel.read` header `read.rs:1-4`.
 
 S8 tool surface (re-verified at the #1164 branch tip; #1161 added
 `dispute`). `EIDNARA_MEMORY_ACTIONS =
@@ -180,7 +180,7 @@ exclusion of the context_researcher is by registration
   registry; retirement sets `invalidated_commit_seq`, never deletes.
 - Memory store: one baseline file, `format_marker` holds the digest; a
   mismatch refuses open and leaves bytes untouched
-  (`crates/memory-store/tests/baseline.rs:492-514`).
+  (`crates/memory-store/tests/baseline.rs:493-515`).
 - Capture memo is process-local and bounded (`source_capture.rs:5`); Kernel
   receipts are the durable record.
 - Review receipts live in the memory store ledger; `review.list` lists from
@@ -224,7 +224,7 @@ C9 `source_capture.rs:3`: "The response bytes never wait on the kernel or the
 job"; single publication slot; at most one screened batch under a 5 s budget.
 C10 `source_capture.rs:7`: counters carry a closed vocabulary, never unit text.
 C11 `storage/AGENTS.md`: single baseline; reject mismatches.
-`memory-reviewer-operations.md:86-88`, `:235-241`: a store at another
+`memory-reviewer-operations.md:125-127`, `:274-280`: a store at another
 baseline refuses to open; the activation gate binds `memstore_baseline_digest`.
 C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.

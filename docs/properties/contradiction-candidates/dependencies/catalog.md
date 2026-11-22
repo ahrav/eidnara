@@ -24,7 +24,7 @@ issues, no incident history, no git-history lens.
 
 Assumption (inferred): "default build" means the daemon built without the
 `test-support` feature and run with `DaemonConfig::default()`
-(`crates/daemon/src/config.rs:153-182`): `memory_enabled: true`,
+(`crates/daemon/src/config.rs:197-229`): `memory_enabled: true`,
 `source_capture_enabled: false`, `contradiction_candidates_enabled: false`.
 
 Every documented guarantee below is a claim under test. Every `file:line`
@@ -320,7 +320,7 @@ request with `object_ids` through `read_visible_page` (`read.rs:448`) and a
 request with none through `newest_page` (`read.rs:289`); `read_visible`
 (`read.rs:383`) and `read_visible_within` (`read.rs:435`) put the capture
 read of the `memory` domain and the classifier's named-id read
-(`crates/daemon/src/lib.rs:15228`) on `read_visible_page`.
+(`crates/daemon/src/lib.rs:15288`) on `read_visible_page`.
 Status: active
 Exercised: yes - on the `newest_page` path,
 `crates/daemon/tests/kernel_routes.rs:1958`, `:7225`, and `:7414` construct
@@ -329,7 +329,7 @@ over-cap row counts, and `:2112` and `:7174` over-budget payloads. On the
 constructs over-cap inputs for `NewestRows` alone,
 `crates/daemon/src/kernel_routes/read.rs:1088` puts one row more than
 `MAX_READ_ROWS` through `read_visible`, and
-`crates/daemon/src/lib.rs:38209` puts over-budget payloads through
+`crates/daemon/src/lib.rs:38290` puts over-budget payloads through
 `read_visible`.
 Guarantee: after the Kernel read, the optional `before` cursor of
 `kernel.read`, and the daemon `ScopeFilter` (`read.rs:329`, `:482-484`),
@@ -730,9 +730,9 @@ Open questions: None.
 Type: safety
 Reachability: default-production - `MemoryStore::open` runs on every daemon
 start; `evaluate` runs on every MemoryReviewer pass and before every job
-(`memory-reviewer-operations.md:44`).
+(`memory-reviewer-operations.md:46`).
 Status: active
-Exercised: yes - `crates/memory-store/tests/baseline.rs:496-518` opens a
+Exercised: yes - `crates/memory-store/tests/baseline.rs:497-519` opens a
 prior-baseline file and observes refusal with unchanged bytes; #1165
 re-exercises it with the fixture frozen at the baseline before
 `contradiction_candidates` (`crates/memory-store/tests/fixtures/prior_baseline.sql`);
@@ -755,14 +755,14 @@ baseline, then a binary with a changed `baseline.sql`; an activation record
 naming the old digest.
 Confidence: high - [evidence](evidence/p5dep-baseline-digest-change-closes-the-activation-gate.md).
 Read `memory-store/src/lib.rs:336-341`, `storage/src/lib.rs:2631`,
-`activation.rs:174-240`, `worker.rs:167`.
+`activation.rs:174-240`, `worker.rs:243`.
 Existing check: the tests above and
 `docs/properties/shared-primitives/catalog.md:676`
 `store-schema-identity-matches-the-baseline` (active) for the open refusal
 across consumers. Status unaudited here; that record reports its own audit.
 Impact: P5 U3 is a baseline rotation (index D4, Batch M1); every deployment
 must reset the store and renew the activation record; proposals bound to the
-old incarnation become unadoptable (`memory-reviewer-operations.md:236-240`).
+old incarnation become unadoptable (`memory-reviewer-operations.md:275-279`).
 Open questions: None.
 
 ### p5dep-harness-sweep-retires-owners-before-evidence
@@ -952,7 +952,7 @@ Type: safety
 Reachability: default-production - `eidnara_memory` is registered by default
 in opencode (`packages/opencode-plugin/src/plugin/tool-registry.ts:54-59`)
 and pi (`packages/pi-plugin/src/tools/index.ts:69-75`,
-`packages/pi-plugin/src/index.ts:475`).
+`packages/pi-plugin/src/index.ts:480`).
 Status: active
 Exercised: partial - opencode allowlist tests
 (`tools.test.ts:1162-1234`) cover the empty, omitted, and partial
