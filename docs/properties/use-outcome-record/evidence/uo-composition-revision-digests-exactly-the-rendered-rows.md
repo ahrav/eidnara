@@ -14,30 +14,34 @@ revision.
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
-  per rendered row: the positive-category rows in object-id order, then the
-  `CURRENT_WORK` rows in the supplied order, which is the order the block
-  renders them in (`crates/daemon/src/canonical_memory.rs:54-61`).
+  per rendered row, in the digest's own order: the `NAMED_FILES` rows in the
+  supplied order, the positive-category rows in object-id order across their
+  categories, then the `CURRENT_WORK` rows in the supplied order (`crates/daemon/src/canonical_memory.rs:56-79`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:742`)).
-- The first four tests named under Existing check are unchanged since
-  `a0e3f2993`; the spec cited their `fn` lines, and the production code was not
-  cited. The fifth covers the order of the `CURRENT_WORK` rows.
+  (`crates/daemon/src/canonical_memory.rs:805`)).
+- The spec cited the `fn` lines of the first four tests named under Existing
+  check, and the production code was not cited. The fifth covers the order
+  of the `CURRENT_WORK` rows, and the sixth the `NAMED_FILES` rows and how
+  the two sections interleave.
 
 - Guarantee under test: The composition revision is a digest over exactly the
-  rendered rows after the token-budget trim: the positive-category rows sorted
-  by object id, then the `CURRENT_WORK` rows in the order the block renders
-  them.
+  rendered rows after the token-budget trim, in the digest's own order: the
+  `NAMED_FILES` rows in the supplied order, the positive-category rows
+  sorted by object id across their categories, then the `CURRENT_WORK` rows
+  in the supplied order.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1264`);
+  (`crates/daemon/src/canonical_memory.rs:1333`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1498`);
+  (`crates/daemon/src/canonical_memory.rs:1629`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1515`);
+  (`crates/daemon/src/canonical_memory.rs:1646`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1537`);
+  (`crates/daemon/src/canonical_memory.rs:1668`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1464`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1595`);
+  `the_revision_reads_the_named_files_in_the_supplied_order`
+  (`crates/daemon/src/canonical_memory.rs:1534`). Status: unaudited.
 
 ## Failure scenario
 
@@ -50,11 +54,12 @@ None.
 
 ## What a test must construct
 
-The five unit tests already construct each input class.
+The six unit tests already construct each input class.
 
 Required faults and enabling state: Snapshots that differ only in rows the
-renderer drops, bytes past the render cap, rows past the memory budget, or
-the order of the `CURRENT_WORK` rows.
+renderer drops, bytes past the render cap, rows past the memory budget, the
+order of the `CURRENT_WORK` rows, or the presence and order of the
+`NAMED_FILES` rows.
 
 ## Investigation log
 
