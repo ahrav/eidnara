@@ -572,40 +572,93 @@ fn shown_contest(
     crate::memory_capture::capture_rationale(decision).contested_by
 }
 
-/// Rewrites each contested statement of `response` to [`contested_line`]'s
-/// text, for the contests whose observation the Kernel serves. The
-/// observations are read by id in one project-scoped read on explicit
-/// search at the response's snapshot, so a contest shows the text of a
-/// memory that is live, belongs to the project, is not hidden, and has
-/// normal sensitivity there; a labeled observation, such as an assistant's
-/// report, is one. A statement whose observation that read does not serve
-/// keeps its stored text. A failed read fails the pass.
-fn show_contests(
-    store: &kernel::KernelStore,
-    project: &ProjectBinding,
-    response: &mut ReadResponse,
-) -> Result<(), kernel::KernelError> {
-    let contests: Vec<(String, i64, crate::memory_capture::Contest)> = response
+/// A capture-written statement a pass serves that carries a contest record
+/// or the record of an observation it replaced.
+struct Marked {
+    statement: String,
+    /// The commit that wrote the row the pass serves.
+    row_seq: i64,
+    /// The commit that first recorded the statement.
+    stated_seq: i64,
+    contest: Option<crate::memory_capture::Contest>,
+    /// The commit that recorded the observation the statement replaced.
+    replaced_seq: Option<i64>,
+}
+
+fn marked_statements(response: &ReadResponse) -> Vec<Marked> {
+    response
         .rows
         .iter()
         .filter(|row| row.visibility == SurfaceVisibility::Visible)
         .filter_map(|row| {
             let decision = response.decisions.get(&row.object.object_id)?;
-            Some((
-                decision.object_id.clone(),
-                row.object.created_commit_seq,
-                shown_contest(row, decision)?,
-            ))
+            if !crate::memory_capture::is_capture_memory(&row.object) {
+                return None;
+            }
+            let contest = shown_contest(row, decision);
+            let replaced_seq = crate::memory_capture::replaced_observation_commit(decision);
+            (contest.is_some() || replaced_seq.is_some()).then(|| Marked {
+                statement: decision.object_id.clone(),
+                row_seq: row.object.created_commit_seq,
+                stated_seq: crate::memory_capture::stated_commit(decision),
+                contest,
+                replaced_seq,
+            })
         })
-        .collect();
-    let mut times = CommitTimes::new(store);
-    show_replacements(&mut times, response)?;
-    if contests.is_empty() {
-        return Ok(());
-    }
-    let mut ids: Vec<String> = contests
+        .collect()
+}
+
+/// The line a pass shows for `mark`, whose stored text is `summary`.
+/// `observation` is the text of the contesting memory while the Kernel
+/// serves it, and the statement then takes [`contested_line`]'s text. A
+/// statement that shows no contest and replaced an observation takes
+/// [`replaced_line`]'s text. `None` keeps the stored text. `recorded` gives
+/// the time a commit was recorded.
+fn marked_line(
+    summary: &str,
+    mark: &Marked,
+    observation: Option<&str>,
+    mut recorded: impl FnMut(i64) -> Result<Option<i64>, kernel::KernelError>,
+) -> Result<Option<String>, kernel::KernelError> {
+    let shown = mark.contest.as_ref().zip(observation);
+    Ok(match (shown, mark.replaced_seq) {
+        (Some((contest, text)), _) => Some(contested_line(
+            summary,
+            recorded(mark.stated_seq)?,
+            recorded(mark.row_seq)?,
+            &contest.memory,
+            text,
+        )),
+        (None, Some(replaced_seq)) => Some(replaced_line(
+            summary,
+            recorded(mark.stated_seq)?,
+            recorded(replaced_seq)?,
+        )),
+        (None, None) => None,
+    })
+}
+
+/// Rewrites the statements of `response` that carry a record, each to its
+/// [`marked_line`]: a contested statement whose observation the Kernel
+/// serves, and a statement that replaced an observation and shows no
+/// contest. A pass with no contested statement rewrites the replacements
+/// too.
+///
+/// The observations are read by id in one project-scoped read on explicit
+/// search at the response's snapshot, so a contest shows the text of a
+/// memory that is live, belongs to the project, is not hidden, and has
+/// normal sensitivity there; a labeled observation, such as an assistant's
+/// report, is one. Commit times are read for the statements that are
+/// rewritten, once for each commit. A failed read fails the pass.
+fn show_contests(
+    store: &kernel::KernelStore,
+    project: &ProjectBinding,
+    response: &mut ReadResponse,
+) -> Result<(), kernel::KernelError> {
+    let marked = marked_statements(response);
+    let mut ids: Vec<String> = marked
         .iter()
-        .map(|(_, _, contest)| contest.memory.clone())
+        .filter_map(|mark| Some(mark.contest.as_ref()?.memory.clone()))
         .collect();
     ids.sort_unstable();
     ids.dedup();
@@ -647,54 +700,21 @@ fn show_contests(
             }
         }
     }
-    for (statement, contested_seq, contest) in contests {
-        let (Some(text), Some(decision)) = (
-            observations.get(&contest.memory),
-            response.decisions.get_mut(&statement),
-        ) else {
+    let mut times = CommitTimes::new(store);
+    for mark in marked {
+        let Some(decision) = response.decisions.get_mut(&mark.statement) else {
             continue;
         };
-        decision.payload.summary = contested_line(
-            &decision.payload.summary,
-            times.recorded(contest.stated_seq)?,
-            times.recorded(contested_seq)?,
-            &contest.memory,
-            text,
-        );
-    }
-    Ok(())
-}
-
-/// Rewrites each statement of `response` that replaced an observation to
-/// [`replaced_line`]'s text. A contested statement keeps its text for
-/// [`contested_line`], and a failed commit-time read fails the pass.
-fn show_replacements(
-    times: &mut CommitTimes<'_>,
-    response: &mut ReadResponse,
-) -> Result<(), kernel::KernelError> {
-    let replacements: Vec<(String, i64, i64)> = response
-        .rows
-        .iter()
-        .filter(|row| row.visibility == SurfaceVisibility::Visible)
-        .filter_map(|row| {
-            let decision = response.decisions.get(&row.object.object_id)?;
-            if !crate::memory_capture::is_capture_memory(&row.object)
-                || shown_contest(row, decision).is_some()
-            {
-                return None;
-            }
-            Some((
-                decision.object_id.clone(),
-                crate::memory_capture::stated_commit(decision),
-                crate::memory_capture::replaced_observation_commit(decision)?,
-            ))
-        })
-        .collect();
-    for (statement, stated_seq, recorded_seq) in replacements {
-        let stated = times.recorded(stated_seq)?;
-        let recorded = times.recorded(recorded_seq)?;
-        if let Some(decision) = response.decisions.get_mut(&statement) {
-            decision.payload.summary = replaced_line(&decision.payload.summary, stated, recorded);
+        let observation = mark
+            .contest
+            .as_ref()
+            .and_then(|contest| observations.get(&contest.memory))
+            .map(String::as_str);
+        let line = marked_line(&decision.payload.summary, &mark, observation, |seq| {
+            times.recorded(seq)
+        })?;
+        if let Some(line) = line {
+            decision.payload.summary = line;
         }
     }
     Ok(())
@@ -1204,6 +1224,113 @@ mod tests {
         assert_eq!(
             replaced_line("S.", Some(day("2026-04-09")), None),
             "S. (stated 2026-04-09; it replaces a value recorded unknown date that the user had not stated)"
+        );
+    }
+
+    /// A served statement that replaced an observation is dated from the
+    /// commit that first recorded it and the commit that recorded the
+    /// observation, whichever commit wrote the row the pass serves. While
+    /// its contesting observation is served the line is the contested line
+    /// alone; once that observation is served no longer the replacement
+    /// line returns. A statement with no record keeps its stored text, and
+    /// a failed commit-time read fails the pass.
+    #[test]
+    fn a_marked_statement_is_dated_from_its_first_commit_and_the_replaced_one() {
+        let capture_row = |object_id: &str| {
+            let mut row = visible_row(object_id, "decision", SurfaceVisibility::Visible);
+            row.object.source_id = "memory_capture".to_string();
+            row.object.created_commit_seq = 9;
+            row
+        };
+        let with = |object_id: &str, rationale: serde_json::Value| {
+            let mut decision =
+                decision(object_id, "PROJECT_RULES", "User stated: The limit is 500.");
+            decision.payload.rationale = rationale.to_string();
+            decision.created_commit_seq = 9;
+            decision
+        };
+        let replaced = serde_json::json!({"recorded_seq": 2});
+        let contest = serde_json::json!({"memory": "mem_b", "stated_seq": 4});
+        let read = response(
+            vec![
+                capture_row("settled"),
+                capture_row("contested"),
+                capture_row("plain"),
+                visible_row("other-writer", "decision", SurfaceVisibility::Visible),
+            ],
+            vec![
+                with(
+                    "settled",
+                    serde_json::json!({"stated_seq": 4, "replaces_observation": replaced}),
+                ),
+                with(
+                    "contested",
+                    serde_json::json!({"contested_by": contest, "replaces_observation": replaced}),
+                ),
+                with("plain", serde_json::json!({"quote": "The limit is 500."})),
+                with(
+                    "other-writer",
+                    serde_json::json!({"stated_seq": 4, "replaces_observation": replaced}),
+                ),
+            ],
+        );
+        let marked = marked_statements(&read);
+        assert_eq!(
+            marked
+                .iter()
+                .map(|mark| mark.statement.as_str())
+                .collect::<Vec<_>>(),
+            ["settled", "contested"]
+        );
+        // Commits 2, 4, and 9 were recorded on three different days.
+        let day = 86_400_000;
+        let recorded = |seq: i64| Ok(Some(seq * day));
+        let stored = "User stated: The limit is 500.";
+        let dated = "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded 1970-01-03 that the user had not stated)";
+        for mark in &marked {
+            assert_eq!(
+                marked_line(stored, mark, None, recorded)
+                    .unwrap()
+                    .as_deref(),
+                Some(dated),
+                "{}",
+                mark.statement
+            );
+        }
+        assert_eq!(
+            marked_line(
+                stored,
+                &marked[1],
+                Some("Assistant reported: 300."),
+                recorded
+            )
+            .unwrap()
+            .as_deref(),
+            Some(
+                "User stated: The limit is 500. (stated 1970-01-05; contested 1970-01-10 by mem_b: \"Assistant reported: 300.\")"
+            )
+        );
+        let unknown = |seq: i64| Ok((seq != 2).then_some(seq * day));
+        assert_eq!(
+            marked_line(stored, &marked[0], None, unknown)
+                .unwrap()
+                .as_deref(),
+            Some(
+                "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded unknown date that the user had not stated)"
+            )
+        );
+        let failed = |_: i64| Err(kernel::KernelError::CorruptCanonicalRow);
+        assert!(marked_line(stored, &marked[0], None, failed).is_err());
+        let unmarked = Marked {
+            statement: "contested-alone".to_string(),
+            row_seq: 9,
+            stated_seq: 4,
+            contest: marked[1].contest.clone(),
+            replaced_seq: None,
+        };
+        assert_eq!(
+            marked_line(stored, &unmarked, None, recorded).unwrap(),
+            None
         );
     }
 

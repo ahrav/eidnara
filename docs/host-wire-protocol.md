@@ -1583,20 +1583,27 @@ fact's unchanged row. A stored plan whose fact names more than four contests
 is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
 sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
-by the fact already named writes nothing. A fact capture writes for a user's
-whole statement holds `replaces_observation` in its rationale when every
-fact the statement replaces or retires by name is an observation: a fact the
-Kernel serves as unapproved that is no quotation capture stored under the
-`User stated: ` label, which an assistant's report and a memory the host
-memory tool wrote are. The record is an object with `recorded_seq`, the
-commit sequence that recorded the earliest such fact. A statement that names
-an approved statement of the user, or a labeled quotation of the user, among
-the facts it replaces holds no record, and a note retired because a replaced
-statement restated it is not counted. Each fact that later rewrites the
-statement, for a contest, a settlement, or its end, keeps the record. The
+by the fact already named writes nothing. A fact that capture writes as the
+user's statement, its stored text being the label and the quotation alone,
+holds `replaces_observation` in its rationale when it names at least one
+fact under `replaces` or `also_replaces` and every fact the plan's facts of
+its quotation name there is an observation: a fact the Kernel serves as
+unapproved that is no quotation capture stored under the `User stated: `
+label, which an assistant's report and a memory the host memory tool wrote
+are. The named facts of a quotation are judged together before the plan
+writes any fact, so one statement stored as two facts is judged as one. The
+record is an object with `recorded_seq`, the commit sequence that recorded
+the earliest of those observations. A statement that names no fact holds no
+record. A statement whose quotation names a fact the Kernel serves as
+approved, one a labeled correction keeps live and contests included, or a
+labeled quotation of the user, holds none, and a note retired because a
+replaced statement restated it is not counted. Each fact that later rewrites
+the statement, for a contest, a settlement, or its end, keeps the record. The
 `<project-memory>` block renders a statement whose rationale holds the record
-and no `contested_by` as
-`<statement> (stated <date>; it replaces a value recorded <date> that the user had not stated)`,
+as
+`<statement> (stated <date>; it replaces a value recorded <date> that the user had not stated)`
+on every pass that shows no contest of the statement, a pass whose Kernel
+serves the contesting fact no longer among them,
 the dates being the UTC days on which the statement's first commit and the
 commit `recorded_seq` names were recorded, `unknown date` when the commit log
 holds none; a record of another shape marks nothing. The stored summary holds

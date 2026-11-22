@@ -911,63 +911,93 @@ async fn another_projects_statement_is_not_delivered() {
     );
 }
 
+/// A user's correction replaces a memory another writer stored, which is an
+/// observation the user had not stated: a note of the host memory tool, a
+/// note of that tool whose text opens with the `User stated: ` label, and a
+/// row on capture's lineage whose text opens with `User stated` and no
+/// label. The correction's record names the commit that wrote the memory,
+/// and its line carries both days.
 #[tokio::test]
 async fn a_user_correction_retires_a_memory_the_host_memory_tool_wrote() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    let written = body(
-        handler
-            .dispatch_value_for_test(
-                test_route(FIRST),
-                kernel_route_fixtures::commit_request(
-                    &project,
-                    "s1",
-                    "agent-write",
-                    vec![json!({"op": "insert_decision", "spec": {
-                        "decision_id": "dec-agent",
-                        "object_id": "mem-agent",
-                        "domain_id": "memory",
-                        "decision_kind": "PROJECT_RULES",
-                        "payload": {"summary": "Releases are cut on Thursdays.", "rationale": ""},
-                        "source_id": "eidnara_memory",
-                        "source_revision": 1,
-                    }})],
-                    Vec::new(),
-                ),
-            )
-            .await,
-    );
-    assert_eq!(written["state"]["kind"], "available", "{written}");
-    capture(
-        &handler,
-        SECOND,
-        "s2",
-        &[("m1", "user", TUESDAY)],
-        |_, existing| {
-            let replaces = ids_containing(existing, "Thursdays");
-            assert_eq!(
-                replaces,
-                ["mem-agent"],
-                "the agent's memory is offered as replaceable"
-            );
-            assert!(existing[0]["can_replace"].as_bool().unwrap());
-            vec![Extracted {
-                quote: TUESDAY.to_string(),
-                replaces,
-                ..Extracted::default()
-            }]
-        },
-    )
-    .await;
-    assert_eq!(
-        explicit_search(&handler, (SECOND, "s2"), &project).await,
-        [(stated(TUESDAY), "visible".to_string())]
-    );
-    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
-        .expect("the correction is delivered");
-    assert!(
-        replacement_dates(&block, &stated(TUESDAY)).is_some(),
-        "a replaced agent note is an observation the user had not stated: {block}"
-    );
+    for (note, source_id) in [
+        ("Releases are cut on Thursdays.", "eidnara_memory"),
+        (
+            "User stated: Releases are cut on Thursdays.",
+            "eidnara_memory",
+        ),
+        (
+            "User stated that releases are cut on Thursdays.",
+            "memory_capture",
+        ),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        let written = body(
+            handler
+                .dispatch_value_for_test(
+                    test_route(FIRST),
+                    kernel_route_fixtures::commit_request(
+                        &project,
+                        "s1",
+                        "agent-write",
+                        vec![json!({"op": "insert_decision", "spec": {
+                            "decision_id": "dec-agent",
+                            "object_id": "mem-agent",
+                            "domain_id": "memory",
+                            "decision_kind": "PROJECT_RULES",
+                            "payload": {"summary": note, "rationale": ""},
+                            "source_id": source_id,
+                            "source_revision": 1,
+                        }})],
+                        Vec::new(),
+                    ),
+                )
+                .await,
+        );
+        assert_eq!(written["state"]["kind"], "available", "{note}: {written}");
+        let (note_seq, _) = stored(&handler, &project, note);
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m1", "user", TUESDAY)],
+            |_, existing| {
+                let replaces = ids_containing(existing, "Thursdays");
+                assert_eq!(
+                    replaces,
+                    ["mem-agent"],
+                    "{note}: the memory is offered as replaceable"
+                );
+                assert!(existing[0]["can_replace"].as_bool().unwrap());
+                vec![Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces,
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(TUESDAY), "visible".to_string())],
+            "{note}"
+        );
+        let (stated_seq, rationale) = stored(&handler, &project, &stated(TUESDAY));
+        assert_eq!(
+            rationale["replaces_observation"],
+            json!({"recorded_seq": note_seq}),
+            "{note}"
+        );
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the correction is delivered");
+        assert_eq!(
+            replacement_dates(&block, &stated(TUESDAY)),
+            Some((
+                commit_day(&handler, stated_seq),
+                commit_day(&handler, note_seq)
+            )),
+            "{note}: {block}"
+        );
+    }
 }
 
 const REPORTED_THURSDAY: &str = "The release checklist says branches are cut on Thursdays.";
@@ -1081,12 +1111,56 @@ async fn a_statement_that_replaced_an_assistants_report_is_delivered_with_both_d
     .await;
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
         .expect("the contested statement is delivered");
-    assert!(block.contains("; contested "), "{block}");
+    let observation = format!("Assistant reported: {observed}");
+    let (contested_seq, contested) = stored(&handler, &project, &stated(TUESDAY));
+    let line = block
+        .lines()
+        .find(|line| line.contains(&stated(TUESDAY)))
+        .expect("the statement's line");
+    assert!(
+        line.ends_with(&format!(
+            "{} (stated {}; contested {} by {}: \"{observation}\")",
+            stated(TUESDAY),
+            days.0,
+            commit_day(&handler, contested_seq),
+            memory_id(&handler, &project, &observation),
+        )),
+        "{block}"
+    );
     assert!(!block.contains("it replaces a value"), "{block}");
-    let (_, contested) = stored(&handler, &project, &stated(TUESDAY));
     assert_eq!(
         contested["replaces_observation"],
         json!({"recorded_seq": report_seq})
+    );
+
+    // The user replaces the contesting observation. The statement's row
+    // still holds the contest record, the Kernel serves its observation no
+    // longer, and the replacement line returns with the statement's first
+    // day.
+    let outdated = "That release calendar is out of date and is being retired.";
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m5", "user", outdated)],
+        |_, existing| {
+            vec![Extracted {
+                quote: outdated.to_string(),
+                replaces: ids_containing(existing, "release calendar still"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let (_, unserved) = stored(&handler, &project, &stated(TUESDAY));
+    assert!(unserved["contested_by"].is_object(), "{unserved}");
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the statement is delivered");
+    assert!(!block.contains(observed), "{block}");
+    assert_eq!(
+        replacement_dates(&block, &stated(TUESDAY)),
+        Some(days.clone()),
+        "{block}"
     );
 
     // The user repeats the statement word for word, which settles the
@@ -1105,8 +1179,10 @@ async fn a_statement_that_replaced_an_assistants_report_is_delivered_with_both_d
         },
     )
     .await;
-    let (_, settled) = stored(&handler, &project, &stated(TUESDAY));
+    let (settled_seq, settled) = stored(&handler, &project, &stated(TUESDAY));
+    assert!(stated_seq < settled_seq, "the settlement wrote a new row");
     assert_eq!(settled["contested_by"], Value::Null, "{settled}");
+    assert_eq!(settled["stated_seq"], json!(stated_seq), "{settled}");
     assert_eq!(
         settled["replaces_observation"],
         json!({"recorded_seq": report_seq})
@@ -1162,6 +1238,11 @@ async fn a_statement_that_replaced_the_users_own_words_carries_no_days() {
             |_, existing| {
                 let mut targets = ids_containing(existing, "User stated: Release branches");
                 targets.extend(ids_containing(existing, "Understood"));
+                assert_eq!(
+                    targets.len(),
+                    if earlier == "with_echo" { 2 } else { 1 },
+                    "{earlier}: {existing:?}"
+                );
                 vec![Extracted {
                     quote: TUESDAY.to_string(),
                     replaces: targets,
@@ -1180,6 +1261,16 @@ async fn a_statement_that_replaced_the_users_own_words_carries_no_days() {
         }
         assert!(!block.contains(THURSDAY), "{earlier}: {block}");
         assert!(!block.contains(echo), "{earlier}: {block}");
+        let mut after = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        after.sort();
+        assert_eq!(
+            after,
+            [
+                (stated(PNPM), "visible".to_string()),
+                (stated(TUESDAY), "visible".to_string()),
+            ],
+            "{earlier}: every named memory is retired"
+        );
         let (_, rationale) = stored(&handler, &project, &stated(TUESDAY));
         assert_eq!(
             rationale.get("replaces_observation"),
@@ -1187,6 +1278,195 @@ async fn a_statement_that_replaced_the_users_own_words_carries_no_days() {
             "{earlier}: {rationale}"
         );
     }
+}
+
+/// A correction that replaces two observations of different commits records
+/// the earlier commit, whichever of them it names first.
+#[tokio::test]
+async fn a_statement_that_replaced_two_observations_records_the_earlier_commit() {
+    let wiki = "The team wiki says release branches are cut on Thursdays.";
+    for newer_first in [true, false] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        for (id, text) in [("m1", REPORTED_THURSDAY), ("m2", wiki)] {
+            capture(
+                &handler,
+                FIRST,
+                "s1",
+                &[(id, "assistant", text)],
+                |text, _| vec![fact(text)],
+            )
+            .await;
+        }
+        let (older_seq, _) = stored(
+            &handler,
+            &project,
+            &format!("Assistant reported: {REPORTED_THURSDAY}"),
+        );
+        let (newer_seq, _) = stored(&handler, &project, &format!("Assistant reported: {wiki}"));
+        assert!(older_seq < newer_seq);
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m3", "user", TUESDAY)],
+            |_, existing| {
+                let mut targets = ids_containing(existing, "team wiki");
+                targets.extend(ids_containing(existing, "release checklist"));
+                assert_eq!(targets.len(), 2, "{existing:?}");
+                if !newer_first {
+                    targets.reverse();
+                }
+                vec![Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: targets,
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (THIRD, "s3"), &project).await,
+            [(stated(TUESDAY), "visible".to_string())],
+            "newer first {newer_first}: both reports are retired"
+        );
+        let (_, rationale) = stored(&handler, &project, &stated(TUESDAY));
+        assert_eq!(
+            rationale["replaces_observation"],
+            json!({"recorded_seq": older_seq}),
+            "newer first {newer_first}"
+        );
+    }
+}
+
+/// The extractor stores one statement of the user as two facts, one that
+/// replaces the user's earlier statement and one that replaces an
+/// assistant's echo of it. The statement replaced the user's own words, so
+/// neither fact holds a record and neither line carries days, as when one
+/// fact names both.
+#[tokio::test]
+async fn a_statement_stored_as_two_facts_is_judged_as_one_replacement() {
+    let echo = "Understood: release branches are cut every Thursday.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY), ("m2", "assistant", echo)],
+        |text, _| vec![fact(text)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "user", TUESDAY)],
+        |_, existing| {
+            let statement = ids_containing(existing, "User stated: Release branches");
+            let echoed = ids_containing(existing, "Understood");
+            assert_eq!((statement.len(), echoed.len()), (1, 1), "{existing:?}");
+            vec![
+                Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: echoed,
+                    content: Some("The release cut is on Tuesdays now."),
+                    ..Extracted::default()
+                },
+                Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: statement,
+                    content: Some("Release branches moved from Thursday to Tuesday."),
+                    ..Extracted::default()
+                },
+            ]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let corrections: Vec<&(String, String, i64, Value)> =
+        rows.iter().filter(|row| row.1 == stated(TUESDAY)).collect();
+    assert_eq!(corrections.len(), 2, "{rows:?}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the statement and its echo are retired: {rows:?}"
+    );
+    for correction in corrections {
+        assert_eq!(
+            correction.3.get("replaces_observation"),
+            None,
+            "{correction:?}"
+        );
+    }
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the correction is delivered");
+    assert!(block.contains(&stated(TUESDAY)), "{block}");
+    assert!(!block.contains("it replaces a value"), "{block}");
+}
+
+/// A plan of the user that replaced an assistant's report holds the record,
+/// and the row that marks the plan ended keeps it beside `ended_by`. Ended
+/// work is served on explicit search, labeled, and in no block.
+#[tokio::test]
+async fn an_ended_statement_keeps_the_record_of_the_observation_it_replaced() {
+    let report = "The retry budget lives in the server defaults for now.";
+    let done = "The retry budget is in the client config now.";
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "assistant", report)],
+        |text, _| vec![fact(text)],
+    )
+    .await;
+    let (report_seq, _) = stored(&handler, &project, &format!("Assistant reported: {report}"));
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m2", "user", RETRY_PLAN)],
+        |_, existing| {
+            vec![Extracted {
+                replaces: ids_containing(existing, "server defaults"),
+                ..classed(RETRY_PLAN, "current_work")
+            }]
+        },
+    )
+    .await;
+    let plan = memory_id(&handler, &project, &stated(RETRY_PLAN));
+    let (_, planned) = stored(&handler, &project, &stated(RETRY_PLAN));
+    assert_eq!(
+        planned["replaces_observation"],
+        json!({"recorded_seq": report_seq})
+    );
+    capture(&handler, SECOND, "s2", &[("m3", "user", done)], |_, _| {
+        vec![Extracted {
+            replaces: vec![plan.clone()],
+            ..classed(done, "status")
+        }]
+    })
+    .await;
+    let rows = memory_rows(&handler, &project);
+    let ended = rows
+        .iter()
+        .find(|row| row.1 == stated(RETRY_PLAN))
+        .expect("the plan stays on explicit search");
+    assert_ne!(ended.0, plan, "the ended plan is a new row");
+    assert_eq!(
+        ended.3["ended_by"],
+        json!({"memory": memory_id(&handler, &project, &stated(done)), "session": "s2"}),
+    );
+    assert_eq!(
+        ended.3["replaces_observation"],
+        json!({"recorded_seq": report_seq})
+    );
+    assert!(
+        explicit_search(&handler, (THIRD, "s3"), &project)
+            .await
+            .contains(&(stated(RETRY_PLAN), "labeled".to_string()))
+    );
+    let served = serve(&handler, THIRD, "s3").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
 }
 
 /// A rationale whose `replaces_observation` holds another shape marks no
@@ -8439,6 +8719,16 @@ async fn a_statement_retired_as_a_further_target_takes_its_restated_note_with_it
         explicit_search(&handler, (THIRD, "s3"), &project).await,
         [(stated(TUESDAY), "visible".to_string())],
         "the report, the statement, and the note the statement restated are retired"
+    );
+    // The correction names the user's own statement as a further target, so
+    // it replaces the user's words and is delivered as stated.
+    let (_, rationale) = stored(&handler, &project, &stated(TUESDAY));
+    assert_eq!(rationale.get("replaces_observation"), None, "{rationale}");
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the correction is delivered");
+    assert!(
+        block.lines().any(|line| line.ends_with(&stated(TUESDAY))),
+        "{block}"
     );
 }
 

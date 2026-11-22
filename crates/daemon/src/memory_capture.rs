@@ -2176,14 +2176,16 @@ fn user_stated(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -
         && states_whole_statements(states_whole, prose, &memory.quote)
 }
 
+/// The text after the `User stated: ` label of a summary that opens with
+/// it.
+fn after_user_label(summary: &str) -> Option<&str> {
+    summary.strip_prefix(USER_STATED)?.strip_prefix(": ")
+}
+
 /// Whether the memory's stored text is the attribution label and its
 /// quotation, with no line appended.
 fn stores_the_quotation_alone(memory: &CapturedMemory) -> bool {
-    memory
-        .content
-        .strip_prefix(USER_STATED)
-        .and_then(|rest| rest.strip_prefix(": "))
-        == Some(memory.quote.as_str())
+    after_user_label(&memory.content) == Some(memory.quote.as_str())
 }
 
 /// Whether `quote` spans whole statements of a user message the job holds
@@ -3872,7 +3874,7 @@ const REPLACES_OBSERVATION: &str = "replaces_observation";
 
 /// A memory the user had not stated, such as an assistant's report of what a
 /// project file says, that a user statement replaced.
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 struct ReplacedObservation {
     /// The commit that recorded the earliest replaced observation.
     recorded_seq: i64,
@@ -3886,12 +3888,55 @@ pub(crate) fn replaced_observation_commit(decision: &kernel::DecisionRow) -> Opt
     if !decision.payload.rationale.contains(REPLACES_OBSERVATION) {
         return None;
     }
-    let rationale: Value = serde_json::from_str(&decision.payload.rationale).ok()?;
-    rationale
-        .get(REPLACES_OBSERVATION)?
-        .as_object()?
-        .get("recorded_seq")?
-        .as_i64()
+    let mut rationale: Value = serde_json::from_str(&decision.payload.rationale).ok()?;
+    // The record is an object: the derived decoder would read an array's
+    // members by position.
+    let record = rationale.get_mut(REPLACES_OBSERVATION)?.take();
+    record.is_object().then_some(())?;
+    serde_json::from_value::<ReplacedObservation>(record)
+        .ok()
+        .map(|replaced| replaced.recorded_seq)
+}
+
+/// For each quotation of the plan whose facts name a replaced target, the
+/// commit that recorded the earliest of the targets when every one is an
+/// observation: a fact the Kernel serves as unapproved that is no quotation
+/// capture stored under the `User stated: ` label, such as an assistant's
+/// report or an agent's note. A quotation with a target that is approved, or
+/// is such a quotation, maps to `None`: its facts replace the user's own
+/// words. The targets are judged together before the plan writes any fact,
+/// so one statement that the extractor stored as two facts is judged as one.
+fn replaced_observations<'a>(
+    envelope: &kernel::Envelope<'_>,
+    output: &'a PreparedCapture,
+    earlier: &HashMap<String, kernel::DecisionRow>,
+) -> Result<HashMap<&'a str, Option<i64>>, kernel::KernelError> {
+    let mut replaced: HashMap<&str, Option<i64>> = HashMap::new();
+    for memory in &output.memories {
+        for target in memory.replaces.iter().chain(&memory.also_replaces) {
+            let served = envelope.served_rows_for(&[target.as_str()], None)?;
+            let Some(row) = served.get(target.as_str()) else {
+                continue;
+            };
+            let held = earlier.get(target);
+            let users_words = is_approved(row)
+                || (is_capture_memory(&row.object)
+                    && held.is_some_and(|held| after_user_label(&held.payload.summary).is_some()));
+            match (users_words, held) {
+                (true, _) => {
+                    replaced.insert(memory.quote.as_str(), None);
+                }
+                (false, Some(held)) => {
+                    let earliest = replaced
+                        .entry(memory.quote.as_str())
+                        .or_insert(Some(held.created_commit_seq));
+                    *earliest = earliest.map(|seq| seq.min(held.created_commit_seq));
+                }
+                (false, None) => {}
+            }
+        }
+    }
+    Ok(replaced)
 }
 
 /// The user statement that ended a statement of work in progress.
@@ -4328,10 +4373,7 @@ fn holds_user_quotation(held: &kernel::DecisionRow, quote: &str) -> bool {
         #[serde(borrow)]
         quote: std::borrow::Cow<'a, str>,
     }
-    held.payload
-        .summary
-        .strip_prefix(USER_STATED)
-        .is_some_and(|rest| rest.starts_with(": "))
+    after_user_label(&held.payload.summary).is_some()
         && serde_json::from_str::<Quoted<'_>>(&held.payload.rationale)
             .is_ok_and(|stored| stored.quote == quote)
 }
@@ -4512,6 +4554,7 @@ fn write_captured_memories(
     let mut restated: Vec<(&kernel::DecisionRow, String)> = Vec::new();
     let mut reaffirmed: Vec<(&String, &str)> = Vec::new();
     let user_source = is_user_source(job);
+    let replaced_observations = replaced_observations(envelope, output, earlier)?;
     for (index, memory) in output.memories.iter().enumerate() {
         if (memory.replaces.is_some() || !memory.also_replaces.is_empty()) && !user_source {
             return Err(kernel::KernelError::Conflict);
@@ -4591,31 +4634,15 @@ fn write_captured_memories(
         let mut captured = Vec::new();
         let mut ended = Vec::new();
         let mut source_revision = 1;
-        // The commit that recorded the earliest replaced observation: a
-        // target the Kernel serves as unapproved that is no quotation capture
-        // labeled as the user's, such as an assistant's report or an agent's
-        // note. A replaced statement of the user's own leaves it unset.
-        let mut replaced_observation = None;
-        let mut replaces_user_words = false;
+        // The record of a user's statement that names a replaced target,
+        // when every target its quotation names is an observation.
+        let replaced_observation = (stated && !named.is_empty())
+            .then(|| replaced_observations.get(memory.quote.as_str()).copied())
+            .flatten()
+            .flatten()
+            .map(|recorded_seq| ReplacedObservation { recorded_seq });
         for (target, primary, work, live) in named {
             let revision = checked_capture_target(envelope, project, output, target, true)?;
-            let held = earlier.get(target);
-            let quotes_user = revision.is_some()
-                && held.is_some_and(|held| {
-                    held.payload
-                        .summary
-                        .strip_prefix(USER_STATED)
-                        .is_some_and(|rest| rest.starts_with(": "))
-                });
-            if live || quotes_user {
-                replaces_user_words = true;
-            } else if let Some(held) = held {
-                replaced_observation = Some(
-                    replaced_observation.map_or(held.created_commit_seq, |seq: i64| {
-                        seq.min(held.created_commit_seq)
-                    }),
-                );
-            }
             match (work, revision) {
                 (Some(statement), Some(revision)) => {
                     ended.push((target, statement, revision));
@@ -4671,14 +4698,8 @@ fn write_captured_memories(
         if let Some(lifetime) = memory.lifetime {
             rationale.insert("lifetime".to_owned(), json!(lifetime));
         }
-        if let Some(recorded_seq) = replaced_observation
-            && stated
-            && !replaces_user_words
-        {
-            rationale.insert(
-                REPLACES_OBSERVATION.to_owned(),
-                json!(ReplacedObservation { recorded_seq }),
-            );
+        if let Some(replaced) = replaced_observation {
+            rationale.insert(REPLACES_OBSERVATION.to_owned(), json!(replaced));
         }
         anchor_reason.record(&mut rationale, reasons);
         let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);
