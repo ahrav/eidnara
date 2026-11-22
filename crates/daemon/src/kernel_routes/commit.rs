@@ -689,6 +689,20 @@ fn caller_domain(domain_id: &str) -> Result<&str, KernelError> {
     Ok(domain_id)
 }
 
+/// A caller-named source lineage for a new row; a lineage of failure records
+/// is refused as invalid input. The daemon's recorder alone starts a row
+/// there, under the capture publication gate, and reads the lineage's newest
+/// decision as the command's record, so a caller's decision or observation
+/// on the lineage would stand in that read. The check runs in the commit's
+/// transaction, after the Kernel has answered a retried commit from its
+/// stored receipt.
+fn caller_lineage(source_id: &str) -> Result<(), KernelError> {
+    if crate::memory_capture::is_failure_lineage(source_id) {
+        return Err(KernelError::InvalidInput);
+    }
+    Ok(())
+}
+
 /// Materializes the project scope, and the route-owned domain it belongs to,
 /// the first time an operation needs it; the checks and the inserts share the
 /// envelope's transaction, so two commits for a new project cannot both
@@ -999,6 +1013,7 @@ fn apply(
     for operation in &plan.operations {
         match operation {
             Operation::InsertDecision { spec } => {
+                caller_lineage(&spec.source_id)?;
                 ensure_domain(
                     envelope,
                     caller_domain(&spec.domain_id)?,
@@ -1038,6 +1053,8 @@ fn apply(
                 // it finds a command's record as the newest row there and
                 // orders runs by the rationale it wrote, so a caller's
                 // successor on or off the lineage would stand in that place.
+                // Reviewer acceptance refuses such a target too (see
+                // `memory_reviewer::coordinator::proposal_target`).
                 let recorded = crate::memory_capture::is_failure_lineage;
                 if recorded(&predecessor.object.source_id) || recorded(&spec.source_id) {
                     return Err(KernelError::AdmissionPolicy);
@@ -1112,6 +1129,7 @@ fn apply(
                 result.touched.push(args.object_id.to_string());
             }
             Operation::InsertObservation { spec } => {
+                caller_lineage(&spec.source_id)?;
                 ensure_domain(
                     envelope,
                     caller_domain(&spec.domain_id)?,
@@ -1478,22 +1496,10 @@ impl Operation {
     /// must lie outside the verifier's prefixes, and a disposition's reason
     /// must compose.
     fn validate(&mut self, reporter_taint: TaintClass) -> Result<(), InvalidReason> {
-        if self.names_verifier_ids() || self.opens_failure_lineage() {
+        if self.names_verifier_ids() {
             return Err(InvalidReason::InvalidInput);
         }
         self.compose_reason(reporter_taint)
-    }
-
-    /// Whether the operation inserts a decision on a lineage of failure
-    /// records. The daemon's recorder alone starts a record there, under the
-    /// capture publication gate, so a caller's row on the lineage would
-    /// stand as the command's newest record.
-    fn opens_failure_lineage(&self) -> bool {
-        matches!(
-            self,
-            Self::InsertDecision { spec }
-                if crate::memory_capture::is_failure_lineage(&spec.source_id)
-        )
     }
 
     /// Whether the operation names a row id under one of the verifier's prefixes

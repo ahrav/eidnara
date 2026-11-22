@@ -285,7 +285,10 @@ export interface EidnaraConfig {
     /**
      * User-only consent to retain the exact bytes of message text and tool results as Kernel
      * source descriptors. The daemon reads this key itself; capture also requires
-     * `memory.enabled`, and subagent sessions never capture. Defaults to off.
+     * `memory.enabled`, and subagent sessions never capture. With `memory.auto_promote` and
+     * `memory.auto_capture` it is also the consent under which the daemon writes failed-command
+     * facts from Pi tool results, which later sessions find through `eidnara_search`. Defaults
+     * to off.
      */
     source_capture?: { enabled: boolean };
     /**
@@ -585,11 +588,13 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(false)
                     .describe(
-                        "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. Project values are ignored with a warning.",
+                        "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. With memory.auto_promote and memory.auto_capture it also lets the daemon write failed-command facts from Pi tool results, which later sessions find through eidnara_search. Project values are ignored with a warning.",
                     ),
             })
             .default({ enabled: false })
-            .describe("User-only exact source capture of message text and tool results."),
+            .describe(
+                "User-only exact source capture of message text and tool results, and the consent for failed-command facts.",
+            ),
         contradiction_candidates: z
             .strictObject({
                 enabled: z
@@ -742,7 +747,7 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(true)
                     .describe(
-                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. Set false to disable unattended capture.",
+                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. With source_capture.enabled it also gates the failed-command facts the daemon writes from Pi tool results with no model call. Set false to disable unattended capture.",
                     ),
                 retrieval_count_promotion_threshold: z
                     .number()

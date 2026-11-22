@@ -2827,8 +2827,8 @@ pub struct HandlerCore {
     native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
     capture_commit_gate: Arc<Mutex<()>>,
     capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
-    /// The tool calls each session's failure records have judged, and the
-    /// live failure record of each command.
+    /// The tool calls each session's failure recorder has judged, and the
+    /// sessions whose recorder task runs.
     failure_memo: Arc<Mutex<memory_capture::FailureMemo>>,
     source_capture: Arc<source_capture::SourceCapture>,
     contradiction_candidates: Arc<contradiction_candidates::Candidates>,
@@ -4835,10 +4835,6 @@ impl HandlerCore {
                 .lock()
                 .expect("capture memo mutex")
                 .remove_session(session);
-            self.failure_memo
-                .lock()
-                .expect("failure memo mutex")
-                .forget_session(session);
         }
         self.prompt_surface_epochs
             .lock()

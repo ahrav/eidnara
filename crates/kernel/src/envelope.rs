@@ -946,36 +946,39 @@ impl KernelStore {
         Ok(usize::try_from(count).unwrap_or(0))
     }
 
-    /// The newest decision on the source lineage `(source_kind, source_id)`:
-    /// the registered decision of the greatest `source_revision`, live or
-    /// not, with the tip the read saw. A writer that keeps one live decision
-    /// per lineage reads it to find the row its next write follows. The
-    /// statement walks the `(source_kind, source_id, source_revision,
-    /// object_kind)` index from its greatest revision to the first decision,
-    /// and the wait for a pooled reader stops at the budget's deadline or
-    /// interrupt with `KernelError::Deadline`.
-    pub fn newest_decision_on_lineage_within_budget(
+    /// The two newest decisions on the source lineage `(source_kind,
+    /// source_id)`: the registered decisions of the greatest
+    /// `source_revision`, live or not, the greatest first, with the tip the
+    /// read saw. A writer that keeps one live decision per lineage reads
+    /// them to find the row its next write follows, and the second row
+    /// tells it when two decisions share the greatest revision, which names
+    /// no single newest one. The statement walks the `(source_kind,
+    /// source_id, source_revision, object_kind)` index from its greatest
+    /// revision to the second decision, and the wait for a pooled reader
+    /// stops at the budget's deadline or interrupt with
+    /// `KernelError::Deadline`.
+    pub fn newest_decisions_on_lineage_within_budget(
         &self,
         budget: &crate::applicability::EvalBudget,
         source_kind: &str,
         source_id: &str,
-    ) -> Result<(i64, Option<ObjectRow>), KernelError> {
+    ) -> Result<(i64, Vec<ObjectRow>), KernelError> {
         let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
         read_snapshot_on(&mut reader, 0, |tx, _| {
             static SQL: LazyLock<String> = LazyLock::new(|| {
                 format!(
                     "SELECT {OBJECT_ROW_COLUMNS} FROM object_registry o
                      WHERE o.source_kind=?1 AND o.source_id=?2 AND o.object_kind='decision'
-                     ORDER BY o.source_revision DESC LIMIT 1"
+                     ORDER BY o.source_revision DESC LIMIT 2"
                 )
             });
-            tx.prepare_cached(SQL.as_str())
-                .and_then(|mut statement| {
-                    statement
-                        .query_row(params![source_kind, source_id], object_row_from)
-                        .optional()
-                })
-                .map_err(map_sqlite)
+            let mut statement = tx.prepare_cached(SQL.as_str()).map_err(map_sqlite)?;
+            let rows = statement
+                .query_map(params![source_kind, source_id], object_row_from)
+                .map_err(map_sqlite)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(map_sqlite)?;
+            Ok(rows)
         })
     }
 

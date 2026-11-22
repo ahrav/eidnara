@@ -58,11 +58,12 @@ pub const MAX_CAPTURE_MEMORY_BYTES: usize = 2048;
 const CAPTURE_FRAGMENT_BYTES: usize = 16 * 1024;
 const MAX_CAPTURE_WORKERS: usize = 16;
 /// Per worker: 4.5 read byte caps for [`select_existing_memories`] and 4 MiB for buffers and plans.
-/// The failure records' memo, the window messages their checkpoints hold,
-/// and those checkpoints' scratch are added at their own bound.
-pub(crate) const RETAINED_BYTES_BOUND: u64 = MAX_CAPTURE_WORKERS as u64
-    * (kernel_routes::read::MAX_READ_ROW_BYTES as u64 * 9 / 2 + 4 * 1024 * 1024)
-    + failures::RETAINED_BYTES_BOUND;
+const WORKER_RETAINED_BYTES: u64 =
+    kernel_routes::read::MAX_READ_ROW_BYTES as u64 * 9 / 2 + 4 * 1024 * 1024;
+/// The workers' reservations, and the failure recorder's memo and
+/// checkpoints at their own bound.
+pub(crate) const RETAINED_BYTES_BOUND: u64 =
+    MAX_CAPTURE_WORKERS as u64 * WORKER_RETAINED_BYTES + failures::RETAINED_BYTES_BOUND;
 
 /// Text roles admitted to extraction. Tool output and reasoning are not memory
 /// instructions and must not be relabeled as user messages by an adapter.
@@ -11721,7 +11722,7 @@ mod tests {
         let window = cap;
         let walk = 2 * cap + 2 * work_cap + cap;
         let other = 4 * 1024 * 1024;
-        let reserved = RETAINED_BYTES_BOUND / MAX_CAPTURE_WORKERS as u64;
+        let reserved = WORKER_RETAINED_BYTES;
         assert!(
             reserved >= window + walk + other,
             "a worker reserves {reserved} bytes and holds {window} of the window, {walk} of the walk, and {other} besides"

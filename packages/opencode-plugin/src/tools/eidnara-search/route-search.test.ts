@@ -1063,9 +1063,9 @@ describe("eidnara_search through the fused route", () => {
             "Command: cargo test [arguments left out]",
             "Failing path: src/render.rs:9:5",
             "Output lines:",
-            ...[0, 1, 2, 3].map((index) => `error: e${index} ${"x".repeat(130)}`),
-            "width is zero",
-            closing,
+            ...[0, 1, 2, 3].map((index) => `> error: e${index} ${"x".repeat(126)}`),
+            "> width is zero",
+            `> ${closing}`,
         ].join("\n");
         const rationale = JSON.stringify({
             at: "2026-03-02T10:15:00.000Z",

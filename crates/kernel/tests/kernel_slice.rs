@@ -2646,12 +2646,13 @@ fn an_envelope_reads_the_decisions_cited_evidence_at_the_tip_it_extends() {
     assert_eq!(read.unwrap(), expected);
 }
 
-/// The newest decision of a source lineage is the decision of its greatest
-/// revision, whether it is live, superseded into a later revision, or
-/// retired. Another lineage, another source kind, and an observation on the
-/// lineage leave it as it is.
+/// The newest decisions of a source lineage are its decisions of the
+/// greatest revisions, the greatest first, whether they are live, superseded
+/// into a later revision, or retired. Another lineage, another source kind,
+/// and an observation on the lineage leave them as they are, and two
+/// decisions of one revision are both returned, in either order of writing.
 #[test]
-fn the_newest_decision_of_a_lineage_is_the_one_of_its_greatest_revision() {
+fn the_newest_decisions_of_a_lineage_are_the_ones_of_its_greatest_revisions() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();
     seed_domain(&store);
@@ -2660,11 +2661,24 @@ fn the_newest_decision_of_a_lineage_is_the_one_of_its_greatest_revision() {
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     let newest = |source_kind: &str, source_id: &str| {
-        store
-            .newest_decision_on_lineage_within_budget(&budget, source_kind, source_id)
-            .unwrap()
+        let (tip, rows) = store
+            .newest_decisions_on_lineage_within_budget(&budget, source_kind, source_id)
+            .unwrap();
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.object_id,
+                    row.source_revision,
+                    row.invalidated_commit_seq,
+                    row.superseded_by,
+                )
+            })
+            .collect();
+        (tip, rows)
     };
-    assert_eq!(newest("fixture", "decision").1, None);
+    let id = |index: i64| format!("decision-object-{index}");
+    assert_eq!(newest("fixture", "decision").1, []);
 
     let seeded = store
         .commit(intent("seed", '1'), |envelope| {
@@ -2683,35 +2697,30 @@ fn the_newest_decision_of_a_lineage_is_the_one_of_its_greatest_revision() {
             Ok(String::new())
         })
         .unwrap();
-    let (tip, row) = newest("fixture", "decision");
-    let row = row.unwrap();
-    assert_eq!(tip, seeded.commit_seq);
     assert_eq!(
-        (row.object_id.as_str(), row.source_revision),
-        ("decision-object-2", 2)
+        newest("fixture", "decision"),
+        (
+            seeded.commit_seq,
+            vec![(id(2), 2, None, None), (id(1), 1, None, None)]
+        )
     );
-    assert_eq!(
-        (row.invalidated_commit_seq, row.superseded_by),
-        (None, None)
-    );
-    assert_eq!(
-        newest("fixture", "other").1.unwrap().object_id,
-        "decision-object-5"
-    );
-    assert_eq!(newest("another-kind", "decision").1, None);
+    assert_eq!(newest("fixture", "other").1, [(id(5), 9, None, None)]);
+    assert_eq!(newest("another-kind", "decision").1, []);
 
-    // A later revision that supersedes the newest one is the newest.
-    store
+    // A later revision that supersedes the newest one is the newest, and
+    // its predecessor reads as superseded.
+    let revised = store
         .commit(intent("revise", '2'), |envelope| {
             envelope.supersede_decision("decision-object-2", decision(3))?;
             Ok(String::new())
         })
         .unwrap();
-    let row = newest("fixture", "decision").1.unwrap();
-    assert_eq!(row.object_id, "decision-object-3");
     assert_eq!(
-        (row.invalidated_commit_seq, row.superseded_by),
-        (None, None)
+        newest("fixture", "decision").1,
+        [
+            (id(3), 3, None, None),
+            (id(2), 2, Some(revised.commit_seq), Some(id(3)))
+        ]
     );
 
     // A retired newest revision stays the lineage's newest and reads as
@@ -2722,12 +2731,34 @@ fn the_newest_decision_of_a_lineage_is_the_one_of_its_greatest_revision() {
             Ok(String::new())
         })
         .unwrap();
-    let (tip, row) = newest("fixture", "decision");
-    let row = row.unwrap();
+    let (tip, rows) = newest("fixture", "decision");
     assert_eq!(tip, retired.commit_seq);
-    assert_eq!(row.object_id, "decision-object-3");
-    assert_eq!(
-        (row.invalidated_commit_seq, row.superseded_by),
-        (Some(retired.commit_seq), None)
-    );
+    assert_eq!(rows[0], (id(3), 3, Some(retired.commit_seq), None));
+
+    // Two decisions of the greatest revision are both returned, whichever
+    // was written first.
+    for (lineage, first, second) in [("tied-a", 7, 8), ("tied-b", 8, 7)] {
+        let tied = |index: i64| DecisionSpec {
+            decision_id: format!("{lineage}-{index}"),
+            object_id: format!("{lineage}-object-{index}"),
+            source_id: lineage.to_string(),
+            source_revision: 4,
+            ..decision(index)
+        };
+        store
+            .commit(intent(lineage, '4'), |envelope| {
+                envelope.insert_decision(tied(first))?;
+                envelope.insert_decision(tied(second))?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let rows = newest("fixture", lineage).1;
+        let mut ids: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            [format!("{lineage}-object-7"), format!("{lineage}-object-8")]
+        );
+        assert!(rows.iter().all(|row| row.1 == 4), "{rows:?}");
+    }
 }
