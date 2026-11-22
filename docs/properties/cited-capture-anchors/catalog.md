@@ -236,7 +236,7 @@ Reachability: default-production - every native capture submit publishes through
 Status: active
 Exercised: yes - `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` replays a publish; the envelope test replays a receipt and changes its digest
 Guarantee: The capture commit's operation key is the project's `memory_capture` key for the job id and its request digest is the SHA-256 of the frozen prepared plan, so a replay of the same plan returns the stored receipt with no new rows and a changed plan under the same key is `Conflict`.
-Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. Production reaches the digest conflict when a committed source's queue row is pruned and the same message is queued and planned again with another extraction: the plan is released, the source waits out the dispatch backoff, and the ninth dispatch abandons it (`a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap`, `crates/daemon/src/memory_auto_delivery_tests.rs:7420`). Refinement R7 marked the conflict test-only before that path was handled
+Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. Production reaches the digest conflict when a committed source's queue row is pruned and the same message is queued and planned again with another extraction: the plan is released, the source waits out the dispatch backoff, and the ninth dispatch abandons it (`a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap`, `crates/daemon/src/memory_auto_delivery_tests.rs:7587`). Refinement R7 marked the conflict test-only before that path was handled
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
 Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:4426` and the frozen-plan read in `publish` at `:1822`
@@ -337,7 +337,7 @@ Open questions: None.
 ### p2-new-anchor-row-decodes-on-write
 
 Type: safety
-Reachability: default-production - every memory-capture publish of a job with a readable frozen HEAD that writes a new capture decision calls `Envelope::insert_anchor` (`crates/daemon/src/memory_capture.rs:4800`), added by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
+Reachability: default-production - every memory-capture publish of a job with a readable frozen HEAD that writes a new capture decision calls `Envelope::insert_anchor` (`crates/daemon/src/memory_capture.rs:4694-4696`), added by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
 Status: active
 Exercised: yes - `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` writes all seven kinds; `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` refuses the required faults
 Guarantee: Every `anchors` row committed through `insert_anchor` decodes with `AnchorCondition::decode`, holds values only in the columns its kind owns, carries a lowercase hex oid for git kinds, and fits within `MAX_OBJECT_PAYLOAD_BYTES`.
@@ -375,7 +375,7 @@ Guarantee: The anchor id for a capture job is a pure function of `(job_id, head_
 Check: `always` - for every capture decision a job's extraction writes with `anchor_id = Some(a)`, `a == "anchor_" + sha256(job_id + ":" + oid)[..32]` for the job's frozen head, every capture decision the job's extraction writes names `a`, and exactly one live `anchors` row has that id; a contested, settled, or ended statement's revision names the `anchor_id` of the row it supersedes (`crates/daemon/src/memory_capture.rs:4201`); a retry rebuilds byte-identical anchor and decision rows, and its citation events match in kind and evidence id while `recorded_at` is the retry's clock
 Fault/timing angle: a retry after a rolled-back or lost commit
 Required faults and enabling state: the same job and plan published into two fresh Kernels; a committed publish whose completion the store refuses, then a retry
-Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:403` and the lazy insert in `write_captured_memories` at `crates/daemon/src/memory_capture.rs:4800`
+Confidence: high - [evidence](evidence/p2-new-capture-anchor-identity-is-deterministic.md). Read `anchor_spec` at `crates/daemon/src/memory_capture/cite.rs:403` and the lazy insert in `write_captured_memories` at `crates/daemon/src/memory_capture.rs:4694-4696`
 Existing check: `crates/daemon/src/memory_capture.rs:10296`, `:11110`; `crates/daemon/src/source_capture_tests.rs:3876`; `crates/daemon/src/source_capture_tests.rs:3528` (one anchor per job); `crates/kernel/tests/kernel_anchor_write.rs:732` for the Kernel refusal of a second row (unaudited)
 Impact: duplicate anchors per job, or `Conflict` on retry that permanently fails the job
 Open questions:
