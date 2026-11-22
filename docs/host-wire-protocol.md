@@ -1264,7 +1264,10 @@ close nothing, so such a quotation stays open. A closing mark inside quoted text
 A user who writes `prefix test names with 'it_'` or `the branch is "main"`
 names a value, an identifier, a path, a flag, or a key inside a sentence of
 their own, so a paragraph in which every quotation holds one literal is plain
-prose with those literals in it. A quotation holds a literal when its opening
+prose with those literals in it, and in it a quotation is a statement only
+when it holds one of the literals with both marks; every other sentence of
+the paragraph stays on explicit search, as each sentence of a paragraph that
+holds a quotation mark does without this rule. A quotation holds a literal when its opening
 mark follows the line start, whitespace, or `(`, `[`, or `{`; its closing mark
 is the next quotation mark of the line and of the opening mark's style (one of
 `'`, `’`, `＇` for a single mark; a mark of the same family for a double
@@ -1340,11 +1343,16 @@ mark is otherwise read as the pairing rules leave it.
 Wherever this section reads a paragraph's first colon, in the join of
 sentences quoted one by one, in the sentence quoted alone after it, and in
 the contest a sentence after it keeps, it reads the opening mark of such a
-literal the same way. The rule keeps four readings it cannot rule out, each
-stated here: a single mark after a token's trailing `_` and before
+literal the same way. The rule keeps five readings it cannot rule out, each
+stated here: a quotation whose marks the pairing rules above cannot see,
+such as one whose opening apostrophe is typed against a word
+(`wrote'Use`) or whose marks are outside the families this section lists,
+is invisible to this rule as it is to the pairing rules, which leave the
+sentences inside it that stand in a paragraph without a mark as prose, so a
+sentence inside it that holds a literal may be a statement; a single mark after a token's trailing `_` and before
 whitespace or punctuation closes its literal for the sentences of its own
-paragraph, so the sentence after `Prefix every test name with 'it_'.` in
-that paragraph may be a statement, while the pairing rules read that mark
+paragraph, so a sentence after `Prefix every test name with 'it_'.` in
+that paragraph that holds a literal of its own may be a statement, while the pairing rules read that mark
 as unknown and the later paragraphs are left out; a quotation that starts at or before a literal with a second
 reading and meets every other condition of this section is a statement
 whole, with whatever stands between the literal's marks and after them up
@@ -1352,9 +1360,9 @@ to the quotation's end, which sentences joined to it extend; a one-word quotatio
 read as a literal; and a single-quoted first word of a longer quotation
 that closes after a letter other than `s` or `S`, as an elision such as `'Goin'`
 does, is read as a literal when no later single mark that closes no literal ends
-a word in its paragraph, so the sentences after it are plain prose, in its
-paragraph and, as the pairing rules above already read a one-word single
-quotation, in the later ones; a later single-quoted literal, in that
+a word in its paragraph, so the sentences after it are read as after any
+other literal, in its paragraph and, as the pairing rules above already read
+a one-word single quotation, in the later ones; a later single-quoted literal, in that
 paragraph or a later one, takes its own marks and leaves this reading as it
 is.
 When a paragraph in which some quotation has no literal's shape leaves a
