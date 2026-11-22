@@ -38,7 +38,11 @@ const MAX_TARGET_JSON_BYTES: usize = 1024;
 pub const MEMORY_REVIEWER_QUEUE_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
 pub const MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024;
 pub const MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
-/// Permanent receipt charge every admitted job keeps for the store incarnation: the job row, its receipt, up to four attempt markers, and the scan-audit rows their caller text leaves, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; the primary-key index entry each row repeats, about 2.5 KiB together; and the scan audit, roughly 2.6 KiB per dispatch (one batch, one domain owner, four field scans and owner copies with their indexes), about 1 KiB for the selection, and about 3 KiB for the reservation and activation identities, some 14 KiB in all. Terminal rows keep it, so it also bounds lifetime admissions per store incarnation: `MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT / MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES` (2,048) jobs per project and four times that per host before reservation refuses for good.
+/// How long a settled job keeps its rows, measured from its queue deadline: ninety days. The window is far past the longest review hold (seven days) and the queue lifetime (one day), so every read, acceptance, takeover, and replay a settled job can still serve has ended when its rows go. Once they are gone the job's causal identity is free again, so a memory with unchanged evidence is reviewed once more at the next selection: each live memory is reviewed about once per window.
+pub const MEMORY_REVIEWER_SETTLED_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
+/// Settled jobs one retirement sweep deletes, so a sweep's write is bounded whatever the backlog.
+pub const MEMORY_REVIEWER_RETIREMENT_BATCH: usize = 256;
+/// Receipt charge every admitted job keeps until it is retired: the job row, its receipt, up to four attempt markers, and the scan-audit rows their caller text leaves, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; the primary-key index entry each row repeats, about 2.5 KiB together; and the scan audit, roughly 2.6 KiB per dispatch (one batch, one domain owner, four field scans and owner copies with their indexes), about 1 KiB for the selection, and about 3 KiB for the reservation and activation identities, some 14 KiB in all. A terminal row keeps it until [`MemoryStore::retire_settled_memory_reviewer_jobs`] deletes the row [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] after its queue deadline, so the quota bounds the jobs of one retention window: `MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT / MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES` (2,048) jobs per project and four times that per host in any ninety days, after which reservation is refused until older jobs retire.
 pub const MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES: u64 = 32 * 1024;
 /// Permanent receipt charge each frozen page keeps once terminal: the compact row (project, slot id, and selection attempt at 256 bytes each, plus state and timestamps) and the primary-key index entry that repeats those keys, about 1.7 KiB at the bounds.
 pub const FROZEN_PAGE_RECEIPT_CHARGE_BYTES: u64 = 4096;
@@ -1721,6 +1725,67 @@ impl MemoryStore {
                     WriteDisposition::Replay((0, 0))
                 } else {
                     WriteDisposition::Applied((jobs, pages))
+                })
+            })
+            .map_err(MemoryReviewerJobError::Store)
+    }
+
+    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its ledger writes own. The totals triggers return each job's charge to its project, so the quota bounds the jobs of one retention window. Returns the jobs retired.
+    pub fn retire_settled_memory_reviewer_jobs(
+        &self,
+        now_ms: i64,
+    ) -> Result<usize, MemoryReviewerJobError> {
+        let cutoff = now_ms.saturating_sub(MEMORY_REVIEWER_SETTLED_RETENTION_MS);
+        // The sweep carries no caller text, so it records no scan and needs no owner scope.
+        let write = PreparedWrite::new(DurableWriteFamily::MemoryReviewerJobs);
+        write
+            .execute(&self.inner, |coordinated| {
+                let tx = coordinated.tx();
+                // A terminal job's receipt is complete or absent: the expiry sweep closes an in-progress receipt before its job goes terminal.
+                let settled: Vec<(i64, String, String)> = tx
+                    .prepare_cached(
+                        "SELECT job_id, project, causal_identity FROM memory_reviewer_jobs j
+                          WHERE state = 'terminal' AND queue_deadline_ms <= ?1
+                            AND NOT EXISTS(SELECT 1 FROM memory_reviewer_receipts r
+                                            WHERE r.project = j.project
+                                              AND r.causal_identity = j.causal_identity
+                                              AND r.state <> 'complete')
+                          ORDER BY queue_deadline_ms LIMIT ?2",
+                    )?
+                    .query_map(
+                        params![cutoff, MEMORY_REVIEWER_RETIREMENT_BATCH as i64],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?
+                    .collect::<rusqlite::Result<_>>()?;
+                for (job_id, project, causal_identity) in &settled {
+                    tx.prepare_cached(
+                        "DELETE FROM memory_reviewer_attempts WHERE project = ?1 AND causal_identity = ?2",
+                    )?
+                    .execute(params![project, causal_identity])?;
+                    tx.prepare_cached(
+                        "DELETE FROM memory_reviewer_receipts WHERE project = ?1 AND causal_identity = ?2",
+                    )?
+                    .execute(params![project, causal_identity])?;
+                    for operation in crate::memory_reviewer_ledger::LEDGER_OPERATIONS {
+                        retire_active_scan_domain_owner(
+                            tx,
+                            "project",
+                            project,
+                            DurableWriteFamily::MemoryReviewerJobs.owner_kind(),
+                            &active_scan_owner_key(&[
+                                "memory_reviewer-ledger",
+                                operation,
+                                causal_identity,
+                            ]),
+                        )?;
+                    }
+                    tx.prepare_cached("DELETE FROM memory_reviewer_jobs WHERE job_id = ?1")?
+                        .execute([job_id])?;
+                }
+                Ok(if settled.is_empty() {
+                    WriteDisposition::Replay(0)
+                } else {
+                    WriteDisposition::Applied(settled.len())
                 })
             })
             .map_err(MemoryReviewerJobError::Store)

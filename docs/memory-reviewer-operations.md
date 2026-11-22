@@ -11,7 +11,9 @@ The MemoryReviewer worker is one task per data home. Each pass it reads the depl
 
 Two producers feed the queue. The History Summarizer reserves a job for each accepted fact set before it publishes the chunk, and activates the job as part of that publication; the Memory Classifier enqueues bounded selection pages of canonical memories. Both paths are exercised by real-store tests named in section 8.
 
-No background component writes a canonical memory, promotes a proposal, or invents provenance; only an explicit `review.accept` under the owner's acceptance record writes one. A default-`Sensitive` subject, which every History Summarizer subject is, never reaches the remote model: the run abstains by policy before any request and records that abstention.
+Under the owner's activation record, a proposal changes a canonical memory only through an explicit `review.accept` under the owner's acceptance record, and a default-`Sensitive` subject, which every History Summarizer subject is, stays local: the run abstains by policy before any request and records that abstention.
+
+A project whose user tier sets `memory_reviewer.enabled` runs without either record. The worker selects that project's memories itself, sends each review through the host's model execution to the model the user configured, which reads `Sensitive` text and is refused `Secret` text, and treats each published proposal as `memory_reviewer.apply` says. "The review switch" in section 2 describes it.
 
 ## 2. Activation (Q36, Q38)
 
@@ -45,6 +47,39 @@ Every term is compared against the live deployment on every pass and again befor
 The status block reports only the closed kind (`identity_mismatch`), never which term differs. The term and the deployment's live value are written to the daemon's log, `<data home>/.eidnara-coordination/eidnara.log`, once per distinct reason: `daemon: memory_reviewer activation gate closed: activation record names another kernel incarnation; the live value is <id>`. Every identity term is reported this way, so a draft record can be corrected one term at a time from the log. The credential is not: a name the sender does not dial with closes the gate as `unknown_credential`, and a mismatched identity logs only `activation record names another credential`, with no live value. The owner copies the identity from the selection file named above. The compiled versions and digests are not published on any other operator surface. Nothing reads the record except the worker; there is no operator command that writes it, and the daemon never writes one.
 
 The credential is read from the startup envelope's credentials, never from the process environment. The host always hands the daemon its Model Execution supervisor and the envelope's credentials; a record naming a credential the sender does not dial with closes the gate as `unknown_credential`. Until the daemon has committed its harness selection for this start, no credential identity exists and the gate reports `unreadable`.
+
+### The review switch
+
+`memory_reviewer.enabled` is a user-tier key, off by default; a project-tier value is ignored with a warning, in the daemon's tier merge and in each plugin's project strip. A route freezes it at bind with two settings: `memory_reviewer.model`, the `provider/model` every review request names (absent, the first model of the History Summarizer's chain), and `memory_reviewer.apply` (`propose`, `contest`, or `apply`; `propose` when absent). An enabled switch also sets `source_capture.enabled` and `contradiction_candidates.enabled` for the route, because a review reads the message blocks a memory cites and the source text recorded after it. A switch with no model to name reviews nothing.
+
+The switch stands in for the owner's runtime identity record for its project. The worker's pass over switched projects (`Worker::switched_pass`, `crates/daemon/src/memory_reviewer/worker.rs`) builds the approval from the live deployment: the host route's identity (`host-model-execution/<harness>/<provider>/<model>`), the configured model, the host's credential source, and the live Kernel and Memory Store incarnations. `activation_state` reads `open` while a switched project is bound or was bound in this process. A switched project stays under review after its last route closes, for the life of the process, at the settings its last binding froze; a root rebound with the switch off leaves review at the next pass.
+
+What the switch changes, step by step:
+
+| Step | Under the owner's record | Under the switch |
+| --- | --- | --- |
+| Transport | the reviewer's own verified connection to Anthropic or Bedrock, with a startup-envelope credential | the host's model execution through the History Summarizer's producer factory (`crates/daemon/src/memory_reviewer/host_execution.rs`): the harness child sends the request under the deployment's credential source, so keys, a profile, and a refreshed token all work; each request runs in a session of its own (`eidnara-memory_reviewer:<digest>`) that is purged when it ends |
+| Model binding | the request names the record's model and the provider's reported model is compared with it | the request names the configured `provider/model` and the host runs that pair. A Pi child reports the model id of its answer; the host carries it in an `answering_model` unit ahead of the text, and the reviewer releases the text only when that id equals the model of the configured pair. An answer that names another model, or a Pi answer that names none, ends the attempt with the `ModelMismatch` refusal and closes review for the rest of the process, as on the direct route. An OpenCode child's transcript carries no model id, so on that harness the dispatch is the binding |
+| Destination | `Remote`: `Normal` content with remote-allowed provider egress | `ConfiguredModel`: every stored class a local reader is served short of `Secret`, whatever the provider-egress class; the render check and the secret scanner apply unchanged |
+| Authority | the root must hold MODULE memories authority through `authority.prepare` | the worker takes MODULE memories authority for the bound root, with the root as the authority project, so every key derived from the authority project keeps the value an unmanaged root has (`review_cycle::grant_authority`) |
+| Subjects | selection pages of the scheduler's slot, closed by `PRODUCTION_SELECTION_OPEN` | the worker selects each pass (`review_cycle::select_and_enqueue`): one job per decision over its `decision_summary` descriptor, most suspicious first |
+| Claim descriptors | published by the search lifecycle owner | the worker runs the claim consumer itself on a host with no search lifecycle owner (`review_cycle::publish_claims`) |
+| Question | the fact-set template `extracted_facts` | the memory template `memory_statement`, whose instructions list the four actions a memory admits (`revise`, `retain`, `retire`, `no_change`) |
+| Proposals | applied only by `review.accept` under the acceptance record | treated as `memory_reviewer.apply` says |
+
+Selection order. A selection reads the project's live `decision_summary` claim descriptors (at most 4,096), keeps those the configured model may read, and orders their decisions: memories that source text published after them overlaps (their contradiction-candidate rows, newest first), contested statements, work in progress, statements automatic delivery serves, then search-only rows. It enqueues at most eight jobs per pass and skips a decision whose causal inputs already have a job. A job's starting references are up to two message blocks the memory cites and up to four later overlapping sources; the later sources are also causal signals, so a memory is reviewed again when new text overlaps it, and passed while nothing new bears on it.
+
+The run. For a memory under the memory template the host labels each linked reference with its writer (the source class the Kernel admitted the descriptor under) and its time (a message descriptor's revision), says whether the memory cites it or it was written after the memory's source, and reads each once before the first request, so one request carries the statement, its source, and what was written later. Related discovery for a memory delivers one stating form per decision, passes the subject's own decision and every rationale, and relates a candidate on three shared terms of the statement.
+
+Apply modes. After a run publishes a proposal, the worker does one of three things (`review_cycle::apply_proposal`):
+
+| `memory_reviewer.apply` | Effect |
+| --- | --- |
+| `propose` | nothing; the proposal waits for `review.accept` |
+| `contest` | a `retire` or `revise` that cites a contradiction records `mark_disputed` on its target, citing the first contradicting evidence row; the statement leaves automatic delivery and stays on explicit search as a labeled row. Every other proposal writes nothing |
+| `apply` | the worker accepts the proposal through `accept_selected_proposal`, the Kernel acceptance `review.accept` runs. `retire` removes the statement from delivery and search. `revise` supersedes the statement with a model-inference successor that explicit search serves as a labeled row; the successor is outside automatic delivery, so an applied revision removes the old text from the block and the corrected text reaches the block only through the user's own later statement |
+
+Trigger. The worker's loop runs a pass every 30 s while idle and at once after a pass that settled a run. `Worker::drain` runs passes until one settles nothing; the fixture host exposes it as the `review-drain` control, which a replay harness calls after each session.
 
 ### Acceptance record
 
@@ -97,7 +132,7 @@ The scheduler enqueues Memory Classifier review selections only while the gate i
 
 ### Production selection gate
 
-Selection over the production classes, `canonical_claims` and `promoted_memory`, is closed by the constant `PRODUCTION_SELECTION_OPEN` in `crates/daemon/src/memory_reviewer/selection.rs`. The gate is separate from activation: an open activation gate schedules no production selection while this constant is `false`.
+Selection by the Memory Classifier's scheduled slot over the production classes, `canonical_claims` and `promoted_memory`, is closed by the constant `PRODUCTION_SELECTION_OPEN` in `crates/daemon/src/memory_reviewer/selection.rs`. The gate is separate from activation: an open activation gate schedules no production selection while this constant is `false`. A project under the review switch is selected by the worker's own pass for the configured-model destination (section 2, "The review switch"), and this gate leaves that selection as it is.
 
 The coordinator does resolve both classes. A canonical or promoted descriptor names its originating decision in its leading identity field (`object_id` or `decision_object_id`), and the coordinator reads it through `ReferenceExpectation::CanonicalSource`, binding the descriptor's revision together with the decision's live revision. The broker judges both on every read, so a retracted, superseded, hidden, or re-revised decision revokes every form derived from it. Multiple descriptors of one decision share that decision as their owner and do not count as independent corroboration.
 
@@ -256,12 +291,18 @@ Batch M1 changes the Memory Store baseline digest once. Its one change adds the 
 
 A database created under the previous baseline refuses to open under this binary with `StoreError::Baseline` and is left byte-identical; recreate it with the Memory Store reset in section 5. The previous activation record closes the gate on `memstore_baseline_digest` until the deployment owner writes a renewed record naming the new digest and the new store's `memstore_incarnation`. There is no migration, backfill, version ledger, or change to the Kernel baseline.
 
+### Memory Store baseline: Batch M2
+
+Batch M2 changes the Memory Store baseline digest once. The `memory_reviewer_receipts_no_delete` and `memory_reviewer_attempts_no_delete` triggers keep their names and now guard a receipt that is in progress and the attempts of such a receipt. A completed receipt and its attempts are deleted by the retirement sweep together with their job (section 6). The tables, columns, and indexes are the ones Batch M1 left.
+
+A database created under the previous baseline refuses to open under this binary with `StoreError::Baseline` and is left byte-identical; recreate it with the Memory Store reset in section 5. The previous activation record closes the gate on `memstore_baseline_digest` until the deployment owner writes a renewed record naming the new digest and the new store's `memstore_incarnation`. The Kernel baseline is the one Batch K1 left.
+
 ## 6. Exposure bounds (Q38)
 
 Provider exposure is bounded by receipts and quotas, not by a spending cap; the daemon holds no billing ledger and none is added.
 
 - One job runs at most `MEMORY_REVIEWER_MAX_ATTEMPTS` (4) attempts, each at most `MEMORY_REVIEWER_MAX_REQUEST_BYTES` (256 KiB) of request body, within `MEMORY_REVIEWER_RUN_DEADLINE_MS` (120 s) less a 10 s settlement reserve. Every attempt is a committed marker in the Memory Store before a byte is sent; a marker that cannot commit sends nothing.
-- Every job charges `MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES` (32 KiB) of permanent receipt metadata, and permanent charges plus temporary allowances are bounded per project (64 MiB) and per host (256 MiB). Terminal rows keep their charge, so a store incarnation admits at most 2,048 jobs per project and 8,192 per host before reservation refuses for good. A project or host at its quota admits no new job; the sampler reports `receipt_charge_bytes`, `allowance_bytes`, `metadata_quota_bytes`, and `metadata_headroom_bytes` so headroom is read, not inferred.
+- Every job charges `MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES` (32 KiB) of receipt metadata, and receipt charges plus temporary allowances are bounded per project (64 MiB) and per host (256 MiB). A settled job keeps its rows and its charge for `MEMORY_REVIEWER_SETTLED_RETENTION_MS` (90 days) past its queue deadline; each lifecycle pass then retires up to 256 such jobs (`MemoryStore::retire_settled_memory_reviewer_jobs`), deleting the job, its completed receipt, its attempt markers, and the scan audit its ledger writes own, and the charge returns to the project. The quota therefore bounds the review work of one retention window: 2,048 jobs per project and 8,192 per host in any 90 days. A project or host at its quota admits no new job until older jobs retire; the sampler reports `receipt_charge_bytes`, `allowance_bytes`, `metadata_quota_bytes`, and `metadata_headroom_bytes` so headroom is read, not inferred. A retired job's causal inputs are free again, so a memory with unchanged evidence is reviewed once more at the next selection, about once per window.
 - Every job carries at most `MAX_MEMORY_REVIEWER_HOLD_REFERENCES` (512) held evidence references, and a project holds at most `MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT` (64) active holds; a run that ends without settling releases its hold rather than leaving it to its cutoff.
 - The requested model profile (`model`, `max_tokens`) is what the attempt marker records; the provider's reported model id is checked against the requested one before any text is released, and a reported model that differs ends the attempt as a failed terminal with nothing released.
 
