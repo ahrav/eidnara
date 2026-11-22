@@ -108,7 +108,7 @@ impl RelatedMemoryDiscovery {
         }
     }
 
-    /// Discovery for the review of the memory `decision` states, whose text is `subject_text`. A decision has up to three descriptors: its summary, its rationale, and its promoted form. The rationale records where the statement came from, and the other two state it, so a page delivers one stating form per decision and passes every form of `decision` itself. A candidate is related when it holds [`MIN_SHARED_TERMS`] of the subject's terms, so the label every recorded statement opens with relates nothing on its own.
+    /// Discovery for the review of the memory `decision` states, whose text is `subject_text`. A decision has up to three descriptors: its summary, its rationale, and its promoted form. The rationale records where the statement came from, and the other two state it, so a page delivers one stating form per decision and passes every form of `decision` itself. A candidate is related when it holds `MIN_SHARED_TERMS` of the subject's terms, so the label every recorded statement opens with relates nothing on its own.
     pub fn for_memory(subject_text: &str, decision: &str) -> Self {
         // The attribution label is capture's, the same on every statement, so the subject's terms come from the statement after it.
         let mut discovery = Self::new(crate::memory_capture::unattributed(subject_text));
