@@ -2646,6 +2646,30 @@ fn an_envelope_reads_the_decisions_cited_evidence_at_the_tip_it_extends() {
     assert_eq!(read.unwrap(), expected);
 }
 
+/// The lineage read and the commit-count read each take a pooled reader
+/// under the budget's statement limit, so a budget that ends while a
+/// statement runs ends the read with `Deadline`.
+#[test]
+fn the_budgeted_lineage_and_log_reads_each_take_a_limited_reader() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let budget = kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let limited = store.controlled_acquisitions_for_test();
+    let (_, rows) = store
+        .newest_decisions_on_lineage_within_budget(&budget, "assistant", "lineage")
+        .unwrap();
+    assert!(rows.is_empty());
+    assert_eq!(store.controlled_acquisitions_for_test(), limited + 1);
+    let count = store
+        .commit_count_in_key_range_within_budget(&budget, "writer", ("a", "b"), 1)
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(store.controlled_acquisitions_for_test(), limited + 2);
+}
+
 /// The newest decisions of a source lineage are its decisions of the
 /// greatest revisions, the greatest first, whether they are live, superseded
 /// into a later revision, or retired. Another lineage, another source kind,
