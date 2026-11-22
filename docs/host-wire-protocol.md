@@ -1184,7 +1184,8 @@ prompt block and, under `source_capture.enabled`, retains it; an empty list
 reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
-`memory.auto_promote` gate only model-extracted facts from redacted text.
+`memory.auto_promote` gate the model-extracted facts from redacted text and,
+for a Pi session, the named-file use records (below).
 A captured fact is the user's statement when its source message has the user
 role and reaches capture under its own message id (a source id of the form
 `<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
@@ -1404,7 +1405,7 @@ last line, before its closing tag, is one fixed sentence: it says that the lines
 project's sessions, that they hold what was said or recorded there, and that
 conventions kept in the repository's files stay in those files. The sentence
 is charged to the budget with the block's tags. The summarizer's prompt
-carries a block of the facts the same selection chose and no such line. A
+carries a block of the facts its read selected (below) and no such line. A
 session replays the m0 an earlier build composed until its next
 recomposition, and a block that recomposition composes ends with the
 sentence. A
@@ -1414,7 +1415,85 @@ they take no place from another session's facts. The read loads at most
 eight pages of that size, the payloads of up to 64 MiB of a session's own
 newer facts and of work in progress past its bounds (below); past that it stops, keeps the facts it had selected, and
 leaves the older facts out of the block. A fact whose stored payload alone
-passes 8 MiB is left unloaded and ends the read the same way. Live work in
+passes 8 MiB is left unloaded and ends the read the same way. The block's
+first element, `<NAMED_FILES note="...">`, lists project files that a
+message of the user named and the agent then used. Each transform pass of a
+primary Pi session whose configuration permits memory capture, and whose
+request carries a `working_directory` that is a path beneath the project
+root, is observed before its window is resolved. The observation reads the
+last two messages the user typed, each with its turn: the rows after it, up
+to the next message the user typed. A message's text parts are read as one
+text, joined by line breaks, through its first 64 KiB; a run of path
+characters that the 64 KiB bound divides is left out. Of that text the
+daemon reads the lines the message's sender wrote: the lines of a code fence,
+and outside a fence every line except a block that a line holding one
+opening tag alone opens, which runs through the last line of the text that
+closes the tag, or to the end of the text when no line closes it, and except
+a line that holds a closing tag alone. The text of a prompt template the
+user invoked is the user's message. From those lines the daemon takes the
+runs of ASCII letters, digits, and `._-/+@` that hold a `.` or a `/` once the
+periods that end them are dropped, and reads the first 32 distinct ones,
+each as written and, for a run that opens with Pi's file-reference mark `@`,
+without that character. A path is held relative to the project root: a
+relative path is read from `working_directory`, an absolute path beneath the
+root is taken relative to the root, `.` and `..` components are resolved
+without reading the file system, and the result names a file when it stays
+beneath the root, is at most 256 bytes of those characters, and passes the
+confined-path rules (at most 16 components, none of them `.git` or
+`.eidnara` in any letter case). A call of the turn uses a named file when it
+is a call of Pi's `read` whose `path` argument, read without one leading `@`
+as Pi opens it, names the file, or a call of Pi's `bash` whose `command`
+names the file in one of its first 256 such runs, read as written, and when
+the turn holds the call's result and the result is no error. A file the
+turn also edits is used the same way. When the pass's transform has
+succeeded, the first eight observed paths that are regular files beneath
+the project root, reached through no symbolic link or mount point, and that
+the Kernel's durable-text redaction leaves as written, are handed to a
+tracked background write that the reply does not wait for; a pass the
+daemon refuses hands over nothing. Each path is recorded once for the
+session: one labeled decision of kind `named_file_use` in the Kernel domain
+`named-files`, scoped to the project, with source kind
+`named_file_recorder`, whose summary is the path and whose rationale holds
+`source` (`named_file_use`), `session`, and `used_ms`, the time of the pass.
+Its id derives from the project, the session, and the path, so a second
+write replays the first and leaves its time. A session records 64 distinct
+paths at most while the daemon holds its recorded paths, which it does for
+the 256 sessions that recorded a path last. At most four passes' records
+are written at once. A pass that finds four being written, a pass observed
+before a `session.delete` that its write follows, a session id the
+redaction would rewrite, and a write the Kernel refuses record nothing; a
+later pass that shows the same use is observed and written under the same
+rules. The records hold no text of a file. The daemon alone writes and
+changes the domain: a `kernel.commit` operation that names `named-files`,
+that writes a row under the id prefixes `nfu_` or `dnf_` or the id
+`domain:named-files`, or that replaces, retires, or marks one of the
+domain's rows, is refused as `invalid_input`, so a path leaves the element
+when its file does. The search projection publishes none of the records, so
+`eidnara_search` ranks none, and a `kernel.read` page returns them with
+`domain_id` `named-files`. A pass reads the newest records
+under the read's row and byte bounds, counts the ones the recorder wrote,
+leaves out the reading session's own,
+groups them by path, orders the paths by the number of sessions that used
+each, then by the last use, then by path, looks for the files of the first
+32, and lists up to eight that are regular files beneath the project root at
+that moment, so a path enters a block only while its file exists; a read
+its bounds cut short marks the composition truncated. A line is
+`<path> (the agent used it in <n> earlier session(s), last on <date>)`,
+the date being the UTC day of `used_ms`; it carries no id, and the record's
+id is no handle of `eidnara_memory`. The element is charged first, to an
+eighth of `memory.injection_budget_tokens`: it holds the longest leading run
+of the lines that fits that share with its tags, the other facts are then
+selected against the rest of the budget, and the element is absent when no
+line fits. Its `note` says that a message of the user named the files, that
+the agent read them or passed them to a command, that the paths are relative
+to the repository root, that each file existed when the block was composed,
+and that memory holds none of their content. A pass that re-renders m0
+composes the element anew; a pass that serves the m0 of an earlier pass
+serves that pass's list. The block the summarizer's prompt carries holds no
+`NAMED_FILES` element: a summarizer that fires on a pass whose read serves it
+holds the facts that read selected beside the element, and a summarizer
+read that no pass read serves, the wrapup's among them, selects the facts
+against the whole budget. Live work in
 progress renders after the categories in one element,
 `<CURRENT_WORK note="...">`, whose `note` states that its lines are work the
 user left open in earlier sessions that no later statement of the user ended,
@@ -1429,7 +1508,8 @@ against bounds of its own, a quarter of the read's row and byte bounds, each
 rounded down and the row bound at least one,
 taken in the read's order, which is by the commit that wrote each fact's
 current row, so the other facts keep the whole of the read's row and byte
-bounds, and they are selected against the whole token budget first. The
+bounds, and they are selected first, against the token budget the
+`NAMED_FILES` element left. The
 read ends for a session when one of the other facts is refused at those
 bounds, so the element holds work in progress the read judged before that
 fact, and the
@@ -1710,6 +1790,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `prev_response_cache_usage` | optional | `{"cache_read_tokens", "cache_write_tokens"}`; a malformed value is dropped |
 | `mid_turn`, `is_subagent`, `tool_present` | optional, default `false` | booleans |
 | `todo_tool_present` | optional | boolean |
+| `working_directory` | optional; `pi` sends it for a session that has a project identity | string: the session's working directory, at its physical path, as a path beneath the project root with `/` separators, empty for the root, at most 256 bytes; the named-file records of Section 7.9 read a turn's relative paths from it, a request without it, or with a value that is no such path, records none, and the daemon keeps the value no longer than the observation |
 | `provider_id`, `model_key`, `cache_ttl`, `system_prompt_hash`, `upgrade_state`, `provider_error` | optional | strings |
 | `prev_response_completed_at_ms`, `request_observed_at_ms` | optional | unsigned integers (milliseconds) |
 | `effective_execute_threshold`, `history_budget_tokens` | optional | numbers |
