@@ -27,7 +27,7 @@ once (`prepare_memory_capture`, `crates/memory-store/src/memory_capture.rs:415`,
 returns the stored text to a later call), and `publish` reads the stored
 text, so a retry publishes the value frozen at submit. The commit's request
 digest is the SHA-256 of the frozen text
-(`crates/daemon/src/memory_capture.rs:4481`), so the receipt covers the head.
+(`crates/daemon/src/memory_capture.rs:4490`), so the receipt covers the head.
 
 The observation runs inside the `kernel_routes::blocking` hop of the submit
 handler (`crates/daemon/src/memory_capture/native.rs:445`), before `publish`
@@ -90,7 +90,7 @@ aliased branch loose and in `packed-refs`.
   writes requires (a plan of another version that decodes and whose commit
   the Kernel holds completes by replay); `head` is `#[serde(default)]`, so a plan of that
   version without it reads as `HeadUnavailable`
-  (`crates/daemon/src/memory_capture.rs:11285`).
+  (`crates/daemon/src/memory_capture.rs:11324`).
 - Missing evidence: none.
 - Conclusion: resolved with answer.
 
