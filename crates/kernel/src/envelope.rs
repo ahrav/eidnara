@@ -920,8 +920,8 @@ impl KernelStore {
     /// key is at or after `from` and before `to`, counted up to `limit`. The
     /// log keeps a commit for the store's lifetime, so the count of a key
     /// range only grows. The statement reads at most `limit` entries of the
-    /// `(producer, operation_key)` index, and the wait for a pooled reader
-    /// stops at the budget's deadline or interrupt with
+    /// `(producer, operation_key)` index. The wait for a pooled reader and
+    /// the statement stop at the budget's deadline or interrupt with
     /// `KernelError::Deadline`.
     pub fn commit_count_in_key_range_within_budget(
         &self,
@@ -930,7 +930,7 @@ impl KernelStore {
         (from, to): (&str, &str),
         limit: usize,
     ) -> Result<usize, KernelError> {
-        let reader = self.lock_reader_within(&budget.acquire_limit())?;
+        let reader = self.reader_with_limit(&budget.acquire_limit())?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let count = reader
             .query_row_cached(
@@ -954,32 +954,36 @@ impl KernelStore {
     /// tells it when two decisions share the greatest revision, which names
     /// no single newest one. The statement walks the `(source_kind,
     /// source_id, source_revision, object_kind)` index from its greatest
-    /// revision to the second decision, and the wait for a pooled reader
-    /// stops at the budget's deadline or interrupt with
-    /// `KernelError::Deadline`.
+    /// revision to the second decision. The wait for a pooled reader and
+    /// the statements stop at the budget's deadline or interrupt with
+    /// `KernelError::Deadline`, so a lineage with many rows of other kinds
+    /// ends the read there and returns no partial answer.
     pub fn newest_decisions_on_lineage_within_budget(
         &self,
         budget: &crate::applicability::EvalBudget,
         source_kind: &str,
         source_id: &str,
     ) -> Result<(i64, Vec<ObjectRow>), KernelError> {
-        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
-        read_snapshot_on(&mut reader, 0, |tx, _| {
-            static SQL: LazyLock<String> = LazyLock::new(|| {
-                format!(
-                    "SELECT {OBJECT_ROW_COLUMNS} FROM object_registry o
-                     WHERE o.source_kind=?1 AND o.source_id=?2 AND o.object_kind='decision'
-                     ORDER BY o.source_revision DESC LIMIT 2"
-                )
-            });
+        static SQL: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "SELECT {OBJECT_ROW_COLUMNS} FROM object_registry o
+                 WHERE o.source_kind=?1 AND o.source_id=?2 AND o.object_kind='decision'
+                 ORDER BY o.source_revision DESC LIMIT 2"
+            )
+        });
+        let mut reader = self.reader_with_limit(&budget.acquire_limit())?;
+        let tx = reader.transaction(TransactionBehavior::Deferred)?;
+        let tip = super::commit_read::tip(&tx).map_err(map_sqlite)?;
+        let rows = {
             let mut statement = tx.prepare_cached(SQL.as_str()).map_err(map_sqlite)?;
-            let rows = statement
+            statement
                 .query_map(params![source_kind, source_id], object_row_from)
                 .map_err(map_sqlite)?
                 .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(map_sqlite)?;
-            Ok(rows)
-        })
+                .map_err(map_sqlite)?
+        };
+        tx.commit()?;
+        Ok((tip, rows))
     }
 
     /// The latest commit sequence, read without loading any object row. One
@@ -2630,6 +2634,48 @@ mod tests {
         );
         assert_eq!(count("writer", "p:8:", "p:8;", 9), 1);
         assert_eq!(count("other", "p:7:", "p:7;", 9), 1);
+    }
+
+    /// The commit-count read and the lineage read end with `Deadline` under a budget whose interrupt is raised and under one whose deadline has passed, and answer under a budget with neither.
+    #[test]
+    fn the_budgeted_log_and_lineage_reads_end_at_a_spent_budget() {
+        use crate::applicability::EvalBudget;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::KernelStore::open(directory.path()).unwrap();
+        store
+            .commit(intent("writer", "p:7:a"), |_| Ok(String::new()))
+            .unwrap();
+        let read = |budget: &EvalBudget| {
+            (
+                store.commit_count_in_key_range_within_budget(
+                    budget,
+                    "writer",
+                    ("p:7:", "p:7;"),
+                    9,
+                ),
+                store
+                    .newest_decisions_on_lineage_within_budget(budget, "capture", "lineage")
+                    .map(|(tip, rows)| (tip, rows.len())),
+            )
+        };
+        let raised = EvalBudget::new(None, Arc::new(AtomicBool::new(true)));
+        let elapsed = EvalBudget::new(
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        for spent in [&raised, &elapsed] {
+            assert_eq!(
+                read(spent),
+                (
+                    Err(crate::KernelError::Deadline),
+                    Err(crate::KernelError::Deadline)
+                )
+            );
+        }
+        let open = EvalBudget::new(None, Arc::new(AtomicBool::new(false)));
+        assert_eq!(read(&open), (Ok(1), Ok((1, 0))));
     }
 
     /// A rekeyed intent names the operation identity, producer, actor, and cause of the intent built with that key and digest, and refuses what [`PreparedIntent::new`] refuses in those two fields.
