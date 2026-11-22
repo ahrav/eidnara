@@ -5157,11 +5157,35 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
         2
     );
 
-    // A later failure of the command, run from another directory under an
-    // assignment, takes the record's place.
+    // The command line under a leading directory step is another command
+    // with a record of its own, which a pass of that same line resolves.
+    let moved = |call: &'static str, output: &'static str, flagged, at_ms| Run {
+        call,
+        command: "cd services && cargo test -p api",
+        output,
+        flagged,
+        at_ms,
+    };
+    let elsewhere = [
+        moved("call-cd", LINK_OUTPUT, true, 1_200),
+        moved("call-cd-ok", "test result: ok.", false, 1_300),
+    ];
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &elsewhere).await,
+        2
+    );
+    let live = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(live.len(), 3, "{live:?}");
+    assert!(
+        live.iter()
+            .any(|(record, _)| record.contains("T00:00:01.200Z") && record.contains(RESOLVED)),
+        "{live:?}"
+    );
+
+    // A later failure of the command takes the record's place.
     let relinked = Run {
         call: "call-2",
-        command: "cd services && RUST_LOG=debug cargo test -p api",
+        command: "cargo test -p api",
         output: LINK_OUTPUT,
         flagged: true,
         at_ms: 2_000,
@@ -5172,7 +5196,9 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
     );
     let api = |rows: Vec<(String, String)>| -> Vec<(String, String)> {
         rows.into_iter()
-            .filter(|(record, _)| !record.contains("T00:00:01.100Z"))
+            .filter(|(record, _)| {
+                !record.contains("T00:00:01.100Z") && !record.contains("T00:00:01.200Z")
+            })
             .collect()
     };
     let rows = api(explicit_search(&handler, (THIRD, "s3"), &project).await);
