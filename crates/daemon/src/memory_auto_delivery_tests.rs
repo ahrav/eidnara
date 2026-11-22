@@ -2748,6 +2748,53 @@ async fn proposals_that_disagree_on_the_speaker_of_one_clause_write_one_labeled_
     }
 }
 
+/// Agreement on a speaker is a matter of the quoted text, whatever category
+/// a proposal files it under. One whole sentence proposed under two
+/// categories, for the user in one and for another source in the other, is
+/// stored as two labeled facts with no statement record. With the user named
+/// in both, each category gets its approved statement.
+#[tokio::test]
+async fn one_sentence_under_two_categories_takes_one_speaker() {
+    let sentence = "The staging port is 4321.";
+    for (speakers, visibility, records) in [
+        ([Voice::User, Voice::Other], "labeled", 0),
+        ([Voice::Other, Voice::User], "labeled", 0),
+        ([Voice::User, Voice::User], "visible", 2),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", sentence)],
+            |_, _| {
+                speakers
+                    .iter()
+                    .zip(["CONFIG_VALUES", "PROJECT_RULES"])
+                    .map(|(&speaker, category)| Extracted {
+                        category: Some(category),
+                        speaker,
+                        ..fact(sentence)
+                    })
+                    .collect()
+            },
+        )
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [
+                (stated(sentence), visibility.to_string()),
+                (stated(sentence), visibility.to_string()),
+            ]
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project).len(),
+            records,
+            "{visibility}"
+        );
+    }
+}
+
 /// A correction proposed twice, once under the user's name with the approved
 /// statement as its replacement target and once under another speaker, is
 /// the user's in neither proposal. Its source commits at once: one labeled
@@ -5768,25 +5815,50 @@ async fn a_correction_replaces_an_approved_statement_only_when_quoted_whole() {
     assert!(!settled.contains("contested"), "{settled}");
 }
 
-/// A sentence that reports what someone wrote after a colon is the user's
-/// sentence. Widening stores it whole, the reporting clause included, so a
-/// reader sees whose words follow the colon.
+/// A clause before a colon belongs to its sentence. A cut quotation after
+/// the colon that the extractor attributes to the user is widened to the
+/// whole sentence, so the stored statement holds the clause that introduces
+/// it. In a sentence of the same shape that reports what a teammate wrote,
+/// the words after the colon are the teammate's: the extractor names
+/// another source, and the quotation stays as quoted on explicit search.
 #[tokio::test]
-async fn a_reporting_clause_before_a_colon_stays_in_the_stored_statement() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    let reported = "My teammate wrote: always rebase before merging.";
-    capture(
-        &handler,
-        FIRST,
-        "s1",
-        &[("m1", "user", reported)],
-        |_, _| vec![fact("always rebase before merging.")],
-    )
-    .await;
-    assert_eq!(
-        explicit_search(&handler, (SECOND, "s2"), &project).await,
-        [(stated(reported), "visible".to_string())]
-    );
+async fn a_clause_before_a_colon_stays_in_the_stored_statement() {
+    let clause = "always rebase before merging.";
+    for (sentence, relays, stored, visibility) in [
+        (
+            "One rule for this repository: always rebase before merging.",
+            false,
+            "One rule for this repository: always rebase before merging.",
+            "visible",
+        ),
+        (
+            "My teammate wrote: always rebase before merging.",
+            true,
+            clause,
+            "labeled",
+        ),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", sentence)],
+            |_, _| {
+                vec![if relays {
+                    relayed(clause)
+                } else {
+                    fact(clause)
+                }]
+            },
+        )
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(stored), visibility.to_string())],
+            "{sentence:?}"
+        );
+    }
 }
 
 /// A user corrects an earlier statement over several sentences: a clause

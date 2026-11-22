@@ -484,6 +484,7 @@ pub(super) fn collapse_quotations(
                 // user's joined memory is classed again by the contests it
                 // keeps.
                 kept.lifetime = joined_class(kept.lifetime, memory.lifetime);
+                kept.speaker = super::joined_speaker(kept.speaker, memory.speaker);
                 if kept.replaces.is_none() && memory.replaces.is_some() {
                     kept.replaces = memory.replaces;
                     kept.also_replaces = memory.also_replaces;

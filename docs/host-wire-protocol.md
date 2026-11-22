@@ -1288,9 +1288,10 @@ of a document, an issue, or a web page, the output or the error message of a
 tool, or what an assistant said earlier, whether those words stand between
 quotation marks, after a lead-in, on pasted lines, or directly in the
 sentence. A value outside these two is a schema defect of its source's
-decision, and a `speaker` given as `null` reads as absent. A decision that
-writes one of its members twice, such as two `speaker` values, is a schema
-defect of its source's decision too, whichever value stands last. Only the value
+decision, and a `speaker` given as `null` reads as absent. The answer is
+decoded as every member of a decision is: of a member the extractor writes
+twice the last value stands, so a decision has one speaker, the one it
+would have with that member written once. Only the value
 `user` attributes a quotation to the user: a quotation with `speaker` `other`
 or with none is stored as a labeled memory for explicit search under the
 rules of every labeled memory, has no statement record, replaces no fact
@@ -1299,16 +1300,23 @@ for a quotation that fails the structure check), is left as proposed by the
 widening rule, and takes no place in a run of joined sentences, so a copy of
 its stretch joins none either. The proposals of one source that quote a
 common stretch of its message carry one speaker, settled before sentences
-are joined and before any link is judged: a proposal that names `user` and
-whose quotation, at any of its occurrences in the message, shares text with
-the quotation of a proposal that names `other` or no speaker is read as
+are joined and before any link is judged, whatever category and targets
+they name: a proposal that names `user` and whose quotation, read without
+its edge whitespace, shares text at any of its occurrences in the message,
+occurrences that overlap one another included, with an occurrence of the
+quotation of a proposal that names `other` or no speaker is read as
 `other`, and the rule repeats until no proposal changes, so quotations that
 overlap in a chain end with one speaker. A quotation is therefore the
-user's only when every proposal that quotes part of it names the user, the
-proposals of one source that share a category and quotation freeze as one
-fact under one speaker, and the widening rule leaves a cut quotation as
-proposed when the sentence it would widen to holds text that a proposal of
-the source attributes to another speaker or to none. A
+user's only when every proposal that quotes part of it names the user. The
+quoted stretch has one attribution; the rule above for memories that share
+a category and quotation still keeps one fact for each replacement target
+they name, each under that attribution, and a fact frozen from proposals
+of which one named a speaker and another none carries the named one. The
+widening rule leaves a cut quotation as proposed when the sentence it would
+widen to holds, at any place the message has that sentence, text that a
+proposal of the source attributes to another speaker or to none, and a run
+of sentences is joined only when the joined statement, the text between its
+sentences and their closing marks included, holds no such text. A
 captured fact's rationale holds the value under `speaker` when its proposal
 carried one. A `speaker` on a proposal of an assistant source is stored in
 the same way and changes nothing. The attribution is a model's reading and
