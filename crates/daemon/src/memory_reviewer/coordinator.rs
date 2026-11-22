@@ -764,20 +764,16 @@ impl Run<'_> {
                 self.transcript.iter().map(RenderedBuffer::resend).collect(),
             ) {
                 Ok(prepared) => prepared,
-                // The assembled prompt formed a secret or a marker where two buffers meet: nothing is sent, and the run settles on that refusal as it does when the disclosure finds one.
-                Err(DisclosureRefusal::RenderCheck) => {
-                    guard.accounting.refund_render(resend);
-                    return Ok(Attempt::Refused(RefusalCode::RenderCheck));
+                Err(refusal) => {
+                    // Nothing left the host, so the resend charge of a body the checks or the encoder refused returns.
+                    if matches!(
+                        refusal,
+                        DisclosureRefusal::RenderCheck | DisclosureRefusal::Send { .. }
+                    ) {
+                        guard.accounting.refund_render(resend);
+                    }
+                    return assembly_verdict(refusal);
                 }
-                // A body over the wire bound spends the budget; a profile the encoder refuses is a configuration fault that leaves the receipt open for a corrected deployment.
-                Err(DisclosureRefusal::Send { error, .. }) => {
-                    guard.accounting.refund_render(resend);
-                    return match error {
-                        SendError::RequestTooLarge => Ok(Attempt::Exhausted),
-                        _ => Err(InvestigationError::Unavailable),
-                    };
-                }
-                Err(_) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
             }
         };
         let mut key = InternalRunKey {
@@ -985,6 +981,19 @@ impl Run<'_> {
         if let Some(end) = marker(format!("\n[/{} {}]\n", alias.as_str(), self.marker_token)) {
             self.transcript.push(end);
         }
+    }
+}
+
+/// What a refusal to assemble the request body means for the run. The assembled prompt formed a secret or a redaction marker where two buffers meet: nothing is sent, and the run settles on that refusal as it does when the disclosure finds one. A body over the wire bound spends the budget. A profile the encoder refuses is a configuration fault that leaves the receipt open for a corrected deployment.
+fn assembly_verdict(refusal: DisclosureRefusal) -> Result<Attempt, InvestigationError> {
+    match refusal {
+        DisclosureRefusal::RenderCheck => Ok(Attempt::Refused(RefusalCode::RenderCheck)),
+        DisclosureRefusal::Send {
+            error: SendError::RequestTooLarge,
+            ..
+        } => Ok(Attempt::Exhausted),
+        DisclosureRefusal::Send { .. } => Err(InvestigationError::Unavailable),
+        _ => Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
     }
 }
 
@@ -1501,6 +1510,35 @@ mod tests {
 
     const PROJECT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DOMAIN: &str = "domain";
+
+    /// A run whose assembled prompt fails the render check settles on that refusal, so its receipt completes as an abstention and a later pass has nothing to take over. A body over the wire bound ends the run's budget, and any other encoder refusal leaves the receipt open.
+    #[test]
+    fn a_body_the_render_check_refuses_settles_the_run_on_that_refusal() {
+        assert!(matches!(
+            assembly_verdict(DisclosureRefusal::RenderCheck),
+            Ok(Attempt::Refused(RefusalCode::RenderCheck))
+        ));
+        assert!(matches!(
+            assembly_verdict(DisclosureRefusal::Send {
+                attempt_index: None,
+                error: SendError::RequestTooLarge,
+                sent: false,
+            }),
+            Ok(Attempt::Exhausted)
+        ));
+        assert!(matches!(
+            assembly_verdict(DisclosureRefusal::Send {
+                attempt_index: None,
+                error: SendError::OutputTokens,
+                sent: false,
+            }),
+            Err(InvestigationError::Unavailable)
+        ));
+        assert!(matches!(
+            assembly_verdict(DisclosureRefusal::PromptNotUtf8),
+            Err(InvestigationError::Kernel(RefusalCode::Unsupported))
+        ));
+    }
 
     fn intent(key: &str) -> CommitIntent {
         CommitIntent {
