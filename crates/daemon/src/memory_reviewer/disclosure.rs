@@ -15,6 +15,7 @@ use memory_store::memory_reviewer_ledger::{
     AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerError,
     MemoryReviewerLedgerRefusal, ResponseUsage,
 };
+use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -22,10 +23,15 @@ use super::broker::{
     BrokerId, EvidenceBroker, OriginClass, ProvenanceTag, Refusal, RefusalCode, RenderedBuffer,
     check_render, hold_refusal,
 };
+use super::classifier::{Answers, ClassifierRoute, ClassifyError, MAX_STATE_BYTES, ReviewState};
 use super::model_request::{
     AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role,
     SIGNED_REQUEST_WINDOW_MS, SendError, Sender, Signed,
 };
+use super::model_response::StopReason;
+
+/// The provider identity an attempt marker records for a classifier request, which the harness sends under its own registry and credential.
+pub const CLASSIFIER_PROVIDER: &str = "harness-classifier";
 
 /// The complete API and model profile of one request: the requested canonical model id and the exact sampling values or their omission. It is serialized into the body before dispatch and bound to the marker through the body digest; nothing resolves an alias or asks the provider what it means.
 #[derive(Debug, Clone, PartialEq)]
@@ -591,8 +597,10 @@ impl Disclosure<'_> {
                 ));
             }
         };
-        // The answer is released only when it comes from the model the route names, as on the direct route.
-        if !host.answered_by_requested(text.model.as_deref()) {
+        // The answer is released only when it comes from the model the route names, as on the direct route. A response the provider stopped carries no answer and no model id, and releases nothing.
+        if text.stop_reason != Some(StopReason::Refusal)
+            && !host.answered_by_requested(text.model.as_deref())
+        {
             return Err(self.end(
                 attempt_index,
                 MemoryReviewerAttemptTerminal::Failed,
@@ -642,9 +650,185 @@ impl Disclosure<'_> {
         Ok(())
     }
 
+    /// One stage-1 attempt: the review state and its questions go to the project's classifier through the harness, under the same marker, claim, deadline, and allowance checks as a chat attempt. Every alias the state quotes is revalidated and the hold is checked first, and the assembled request passes the render check as a whole, so the classifier receives only bytes a chat request of this run could carry. The attempt's terminal is recorded on every path past the marker.
+    pub async fn classify(
+        &self,
+        route: &ClassifierRoute,
+        review: &ReviewState,
+        aliases: &[String],
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Answers, DisclosureRefusal> {
+        if self.broker.binding().destination != ArtifactDestination::ConfiguredModel {
+            return Err(DisclosureRefusal::DestinationNotRemote);
+        }
+        let hold = &self.broker.binding().hold;
+        let live_memstore = self
+            .ledger
+            .memory_reviewer_store_incarnation()
+            .map_err(|error| DisclosureRefusal::Store(error.to_string()))?;
+        if hold.memstore_incarnation != live_memstore {
+            return Err(DisclosureRefusal::Hold(RefusalCode::HoldInvalid));
+        }
+        if cancel.is_cancelled() {
+            return Err(DisclosureRefusal::Cancelled);
+        }
+        let aliases: Vec<&str> = aliases.iter().map(String::as_str).collect();
+        let evidence = self.revalidate_aliases(aliases)?;
+        self.guard(&evidence)?;
+        let unsent = |error| DisclosureRefusal::Send {
+            attempt_index: None,
+            error,
+            sent: false,
+        };
+        let state = review.state();
+        let questions = review.questions();
+        let state_bytes =
+            serde_json::to_vec(&state).map_err(|_| unsent(SendError::RequestTooLarge))?;
+        if state_bytes.len() > MAX_STATE_BYTES {
+            return Err(unsent(SendError::RequestTooLarge));
+        }
+        let body =
+            serde_json::to_vec(&serde_json::json!({ "state": state, "questions": questions }))
+                .map_err(|_| unsent(SendError::RequestTooLarge))?;
+        // Each quoted text passed the render check when the broker read it; the request is checked whole so a secret or marker formed where two fields meet stays with the host.
+        check_render(&body, None).map_err(|_| DisclosureRefusal::RenderCheck)?;
+        let union = self
+            .broker
+            .ledger
+            .union()
+            .encode()
+            .map_err(|_| DisclosureRefusal::PolicyUnion)?;
+        let marker = AttemptMarker {
+            body_digest: format!("{:x}", Sha256::digest(&body)),
+            request_bytes: u64::try_from(body.len())
+                .map_err(|_| unsent(SendError::RequestTooLarge))?,
+            provider: CLASSIFIER_PROVIDER.to_string(),
+            model: route.classifier.clone(),
+            credential_id: self.sender.credential_id().to_string(),
+            policy_union_digest: union.digest,
+        };
+        let outcome = self
+            .ledger
+            .dispatch_memory_reviewer_attempt(
+                self.project,
+                &hold.subject,
+                hold.generation,
+                self.claim_id,
+                &hold.kernel_incarnation,
+                &marker,
+                (),
+                self.now_ms,
+                |()| (),
+            )
+            .map_err(|error| match error {
+                MemoryReviewerLedgerError::Refused(reason) => DisclosureRefusal::Ledger(reason),
+                MemoryReviewerLedgerError::Store(error) => {
+                    DisclosureRefusal::Store(error.to_string())
+                }
+            })?;
+        let (attempt_index, attempt_deadline_ms) = match outcome {
+            DispatchOutcome::ChargedNotDispatched {
+                attempt_index,
+                reason,
+                finished,
+            } => {
+                return Err(DisclosureRefusal::ChargedNotDispatched {
+                    attempt_index,
+                    reason,
+                    terminal_recorded: finished,
+                });
+            }
+            DispatchOutcome::Handed {
+                attempt_index,
+                attempt_deadline_ms,
+                release,
+                ..
+            } => {
+                if let Err(error) = release {
+                    return Err(self.end(
+                        attempt_index,
+                        MemoryReviewerAttemptTerminal::Failed,
+                        ResponseUsage::NONE,
+                        DisclosureRefusal::Store(error.to_string()),
+                    ));
+                }
+                (attempt_index, attempt_deadline_ms)
+            }
+        };
+        let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
+        let wait = deadline
+            .min(Instant::now() + Duration::from_millis(remaining))
+            .saturating_duration_since(Instant::now());
+        let answered = route
+            .exchange
+            .classify(
+                &route.project,
+                &route.classifier,
+                state,
+                questions,
+                wait,
+                cancel,
+            )
+            .await;
+        let failed = |error| DisclosureRefusal::Send {
+            attempt_index: Some(attempt_index),
+            error,
+            sent: true,
+        };
+        let value = match answered {
+            Ok(value) => value,
+            Err(ClassifyError::Cancelled) => {
+                return Err(self.end(
+                    attempt_index,
+                    MemoryReviewerAttemptTerminal::Cancelled,
+                    ResponseUsage::NONE,
+                    DisclosureRefusal::Cancelled,
+                ));
+            }
+            Err(error) => {
+                return Err(self.end(
+                    attempt_index,
+                    MemoryReviewerAttemptTerminal::Failed,
+                    ResponseUsage::NONE,
+                    failed(match error {
+                        ClassifyError::Unanswered => SendError::Deadline,
+                        _ => SendError::Transport,
+                    }),
+                ));
+            }
+        };
+        let answer_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+        let usage = ResponseUsage {
+            raw_response_bytes: u64::try_from(answer_bytes).ok(),
+            decoded_text_bytes: Some(0),
+        };
+        let answers = match Answers::parse(review, &value) {
+            Ok(answers) => answers,
+            Err(_) => {
+                return Err(self.end(
+                    attempt_index,
+                    MemoryReviewerAttemptTerminal::Failed,
+                    usage,
+                    failed(SendError::Transport),
+                ));
+            }
+        };
+        self.finish(
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            usage,
+        )
+        .map_err(|error| DisclosureRefusal::TerminalNotRecorded {
+            attempt_index,
+            error,
+            cause: None,
+        })?;
+        Ok(answers)
+    }
+
     /// Re-judges every disclosed alias at the current clock, once per alias, and collects the evidence ids they name.
     fn revalidate(&self, prepared: &PreparedBody) -> Result<Vec<String>, DisclosureRefusal> {
-        let now = (self.now_ms)();
         let mut aliases: Vec<&str> = Vec::with_capacity(prepared.tags.len());
         for tag in &prepared.tags {
             match tag.alias.as_ref() {
@@ -658,6 +842,11 @@ impl Disclosure<'_> {
                 }
             }
         }
+        self.revalidate_aliases(aliases)
+    }
+
+    fn revalidate_aliases(&self, mut aliases: Vec<&str>) -> Result<Vec<String>, DisclosureRefusal> {
+        let now = (self.now_ms)();
         aliases.sort_unstable();
         aliases.dedup();
         let mut evidence = Vec::new();

@@ -304,7 +304,12 @@ export interface EidnaraConfig {
      * model, and what it does with each proposal. The daemon reads these keys itself. Defaults
      * to off.
      */
-    memory_reviewer?: { enabled: boolean; model?: string; apply: "propose" | "contest" | "apply" };
+    memory_reviewer?: {
+        enabled: boolean;
+        model?: string;
+        apply: "propose" | "contest" | "apply";
+        classifier?: string;
+    };
     /**
      * User-only list of repository documents the daemon reads for the prompt block and, when
      * `source_capture.enabled` is set, retains. The daemon reads and validates this key itself;
@@ -637,6 +642,12 @@ export const EidnaraConfigSchema = z
                     .default("propose")
                     .describe(
                         "User-only: what the daemon does with a proposal it records. propose leaves it for review.accept; contest marks the target of a retire or revise that cites a contradiction as disputed, which moves it from automatic delivery to explicit search; apply accepts the proposal (default: propose).",
+                    ),
+                classifier: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "User-only: the provider/model of a typed classifier that decides each review first, for example typesafe/jev-latest. A harness that can call it answers the daemon's classifier work; the chat model then writes a proposal only for a memory the classifier flags, and no memory changes that the classifier did not flag. Absent, or on a harness that cannot call a classifier, the chat model decides.",
                     ),
             })
             .default({ enabled: false, apply: "propose" })

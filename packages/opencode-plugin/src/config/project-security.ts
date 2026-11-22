@@ -546,7 +546,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
-    // The block holds the user-level review switch and its two settings; the daemon reads them
+    // The block holds the user-level review switch and its settings; the daemon reads them
     // from the user tier only.
     if ("memory_reviewer" in projectRaw) {
         const reviewer = projectRaw.memory_reviewer;

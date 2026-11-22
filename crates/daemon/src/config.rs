@@ -87,6 +87,9 @@ impl Default for TerseTextCompressionConfig {
     }
 }
 
+/// The longest classifier reference the user tier may name.
+pub const MAX_CLASSIFIER_REF_BYTES: usize = 256;
+
 /// What the MemoryReviewer worker does with a proposal it publishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReviewApply {
@@ -115,7 +118,7 @@ impl ReviewApply {
     }
 }
 
-/// The user tier's MemoryReviewer switch and its two settings.
+/// The user tier's MemoryReviewer switch and its settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemoryReviewerConfig {
     /// User-only consent to review the project's memories with the configured model: the worker selects memories, sends each with its evidence through the host's model execution, and records a proposal. The switch stands in for the deployment owner's activation record.
@@ -123,6 +126,8 @@ pub struct MemoryReviewerConfig {
     /// The `provider/model` every review request names; absent, the first model of the History Summarizer's chain.
     pub model: Option<String>,
     pub apply: ReviewApply,
+    /// The `provider/model` of the typed classifier that decides each review first, as the harness names it (`typesafe/jev-latest`). With one set, a harness that answers classifier work decides keep or change and the chat model writes the proposal only for a memory the classifier flags. Absent, the chat model decides.
+    pub classifier: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -249,6 +254,12 @@ impl DaemonConfig {
             .model
             .as_deref()
             .or_else(|| self.model_chain.first().map(String::as_str))
+    }
+
+    /// The classifier that decides each review first while the switch is on, when the user tier names one.
+    pub fn memory_reviewer_classifier(&self) -> Option<&str> {
+        self.memory_reviewer_model()
+            .and(self.memory_reviewer.classifier.as_deref())
     }
 
     pub fn eidnara_folds(&self) -> bool {
@@ -537,6 +548,7 @@ impl MergedConfig {
                 .sum::<usize>()
             + optional(memory_classifier_review_user_memories_schedule)
             + optional(&memory_reviewer.model)
+            + optional(&memory_reviewer.classifier)
             + optional(prompt_surface_guidance_override)
             + allocation(cache_ttl.capacity())
             + cache_ttl_by_model
@@ -1031,6 +1043,7 @@ pub enum ConfigKey {
     MemoryReviewerEnabled,
     MemoryReviewerModel,
     MemoryReviewerApply,
+    MemoryReviewerClassifier,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
@@ -1074,6 +1087,7 @@ impl ConfigKey {
         Self::MemoryReviewerEnabled,
         Self::MemoryReviewerModel,
         Self::MemoryReviewerApply,
+        Self::MemoryReviewerClassifier,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
@@ -1114,6 +1128,7 @@ impl ConfigKey {
             Self::MemoryReviewerEnabled => "/memory_reviewer/enabled",
             Self::MemoryReviewerModel => "/memory_reviewer/model",
             Self::MemoryReviewerApply => "/memory_reviewer/apply",
+            Self::MemoryReviewerClassifier => "/memory_reviewer/classifier",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
@@ -1167,6 +1182,7 @@ impl ConfigKey {
             | Self::MemoryReviewerEnabled
             | Self::MemoryReviewerModel
             | Self::MemoryReviewerApply
+            | Self::MemoryReviewerClassifier
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -1207,6 +1223,7 @@ impl ConfigKey {
             | Self::MemoryReviewerEnabled
             | Self::MemoryReviewerModel
             | Self::MemoryReviewerApply
+            | Self::MemoryReviewerClassifier
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -1388,6 +1405,24 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                     None => warnings.push(format!(
                         "ignoring {pointer}: expected propose, contest, or apply; proposals stay unapplied"
                     )),
+                }
+            }
+        }
+        ConfigKey::MemoryReviewerClassifier => {
+            if let Some(classifier) = tier.pointer(pointer).and_then(Value::as_str) {
+                let classifier = classifier.trim();
+                // A harness looks a classifier up by provider and model id, so only the `provider/model` form names one.
+                if classifier
+                    .split_once('/')
+                    .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
+                    && classifier.len() <= MAX_CLASSIFIER_REF_BYTES
+                    && !classifier.chars().any(char::is_control)
+                {
+                    cfg.memory_reviewer.classifier = Some(classifier.to_string());
+                } else if !classifier.is_empty() {
+                    warnings.push(format!(
+                        "ignoring {pointer}: not in provider/model form; the chat model decides each review"
+                    ));
                 }
             }
         }
@@ -2428,6 +2463,7 @@ mod tests {
                 ConfigKey::MemoryReviewerEnabled,
                 ConfigKey::MemoryReviewerModel,
                 ConfigKey::MemoryReviewerApply,
+                ConfigKey::MemoryReviewerClassifier,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
@@ -2494,6 +2530,25 @@ mod tests {
         let cfg = merge_tiers(Some(&own), None);
         assert_eq!(cfg.memory_reviewer_model(), Some("prov/reviewer"));
         assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Contest);
+        assert_eq!(cfg.memory_reviewer_classifier(), None);
+
+        // A classifier named in provider/model form decides each review first; one named while the switch is off decides nothing.
+        let classified = serde_json::json!({
+            "history_summarizer": { "module_model": "prov/summarizer" },
+            "memory_reviewer": { "enabled": true, "classifier": " typesafe/jev-latest " },
+        });
+        assert_eq!(
+            merge_tiers(Some(&classified), None).memory_reviewer_classifier(),
+            Some("typesafe/jev-latest")
+        );
+        let unswitched = serde_json::json!({
+            "history_summarizer": { "module_model": "prov/summarizer" },
+            "memory_reviewer": { "classifier": "typesafe/jev-latest" },
+        });
+        assert_eq!(
+            merge_tiers(Some(&unswitched), None).memory_reviewer_classifier(),
+            None
+        );
 
         // A switch with no model to name reviews nothing; the evidence consents still follow it.
         let modelless = serde_json::json!({ "memory_reviewer": { "enabled": true } });
@@ -2505,19 +2560,24 @@ mod tests {
         // A model outside provider/model form and a mode outside the three are refused with a warning, and the defaults stand.
         let malformed = serde_json::json!({
             "history_summarizer": { "module_model": "prov/summarizer" },
-            "memory_reviewer": { "enabled": true, "model": "reviewer", "apply": "always" },
+            "memory_reviewer": { "enabled": true, "model": "reviewer", "apply": "always", "classifier": "jev" },
         });
         let (cfg, warnings) = merge_tiers_with_warnings(Some(&malformed), None);
         assert_eq!(cfg.memory_reviewer_model(), Some("prov/summarizer"));
         assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Propose);
-        for pointer in ["/memory_reviewer/model", "/memory_reviewer/apply"] {
+        assert_eq!(cfg.memory_reviewer_classifier(), None);
+        for pointer in [
+            "/memory_reviewer/model",
+            "/memory_reviewer/apply",
+            "/memory_reviewer/classifier",
+        ] {
             assert!(
                 warnings.iter().any(|warning| warning.contains(pointer)),
                 "{warnings:?}"
             );
         }
 
-        // A project tier sets none of the three keys.
+        // A project tier sets none of the four keys.
         let (cfg, warnings) = merge_tiers_with_warnings(None, Some(&own));
         assert!(!cfg.memory_reviewer.enabled);
         assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Propose);
@@ -2612,7 +2672,7 @@ mod tests {
             "source_capture": { "enabled": true },
             "contradiction_candidates": { "enabled": true },
             "verifier": { "enabled": true },
-            "memory_reviewer": { "enabled": true, "model": "hostile/model", "apply": "apply" },
+            "memory_reviewer": { "enabled": true, "model": "hostile/model", "apply": "apply", "classifier": "hostile/classifier" },
             "user_memories": { "enabled": true },
             "memory_classifier": {
                 "inject_docs": true,
@@ -2690,7 +2750,7 @@ mod tests {
         assert_eq!(
             cfg.memory_reviewer,
             MemoryReviewerConfig::default(),
-            "project tier cannot switch the MemoryReviewer on, name its model, or set its apply mode"
+            "project tier cannot switch the MemoryReviewer on, name its model or classifier, or set its apply mode"
         );
         assert_eq!(
             cfg.memory_classifier_review_user_memories_schedule, None,
@@ -2856,7 +2916,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 34);
+        assert_eq!(ConfigKey::ALL.len(), 35);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the

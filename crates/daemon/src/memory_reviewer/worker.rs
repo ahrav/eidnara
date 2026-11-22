@@ -23,6 +23,7 @@ use crate::{MemoriesAuthority, RouteBindings, SessionBinding, memories_authority
 
 use super::activation::{self, Activation, Closed, LiveIdentity};
 use super::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
+use super::classifier::{CLASSIFY_WAIT, ClassifierExchange, ClassifierRoute};
 use super::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, Rejection,
 };
@@ -31,7 +32,7 @@ use super::host_execution::{HOST_CREDENTIAL_ID, HostExecution};
 use super::lifecycle::{ActivationState, MemoryReviewerStatus};
 use super::model_request::{Provider, Providers, Sender};
 use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
-use super::review_cycle::{self, Applied, ApplyScope, SelectionScope};
+use super::review_cycle::{self, ActionGate, Applied, ApplyScope, SelectionScope};
 use super::settlement::Settled;
 use super::settlement::TaskClaim;
 use crate::HistorySummarizerProducerFactory;
@@ -88,6 +89,8 @@ pub struct ReviewSwitch {
     /// The `provider/model` every request of the project's reviews names.
     pub model_ref: String,
     pub apply: ReviewApply,
+    /// The `provider/model` of the classifier that decides each review first, when the user tier names one.
+    pub classifier: Option<String>,
     pub harness: String,
     pub credential_fingerprints: BTreeMap<String, String>,
 }
@@ -102,17 +105,23 @@ pub struct SwitchedReview {
     claims: Mutex<ClaimProgress>,
     /// One pass runs at a time, whether the loop or a caller of [`Worker::drain`] started it.
     serial: tokio::sync::Mutex<()>,
+    /// Where stage-1 requests wait for the harness; the daemon's `memory.review.classify` handlers hold the same exchange.
+    pub classifiers: Arc<ClassifierExchange>,
+    /// What selection remembers between passes: the writers of the sources it looked up and the memories that wait for a pending proposal.
+    selection: Arc<Mutex<review_cycle::SelectionMemory>>,
 }
 
 impl SwitchedReview {
-    /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer.
+    /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer, and `classifiers` is the exchange the host's `memory.review.classify` handlers answer.
     pub fn through(
         producers: Arc<dyn HistorySummarizerProducerFactory>,
         claims_published: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        classifiers: Arc<ClassifierExchange>,
     ) -> Self {
         Self {
             producers: Some(producers),
             claims_published,
+            classifiers,
             ..Self::default()
         }
     }
@@ -174,6 +183,10 @@ pub(crate) fn module_projects(
             .map(|model| ReviewSwitch {
                 model_ref: model.to_string(),
                 apply: binding.config.memory_reviewer.apply,
+                classifier: binding
+                    .config
+                    .memory_reviewer_classifier()
+                    .map(str::to_string),
                 harness: binding.harness.clone(),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
@@ -339,6 +352,20 @@ impl Worker {
         }
     }
 
+    /// The classifier route of a switched project: its configured classifier, while a harness of the project answers classifier work. A project with no classifier named, or whose harness has made no recent pull, leaves the chat model deciding.
+    fn classifier_route(&self, switch: &ReviewSwitch, root: &RootScope) -> Option<ClassifierRoute> {
+        let classifier = switch.classifier.as_ref()?;
+        self.switched
+            .classifiers
+            .present(&root.project_digest, classifier)
+            .then(|| ClassifierRoute {
+                exchange: Arc::clone(&self.switched.classifiers),
+                classifier: classifier.clone(),
+                project: root.project_digest.clone(),
+                wait: CLASSIFY_WAIT,
+            })
+    }
+
     /// Whether a route's project is reviewed under the switch: its newest root set one and the worker can reach the host's model execution.
     fn is_switched(&self, route: &ProjectRoute) -> bool {
         route.review.is_some() && self.switched.producers.is_some()
@@ -447,6 +474,7 @@ impl Worker {
                 permits: Arc::clone(&self.permits),
                 now_ms: Arc::new(crate::now_ms),
                 inspection_limit: MAX_ISSUED_INSPECTIONS,
+                classifier: self.classifier_route(&switch, &root),
             };
             let route = Arc::new(route);
             let ready = {
@@ -454,6 +482,7 @@ impl Worker {
                 let kernel = Arc::clone(&kernel);
                 let route = Arc::clone(&route);
                 let root = root.clone();
+                let selection = Arc::clone(&self.switched.selection);
                 tokio::task::spawn_blocking(move || {
                     let now = crate::now_ms();
                     let list = |store: &MemoryStore| {
@@ -468,9 +497,13 @@ impl Worker {
                     let pending = list(&store)?;
                     let scope = kernel::ProjectScope::new(&root.project_digest)
                         .map_err(|error| error.to_string())?;
+                    let mut selection = selection
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let selected = review_cycle::select_and_enqueue(
                         &kernel,
                         &store,
+                        &mut selection,
                         &SelectionScope {
                             project: &scope,
                             project_digest: &root.project_digest,
@@ -484,10 +517,11 @@ impl Worker {
                         return Ok(pending);
                     }
                     eprintln!(
-                        "daemon: memory_reviewer selected {} of {} memories for review: {:?}",
+                        "daemon: memory_reviewer selected {} of {} memories for review: {:?}; {} wait for a pending proposal",
                         selected.total(),
                         selected.examined,
-                        review_cycle::describe(&selected)
+                        review_cycle::describe(&selected),
+                        selected.waiting
                     );
                     list(&store)
                 })
@@ -503,7 +537,7 @@ impl Worker {
                     continue;
                 }
             };
-            // A selection numbers its jobs most suspicious first; the jobs of one selection share a queue deadline, so its order decides which run first.
+            // A selection numbers its jobs newest evidence first; the jobs of one selection share a queue deadline, so its order decides which run first.
             ready.sort_by_key(|job| (job.queue_deadline_ms, job.producer.ordinal));
             let mut runs = 0;
             for job in ready {
@@ -529,6 +563,14 @@ impl Worker {
                                 let (kernel_incarnation, memstore_incarnation) =
                                     (kernel_incarnation.clone(), memstore_incarnation.clone());
                                 let mode = switch.apply;
+                                // A run that went through stage 1 left its record with the exchange; where no classifier decided, the action rule stands alone.
+                                let gate = match &coordinator.classifier {
+                                    Some(route) => ActionGate::Classifier(
+                                        route.exchange.take_record(&job.causal_identity),
+                                    ),
+                                    None => ActionGate::ChatDecides,
+                                };
+                                let job = Arc::clone(&job);
                                 tokio::task::spawn_blocking(move || {
                                     review_cycle::apply_proposal(
                                         &kernel,
@@ -541,12 +583,23 @@ impl Worker {
                                         },
                                         &job.causal_identity,
                                         mode,
+                                        &gate,
                                         crate::now_ms(),
                                     )
                                 })
                                 .await
                                 .unwrap_or_else(|error| Applied::Refused(error.to_string()))
                             };
+                            // A change proposal a reader has yet to settle holds its memory: new evidence waits for it.
+                            if matches!(applied, Applied::Left | Applied::Disputed { .. })
+                                && let ReviewTarget::Memory { object_id, .. } = &job.target
+                            {
+                                self.switched
+                                    .selection
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .note_pending(&route.project, object_id, &job.causal_identity);
+                            }
                             match &applied {
                                 Applied::Left => {}
                                 // A proposal that keeps its memory is accepted in every mode and changes nothing worth a line.
@@ -620,6 +673,7 @@ impl Worker {
             permits: Arc::clone(&self.permits),
             now_ms: Arc::new(crate::now_ms),
             inspection_limit: MAX_ISSUED_INSPECTIONS,
+            classifier: None,
         };
         let mut settled = 0;
         for route in (self.projects)() {

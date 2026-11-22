@@ -103,6 +103,10 @@ describe("EidnaraConfigSchema", () => {
                 enabled: true,
                 apply: "apply",
             });
+            expect(
+                parse({ enabled: true, classifier: "typesafe/jev-latest" }).data?.memory_reviewer,
+            ).toEqual({ enabled: true, apply: "propose", classifier: "typesafe/jev-latest" });
+            expect(parse({ classifier: 1 }).success).toBe(false);
             expect(parse({ enabled: "yes" }).success).toBe(false);
             expect(parse({ apply: "always" }).success).toBe(false);
             expect(parse({ enabled: true, extra: 1 }).success).toBe(false);

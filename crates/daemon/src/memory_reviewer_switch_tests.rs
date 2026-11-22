@@ -1,13 +1,16 @@
-//! Tests for memory review under the user's switch. A project's captured
-//! statements are selected most suspicious first, each is reviewed through
-//! the host's model execution with the source text recorded after it, and
-//! the proposal is treated as the apply mode says. The producer state
-//! scripts the model's answers.
+//! Tests for memory review under the user's switch. A captured statement is
+//! reviewed when later evidence bears on it: a typed classifier, where the
+//! project names one and its harness answers, decides keep or change, the
+//! chat model writes the proposal through the host's model execution, and the
+//! proposal is treated as the apply mode and the action rule say. The
+//! producer state scripts the chat model's answers and a harness task scripts
+//! the classifier's.
 
 use host_runtime::model_execution::supervisor::Supervisor;
 
 use super::*;
 use crate::config::{MemoryReviewerConfig, ReviewApply};
+use crate::memory_reviewer::classifier_wire::{NEXT, SUBMIT};
 use crate::memory_reviewer::coordinator::InvestigationPermits;
 use crate::memory_reviewer::host_execution::CHILD_SESSION_PREFIX;
 use crate::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
@@ -23,10 +26,15 @@ const THURSDAY: &str = "Cut release branches from main every Thursday.";
 const TUESDAY: &str = "We cut release branches from main every Tuesday now, not Thursday.";
 const LINTER: &str = "Run the linter before every commit.";
 const MODEL: &str = "test/reviewer";
+const CLASSIFIER: &str = "test/classifier";
 /// The model id a child that ran [`MODEL`] reports for its answer.
 const ANSWERING_MODEL: &str = "reviewer";
 
 fn switch_config(apply: ReviewApply) -> DaemonConfig {
+    classified_config(apply, None)
+}
+
+fn classified_config(apply: ReviewApply, classifier: Option<&str>) -> DaemonConfig {
     DaemonConfig {
         memory_auto_capture: true,
         source_capture_enabled: true,
@@ -35,6 +43,7 @@ fn switch_config(apply: ReviewApply) -> DaemonConfig {
             enabled: true,
             model: Some(MODEL.to_string()),
             apply,
+            classifier: classifier.map(str::to_string),
         },
         ..default_test_config()
     }
@@ -66,7 +75,15 @@ struct Rig {
 
 impl Rig {
     async fn open(apply: ReviewApply) -> Self {
-        let config = switch_config(apply);
+        Self::open_with(switch_config(apply)).await
+    }
+
+    /// A project whose user tier names [`CLASSIFIER`] beside the switch.
+    async fn classified(apply: ReviewApply) -> Self {
+        Self::open_with(classified_config(apply, Some(CLASSIFIER))).await
+    }
+
+    async fn open_with(config: DaemonConfig) -> Self {
         let state = Arc::new(ProducerState::default());
         let (handler, store, dir, project) =
             handler_with_store_and_kernel(Arc::clone(&state), config.clone()).await;
@@ -102,6 +119,7 @@ impl Rig {
                     state: Arc::clone(&state),
                 }),
                 None,
+                Arc::clone(&handler.review_classifiers),
             ),
         });
         Self {
@@ -185,6 +203,66 @@ impl Rig {
         self.worker.drain(&CancellationToken::new()).await
     }
 
+    /// One routed request of session `s1`, as a harness sends it.
+    async fn call(&self, request: Value) -> Value {
+        memory_auto_delivery_tests::body(
+            self.handler
+                .dispatch_value_for_test(test_route(FIRST), request)
+                .await,
+        )
+    }
+
+    /// Runs a drain while a harness answers each classifier request with `changes` as the probability of a change, and returns the runs settled with the requests the harness received.
+    async fn drain_classified(&self, changes: f64) -> (usize, Vec<Value>) {
+        // A harness pulls before work exists, which is what tells the worker the project has a classifier.
+        let idle = self
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await;
+        assert_eq!(idle, json!({"state": "ready"}));
+        let cancel = CancellationToken::new();
+        let drain = {
+            let worker = Arc::clone(&self.worker);
+            let cancel = cancel.clone();
+            tokio::spawn(async move { worker.drain(&cancel).await })
+        };
+        let mut requests = Vec::new();
+        while !drain.is_finished() {
+            let work = self
+                .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 50}))
+                .await;
+            if work["state"] != "work" {
+                continue;
+            }
+            assert_eq!(work["classifier"], CLASSIFIER);
+            let strongest = work["request"]["state"]["later"][0]["id"].clone();
+            let submitted = self
+                .call(json!({
+                    "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+                    "lease": work["lease"],
+                    "answers": {
+                        "changes": { "type": "bool", "probability": changes },
+                        "relation": { "type": "choice", "choice": "replaces", "probabilities": {}, "confidence": 1.0 },
+                        "work_ended": { "type": "bool", "probability": 0.0 },
+                        "strongest": { "type": "choice", "choice": strongest, "probabilities": {}, "confidence": 1.0 },
+                    },
+                }))
+                .await;
+            assert_eq!(submitted, json!({"state": "processed"}));
+            requests.push(work["request"].clone());
+        }
+        (drain.await.unwrap(), requests)
+    }
+
+    fn active_review_holds(&self) -> usize {
+        self.handler
+            .kernel
+            .kernel_store()
+            .unwrap()
+            .list_active_review_holds(crate::now_ms(), 16)
+            .unwrap()
+            .len()
+    }
+
     fn attempts(&self) -> Vec<ProducerAttempt> {
         self.state.attempts.lock().unwrap().clone()
     }
@@ -233,54 +311,65 @@ fn stated(quote: &str) -> String {
 const RETIRE_CITING_LATER: &str = r#"{"v":1,"step":{"kind":"propose","action":"retire","support":[],"contradictions":[{"alias":"ref-2"}],"limitations":[],"uncertainty":"low"}}"#;
 const RETAIN: &str = r#"{"v":1,"step":{"kind":"propose","action":"retain","support":[{"alias":"ref-1"}],"contradictions":[],"limitations":[],"uncertainty":"low"}}"#;
 
-/// States two rules, then has the user replace the first in a later session, and runs the review to its end with the model retiring the replaced rule and retaining the other.
+const RETIRE_UNSURE: &str = r#"{"v":1,"step":{"kind":"propose","action":"retire","support":[],"contradictions":[{"alias":"ref-2"}],"limitations":[],"uncertainty":"medium"}}"#;
+const REVISE_CITING_LATER: &str = r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"User stated: Cut release branches from main every Tuesday.","support":[],"contradictions":[{"alias":"ref-2"}],"limitations":[],"uncertainty":"low"}}"#;
+
+/// States two rules, then has the user replace the first in a later session, and runs the review to its end with the model retiring the replaced rule. The other rule has no later evidence and is left unreviewed.
 async fn reviewed(apply: ReviewApply) -> Rig {
     let rig = Rig::open(apply).await;
     rig.state_rules(&[THURSDAY, LINTER]).await;
+    assert_eq!(
+        rig.drain().await,
+        0,
+        "a new memory has no evidence of change"
+    );
+    assert!(rig.attempts().is_empty());
     rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
         .await;
-    rig.answers(&[RETIRE_CITING_LATER, RETAIN]);
-    assert_eq!(rig.drain().await, 2, "one run per statement");
+    rig.answers(&[RETIRE_CITING_LATER]);
+    assert_eq!(
+        rig.drain().await,
+        1,
+        "the statement the later message bears on"
+    );
     rig
 }
 
-/// The switch alone reviews a project: the worker takes memories authority for the bound root, publishes the claim descriptors, reviews the statement later text overlaps first, and hands the model the statement with the later message, labeled with its writer and time. Each request names the configured model and runs in a session of its own that is purged. In `propose` mode both statements stay delivered and the proposals are listed.
+/// The switch alone reviews a project: the worker takes memories authority for the bound root, publishes the claim descriptors, and reviews a statement once later text bears on it, handing the model the statement with the later message, labeled with its writer and time. The request names the configured model, asks for its system text as written, and runs in a session of its own that is purged. In `propose` mode the statement stays delivered, the proposal is listed, and the memory waits for it: a further later message starts no second review.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_switched_project_is_reviewed_through_the_host_and_propose_changes_no_memory() {
+async fn a_switched_project_is_reviewed_on_later_evidence_and_propose_changes_no_memory() {
     let rig = reviewed(ReviewApply::Propose).await;
     assert_eq!(rig.status.activation_state(), ActivationState::Open);
     let attempts = rig.attempts();
-    assert_eq!(attempts.len(), 2, "one request per run");
+    assert_eq!(attempts.len(), 1, "one request for the one run");
     let first = &attempts[0];
     assert_eq!(first.model, MODEL);
     assert!(first.session_id.starts_with(CHILD_SESSION_PREFIX));
+    assert!(
+        first
+            .system
+            .starts_with(host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE),
+        "{}",
+        first.system
+    );
     assert!(
         first.system.contains("revise|retain|retire|no_change"),
         "{}",
         first.system
     );
     assert!(!first.system.contains("create|"), "{}", first.system);
-    // The statement later text overlaps is reviewed first, and its request carries that text with the host's label.
     assert!(first.prompt.contains(&stated(THURSDAY)), "{}", first.prompt);
     assert!(first.prompt.contains(TUESDAY), "{}", first.prompt);
     assert!(
-        first
-            .prompt
-            .contains("ref-2: a message the user wrote at 2023-11-14T22:13:20Z"),
+        first.prompt.contains(
+            "ref-2: a message the user wrote at 2023-11-14T22:13:20Z; written after the memory's source"
+        ),
         "{}",
         first.prompt
     );
-    assert!(attempts[1].prompt.contains(&stated(LINTER)));
-    assert!(!attempts[1].prompt.contains(TUESDAY));
     let purged = rig.state.purges.lock().unwrap().clone();
-    assert_eq!(
-        purged,
-        attempts
-            .iter()
-            .map(|attempt| attempt.session_id.clone())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(rig.state.harnesses.lock().unwrap().as_slice(), ["pi", "pi"]);
+    assert_eq!(purged, std::slice::from_ref(&first.session_id));
+    assert_eq!(rig.state.harnesses.lock().unwrap().as_slice(), ["pi"]);
 
     let root = rig.project.to_string_lossy().to_string();
     let authority = rig
@@ -290,39 +379,255 @@ async fn a_switched_project_is_reviewed_through_the_host_and_propose_changes_no_
         .expect("the switch gave the root memories authority");
     assert_eq!(authority.project, root);
     let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
-    assert_eq!(outcomes.outcomes.len(), 2);
+    assert_eq!(outcomes.outcomes.len(), 1);
     assert!(outcomes.outcomes.iter().all(|outcome| outcome.selected));
 
     let block = rig.block().await;
     assert!(block.contains(&stated(THURSDAY)), "{block}");
     assert!(block.contains(&stated(LINTER)), "{block}");
-    // The `retire` waits on a decision under its review hold. The `retain` asked for no write, so the worker accepted it and its hold ended: the project's hold allowance is spent only on proposals that wait.
-    let holds = rig
-        .handler
-        .kernel
-        .kernel_store()
-        .unwrap()
-        .list_active_review_holds(crate::now_ms(), 16)
-        .unwrap();
-    assert_eq!(holds.len(), 1, "{holds:?}");
+    // The `retire` waits on a decision under its review hold.
+    assert_eq!(rig.active_review_holds(), 1);
 
     // Nothing new bears on either statement, so a second drain selects and sends nothing.
     assert_eq!(rig.drain().await, 0);
-    assert_eq!(rig.attempts().len(), 2);
+    assert_eq!(rig.attempts().len(), 1);
 
-    // Another later message overlaps the first statement, so it alone is reviewed again.
+    // Another later message overlaps the statement. Its `retire` is still pending, so the memory waits for that proposal.
     rig.user_says_later(
         "later-2",
         1_700_000_100_000,
         "Reminder: release branches are cut from main every Tuesday.",
     )
     .await;
+    assert_eq!(rig.drain().await, 0);
+    assert_eq!(rig.attempts().len(), 1);
+}
+
+/// A review that keeps its memory settles at once, so new evidence reviews the memory again, and that review carries every later message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_memory_is_reviewed_again_only_when_new_evidence_arrives() {
+    let rig = Rig::open(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later(
+        "later-1",
+        1_700_000_000_000,
+        "The release branches are still cut from main every Thursday.",
+    )
+    .await;
+    rig.answers(&[RETAIN]);
+    assert_eq!(rig.drain().await, 1);
+    assert_eq!(rig.active_review_holds(), 0, "a keep is settled at once");
+    assert_eq!(
+        rig.drain().await,
+        0,
+        "the same evidence reviews a memory once"
+    );
+    rig.user_says_later("later-2", 1_700_000_100_000, TUESDAY)
+        .await;
     rig.answers(&[RETIRE_CITING_LATER]);
     assert_eq!(rig.drain().await, 1);
-    let again = rig.attempts();
-    assert_eq!(again.len(), 3);
-    assert!(again[2].prompt.contains(&stated(THURSDAY)));
-    assert!(again[2].prompt.contains("Reminder: release branches"));
+    let attempts = rig.attempts();
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts[1].prompt.contains(TUESDAY));
+    assert!(
+        attempts[1]
+            .prompt
+            .contains("still cut from main every Thursday")
+    );
+    assert!(!rig.block().await.contains(THURSDAY));
+}
+
+/// Where the project names a classifier and its harness answers classifier work, the classifier decides first. A keep settles the review with no chat request: the request the harness received holds the statement and the later message with its writer and time, the proposal is settled, and the statement stays delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_classifier_keeps_a_memory_without_a_chat_request() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    let (settled, requests) = rig.drain_classified(0.02).await;
+    assert_eq!(settled, 1);
+    assert!(rig.attempts().is_empty(), "the chat model was not asked");
+    assert_eq!(requests.len(), 1);
+    let state = &requests[0]["state"];
+    assert_eq!(state["memory"]["text"], stated(THURSDAY));
+    assert_eq!(state["memory"]["said_by"], "user");
+    assert_eq!(state["memory"]["work_in_progress"], false);
+    assert_eq!(state["later"][0]["text"], TUESDAY);
+    assert_eq!(state["later"][0]["writer"], "user");
+    assert_eq!(state["later"][0]["time"], "2023-11-14T22:13:20Z");
+    assert_eq!(
+        requests[0]["questions"]["changes"]["type"], "bool",
+        "{}",
+        requests[0]["questions"]
+    );
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+    assert_eq!(outcomes.outcomes.len(), 1);
+    assert!(outcomes.outcomes[0].selected, "a host-built keep proposal");
+    assert_eq!(rig.active_review_holds(), 0);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+}
+
+/// A review the classifier flags goes to the chat model, and a `low`-uncertainty `retire` that cites the later message is applied: the statement leaves the block and search.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flagged_review_is_written_by_the_chat_model_and_applied() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.answers(&[RETIRE_CITING_LATER]);
+    let (settled, requests) = rig.drain_classified(0.93).await;
+    assert_eq!((settled, requests.len()), (1, 1));
+    assert_eq!(
+        rig.attempts().len(),
+        1,
+        "one chat request for the flagged review"
+    );
+    let block = rig.block().await;
+    assert!(!block.contains(THURSDAY), "{block}");
+    assert!(block.contains(&stated(LINTER)), "{block}");
+    assert_eq!(
+        rig.search().await,
+        [(stated(LINTER), "visible".to_string())]
+    );
+    assert_eq!(rig.active_review_holds(), 0);
+}
+
+/// A change outside the action rule is dropped in `apply` and `contest`: the memory stays as it was and the proposal's hold ends. The rule needs the model's `low` uncertainty, and where a classifier decides it needs the classifier's flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_outside_the_action_rule_is_dropped() {
+    // The classifier flags and the model is unsure.
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.answers(&[RETIRE_UNSURE]);
+    assert_eq!(rig.drain_classified(0.9).await.0, 1);
+    assert_eq!(rig.attempts().len(), 1);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert_eq!(rig.active_review_holds(), 0);
+
+    // No classifier decides and the model is unsure.
+    for mode in [ReviewApply::Apply, ReviewApply::Contest] {
+        let rig = Rig::open(mode).await;
+        rig.state_rules(&[THURSDAY]).await;
+        rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+            .await;
+        rig.answers(&[RETIRE_UNSURE]);
+        assert_eq!(rig.drain().await, 1);
+        assert!(rig.block().await.contains(&stated(THURSDAY)), "{mode:?}");
+        assert_eq!(rig.active_review_holds(), 0, "{mode:?}");
+    }
+}
+
+/// A project that names a classifier whose harness asks for no classifier work is decided by the chat model, as a project that names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_a_harness_that_answers_classifier_work_the_chat_model_decides() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.answers(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    assert_eq!(rig.attempts().len(), 1);
+    assert!(!rig.block().await.contains(THURSDAY));
+}
+
+/// The reviewer writes no successor to the user's own statement: an accepted `revise` of one disputes it in `apply`, so it leaves the block and stays on search as a labeled row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn apply_disputes_a_user_statement_the_model_would_revise() {
+    let rig = Rig::open(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.answers(&[REVISE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    let block = rig.block().await;
+    assert!(!block.contains(THURSDAY), "{block}");
+    assert_eq!(
+        rig.search().await,
+        [
+            (stated(THURSDAY), "labeled".to_string()),
+            (stated(LINTER), "visible".to_string()),
+        ]
+    );
+}
+
+/// A response the provider stopped itself settles the review on that request as the model declining: one request is made and the statement stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_response_the_provider_stopped_settles_the_review_on_one_request() {
+    let rig = Rig::open(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.state.await_results.lock().unwrap().push_back(Err(
+        HistorySummarizerProducerError::RunFailed {
+            run_id: "run".to_string(),
+            detail: host_runtime::model_execution::backend::PI_PROVIDER_STOP_MESSAGE.to_string(),
+            classification: None,
+            class_field_present: false,
+        },
+    ));
+    assert_eq!(rig.drain().await, 1);
+    assert_eq!(rig.attempts().len(), 1);
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+    assert_eq!(outcomes.outcomes.len(), 1);
+    assert!(!outcomes.outcomes[0].selected);
+    assert_eq!(
+        outcomes.outcomes[0].abstained_reason,
+        Some(memory_store::memory_reviewer_ledger::AbstainReason::ModelDeclined)
+    );
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert_eq!(rig.drain().await, 0);
+}
+
+/// The classifier methods answer only a project whose user tier names the classifier the harness asks for, and refuse a body outside their fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn classifier_work_is_offered_only_for_the_configured_classifier() {
+    let unclassified = Rig::open(ReviewApply::Apply).await;
+    assert_eq!(
+        unclassified
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await,
+        json!({"state": "disabled"})
+    );
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    assert_eq!(
+        rig.call(json!({"method": NEXT, "session_id": "s1", "classifier": "other/classifier"}))
+            .await,
+        json!({"state": "disabled"})
+    );
+    assert_eq!(
+        rig.call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await,
+        json!({"state": "ready"})
+    );
+    assert_eq!(
+        rig.call(json!({
+            "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+            "lease": "00000000000000000000000000000000", "error": "provider_unavailable",
+        }))
+        .await,
+        json!({"state": "stale"})
+    );
+    for refused in [
+        json!({"method": NEXT, "session_id": "s1"}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 60_000}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "extra": 1}),
+        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0"}),
+        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0", "error": "boom"}),
+        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0", "answers": {}, "error": "cancelled"}),
+    ] {
+        let outcome = rig
+            .handler
+            .dispatch_value_for_test(test_route(FIRST), refused.clone())
+            .await;
+        assert!(
+            matches!(outcome, PreparedOutcome::Error { .. }),
+            "{refused} must be refused"
+        );
+    }
 }
 
 /// In `contest` mode a `retire` that cites a contradiction disputes its target: the statement leaves the next session's block and stays on explicit search as a labeled row. The retained statement is untouched.
@@ -371,7 +676,7 @@ async fn an_answer_from_another_model_is_withheld_and_closes_review() {
         rig.state_rules(&[THURSDAY, LINTER]).await;
         rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
             .await;
-        rig.answers_from(reported, &[RETIRE_CITING_LATER, RETAIN]);
+        rig.answers_from(reported, &[RETIRE_CITING_LATER]);
         assert_eq!(rig.drain().await, 0, "{reported:?}");
         assert_eq!(rig.attempts().len(), 1, "{reported:?}");
         assert_eq!(
@@ -396,6 +701,8 @@ async fn an_answer_from_another_model_is_withheld_and_closes_review() {
 async fn a_switched_root_is_reviewed_after_its_last_route_closes() {
     let rig = Rig::open(ReviewApply::Propose).await;
     rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
     let bound: Vec<RouteHandle> = rig
         .handler
         .bindings
@@ -416,7 +723,7 @@ async fn a_switched_root_is_reviewed_after_its_last_route_closes() {
             .latest_per_root()
             .is_empty()
     );
-    rig.answers(&[RETAIN]);
+    rig.answers(&[RETIRE_CITING_LATER]);
     assert_eq!(rig.drain().await, 1);
     assert_eq!(rig.attempts().len(), 1);
 
@@ -454,6 +761,8 @@ async fn a_project_without_the_switch_is_left_unreviewed() {
         );
     }
     rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
     assert_eq!(rig.drain().await, 0);
     assert!(rig.attempts().is_empty());
     let root = rig.project.to_string_lossy().to_string();

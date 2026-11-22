@@ -1047,6 +1047,56 @@ fn canonical_and_promoted_forms_share_an_origin_and_a_revoked_decision_revokes_b
     );
 }
 
+/// A memory review's conclusion stands on the references it read: the inspection ceiling refuses the next read and the ledger notes it for the proposal's limitations, while the conclusion stays usable. A fact-set review at the same ceiling is partial, as `accounting_bounds_operations_bytes_and_uncertain_disclosure` shows.
+#[test]
+fn a_memory_review_keeps_its_conclusion_when_the_inspection_ceiling_refuses_a_read() {
+    let fixture = Fixture::open();
+    let (capture_id, capture_digest) = fixture.ingest("capture", &[b'x'; 4096], true);
+    let binding = fixture.hold_binding(PROJECT);
+    let hold = fixture
+        .store
+        .acquire_execution_hold(
+            &binding,
+            std::slice::from_ref(&capture_id),
+            fixture.now + 2 * HOUR_MS,
+        )
+        .unwrap();
+    let mut broker = EvidenceBroker::new(
+        RunBinding {
+            hold: binding,
+            hold_id: hold.hold_id,
+            destination: kernel::ArtifactDestination::Local,
+        },
+        QuestionTemplate::MemoryStatement,
+    )
+    .unwrap()
+    .with_inspection_limit(2);
+    let alias = broker
+        .aliases
+        .issue(ReferenceExpectation::TemporaryCapture {
+            evidence_id: capture_id,
+            artifact_digest: capture_digest,
+            byte_length: 4096,
+            retain_until: fixture.now + HOUR_MS,
+        });
+    for _ in 0..2 {
+        broker
+            .read(&fixture.store, alias.as_str(), Some(0..1), fixture.now)
+            .unwrap();
+    }
+    assert!(!broker.ledger.inspections_exhausted());
+    assert_eq!(
+        broker
+            .read(&fixture.store, alias.as_str(), Some(0..1), fixture.now)
+            .unwrap_err()
+            .code,
+        RefusalCode::InspectionLimit
+    );
+    assert!(broker.ledger.inspections_exhausted());
+    assert!(broker.ledger.conclusions_usable());
+    assert!(!broker.ledger.is_partial());
+}
+
 #[test]
 fn accounting_bounds_operations_bytes_and_uncertain_disclosure() {
     let fixture = Fixture::open();

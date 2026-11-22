@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE;
 use memory_store::memory_reviewer_ledger::{MAX_PROVIDER_BYTES, ResponseAllowance};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -138,11 +139,17 @@ impl HostExecution {
             Ok(Err(_)) => return Err(unsent(SendError::Connect)),
             Err(_) => return Err(unsent(SendError::Deadline)),
         };
+        // A review's references carry their own times, and the labels state them; the harness's line about today's date would sit beside them as a second clock. The directive asks the harness for the system text as written.
+        let system = if system.is_empty() {
+            String::new()
+        } else {
+            format!("{PLAIN_SYSTEM_DIRECTIVE}{system}")
+        };
         let started = tokio::time::timeout(
             remaining(),
             producer.start_with_generation(
                 session,
-                system,
+                &system,
                 prompt,
                 &self.model_ref,
                 max_tokens,
@@ -178,6 +185,17 @@ impl HostExecution {
         // The run's session holds the prompt and the answer; it is deleted on every path.
         let _ = producer.purge_session(session).await;
         let sent = |error| HostFailure { error, sent: true };
+        // The provider ended the response itself without an answer, as a content filter does. The same request meets the same stop again, so the attempt reads as the model declining, which settles the review on this request.
+        if let Err(HistorySummarizerProducerError::RunFailed { detail, .. }) = &output
+            && host_runtime::model_execution::backend::is_provider_stop(detail)
+        {
+            return Ok(AssistantText {
+                text: String::new(),
+                stop_reason: Some(StopReason::Refusal),
+                model: None,
+                accounting: *accounting,
+            });
+        }
         let output = output.map_err(|error| {
             sent(match error {
                 HistorySummarizerProducerError::TimedOut => SendError::Deadline,
