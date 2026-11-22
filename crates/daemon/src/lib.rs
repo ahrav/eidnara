@@ -287,6 +287,8 @@ pub const OBSERVATIONAL_HARNESS: &str = "cli";
 pub(crate) struct RouteBindings {
     by_route: HashMap<RouteHandle, BoundRoute>,
     next_bind_seq: u64,
+    /// The newest participating binding of each root that set the review switch, kept after its route closes: the switch is the user's consent, and a review of a session's memories starts when a worker pass next runs, which can be after the session's route is gone. A later bind of the root with the switch off drops the entry.
+    reviewed: HashMap<PathBuf, (u64, SessionBinding)>,
 }
 
 struct BoundRoute {
@@ -352,6 +354,14 @@ impl RouteBindings {
     fn insert(&mut self, channel: RouteHandle, binding: SessionBinding) -> Option<SessionBinding> {
         let seq = self.next_bind_seq;
         self.next_bind_seq += 1;
+        if !binding.is_observational() {
+            if binding.config.memory_reviewer.enabled {
+                self.reviewed
+                    .insert(binding.project_root.clone(), (seq, binding.clone()));
+            } else {
+                self.reviewed.remove(&binding.project_root);
+            }
+        }
         self.by_route
             .insert(
                 channel,
@@ -411,6 +421,7 @@ impl RouteBindings {
 
     fn clear(&mut self) {
         self.by_route.clear();
+        self.reviewed.clear();
     }
 
     /// The bindings that take part in background work, with the sequence that orders them by insertion time. Observational bindings are excluded here, before any newest-per-root selection, so an observer never replaces an older participating binding, an observer-only root contributes nothing, and closing an observer reveals no binding that was not already selected. This is the only view background work reads: the MemoryReviewer worker's projects, the scheduler's roots and schedules, and the search maintenance roster.
@@ -437,6 +448,15 @@ impl RouteBindings {
                 .or_insert_with(|| binding.kernel_project.scope().clone());
         }
         projects.into_iter().collect()
+    }
+
+    /// The roots the MemoryReviewer worker runs for: the newest participating binding on every bound root, and for a root under the review switch whose routes have closed, the binding that last set the switch.
+    pub(crate) fn review_roots(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
+        let mut roots = self.latest_per_root();
+        for (root, (seq, binding)) in &self.reviewed {
+            roots.entry(root.as_path()).or_insert((*seq, binding));
+        }
+        roots
     }
 
     /// The newest participating binding on every root that has one, with the sequence that orders bindings by insertion time.
