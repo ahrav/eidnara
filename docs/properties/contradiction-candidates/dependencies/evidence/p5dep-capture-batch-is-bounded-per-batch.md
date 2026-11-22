@@ -19,8 +19,8 @@ descriptors a job publishes. Lens: resource boundaries; C9; D3.
   memory_store::memory_capture::MAX_CAPTURE_SOURCE_BYTES` (64 KiB,
   `crates/memory-store/src/memory_capture.rs:19`); `MAX_SOURCE_BATCH_UNITS =
   crate::memory_capture::MAX_CAPTURE_MESSAGES` (32,
-  `crates/daemon/src/memory_capture.rs:46`); `MAX_SOURCE_BATCH_BYTES =
-  MAX_CAPTURE_INPUT_BYTES` (64 KiB, `:47`).
+  `crates/daemon/src/memory_capture.rs:51`); `MAX_SOURCE_BATCH_BYTES =
+  MAX_CAPTURE_INPUT_BYTES` (64 KiB, `:52`).
 - `harness_sources.rs:1515` doc of `publish_screened` (long paragraph):
   screening order, `UnitTooLarge`, `Deferred` when the next unit would exceed
   units or bytes, `Refused` for secrets and re-admission blocks, replay counts

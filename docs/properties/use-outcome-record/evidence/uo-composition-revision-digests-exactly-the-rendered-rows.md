@@ -29,15 +29,15 @@ revision.
   by object id, then the `CURRENT_WORK` rows in the order the block renders
   them.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1479`);
+  (`crates/daemon/src/canonical_memory.rs:1503`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1713`);
+  (`crates/daemon/src/canonical_memory.rs:1737`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1730`);
+  (`crates/daemon/src/canonical_memory.rs:1754`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1752`);
+  (`crates/daemon/src/canonical_memory.rs:1776`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1679`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1703`). Status: unaudited.
 
 ## Failure scenario
 
