@@ -236,11 +236,11 @@ Reachability: default-production - every native capture submit publishes through
 Status: active
 Exercised: yes - `correction_supersedes_and_replay_or_duplicate_creates_no_extra_memory` replays a publish; the envelope test replays a receipt and changes its digest
 Guarantee: The capture commit's operation key is the project's `memory_capture` key for the job id and its request digest is the SHA-256 of the frozen prepared plan, so a replay of the same plan returns the stored receipt with no new rows and a changed plan under the same key is `Conflict`.
-Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. Production reaches the digest conflict when a committed source's queue row is pruned and the same message is queued and planned again with another extraction: the plan is released, the source waits out the dispatch backoff, and the ninth dispatch abandons it (`a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap`, `crates/daemon/src/memory_auto_delivery_tests.rs:8567`). Refinement R7 marked the conflict test-only before that path was handled
+Check: `always` - for every receipt of producer `memory_capture`, a second commit with the same key and digest is `replayed` and adds no row; one with a different digest returns `Conflict`. Production reaches the digest conflict when a committed source's queue row is pruned and the same message is queued and planned again with another extraction: the plan is released, the source waits out the dispatch backoff, and the ninth dispatch abandons it (`a_conflict_that_planning_again_cannot_clear_ends_at_the_dispatch_cap`, `crates/daemon/src/memory_auto_delivery_tests.rs:8620`). Refinement R7 marked the conflict test-only before that path was handled
 Fault/timing angle: the first commit's reply is lost and the job is retried
 Required faults and enabling state: a publish retried after success; a frozen plan altered under the same key
 Confidence: high - [evidence](evidence/p2-capture-commit-replays-by-job-key-and-frozen-digest.md). Read `publish_captured_memories` at `crates/daemon/src/memory_capture.rs:4332` and the frozen-plan read in `publish` at `:1829`
-Existing check: `crates/daemon/src/memory_capture.rs:11358`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24973` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:11358`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24970` (unaudited)
 Impact: a non-replaying retry would duplicate memories; a digest that omitted plan fields would let a changed plan replay the old receipt
 Open questions: None.
 
@@ -255,7 +255,7 @@ Check: `always` - for every prepared memory, `source.text.contains(quote)` for t
 Fault/timing angle: none
 Required faults and enabling state: a quote taken from another message of the batch; an invented `message_id`; a duplicate `message_id`; an empty quote; quotations of one user message that join into one statement
 Confidence: high - [evidence](evidence/p2-capture-quote-is-an-exact-substring-of-its-own-batch-source.md). Read `parse_capture_batch` at `crates/daemon/src/memory_capture.rs:375` and `validate_capture_memories` at `:934`; the prompt states the rule at `:290` (offset corrected by refinement R8)
-Existing check: `crates/daemon/src/memory_capture.rs:5017`, `:5050`, `:5082`, `:5224`, `:8654`, `:9965`; `crates/daemon/src/lib.rs:25381` (unaudited)
+Existing check: `crates/daemon/src/memory_capture.rs:5017`, `:5050`, `:5082`, `:5224`, `:8654`, `:9965`; `crates/daemon/src/lib.rs:25378` (unaudited)
 Impact: a quote from another message would cite evidence for a statement the source never made
 Open questions: None.
 
@@ -270,7 +270,7 @@ Check: `always` - for every capture job, `job_id == job_id(source, redacted_text
 Fault/timing angle: none
 Required faults and enabling state: the same source enqueued twice; a fragment id outside the store grammar
 Confidence: high - [evidence](evidence/p2-capture-job-and-decision-identity-derive-from-the-source-tuple.md). Read `job_id` at `crates/memory-store/src/memory_capture.rs:136`, the hashed fragment id in `native_capture_fragments` at `crates/daemon/src/memory_capture.rs:1075`, and the object id at `:4608`
-Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:9984`, `:10033`, `:11088`, `:11066`, `:11358`, `:10533`; `crates/daemon/src/lib.rs:24973`, `:26433` (unaudited)
+Existing check: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:9984`, `:10033`, `:11088`, `:11066`, `:11358`, `:10533`; `crates/daemon/src/lib.rs:24970`, `:26430` (unaudited)
 Impact: unstable ids would duplicate memories on retry and break the deterministic anchor id U3 derives from the job id
 Open questions: None.
 
@@ -281,11 +281,11 @@ Reachability: default-production - every capture publish, checkpoint, and sessio
 Status: active
 Exercised: yes - daemon tests race checkpoints and publishes against session delete
 Guarantee: Capture publication, capture checkpointing, source-capture publish, the failed-command recorder's judgment of one command result, and session deletion each hold `capture_commit_gate` for their whole store and Kernel write, so a deleted session's sources and failed-command facts land wholly before or wholly after the sweep.
-Check: `always` - no capture or source publish commit for a session has a `commit_seq` after that session's delete sweep committed; observed by holding the gate from a test thread and asserting the competing operation has not committed (refinement R5 adds this gate-hold observation method); a failed-command task handed off before the delete commits nothing after it, a fact committed before the delete stays live, and a later pass of the session writes as before
+Check: `always` - no capture or source publish commit for a session has a `commit_seq` after that session's delete sweep committed; observed by holding the gate from a test thread and asserting the competing operation has not committed (refinement R5 adds this gate-hold observation method); a failed-command task handed off before the delete or while it runs commits nothing after it, also after a delete that ended between its two stores, a fact committed before the delete stays live, and a pass handed off after the delete writes as before
 Fault/timing angle: a checkpoint, a publish, or a failed-command task admitted before a delete that runs after it, also a delete that ends between its two stores
 Required faults and enabling state: a session delete issued while a checkpoint, a publish, or a failed-command judgment waits on the gate or holds it
-Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1815`, the delete path at `crates/daemon/src/lib.rs:7068`, and `capture_after_response` at `crates/daemon/src/lib.rs:9333`, and the recorder's gate in `record` at `crates/daemon/src/memory_capture/failures.rs:2188`
-Existing check: `crates/daemon/src/lib.rs:25553`, `:25891`, `:26103`, `:26756`; `crates/daemon/src/lib.rs:25278`; `crates/daemon/src/source_capture_tests.rs:1062`; `crates/daemon/src/memory_auto_delivery_tests.rs:6265`, `:5546` (unaudited)
+Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1815`, the delete path at `crates/daemon/src/lib.rs:7068`, and `capture_after_response` at `crates/daemon/src/lib.rs:9330`, and the recorder's gate in `record` at `crates/daemon/src/memory_capture/failures.rs:2171`
+Existing check: `crates/daemon/src/lib.rs:25550`, `:25888`, `:26100`, `:26753`; `crates/daemon/src/lib.rs:25275`; `crates/daemon/src/source_capture_tests.rs:1062`; `crates/daemon/src/memory_auto_delivery_tests.rs:6312`, `:5539` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 
@@ -392,7 +392,7 @@ Check: `always` - every job frozen by one submission carries the identical `head
 Fault/timing angle: a `git checkout` between the submit and its retry
 Required faults and enabling state: a commit on the checked-out branch between the submit and the retry, with completion refused so the frozen plans stay in the store
 Confidence: high - [evidence](evidence/p2-new-head-observed-once-and-frozen.md). Read `accept_native_output` (`crates/daemon/src/memory_capture/native.rs:776`): one `observe_head` call precedes the loop that freezes each job's plan, and the receipt digest covers every frozen byte (`crates/daemon/src/memory_capture.rs:4396`)
-Existing check: `crates/daemon/src/lib.rs:25116`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3528`, `:3700` (unaudited)
+Existing check: `crates/daemon/src/lib.rs:25113`; `crates/daemon/src/memory_capture/head.rs:351`, `:373`, `:517`, `:690`; `crates/daemon/src/source_capture_tests.rs:3528`, `:3700` (unaudited)
 Impact: the anchor stops describing the revision at which the quote was observed, and the receipt no longer covers the anchor's value
 Open questions: None.
 
@@ -407,7 +407,7 @@ Check: `always-or-unreached` - the path runs only when the head observation is u
 Fault/timing angle: none
 Required faults and enabling state: a root with no `.git`; an unborn branch; an `objectFormat` gix refuses
 Confidence: medium - [evidence](evidence/p2-new-head-unavailable-keeps-decision-admitted.md). The owner decided on 2026-10-25 (OQ2-11) that a detached HEAD anchors at its commit, which removes detached HEAD from this path; `observe_head` (`crates/daemon/src/memory_capture/head.rs:32`) maps every other refusal to `HeadUnavailable`
-Existing check: `crates/daemon/src/memory_capture/head.rs:373`, `:416`, `:568`; `crates/daemon/src/lib.rs:25116`, `:25226`; `crates/daemon/src/source_capture_tests.rs:3700` (unaudited)
+Existing check: `crates/daemon/src/memory_capture/head.rs:373`, `:416`, `:568`; `crates/daemon/src/lib.rs:25113`, `:25223`; `crates/daemon/src/source_capture_tests.rs:3700` (unaudited)
 Impact: capture would stop in fresh checkouts
 Open questions: None.
 
