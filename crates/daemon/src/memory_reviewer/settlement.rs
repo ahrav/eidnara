@@ -931,6 +931,36 @@ fn copy_selection(
     })
 }
 
+/// Ends the review hold of the proposal `receipt` selects, after the Kernel settled that proposal: the settlement is the decision the hold kept the evidence for, so the hold's place in the project's allowance returns at once. Returns whether a live hold was released; a hold that already ended is left as it is.
+pub fn release_settled_review_hold(
+    store: &KernelStore,
+    receipt: MemoryReviewerReceipt,
+    live_memstore: &str,
+    causal_identity: &str,
+    now: i64,
+) -> Result<bool, String> {
+    let CopiedSelection { reference, run, .. } =
+        copy_selection(receipt, live_memstore, causal_identity)
+            .map_err(|refusal| refusal.to_string())?;
+    let review = MemoryReviewerHoldBinding {
+        subject: reference.candidate_id,
+        ..run
+    };
+    let Some(hold) = store
+        .lookup_review_hold(&review, now)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    match store.release_review_hold(&hold.hold_id, &review) {
+        Ok(()) => Ok(true),
+        Err(MemoryReviewerHoldError::Refused(
+            MemoryReviewerHoldRefusal::Released | MemoryReviewerHoldRefusal::Expired,
+        )) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. The row's queue deadline is judged against the receipt's completion time, which the Memory Store fenced against that same deadline, so a result selected while its queue was live stays readable afterward exactly as long as its review hold is live and every disclosed input still passes local policy.
 pub fn read_selected_proposal(
     store: &KernelStore,

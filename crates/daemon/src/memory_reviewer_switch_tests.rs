@@ -296,6 +296,15 @@ async fn a_switched_project_is_reviewed_through_the_host_and_propose_changes_no_
     let block = rig.block().await;
     assert!(block.contains(&stated(THURSDAY)), "{block}");
     assert!(block.contains(&stated(LINTER)), "{block}");
+    // The `retire` waits on a decision under its review hold. The `retain` asked for no write, so the worker accepted it and its hold ended: the project's hold allowance is spent only on proposals that wait.
+    let holds = rig
+        .handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .list_active_review_holds(crate::now_ms(), 16)
+        .unwrap();
+    assert_eq!(holds.len(), 1, "{holds:?}");
 
     // Nothing new bears on either statement, so a second drain selects and sends nothing.
     assert_eq!(rig.drain().await, 0);
@@ -343,6 +352,15 @@ async fn apply_retires_a_replaced_statement_from_the_block_and_from_search() {
         rig.search().await,
         [(stated(LINTER), "visible".to_string())]
     );
+    // Both proposals are settled, so both review holds have ended and the project's hold allowance is whole.
+    let holds = rig
+        .handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .list_active_review_holds(crate::now_ms(), 16)
+        .unwrap();
+    assert!(holds.is_empty(), "{holds:?}");
 }
 
 /// An answer is released only when the host reports it came from the configured model. An answer that names another model, or on the Pi harness names none, ends its attempt with no text admitted and closes review for the rest of the process: no proposal is published, no further request is made, and both statements stay delivered.
@@ -371,6 +389,50 @@ async fn an_answer_from_another_model_is_withheld_and_closes_review() {
         assert_eq!(rig.drain().await, 0);
         assert_eq!(rig.attempts().len(), 1);
     }
+}
+
+/// A session's memories are reviewed by the worker pass that follows it, which can run after the session's route has closed. A root that set the switch stays listed for the worker when every route on it is gone, and its statements are reviewed then; a later bind of the root with the switch off takes it out of review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_switched_root_is_reviewed_after_its_last_route_closes() {
+    let rig = Rig::open(ReviewApply::Propose).await;
+    rig.state_rules(&[THURSDAY]).await;
+    let bound: Vec<RouteHandle> = rig
+        .handler
+        .bindings
+        .lock()
+        .unwrap()
+        .by_route
+        .keys()
+        .copied()
+        .collect();
+    for channel in bound {
+        rig.handler.unbind_route(channel);
+    }
+    assert!(
+        rig.handler
+            .bindings
+            .lock()
+            .unwrap()
+            .latest_per_root()
+            .is_empty()
+    );
+    rig.answers(&[RETAIN]);
+    assert_eq!(rig.drain().await, 1);
+    assert_eq!(rig.attempts().len(), 1);
+
+    let off = DaemonConfig {
+        memory_reviewer: MemoryReviewerConfig::default(),
+        ..switch_config(ReviewApply::Propose)
+    };
+    rig.handler.bind_route(
+        test_route(FIRST),
+        SessionBinding {
+            config: off,
+            ..binding_with_harness(rig.project.to_str().unwrap(), "pi", "s1")
+        },
+    );
+    rig.handler.unbind_route(test_route(FIRST));
+    assert!(module_projects(&rig.store, &rig.handler.bindings).is_empty());
 }
 
 /// A project whose user tier leaves the switch off is listed for no review: no authority is taken, no job is selected, and no request is made.
