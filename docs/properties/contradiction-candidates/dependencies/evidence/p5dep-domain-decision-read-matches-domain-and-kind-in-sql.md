@@ -37,9 +37,9 @@ outside the domain never fails this read." Lens: protocol contracts; C4.
   domain_id` on each returned row ("Applied in the kernel query as well;
   `keeps` re-checks each returned row", `:104`).
 - Tests: `crates/kernel/tests/kernel_canonical_read.rs:229`
-  `the_domain_selection_equals_the_filtered_full_read`; `:450`
+  `the_domain_selection_equals_the_filtered_full_read`; `:476`
   `the_domain_selection_reads_no_row_of_another_domains_payload_pressure`;
-  `:422` `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order`;
+  `:448` `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order`;
   in-module `admission.rs:6635-6643` reads `"memory"` after a reopen.
 
 ## Failure scenario

@@ -241,7 +241,7 @@ Reachability: default-production - `domain_decisions_in_serving_order`
 (`canonical_memory.rs:318`) and `read_visible_within` with `RowSelection::DomainDecisions("memory")`
 (`crates/daemon/src/memory_capture.rs:3543-3550`) reach the domain read, both on default paths.
 Status: active
-Exercised: yes - `crates/kernel/tests/kernel_canonical_read.rs:229`, `:450`
+Exercised: yes - `crates/kernel/tests/kernel_canonical_read.rs:229`, `:476`
 compare the domain selection to the filtered full read and show another
 domain's payload volume does not cost the domain read.
 Guarantee: `visible_domain_decisions_as_of_in_scope(surface, as_of, domain,

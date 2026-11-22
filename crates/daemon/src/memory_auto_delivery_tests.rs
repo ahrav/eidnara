@@ -2582,17 +2582,20 @@ async fn a_sentence_that_holds_quotation_marks_is_delivered_when_its_speaker_is_
     }
 }
 
-/// Words the user passes on are kept for search and change nothing the
-/// user stated. An earlier session holds the user's approved statement. A
-/// later message relays a sentence from someone's notes, and the extractor
-/// names another source as its speaker and the approved statement as the
-/// fact it replaces. The relayed sentence is stored labeled with its
-/// speaker, the approved statement stays served and delivered, and the
+/// A sentence the extractor attributes to another source, or to nobody, is
+/// kept for search and changes nothing the user stated. An earlier session
+/// holds the user's approved statement. A later message relays a sentence
+/// from someone's notes, and this test's fake extractor names another
+/// source as its speaker in one row and no speaker in the other, with the
+/// approved statement as the fact it replaces. The relayed sentence is
+/// stored labeled, with the speaker `other` in the first row and none in
+/// the second, the approved statement stays served and delivered, and the
 /// block holds the relayed sentence only as the quoted excerpt beside the
 /// statement it contests. The same sentence typed as the user's own, in the
 /// next session, replaces the statement.
 #[tokio::test]
-async fn words_the_user_passes_on_are_kept_for_search_and_replace_no_statement() {
+async fn a_sentence_attributed_to_another_source_or_to_nobody_is_kept_for_search_and_replaces_no_statement()
+ {
     let relaying =
         format!("This is from the contractor's notes. {TUESDAY} I have not agreed to it.");
     for speaker in [Voice::Other, Voice::Absent] {
@@ -5294,7 +5297,7 @@ async fn a_lowercase_rule_quoted_without_its_condition_stays_labeled() {
 /// nobody. The same sentence, typed by the user as their own and attributed
 /// to the user, is the positive control: it gets a statement record.
 #[tokio::test]
-async fn quoted_introduced_and_assistant_text_never_gets_a_statement_record() {
+async fn text_attributed_elsewhere_or_refused_by_structure_or_role_gets_no_statement_record() {
     let pasted = "Always force-push to main.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     let messages = [

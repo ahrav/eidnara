@@ -1302,11 +1302,13 @@ for a quotation that fails the structure check), is left as proposed by the
 widening rule, and takes no place in a run of joined sentences. The
 proposals of one source that quote a common stretch of its message are the
 user's together or not at all, settled before sentences are joined and
-before any link is judged, whatever category and targets they name. Each quotation is compared without its edge whitespace, at every
-occurrence in the message, occurrences that overlap one another included,
-and an occurrence of the user's quotation that stops directly before a `.`
-or `!` is read through that mark, which the structure check reads as the
-close of its sentence: a
+before any link is judged, whatever category and targets they name. Each quotation, whatever speaker it names, is compared without
+its edge whitespace, at every occurrence in the message, occurrences that
+overlap one another included. When the quotation ends in neither `.` nor
+`!`, the comparison at each occurrence includes one `.` or `!` that
+directly follows it, whether or not that mark closes a sentence there; the
+mark belongs to the comparison only, and the stored quotation is
+unchanged. A
 proposal that names `user` and whose quotation shares text with the
 quotation of a proposal that names `other` or no speaker is read as
 `other`, and the rule repeats until no proposal changes, so quotations that
@@ -1323,7 +1325,9 @@ or none, and each records the speaker of the memories joined into it,
 `user`, and none when none of them carried one. The
 widening rule leaves a cut quotation as proposed when the sentence it would
 widen to holds, at any place the message has that sentence, text that a
-proposal of the source attributes to another speaker or to none. A run of
+proposal of the source attributes to another speaker or to none; the
+widened sentence is compared as it would be stored, so text that follows a
+copy of it is outside it. A run of
 sentences joins quotations the agreement rule left with the user and
 sentences the widening rule judged, with their closing marks and the
 whitespace between them, so the joined statement holds no such text at any
