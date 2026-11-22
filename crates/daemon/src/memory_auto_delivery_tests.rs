@@ -962,6 +962,119 @@ async fn a_user_correction_retires_a_memory_the_host_memory_tool_wrote() {
         explicit_search(&handler, (SECOND, "s2"), &project).await,
         [(stated(TUESDAY), "visible".to_string())]
     );
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the correction is delivered");
+    assert!(
+        replacement_dates(&block, &stated(TUESDAY)).is_some(),
+        "a replaced agent note is an observation the user had not stated: {block}"
+    );
+}
+
+const REPORTED_THURSDAY: &str = "The release checklist says branches are cut on Thursdays.";
+
+/// The suffix a delivered statement carries when it replaced an observation:
+/// the day the statement was recorded and the day the observation was.
+fn replacement_dates(block: &str, statement: &str) -> Option<(String, String)> {
+    let line = block.lines().find(|line| line.contains(statement))?;
+    let (_, dates) = line.split_once(&format!("{statement} (stated "))?;
+    let (stated_day, rest) = dates.split_once("; it replaces a value recorded ")?;
+    let recorded_day = rest.strip_suffix(" that the user had not stated)")?;
+    Some((stated_day.to_string(), recorded_day.to_string()))
+}
+
+/// An assistant reports what a project document says, and a later message
+/// of the user changes that value. The next session's block shows the
+/// user's statement with the day it was stated and the day the replaced
+/// report was recorded, so a session that reads the older value in the
+/// document can tell which is newer. The stored statement holds the user's
+/// words alone, and the replaced report is served no longer.
+#[tokio::test]
+async fn a_statement_that_replaced_an_assistants_report_is_delivered_with_both_days() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "assistant", REPORTED_THURSDAY)],
+        |_, _| vec![fact(REPORTED_THURSDAY)],
+    )
+    .await;
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        [(
+            format!("Assistant reported: {REPORTED_THURSDAY}"),
+            "labeled".to_string()
+        )]
+    );
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", TUESDAY)],
+        |_, existing| {
+            vec![Extracted {
+                quote: TUESDAY.to_string(),
+                replaces: ids_containing(existing, "Thursdays"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the user's statement is delivered");
+    let today = chrono::DateTime::from_timestamp_millis(now_ms())
+        .unwrap()
+        .format("%Y-%m-%d")
+        .to_string();
+    let (stated_day, recorded_day) =
+        replacement_dates(&block, &stated(TUESDAY)).unwrap_or_else(|| panic!("{block}"));
+    assert!(stated_day <= today && recorded_day <= stated_day, "{block}");
+    assert_eq!(stated_day.len(), 10, "{block}");
+    assert!(!block.contains(REPORTED_THURSDAY), "{block}");
+    assert_eq!(
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(stated(TUESDAY), "visible".to_string())],
+        "the stored statement is the user's words alone"
+    );
+}
+
+/// A statement that replaces the user's own earlier statement, and one that
+/// replaces nothing, are delivered as stated: the dates mark a replaced
+/// observation only.
+#[tokio::test]
+async fn a_statement_that_replaced_the_users_own_statement_carries_no_days() {
+    let (handler, _store, _dir, _project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", THURSDAY), ("m2", "user", PNPM)],
+        |text, _| vec![fact(text)],
+    )
+    .await;
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m3", "user", TUESDAY)],
+        |_, existing| {
+            vec![Extracted {
+                quote: TUESDAY.to_string(),
+                replaces: ids_containing(existing, "Thursday"),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+        .expect("the statements are delivered");
+    for statement in [stated(TUESDAY), stated(PNPM)] {
+        assert!(
+            block.lines().any(|line| line.ends_with(&statement)),
+            "{statement} is delivered as stated: {block}"
+        );
+    }
+    assert!(!block.contains("it replaces a value"), "{block}");
 }
 
 #[tokio::test]

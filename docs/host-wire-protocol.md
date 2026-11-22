@@ -1583,7 +1583,18 @@ fact's unchanged row. A stored plan whose fact names more than four contests
 is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
 sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
-by the fact already named writes nothing. The `<project-memory>` block renders
+by the fact already named writes nothing. A fact capture writes for a user's
+whole statement that replaces or retires a fact the Kernel serves as
+unapproved and whose text carries no `User stated` label, which an
+assistant's report and a memory the host memory tool wrote are, holds
+`replaces_observation` in its rationale, an object with `recorded_seq`, the
+commit sequence that recorded the earliest such fact. The `<project-memory>`
+block renders that statement, while its rationale holds no `contested_by`, as
+`<statement> (stated <date>; it replaces a value recorded <date> that the user had not stated)`,
+the dates being the UTC days on which the statement's first commit and the
+replaced fact's commit were recorded, `unknown date` when the commit log
+holds none; the stored statement and its explicit-search text hold the user's
+words alone. The `<project-memory>` block renders
 a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
 the dates being the UTC days on which the statement's first commit and the

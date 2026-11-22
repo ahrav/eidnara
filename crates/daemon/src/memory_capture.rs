@@ -3865,6 +3865,17 @@ pub(crate) struct CaptureRationale {
     source: Option<String>,
     #[serde(default)]
     lifetime: Option<Lifetime>,
+    /// The observation this user statement replaced.
+    #[serde(default)]
+    pub(crate) replaces_observation: Option<ReplacedObservation>,
+}
+
+/// A memory the user had not stated, such as an assistant's report of what a
+/// project file says, that a user statement replaced.
+#[derive(Clone, Copy, Deserialize)]
+pub(crate) struct ReplacedObservation {
+    /// The commit that recorded the replaced memory.
+    pub(crate) recorded_seq: i64,
 }
 
 /// The user statement that ended a statement of work in progress.
@@ -4551,6 +4562,16 @@ fn write_captured_memories(
             }
             named.push((target, primary, work, live));
         }
+        // The commit that recorded the earliest replaced memory that the
+        // Kernel serves as unapproved and that carries no `User stated`
+        // label: an assistant's report or an agent's note.
+        let replaced_observation = named
+            .iter()
+            .filter(|(_, _, _, live)| stated && !live)
+            .filter_map(|(target, ..)| earlier.get(*target))
+            .filter(|held| !held.payload.summary.starts_with(USER_STATED))
+            .map(|held| held.created_commit_seq)
+            .min();
         // A correction whose approval the Kernel refused is stored labeled.
         let labeled = attributed && approval == Approval::Refused;
         // The approved targets a labeled correction leaves live. Each is
@@ -4620,6 +4641,12 @@ fn write_captured_memories(
         }
         if let Some(lifetime) = memory.lifetime {
             rationale.insert("lifetime".to_owned(), json!(lifetime));
+        }
+        if let Some(recorded_seq) = replaced_observation {
+            rationale.insert(
+                "replaces_observation".to_owned(),
+                json!({"recorded_seq": recorded_seq}),
+            );
         }
         anchor_reason.record(&mut rationale, reasons);
         let evidence = citation.cite(&job.text, &memory.quote, &mut rationale, reasons);

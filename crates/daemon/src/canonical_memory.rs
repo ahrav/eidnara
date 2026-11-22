@@ -560,6 +560,7 @@ fn show_contests(
             ))
         })
         .collect();
+    show_replacements(store, response)?;
     if contests.is_empty() {
         return Ok(());
     }
@@ -632,6 +633,56 @@ fn show_contests(
             &contest.memory,
             text,
         );
+    }
+    Ok(())
+}
+
+/// Appends to each statement of `response` that replaced an observation the
+/// day the statement was recorded and the day the observation was. A
+/// contested statement keeps its text for [`contested_line`].
+fn show_replacements(
+    store: &kernel::KernelStore,
+    response: &mut ReadResponse,
+) -> Result<(), kernel::KernelError> {
+    let replacements: Vec<(String, i64, i64)> = response
+        .rows
+        .iter()
+        .filter(|row| {
+            row.visibility == SurfaceVisibility::Visible
+                && crate::memory_capture::is_capture_memory(&row.object)
+        })
+        .filter_map(|row| {
+            let decision = response.decisions.get(&row.object.object_id)?;
+            if !decision.payload.rationale.contains("replaces_observation") {
+                return None;
+            }
+            let recorded = crate::memory_capture::capture_rationale(decision);
+            if recorded.contested_by.is_some() {
+                return None;
+            }
+            Some((
+                decision.object_id.clone(),
+                crate::memory_capture::stated_commit(decision),
+                recorded.replaces_observation?.recorded_seq,
+            ))
+        })
+        .collect();
+    let day = |at: Option<i64>| {
+        at.and_then(chrono::DateTime::from_timestamp_millis)
+            .map_or_else(
+                || "unknown date".to_owned(),
+                |at| at.format("%Y-%m-%d").to_string(),
+            )
+    };
+    for (statement, stated_seq, recorded_seq) in replacements {
+        let stated = day(store.commit_recorded_at(stated_seq)?);
+        let recorded = day(store.commit_recorded_at(recorded_seq)?);
+        if let Some(decision) = response.decisions.get_mut(&statement) {
+            decision.payload.summary = format!(
+                "{} (stated {stated}; it replaces a value recorded {recorded} that the user had not stated)",
+                decision.payload.summary
+            );
+        }
     }
     Ok(())
 }
