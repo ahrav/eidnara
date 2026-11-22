@@ -1307,7 +1307,7 @@ quotation after the same letters, and this section adds the `_`, so that
 `'it_'` closes. Any other closing mark has a second reading and introduces
 what follows its
 literal: a mark directly before any other character, as in
-`«_Notice_«[Draft]` or `'main'-style`, may be the opening mark of a nested
+`'_Notice_'[Draft]` or `'main'-style`, may be the opening mark of a nested
 quotation or stand inside a longer word; a single mark after `s`, `S`, or a number may be a plural
 possessive or a feet mark, a double mark after a number an inch mark, a
 mark after a bracket or another character that is no letter a prime, a mark

@@ -7233,6 +7233,37 @@ mod tests {
                 "Keep the log.",
                 true,
             ),
+            (
+                "Use the 'main' branch.\n\nRun `make` first.\n\nKeep the offset at '+6' in `conf.toml`.",
+                "Keep the offset at '+6' in `conf.toml`.",
+                true,
+            ),
+            (
+                "Use the 'main' branch.\n\nRun `make` first.\n\nKeep the offset at '+6' in `conf.toml`.",
+                "Run `make` first.",
+                false,
+            ),
+            (
+                "Use the 'main' branch.\n\nRun `make` first.\n\nKeep the offset at '+6' in `conf.toml`.",
+                "Use the 'main' branch.",
+                true,
+            ),
+            ("Set ('main') as the default. Keep it.", "Keep it.", true),
+            (
+                "Set 'main'/'dev' as the defaults. Keep them.",
+                "Keep them.",
+                false,
+            ),
+            (
+                "Nenne den Zweig \u{201a}main\u{2018} hier.\n\nHalte ihn kurz.",
+                "Halte ihn kurz.",
+                true,
+            ),
+            (
+                "Send the rest to Hawai\u{2018}i.\n\nKeep the log.",
+                "Keep the log.",
+                false,
+            ),
             // A closing mark after sentence punctuation with nothing open.
             (
                 "Bob wrote 'it_' is the prefix. Always use it.' Then he left.",
