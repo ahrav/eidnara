@@ -1083,3 +1083,4 @@ pub(super) fn run_copy(
 }
 
 mod failure_evidence;
+pub(super) use failure_evidence::{completes_failure_line, is_output_failure_line, printable};

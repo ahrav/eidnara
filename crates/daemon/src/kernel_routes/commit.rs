@@ -1034,6 +1034,14 @@ fn apply(
                 )?;
                 let predecessor = scoped_object_state(envelope, filter, replaced_object_id)?;
                 refuse_rewriting_user_authority(envelope, replaced_object_id)?;
+                // The recorder alone writes the rows of a failure lineage:
+                // it finds a command's record as the newest row there and
+                // orders runs by the rationale it wrote, so a caller's
+                // successor on or off the lineage would stand in that place.
+                let recorded = crate::memory_capture::is_failure_lineage;
+                if recorded(&predecessor.object.source_id) || recorded(&spec.source_id) {
+                    return Err(KernelError::AdmissionPolicy);
+                }
                 // An existing replacement must belong to the bound project
                 // whether or not it is live: a foreign retired id answering
                 // `already_exists` where a foreign live one answers
@@ -1045,6 +1053,12 @@ fn apply(
                         Some(state) => {
                             scoped_object_state(envelope, filter, &spec.object_id)?;
                             if state.object.invalidated_commit_seq.is_none() {
+                                // A fold keeps the survivor's stored row, so
+                                // a survivor on a failure lineage is refused
+                                // as a successor there is.
+                                if recorded(&state.object.source_id) {
+                                    return Err(KernelError::AdmissionPolicy);
+                                }
                                 // A fold discards the spec and keeps the
                                 // survivor's stored label, so the floor is
                                 // judged against that label instead.
@@ -1464,10 +1478,22 @@ impl Operation {
     /// must lie outside the verifier's prefixes, and a disposition's reason
     /// must compose.
     fn validate(&mut self, reporter_taint: TaintClass) -> Result<(), InvalidReason> {
-        if self.names_verifier_ids() {
+        if self.names_verifier_ids() || self.opens_failure_lineage() {
             return Err(InvalidReason::InvalidInput);
         }
         self.compose_reason(reporter_taint)
+    }
+
+    /// Whether the operation inserts a decision on a lineage of failure
+    /// records. The daemon's recorder alone starts a record there, under the
+    /// capture publication gate, so a caller's row on the lineage would
+    /// stand as the command's newest record.
+    fn opens_failure_lineage(&self) -> bool {
+        matches!(
+            self,
+            Self::InsertDecision { spec }
+                if crate::memory_capture::is_failure_lineage(&spec.source_id)
+        )
     }
 
     /// Whether the operation names a row id under one of the verifier's prefixes

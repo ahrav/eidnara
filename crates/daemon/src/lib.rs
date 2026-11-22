@@ -2827,6 +2827,9 @@ pub struct HandlerCore {
     native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
     capture_commit_gate: Arc<Mutex<()>>,
     capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
+    /// The tool calls each session's failure records have judged, and the
+    /// live failure record of each command.
+    failure_memo: Arc<Mutex<memory_capture::FailureMemo>>,
     source_capture: Arc<source_capture::SourceCapture>,
     contradiction_candidates: Arc<contradiction_candidates::Candidates>,
     session_resolver: Arc<dyn SessionResolver>,
@@ -3859,6 +3862,7 @@ impl Handler {
             use_outcome_lifecycle: Arc::default(),
             contradiction_candidates: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
+            failure_memo: Arc::new(Mutex::new(memory_capture::FailureMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
@@ -4410,6 +4414,7 @@ impl Handler {
             use_outcome_lifecycle: Arc::default(),
             contradiction_candidates: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
+            failure_memo: Arc::new(Mutex::new(memory_capture::FailureMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
@@ -4830,6 +4835,10 @@ impl HandlerCore {
                 .lock()
                 .expect("capture memo mutex")
                 .remove_session(session);
+            self.failure_memo
+                .lock()
+                .expect("failure memo mutex")
+                .forget_session(session);
         }
         self.prompt_surface_epochs
             .lock()
@@ -7087,6 +7096,10 @@ impl HandlerCore {
                     .lock()
                     .expect("capture memo mutex")
                     .remove_session(&session_id);
+                core.failure_memo
+                    .lock()
+                    .expect("failure memo mutex")
+                    .forget_session(&session_id);
                 // A source capture handed off before this delete rechecks its ticket under the same gate and publishes nothing.
                 core.source_capture.invalidate_sessions();
                 deleted
@@ -9235,6 +9248,11 @@ impl HandlerCore {
             parsed.messages.len(),
             entry.meter.reserve(),
         ) {
+            self.spawn_tracked_task(checkpoint.run());
+        }
+        // A command result the window holds is recorded when it reports a
+        // failure, off the reply's path as the capture checkpoint is.
+        if let Some(checkpoint) = self.failure_checkpoint(&binding, &parsed) {
             self.spawn_tracked_task(checkpoint.run());
         }
         // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.

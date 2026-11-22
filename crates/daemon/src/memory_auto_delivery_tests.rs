@@ -4886,6 +4886,1216 @@ async fn a_lowercase_rule_quoted_without_its_condition_stays_labeled() {
     }
 }
 
+/// One run of a command in a session's window: the tool call's id, the
+/// command, the tool's output, whether the harness marked the result as an
+/// error, and when the result was written.
+struct Run {
+    call: &'static str,
+    command: &'static str,
+    output: &'static str,
+    flagged: bool,
+    at_ms: i64,
+}
+
+/// A run whose result the harness marks as an error and that prints a panic.
+fn failed_run(call: &'static str, command: &'static str, at_ms: i64) -> Run {
+    Run {
+        call,
+        command,
+        output: PANIC_OUTPUT,
+        flagged: true,
+        at_ms,
+    }
+}
+
+/// A run that reports no failure.
+fn passed_run(call: &'static str, command: &'static str, at_ms: i64) -> Run {
+    Run {
+        call,
+        command,
+        output: "test result: ok. 2 passed; 0 failed",
+        flagged: false,
+        at_ms,
+    }
+}
+
+/// A transform request whose window holds one user message and, for each
+/// run, the assistant's tool call and the tool's result.
+fn command_request(session: &str, runs: &[Run]) -> Value {
+    let mut messages = vec![ck("m-user", 1, "Run the suite.")];
+    for (index, run) in runs.iter().enumerate() {
+        let ordinal = 2 + 2 * index as u64;
+        let message = |role: &str, ordinal: u64, block: Value| IngressMessage {
+            mid: format!("m-{ordinal}"),
+            ordinal,
+            ck: serde_json::from_value(json!({
+                "role": role,
+                "content": [{ "kind": block }],
+                "meta": { "harness_id": format!("m-{ordinal}"), "created_at_ms": run.at_ms },
+            }))
+            .unwrap(),
+        };
+        messages.push(message(
+            "assistant",
+            ordinal,
+            json!({ "type": "tool_call", "id": run.call, "name": "bash", "input": { "command": run.command } }),
+        ));
+        let output = if run.flagged { "error_text" } else { "text" };
+        messages.push(message(
+            "tool",
+            ordinal + 1,
+            json!({
+                "type": "tool_result", "id": run.call, "tool_name": "bash",
+                "output": { "kind": { "type": output, "text": run.output } },
+            }),
+        ));
+    }
+    let mut request = request_with_usage(messages, 1_000, 200_000);
+    request["session_id"] = json!(session);
+    request
+}
+
+/// `request` as the window of a Pi session, which the transform handler
+/// derives from the session's native rows.
+fn window_of(request: Value) -> TransformRequest {
+    let mut window: TransformRequest = serde_json::from_value(request).unwrap();
+    window.serializer_profile = "pi".to_owned();
+    window
+}
+
+fn command_window(session: &str, runs: &[Run]) -> TransformRequest {
+    window_of(command_request(session, runs))
+}
+
+/// The configuration under which a failed command is recorded: memory
+/// capture on, and the user's consent to source capture, which retains tool
+/// results.
+fn failure_config() -> DaemonConfig {
+    DaemonConfig {
+        source_capture_enabled: true,
+        ..capture_config()
+    }
+}
+
+/// The binding of a primary session under [`failure_config`].
+fn failure_binding(project: &Path, harness: &str, session: &str) -> SessionBinding {
+    SessionBinding {
+        config: failure_config(),
+        ..binding_with_harness(project.to_str().unwrap(), harness, session)
+    }
+}
+
+/// Judges `window` as one pass of `session` and returns the rows written.
+async fn record_window(
+    handler: &Handler,
+    project: &Path,
+    session: &str,
+    window: &TransformRequest,
+) -> usize {
+    let binding = failure_binding(project, "pi", session);
+    match handler.failure_checkpoint(&binding, window) {
+        Some(checkpoint) => checkpoint.run().await,
+        None => 0,
+    }
+}
+
+/// Judges the command results of `runs` as one transform pass of `session`
+/// does, and returns the number of rows written.
+async fn record_failures(handler: &Handler, project: &Path, session: &str, runs: &[Run]) -> usize {
+    record_window(handler, project, session, &command_window(session, runs)).await
+}
+
+/// The memory rows explicit search serves, as the route returns them.
+async fn served_memory_rows(
+    handler: &Handler,
+    (channel, session): (u16, &str),
+    project: &Path,
+) -> Vec<Value> {
+    let request = kernel_route_fixtures::read_request(project, session, "explicit_search", None);
+    let mut body = body(
+        handler
+            .dispatch_value_for_test(test_route(channel), request)
+            .await,
+    );
+    let mut rows = body["rows"].take();
+    let rows = rows.as_array_mut().unwrap();
+    rows.retain(|row| row["object"]["domain_id"] == "memory");
+    std::mem::take(rows)
+}
+
+/// Starts the daemon's process state again: the failure memo is empty.
+fn forget_failure_memo(handler: &Handler) {
+    *handler.failure_memo.lock().unwrap() = memory_capture::FailureMemo::default();
+}
+
+/// Sends one operation through the generic `kernel.commit` route as session
+/// `s2` and returns the response body.
+async fn commit_operation(
+    handler: &Handler,
+    project: &Path,
+    key: &'static str,
+    operation: Value,
+) -> Value {
+    let request =
+        kernel_route_fixtures::commit_request(project, "s2", key, vec![operation], Vec::new());
+    body(
+        handler
+            .dispatch_value_for_test(test_route(SECOND), request)
+            .await,
+    )
+}
+
+/// A credential under a name the durable-text redactor reads as a secret's,
+/// and its value. Both are joined at run time, so no line of this file
+/// holds an assignment a secret scanner reports.
+fn keyed_credential(name: &str) -> (String, String) {
+    let value = ["v4lu3", "-of-", "the", "-fixture", "-7391"].concat();
+    let key = [name, "_", "pass", "word"].concat();
+    (format!("{key}={value}"), value)
+}
+
+const PANIC_OUTPUT: &str = "running 2 tests\ntest parses ... ok\ntest renders ... FAILED\n\nthread 'renders' panicked at src/render.rs:9:5:\nwidth is zero\n\nCommand exited with code 101";
+const LINK_OUTPUT: &str =
+    "error: linking with `cc` failed: exit status: 1\n\nCommand exited with code 101";
+const RESOLVED: &str = " Resolved: a later run of this command reported no failure.";
+
+/// A command fails in one session. A later session finds the failure on
+/// explicit search: the command's name, the exit code, the path the output
+/// names, and the failure lines of the output, as a labeled row that no
+/// memory block holds. A later failure of the same command takes the
+/// record's place, a run that passes marks it resolved, and a command run
+/// from another directory or under an environment assignment is the same
+/// command.
+#[tokio::test]
+async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_and_resolved_by_a_pass()
+ {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let first_pass = || {
+        [
+            Run {
+                call: "call-0",
+                command: "ls src",
+                output: "main.rs\nrender.rs",
+                flagged: false,
+                at_ms: 900,
+            },
+            failed_run("call-1", "cargo test -p api", 1_000),
+        ]
+    };
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &first_pass()).await,
+        1,
+        "the failed run is recorded and the listing is not"
+    );
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (record, visibility) = &rows[0];
+    assert_eq!(visibility, "labeled");
+    assert_eq!(
+        record,
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 101.\nCommand: cargo test [arguments left out]\nFailing path: src/render.rs:9:5\nOutput lines:\ntest renders ... FAILED\nthread 'renders' panicked at src/render.rs:9:5:\nwidth is zero\nCommand exited with code 101"
+    );
+    let row = &served_memory_rows(&handler, (SECOND, "s2"), &project).await[0];
+    assert_eq!(row["decision"]["decision_kind"], "TOOL_FAILURE");
+    let rationale = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .remove(0);
+    let digest = rationale["command_digest"].as_str().unwrap().to_owned();
+    assert_eq!(digest.len(), 32, "{rationale}");
+    assert_eq!(
+        row["object"]["source_id"],
+        format!("tool_failure:{digest}"),
+        "the command's lineage"
+    );
+    assert_eq!(row["object"]["source_revision"], 1);
+    assert_eq!(
+        rationale,
+        json!({
+            "source": "tool_failure",
+            "session": "s1",
+            "call": "call-1",
+            "tool": "bash",
+            "command": "cargo test [arguments left out]",
+            "command_digest": digest,
+            "state": "failed",
+            "evidence": "tool_status",
+            "output_text": "kept",
+            "exit_code": 101,
+            "path": "src/render.rs:9:5",
+            "at_ms": 1_000,
+            "at": "1970-01-01T00:00:01.000Z",
+        })
+    );
+    let served = serve(&handler, SECOND, "s2").await;
+    assert_eq!(project_memory_block(&served), None, "{served}");
+
+    // The same window again, as every later pass of the session sends it,
+    // and after a restart, when the memo is empty and the Kernel holds the
+    // call's record.
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &first_pass()).await,
+        0
+    );
+    forget_failure_memo(&handler);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &first_pass()).await,
+        0
+    );
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        rows
+    );
+
+    // A failure of the command with other arguments is another command and
+    // keeps its own record.
+    let other = failed_run("call-web", "cargo test -p web", 1_100);
+    assert_eq!(record_failures(&handler, &project, "s1", &[other]).await, 1);
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        2
+    );
+
+    // A later failure of the command, run from another directory under an
+    // assignment, takes the record's place.
+    let relinked = Run {
+        call: "call-2",
+        command: "cd services && RUST_LOG=debug cargo test -p api",
+        output: LINK_OUTPUT,
+        flagged: true,
+        at_ms: 2_000,
+    };
+    assert_eq!(
+        record_failures(&handler, &project, "s2", &[relinked]).await,
+        1
+    );
+    let api = |rows: Vec<(String, String)>| -> Vec<(String, String)> {
+        rows.into_iter()
+            .filter(|(record, _)| !record.contains("T00:00:01.100Z"))
+            .collect()
+    };
+    let rows = api(explicit_search(&handler, (THIRD, "s3"), &project).await);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].0.contains("linking with `cc` failed"), "{rows:?}");
+    assert!(!rows[0].0.contains("width is zero"), "{rows:?}");
+    let live = served_memory_rows(&handler, (THIRD, "s3"), &project).await;
+    let superseding = live
+        .iter()
+        .find(|row| row["object"]["source_id"] == format!("tool_failure:{digest}"))
+        .unwrap();
+    assert_eq!(superseding["object"]["source_revision"], 2);
+
+    // An earlier run seen late changes nothing, and neither does a pass
+    // that predates the failure or shares its millisecond.
+    let stale = [
+        failed_run("call-3", "cargo test -p api", 1_500),
+        passed_run("call-4", "cargo test -p api", 1_600),
+        passed_run("call-4b", "cargo test -p api", 2_000),
+    ];
+    assert_eq!(record_failures(&handler, &project, "s3", &stale).await, 0);
+    assert_eq!(
+        api(explicit_search(&handler, (THIRD, "s3"), &project).await),
+        rows
+    );
+
+    // A later run that reports no failure resolves the record, once. The
+    // first line states it.
+    let passed = || passed_run("call-5", "cargo test -p api", 3_000);
+    assert_eq!(
+        record_failures(&handler, &project, "s3", &[passed()]).await,
+        1
+    );
+    let resolved = api(explicit_search(&handler, (THIRD, "s3"), &project).await);
+    assert_eq!(resolved.len(), 1, "{resolved:?}");
+    assert_eq!(
+        resolved[0].0,
+        rows[0]
+            .0
+            .replacen("101.\n", &format!("101.{RESOLVED}\n"), 1)
+    );
+    assert_eq!(resolved[0].1, "labeled");
+    let rationales = memory_rationales(&handler, (THIRD, "s3"), &project).await;
+    let rationale = rationales
+        .iter()
+        .find(|rationale| rationale["command_digest"] == digest)
+        .unwrap();
+    assert_eq!(rationale["state"], "resolved");
+    assert_eq!(rationale["session"], "s2");
+    assert_eq!(rationale["at_ms"], 2_000);
+    assert_eq!(rationale["resolved_session"], "s3");
+    assert_eq!(rationale["resolved_call"], "call-5");
+    assert_eq!(rationale["resolved_at_ms"], 3_000);
+    assert_eq!(rationale["resolved_at"], "1970-01-01T00:00:03.000Z");
+    forget_failure_memo(&handler);
+    assert_eq!(
+        record_failures(&handler, &project, "s3", &[passed()]).await,
+        0
+    );
+    // A failure that ran between the recorded failure and the pass, seen
+    // late, is older than the resolved record, and a second pass resolves
+    // nothing more.
+    let late = [
+        failed_run("call-6", "cargo test -p api", 2_500),
+        passed_run("call-6b", "cargo test -p api", 3_500),
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &late).await, 0);
+    assert_eq!(
+        api(explicit_search(&handler, (THIRD, "s3"), &project).await),
+        resolved
+    );
+
+    // A failure after the pass takes the resolved record's place.
+    let again = failed_run("call-7", "cargo test -p api", 4_000);
+    assert_eq!(record_failures(&handler, &project, "s2", &[again]).await, 1);
+    let rows = api(explicit_search(&handler, (THIRD, "s3"), &project).await);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(!rows[0].0.contains(RESOLVED), "{rows:?}");
+    let rationales = memory_rationales(&handler, (THIRD, "s3"), &project).await;
+    let rationale = rationales
+        .iter()
+        .find(|rationale| rationale["command_digest"] == digest)
+        .unwrap();
+    assert_eq!(rationale["state"], "failed");
+    assert_eq!(rationale["call"], "call-7");
+}
+
+/// A record is a durable copy of part of a tool result, so it is written
+/// under the consent that retains tool results. With source capture off,
+/// which is the product default, with memory capture off, in a subagent's
+/// window, in an OpenCode window, for a tool call that carries no command,
+/// and for a result without a creation time, no record is written. The same
+/// window under both consents is recorded.
+#[tokio::test]
+async fn a_failure_is_recorded_only_under_the_source_capture_consent_of_a_primary_pi_session() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let failed = || command_window("s1", &[failed_run("call-1", "cargo test -p api", 1_000)]);
+    let bound = |config: DaemonConfig, harness: &str| SessionBinding {
+        config,
+        ..binding_with_harness(project.to_str().unwrap(), harness, "s1")
+    };
+    assert!(
+        !default_test_config().source_capture_enabled,
+        "source capture is off unless the user turns it on"
+    );
+    let refused = [
+        ("source capture off", bound(capture_config(), "pi")),
+        (
+            "memory capture off",
+            bound(
+                DaemonConfig {
+                    memory_auto_capture: false,
+                    ..failure_config()
+                },
+                "pi",
+            ),
+        ),
+        (
+            "memory off",
+            bound(
+                DaemonConfig {
+                    memory_enabled: false,
+                    ..failure_config()
+                },
+                "pi",
+            ),
+        ),
+        ("an OpenCode binding", bound(failure_config(), "opencode")),
+    ];
+    for (case, binding) in &refused {
+        assert!(
+            handler.failure_checkpoint(binding, &failed()).is_none(),
+            "{case}"
+        );
+    }
+    let on = failure_binding(&project, "pi", "s1");
+    let mut subagent = failed();
+    subagent.is_subagent = true;
+    assert!(handler.failure_checkpoint(&on, &subagent).is_none());
+    for profile in ["opencode-aisdk", "owned-llmrunner"] {
+        let mut other = failed();
+        other.serializer_profile = profile.to_owned();
+        assert!(
+            handler.failure_checkpoint(&on, &other).is_none(),
+            "{profile}"
+        );
+    }
+    // A file read that returns an error carries a path and no command.
+    let request = || command_request("s1", &[failed_run("call-1", "cargo test -p api", 1_000)]);
+    let mut read = request();
+    read["messages"][1]["ck"]["content"][0]["kind"]["input"] = json!({ "path": "src/render.rs" });
+    assert!(handler.failure_checkpoint(&on, &window_of(read)).is_none());
+    // A result without a creation time has no place among the command's
+    // runs: its call is settled and writes nothing.
+    let mut untimed = request();
+    untimed["messages"][2]["ck"]["meta"]["created_at_ms"] = Value::Null;
+    let untimed = window_of(untimed);
+    assert_eq!(record_window(&handler, &project, "s1", &untimed).await, 0);
+    assert_eq!(handler.failure_memo.lock().unwrap().calls_for_test("s1"), 1);
+    assert!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+    // The positive control, as another call of the session.
+    let recorded = [failed_run("call-2", "cargo test -p api", 1_000)];
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &recorded).await,
+        1
+    );
+}
+
+/// A failing command carries a credential in its arguments, in a form the
+/// redactor finds and in one it has no rule for, and prints one. The record
+/// holds the program's name and no argument, so neither form reaches it,
+/// and it holds no line of the output: the redactor reports a finding
+/// there, so the text is withheld and the record says where the output
+/// stands. The path and the error name come from lines without a finding.
+/// An operand the redactor rewrites is no plain word and stays out too.
+#[tokio::test]
+async fn a_record_holds_no_credential_of_its_command_or_its_output() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let (assignment, value) = keyed_credential("db");
+    let short = ["-p", value.as_str()].concat();
+    let output: &'static str = format!(
+        "error[E0308]: mismatched types\n  --> src/deploy.rs:14:9\nerror: login refused for {assignment}\n\nCommand exited with code 1"
+    )
+    .leak();
+    let runs = [
+        Run {
+            call: "call-1",
+            command: format!("deploy --{assignment} {short} --target api").leak(),
+            output,
+            flagged: true,
+            at_ms: 1_000,
+        },
+        Run {
+            call: "call-2",
+            command: format!("deploy {assignment}").leak(),
+            output: "error: no target\n\nCommand exited with code 2",
+            flagged: true,
+            at_ms: 2_000,
+        },
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 2);
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    for text in rows
+        .iter()
+        .map(|(record, _)| record.clone())
+        .chain(rationales.iter().map(Value::to_string))
+    {
+        assert!(!text.contains(&value), "{text}");
+        assert!(!text.contains("REDACTED"), "{text}");
+    }
+    let withheld = rows
+        .iter()
+        .find(|(record, _)| record.contains("exit code 1."))
+        .unwrap();
+    assert_eq!(
+        withheld.0,
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 1.\nCommand: deploy [arguments left out]\nFailing path: src/deploy.rs:14:9\nError: E0308\nOutput text withheld: the redactor found credential-shaped content in the output. The whole output stands in the result of tool call call-1 of session s1 while that session's history holds it."
+    );
+    let rationale = rationales
+        .iter()
+        .find(|rationale| rationale["call"] == "call-1")
+        .unwrap();
+    assert_eq!(rationale["output_text"], "withheld");
+    assert_eq!(rationale["command"], "deploy [arguments left out]");
+    // The positive control: an output without a finding keeps its lines.
+    let kept = rows
+        .iter()
+        .find(|(record, _)| record.contains("exit code 2."))
+        .unwrap();
+    assert!(
+        kept.0.ends_with(
+            "\nCommand: deploy [arguments left out]\nOutput lines:\nerror: no target\nCommand exited with code 2"
+        ),
+        "{kept:?}"
+    );
+    // Two command lines that differ in the credential alone are one
+    // command: the later failure takes the record's place.
+    let rotated = ["rot4t3d", "-fixture", "-2208"].concat();
+    let again = Run {
+        call: "call-3",
+        command: format!("deploy {}", assignment.replace(&value, &rotated)).leak(),
+        output: "error: no target\n\nCommand exited with code 3",
+        flagged: true,
+        at_ms: 3_000,
+    };
+    assert_eq!(record_failures(&handler, &project, "s1", &[again]).await, 1);
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|(record, _)| !record.contains("exit code 2.")),
+        "{rows:?}"
+    );
+}
+
+/// A command line that hides its exit status reports success to the tool.
+/// The status the command line printed decides as the tool's status does,
+/// the shell's report of a program it did not find is a failure, and a
+/// failure line is one where a pipe or a list hides the status. A single
+/// command that the tool reports as passed is a pass whatever its output
+/// holds.
+#[tokio::test]
+async fn a_failure_behind_a_hidden_exit_status_is_recorded_on_stated_grounds() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let unmarked = |call: &'static str, command: &'static str, output: &'static str, at_ms| Run {
+        call,
+        command,
+        output,
+        flagged: false,
+        at_ms,
+    };
+    const BUILD: &str = "error: could not compile `api`\nwarning: build failed";
+    let runs = [
+        unmarked(
+            "call-1",
+            "cargo build -p api; echo \"exit=$?\"",
+            "error: could not compile `api`\nexit=101",
+            1_000,
+        ),
+        unmarked(
+            "call-2",
+            "cargo build -p web 2>&1 | tail -n 40",
+            BUILD,
+            2_000,
+        ),
+        unmarked(
+            "call-3",
+            "pnpm typecheck 2>&1 | tee check.log",
+            "bash: line 1: pnpm: command not found",
+            3_000,
+        ),
+        // A search through a log prints failure lines and passes.
+        unmarked("call-4", "grep -rn error: logs/build.log", BUILD, 4_000),
+        // The command line printed status 0.
+        unmarked(
+            "call-5",
+            "cargo build -p cli; echo \"exit=$?\"",
+            "error: could not compile `api`\nexit=0",
+            5_000,
+        ),
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 3);
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    let grounds = |call: &str| {
+        let rationale = rationales
+            .iter()
+            .find(|rationale| rationale["call"] == call)
+            .unwrap_or_else(|| panic!("{call}: {rationales:?}"));
+        (
+            rationale["evidence"].as_str().unwrap().to_owned(),
+            rationale["exit_code"].as_i64(),
+        )
+    };
+    assert_eq!(grounds("call-1"), ("printed_status".to_owned(), Some(101)));
+    assert_eq!(grounds("call-2"), ("failure_lines".to_owned(), None));
+    assert_eq!(grounds("call-3"), ("shell_report".to_owned(), None));
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert!(
+        rows.iter().any(|(record, _)| record.contains(
+            ": the command failed: its command line printed exit status 101.\nCommand: cargo build [arguments left out]\n"
+        )),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|(record, _)| record.contains(
+            ": the output holds failure lines and the command line hides its exit status from the tool.\n"
+        )),
+        "{rows:?}"
+    );
+    // A later run of the piped build without a failure line resolves its
+    // record.
+    let passed = unmarked(
+        "call-6",
+        "cargo build -p web 2>&1 | tail -n 40",
+        "Finished `dev` profile",
+        6_000,
+    );
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[passed]).await,
+        1
+    );
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    let resolved: Vec<&Value> = rationales
+        .iter()
+        .filter(|rationale| rationale["state"] == "resolved")
+        .collect();
+    assert_eq!(resolved.len(), 1, "{rationales:?}");
+    assert_eq!(resolved[0]["call"], "call-2");
+}
+
+/// The transform handler derives a Pi window from the request's native rows
+/// and hands its failed command to a detached task, which writes the record
+/// from the call, the command, the exit code, and the result's time. A
+/// checkpoint handed off before `session.delete` writes nothing after it.
+#[tokio::test]
+async fn a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writes_nothing() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let rows = vec![
+        json!({ "id": "1a2b3c4d", "message": {
+            "role": "user", "content": [{ "type": "text", "text": "Run the suite." }],
+            "timestamp": 900
+        } }),
+        json!({ "id": "2b3c4d5e", "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall", "id": "call-1", "name": "bash",
+                "arguments": { "command": "cargo test -p api" }
+            }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": 950
+        } }),
+        json!({ "id": "3c4d5e6f", "message": {
+            "role": "toolResult", "toolCallId": "call-1", "toolName": "bash",
+            "content": [{ "type": "text", "text": PANIC_OUTPUT }], "isError": true,
+            "timestamp": 1_000
+        } }),
+    ];
+    let mut request = request_with_usage(Vec::new(), 1_000, 200_000);
+    request["session_id"] = json!("s1");
+    request["serializer_profile"] = json!("pi");
+    request["native_messages"] = json!(rows);
+    call_transform_request_on_channel(&handler, FIRST, request).await;
+    let mut rationales = Vec::new();
+    for _ in 0..500 {
+        rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+        if !rationales.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(rationales.len(), 1, "{rationales:?}");
+    let rationale = &rationales[0];
+    assert_eq!(
+        (
+            &rationale["session"],
+            &rationale["call"],
+            &rationale["tool"]
+        ),
+        (&json!("s1"), &json!("call-1"), &json!("bash"))
+    );
+    assert_eq!(
+        (&rationale["exit_code"], &rationale["at_ms"]),
+        (&json!(101), &json!(1_000))
+    );
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rows[0].1, "labeled");
+    assert!(
+        rows[0].0.starts_with(
+            "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 101.\nCommand: cargo test [arguments left out]\n"
+        ),
+        "{rows:?}"
+    );
+
+    let binding = failure_binding(&project, "pi", "s1");
+    let next = || command_window("s1", &[failed_run("call-2", "npm run deploy", 2_000)]);
+    // The detached task of the request above releases the session's memo
+    // entry when it ends.
+    let mut handed_off = None;
+    for _ in 0..500 {
+        handed_off = handler.failure_checkpoint(&binding, &next());
+        if handed_off.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let handed_off = handed_off.expect("the session's earlier checkpoint ended");
+    assert!(
+        handler.failure_checkpoint(&binding, &next()).is_none(),
+        "one checkpoint of a session is in flight at a time"
+    );
+    let deleted = handler
+        .core
+        .handle_session_delete_value(
+            test_route(FIRST),
+            &json!({ "method": "session.delete", "session_id": "s1" }),
+        )
+        .await;
+    assert!(
+        matches!(deleted, PreparedOutcome::Response(_)),
+        "{deleted:?}"
+    );
+    assert_eq!(handed_off.run().await, 0);
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        rows
+    );
+    // The positive control: the session's next pass carries the window
+    // again and writes the record.
+    assert_eq!(record_window(&handler, &project, "s1", &next()).await, 1);
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert!(
+        rows.iter()
+            .any(|(record, _)| record.contains("\nCommand: npm run [arguments left out]\n")),
+        "{rows:?}"
+    );
+}
+
+/// A session writes 64 failure records, resolved copies included. The
+/// count is the number of the session's commits in the Kernel's log, so it
+/// holds after a restart and for a record another session has superseded,
+/// and it is each session's own. A second project keeps its own record of a
+/// command.
+#[tokio::test]
+async fn a_session_writes_at_most_its_bound_of_failure_records_also_after_a_restart() {
+    let (handler, _store, dir, project) = delivery_handler(failure_config()).await;
+    let runs: Vec<Run> = (0..65)
+        .map(|index| {
+            failed_run(
+                format!("call-{index}").leak(),
+                format!("make target-{index}").leak(),
+                1_000 + index,
+            )
+        })
+        .collect();
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 64);
+    let over = || failed_run("call-over", "make target-over", 9_000);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[over()]).await,
+        0
+    );
+    // A resolved copy is a record of the session that writes it.
+    let passed = || passed_run("call-pass", "make target-0", 9_500);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[passed()]).await,
+        0
+    );
+    // Another session supersedes one of the session's records, which still
+    // counts toward the session's bound.
+    let superseding = failed_run("call-other", "make target-1", 9_600);
+    assert_eq!(
+        record_failures(&handler, &project, "s2", &[superseding]).await,
+        1
+    );
+    forget_failure_memo(&handler);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[over(), passed()]).await,
+        0
+    );
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        64
+    );
+    assert_eq!(
+        record_failures(&handler, &project, "s2", &[over()]).await,
+        1
+    );
+
+    let other = dir.path().join("other-project");
+    std::fs::create_dir_all(&other).unwrap();
+    bind(&handler, OTHER_PROJECT, &other, "s-other", failure_config());
+    assert_eq!(
+        record_failures(&handler, &other, "s-other", &[over()]).await,
+        1
+    );
+    // A session and a call id that the first project has judged name
+    // another call in the second project.
+    let again = failed_run("call-over", "make target-over", 9_100);
+    assert_eq!(record_failures(&handler, &other, "s2", &[again]).await, 1);
+    assert_eq!(
+        explicit_search(&handler, (OTHER_PROJECT, "s-other"), &other)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        65
+    );
+}
+
+/// A pass considers the last 1,024 command results of its window, which is
+/// the number of calls the session's memo holds, and hands off the earliest
+/// 256 unjudged ones: the result ahead of the 1,024 is left unjudged, and
+/// the rest are settled in four passes.
+#[tokio::test]
+async fn a_pass_hands_off_its_bound_of_the_last_results_that_its_memo_holds() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let runs: Vec<Run> = (0..1_025)
+        .map(|index| passed_run(format!("call-{index}").leak(), "ls src", 1_000 + index))
+        .collect();
+    let scope = kernel_routes::ProjectBinding::new(&project);
+    let seen = |call: &str| {
+        let memo = handler.failure_memo.lock().unwrap();
+        (
+            memo.calls_for_test("s1"),
+            memo.has_seen_for_test(scope.digest(), "s1", call),
+        )
+    };
+    for pass in 1..=4 {
+        assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+        let last = format!("call-{}", 256 * pass);
+        assert_eq!(seen(&last), (256 * pass, true), "{pass}");
+        assert_eq!(seen("call-0"), (256 * pass, false), "{pass}");
+        if pass < 4 {
+            let next = format!("call-{}", 256 * pass + 1);
+            assert_eq!(seen(&next), (256 * pass, false), "{pass}");
+        }
+    }
+    let binding = failure_binding(&project, "pi", "s1");
+    assert!(
+        handler
+            .failure_checkpoint(&binding, &command_window("s1", &runs))
+            .is_none(),
+        "a window of judged calls hands off nothing"
+    );
+    assert_eq!(handler.failure_memo.lock().unwrap().held_for_test(), (0, 0));
+}
+
+/// Another writer retires a command's record. The retired row stays the
+/// newest of the command's lineage and suppresses no failure: the next
+/// failure of the command, also one that ran before the retired record's
+/// run, writes the lineage's next revision, and a pass resolves nothing
+/// while the newest row is retired. A retired record's own call writes
+/// nothing again.
+#[tokio::test]
+async fn a_retired_record_gives_way_to_the_next_failure_of_its_command() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let first = || failed_run("call-1", "cargo test -p api", 1_000);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[first()]).await,
+        1
+    );
+    let retire_live_record = |key: &'static str| {
+        let (handler, project) = (&handler, &project);
+        async move {
+            let row = served_memory_rows(handler, (SECOND, "s2"), project)
+                .await
+                .remove(0);
+            let retire = json!({"op": "retire_decision", "object_id": row["object"]["object_id"]});
+            let retired = commit_operation(handler, project, key, retire).await;
+            assert_eq!(retired["state"]["kind"], "available", "{retired}");
+            assert!(
+                served_memory_rows(handler, (SECOND, "s2"), project)
+                    .await
+                    .is_empty()
+            );
+        }
+    };
+    retire_live_record("retire-first").await;
+    let passed = passed_run("call-pass", "cargo test -p api", 1_200);
+    assert_eq!(
+        record_failures(&handler, &project, "s3", &[passed]).await,
+        0,
+        "a retired record is resolved by no pass"
+    );
+    let earlier = failed_run("call-0", "cargo test -p api", 500);
+    assert_eq!(
+        record_failures(&handler, &project, "s3", &[earlier]).await,
+        1,
+        "a retired record suppresses no failure"
+    );
+    let row = &served_memory_rows(&handler, (SECOND, "s2"), &project).await[0];
+    assert_eq!(row["object"]["source_revision"], 2);
+    retire_live_record("retire-second").await;
+    forget_failure_memo(&handler);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[first()]).await,
+        0,
+        "the Kernel holds the call's record"
+    );
+    assert!(
+        served_memory_rows(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+}
+
+/// A disposition that rejects a command's record hides it from explicit
+/// search, and the Kernel bars the rejected row's supersession. A later
+/// failure and a later pass of the command write nothing and are settled,
+/// so the rejected text reaches no new row.
+#[tokio::test]
+async fn a_rejected_record_is_superseded_by_no_later_run_of_its_command() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let failed = [failed_run("call-1", "cargo test -p api", 1_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &failed).await, 1);
+    let row = served_memory_rows(&handler, (SECOND, "s2"), &project)
+        .await
+        .remove(0);
+    let reject = json!({
+        "op": "disposition", "object_id": row["object"]["object_id"], "event": "explicit_reject"
+    });
+    let rejected = commit_operation(&handler, &project, "reject", reject).await;
+    assert_eq!(rejected["state"]["kind"], "available", "{rejected}");
+    assert!(
+        served_memory_rows(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+    let later = [
+        failed_run("call-2", "cargo test -p api", 2_000),
+        passed_run("call-3", "cargo test -p api", 3_000),
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &later).await, 0);
+    assert!(
+        served_memory_rows(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        handler.failure_memo.lock().unwrap().calls_for_test("s1"),
+        3,
+        "the refused calls are settled"
+    );
+    // The positive control: another command of the project is recorded.
+    let other = [failed_run("call-4", "cargo build", 4_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &other).await, 1);
+}
+
+/// Pi marks a tool call it blocked, did not find, or refused the arguments
+/// of as an error, and one whose command it aborted or timed out. None of
+/// them ran to its own outcome, so none changes the command's record, and
+/// each call is settled.
+#[tokio::test]
+async fn a_call_the_harness_refused_or_ended_changes_no_record_of_its_command() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let failed = [failed_run("call-1", "cargo test -p api", 1_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &failed).await, 1);
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    let refused = |call: &'static str, output: &'static str, at_ms: i64| Run {
+        call,
+        command: "cargo test -p api",
+        output,
+        flagged: true,
+        at_ms,
+    };
+    let runs = [
+        refused("call-2", "Tool execution was blocked", 2_000),
+        refused("call-3", "Tool bash not found", 2_100),
+        refused(
+            "call-4",
+            "Validation failed for tool \"bash\":\n  - command: must be string",
+            2_200,
+        ),
+        refused(
+            "call-5",
+            "test renders ... FAILED\n\nCommand aborted",
+            2_300,
+        ),
+        refused(
+            "call-6",
+            "error: build failed\n\nCommand timed out after 120 seconds",
+            2_400,
+        ),
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        rows
+    );
+    assert_eq!(handler.failure_memo.lock().unwrap().calls_for_test("s1"), 6);
+    // The positive control: a marked failure of the command takes the
+    // record's place.
+    let again = [refused(
+        "call-7",
+        "error: build failed\n\nCommand exited with code 1",
+        3_000,
+    )];
+    assert_eq!(record_failures(&handler, &project, "s1", &again).await, 1);
+}
+
+/// The results of one command in one window are judged in the order they
+/// ran: the failure is recorded and the pass after it resolves it in the
+/// same pass. A result under a call id that two tool calls of the window
+/// carry is left out, since the id names neither call alone.
+#[tokio::test]
+async fn results_of_one_window_are_judged_in_run_order_and_a_shared_call_id_is_left_out() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let runs = [
+        failed_run("call-1", "cargo test -p api", 1_000),
+        passed_run("call-2", "cargo test -p api", 2_000),
+        failed_run("call-dup", "make bundle", 3_000),
+        failed_run("call-dup", "make bundle", 3_100),
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 2);
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rationales.len(), 1, "{rationales:?}");
+    assert_eq!(rationales[0]["state"], "resolved");
+    assert_eq!(rationales[0]["call"], "call-1");
+    assert_eq!(rationales[0]["resolved_call"], "call-2");
+}
+
+/// A Pi result whose message is larger than the bytes all checkpoints hold
+/// can never be handed off. Its call is settled unread, it resolves nothing,
+/// and the small failure after it in the window is recorded by the same
+/// pass.
+#[tokio::test]
+async fn a_result_too_large_to_hold_is_settled_unread_and_the_results_after_it_are_judged() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let earlier = [failed_run("call-0", "make bundle", 500)];
+    assert_eq!(record_failures(&handler, &project, "s1", &earlier).await, 1);
+    let part = "x".repeat(12 * 1024 * 1024);
+    let call = |id: &str, row: &str, command: &str, at: i64| {
+        json!({ "id": row, "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall", "id": id, "name": "bash", "arguments": { "command": command }
+            }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": at
+        } })
+    };
+    let native: Vec<Arc<Value>> = [
+        json!({ "id": "1a2b3c4d", "message": {
+            "role": "user", "content": [{ "type": "text", "text": "Build it." }], "timestamp": 900
+        } }),
+        call("call-big", "2b3c4d5e", "make bundle", 1_000),
+        json!({ "id": "3c4d5e6f", "message": {
+            "role": "toolResult", "toolCallId": "call-big", "toolName": "bash",
+            "content": [
+                { "type": "text", "text": part }, { "type": "text", "text": part },
+                { "type": "text", "text": part },
+            ],
+            "isError": false, "timestamp": 1_100
+        } }),
+        call("call-small", "4d5e6f70", "cargo test -p api", 1_200),
+        json!({ "id": "5e6f7081", "message": {
+            "role": "toolResult", "toolCallId": "call-small", "toolName": "bash",
+            "content": [{ "type": "text", "text": PANIC_OUTPUT }], "isError": true,
+            "timestamp": 1_300
+        } }),
+    ]
+    .into_iter()
+    .map(Arc::new)
+    .collect();
+    let mut window = command_window("s1", &[]);
+    window.messages = crate::codec::pi::derive_pi_window(&native)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let large = crate::retained_size::ingress_message_retained_bytes(&window.messages[2]);
+    assert!(large > 32 * 1024 * 1024, "{large}");
+    assert_eq!(record_window(&handler, &project, "s1", &window).await, 1);
+    let mut states: Vec<(String, String)> = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .iter()
+        .map(|rationale| {
+            let text = |name: &str| rationale[name].as_str().unwrap().to_owned();
+            (text("command"), text("state"))
+        })
+        .collect();
+    states.sort();
+    assert_eq!(
+        states,
+        [
+            (
+                "cargo test [arguments left out]".to_owned(),
+                "failed".to_owned()
+            ),
+            ("make bundle".to_owned(), "failed".to_owned()),
+        ],
+        "the unread result resolves nothing"
+    );
+    let scope = kernel_routes::ProjectBinding::new(&project);
+    let memo = handler.failure_memo.lock().unwrap();
+    assert!(memo.has_seen_for_test(scope.digest(), "s1", "call-big"));
+    assert!(memo.has_seen_for_test(scope.digest(), "s1", "call-small"));
+    assert_eq!(memo.held_for_test(), (0, 0));
+}
+
+/// The generic commit route starts no row on a failure lineage and
+/// supersedes no row onto one, off one, or along one, so the recorder's
+/// rows are the only ones there and the newest row of a lineage is the
+/// command's record. Retiring a record stays open to the route.
+#[tokio::test]
+async fn the_generic_commit_route_writes_no_row_on_a_failure_lineage() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let failed = [failed_run("call-1", "cargo test -p api", 1_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &failed).await, 1);
+    let record = served_memory_rows(&handler, (SECOND, "s2"), &project)
+        .await
+        .remove(0);
+    let record_id = record["object"]["object_id"].as_str().unwrap().to_owned();
+    let lineage = record["object"]["source_id"].as_str().unwrap().to_owned();
+    assert!(lineage.starts_with("tool_failure:"), "{lineage}");
+    let spec = |object: &str, kind: &str, source: &str, revision: i64| {
+        json!({
+            "decision_id": format!("dec-{object}"),
+            "object_id": object,
+            "domain_id": "memory",
+            "decision_kind": kind,
+            "payload": { "summary": "A note about the suite.", "rationale": "{}" },
+            "source_id": source,
+            "source_revision": revision,
+        })
+    };
+    let insert = |object: &str, kind: &str, source: &str| json!({ "op": "insert_decision", "spec": spec(object, kind, source, 9) });
+    for (key, kind, source) in [
+        ("lineage-a", "TOOL_FAILURE", lineage.as_str()),
+        ("lineage-b", "PROJECT_RULES", lineage.as_str()),
+        ("lineage-c", "TOOL_FAILURE", "tool_failure"),
+        ("lineage-d", "TOOL_FAILURE", "tool_failure:0123"),
+    ] {
+        let refused =
+            commit_operation(&handler, &project, key, insert("mem-foreign", kind, source)).await;
+        assert_eq!(refused["state"]["kind"], "invalid", "{key}: {refused}");
+    }
+    // The positive control: the same row on another lineage is written, also
+    // on one whose name only begins like the failure lineage's.
+    for (key, object, source) in [
+        ("lineage-e", "mem-note", "eidnara_memory"),
+        ("lineage-f", "mem-near", "tool_failures"),
+    ] {
+        let written = commit_operation(
+            &handler,
+            &project,
+            key,
+            insert(object, "PROJECT_RULES", source),
+        )
+        .await;
+        assert_eq!(written["state"]["kind"], "available", "{key}: {written}");
+    }
+    let supersede = |replaced: &str, object: &str, kind: &str, source: &str| {
+        json!({
+            "op": "supersede_decision", "replaced_object_id": replaced,
+            "spec": spec(object, kind, source, 10),
+        })
+    };
+    for (key, operation) in [
+        (
+            "move-on",
+            supersede("mem-note", "mem-moved", "TOOL_FAILURE", &lineage),
+        ),
+        (
+            "move-off",
+            supersede(&record_id, "mem-off", "PROJECT_RULES", "eidnara_memory"),
+        ),
+        (
+            "revise",
+            supersede(&record_id, "mem-revised", "TOOL_FAILURE", &lineage),
+        ),
+        (
+            "fold",
+            supersede("mem-note", &record_id, "TOOL_FAILURE", &lineage),
+        ),
+    ] {
+        let refused = commit_operation(&handler, &project, key, operation).await;
+        assert_eq!(refused["state"]["kind"], "invalid", "{key}: {refused}");
+    }
+    // The record stands as the recorder wrote it, and the next failure of
+    // the command is the lineage's next revision.
+    let again = [failed_run("call-2", "cargo test -p api", 2_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &again).await, 1);
+    let rows = served_memory_rows(&handler, (SECOND, "s2"), &project).await;
+    let on_lineage: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["object"]["source_id"] == lineage.as_str())
+        .collect();
+    assert_eq!(on_lineage.len(), 1, "{on_lineage:?}");
+    assert_eq!(on_lineage[0]["object"]["source_revision"], 2);
+    let retire =
+        json!({"op": "retire_decision", "object_id": on_lineage[0]["object"]["object_id"]});
+    let retired = commit_operation(&handler, &project, "retire", retire).await;
+    assert_eq!(retired["state"]["kind"], "available", "{retired}");
+}
+
 /// Text the user quotes from someone else stays labeled: a sentence inside
 /// quotation marks, a paragraph inside a quotation that spans paragraphs, a
 /// paragraph a colon line introduces, and a question.

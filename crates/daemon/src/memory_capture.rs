@@ -6,10 +6,12 @@
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
 pub(crate) mod cite;
+mod failures;
 mod head;
 mod native;
 #[cfg(test)]
 pub(crate) use cite::CITATION_EVENT_KIND;
+pub(crate) use failures::{FailureMemo, is_failure_lineage};
 #[cfg(test)]
 pub(crate) use head::fixtures as head_fixtures;
 pub(crate) use head::{FrozenHead, observe_head};
@@ -56,8 +58,11 @@ pub const MAX_CAPTURE_MEMORY_BYTES: usize = 2048;
 const CAPTURE_FRAGMENT_BYTES: usize = 16 * 1024;
 const MAX_CAPTURE_WORKERS: usize = 16;
 /// Per worker: 4.5 read byte caps for [`select_existing_memories`] and 4 MiB for buffers and plans.
+/// The failure records' memo, the window messages their checkpoints hold,
+/// and those checkpoints' scratch are added at their own bound.
 pub(crate) const RETAINED_BYTES_BOUND: u64 = MAX_CAPTURE_WORKERS as u64
-    * (kernel_routes::read::MAX_READ_ROW_BYTES as u64 * 9 / 2 + 4 * 1024 * 1024);
+    * (kernel_routes::read::MAX_READ_ROW_BYTES as u64 * 9 / 2 + 4 * 1024 * 1024)
+    + failures::RETAINED_BYTES_BOUND;
 
 /// Text roles admitted to extraction. Tool output and reasoning are not memory
 /// instructions and must not be relabeled as user messages by an adapter.

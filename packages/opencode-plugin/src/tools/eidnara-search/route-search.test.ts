@@ -1052,6 +1052,75 @@ describe("eidnara_search through the fused route", () => {
         expect(shown[1]).toEqual(shown[0]);
     });
 
+    it("serves a failed command's record with its category, label, and text on the route and on the fallback", async () => {
+        const bytes = (text: string) => new TextEncoder().encode(text).length;
+        const outcome =
+            "Tool failure recorded from the result of bash at 2026-03-02T10:15:00.000Z: the command failed with exit code 101.";
+        const resolved = " Resolved: a later run of this command reported no failure.";
+        const closing = "test result: FAILED. 1 passed; 1 failed";
+        const summary = [
+            `${outcome}${resolved}`,
+            "Command: cargo test [arguments left out]",
+            "Failing path: src/render.rs:9:5",
+            "Output lines:",
+            ...[0, 1, 2, 3].map((index) => `error: e${index} ${"x".repeat(130)}`),
+            "width is zero",
+            closing,
+        ].join("\n");
+        const rationale = JSON.stringify({
+            at: "2026-03-02T10:15:00.000Z",
+            at_ms: 1772446500000,
+            call: "call-1",
+            command: "cargo test [arguments left out]",
+            command_digest: "0f3a5c7e9b1d2f4a6c8e0b2d4f6a8c0e",
+            evidence: "tool_status",
+            exit_code: 101,
+            output_text: "kept",
+            path: "src/render.rs:9:5",
+            resolved_at: "2026-03-02T10:20:00.000Z",
+            resolved_at_ms: 1772446800000,
+            resolved_call: "call-2",
+            resolved_session: "s2",
+            session: "s1",
+            source: "tool_failure",
+            state: "resolved",
+            tool: "bash",
+        });
+        // The daemon keeps a summary within 900 bytes, and the tool renders 1,024 bytes of a fact.
+        expect(bytes(summary)).toBeGreaterThan(860);
+        expect(bytes(summary)).toBeLessThanOrEqual(900);
+        expect(bytes(`${summary}\n${rationale}`)).toBeGreaterThan(1024);
+        for (const fallback of [false, true]) {
+            const { kernel, run } = harness();
+            kernel.seedDecision({
+                object_id: id(1),
+                decision_kind: "TOOL_FAILURE",
+                summary,
+                rationale,
+                source_id: "tool_failure:0f3a5c7e9b1d2f4a6c8e0b2d4f6a8c0e",
+                labeled: true,
+            });
+            kernel.routeReply = () =>
+                fallback
+                    ? { kind: "terminal", terminal: "disabled" }
+                    : fused([{ object: id(1), labeled: true }]);
+            const execution = await run({ query: "cargo test failed" });
+            if (execution.status !== "complete") throw new Error(execution.text);
+            expect(execution.prePack.map((result) => result.objectId)).toEqual([id(1)]);
+            const lines = execution.text.split("\n");
+            const header = lines.findIndex((line) => line.includes(` id=${id(1)} `));
+            expect(lines[header]).toContain(" category=TOOL_FAILURE ");
+            expect(lines[header]).toContain(` match=${fallback ? "lexical" : "fused"}`);
+            expect(lines[header]).toMatch(/ trust=\[labeled\]$/);
+            // The first line states the outcome and the resolution, and the last kept line is whole.
+            expect(lines[header + 1]).toBe(`${outcome}${resolved}`);
+            expect(lines[header + 2]).toBe("Command: cargo test [arguments left out]");
+            expect(lines.slice(header + 1).join("\n")).toStartWith(
+                `${summary}\n{"at":"2026-03-02T10:15:00.000Z"`,
+            );
+        }
+    });
+
     it("refuses a ranking whose daemon connection changes before hydration in both passes", async () => {
         class MovingTransport extends FakeKernelTransport {
             identity = 0;
