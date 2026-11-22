@@ -1799,6 +1799,7 @@ impl Writer<'_> {
             .into_iter()
             .all(|text| kernel::exact_text_refusal(text).is_none());
         if !clean {
+            eprintln!("daemon: tool failure record left unwritten: the redactor changes its text");
             return Ok(false);
         }
         let (session_key, _) = session_keys(self.session);

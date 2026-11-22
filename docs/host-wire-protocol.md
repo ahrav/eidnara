@@ -1714,7 +1714,8 @@ whose text, or whose command line, is longer than 64 KiB, the largest tool
 span source capture retains; a result whose message carries no creation
 time; a command line on which the redactor's scan does not finish; and a
 result that the harness marks as an error when the harness ended or refused
-the call itself, which is when its last line begins with `Command aborted`,
+the call itself, which is when its last non-empty line begins with
+`Command aborted`,
 `Operation aborted`, `Tool execution aborted`, or `Command timed out after `,
 when its whole text is `Tool execution was blocked` or `Tool <name> not
 found`, or when it begins with `Validation failed for tool "`. Pi writes
@@ -1813,7 +1814,9 @@ line holds more; a command line that begins with no plain word is shown as
 `[left out]`. The command's digest is the first 32 hexadecimal digits of the
 SHA-256 of the project's digest and that redacted, normalized text, each
 behind its length, so two command lines that differ in a credential the
-redactor finds are one command.
+redactor finds are one command. The redactor is the fact's only judge of
+text: the words shown and the kept lines of an output hold whatever the
+redactor's rules pass, as a tool span that source capture retains does.
 
 Each failed call writes one fact of the `memory` domain: `decision_kind`
 `TOOL_FAILURE`, `source_id` `tool_failure:<digest>` with the command's
@@ -1849,7 +1852,8 @@ output` or `the redactor's scan of the output did not finish`.
 
 The fact's `rationale` is a string that holds a JSON object. Its fields are
 `source` (`tool_failure`), `session`, `call` (the tool call's id, in at most
-128 bytes), `tool`, `command` (the command as shown), `digest`,
+128 bytes), `tool`, `command` (the command as shown), `digest` (the
+command's digest),
 `state` (`failed` or `resolved`), `evidence` (`tool_status`,
 `printed_status`, `shell_report`, or `failure_lines`), `output_text` (`kept`
 or `withheld`), `at_ms` and `at` (the creation time of the failed run's
