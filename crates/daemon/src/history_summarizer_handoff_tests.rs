@@ -1038,6 +1038,7 @@ fn publish_accepted_chunk(
         output: ProducerOutput {
             text,
             length_capped: false,
+            model: None,
         },
         observed_chunk_fingerprint: "fp",
         validation_chunk: &chunk,
@@ -1395,6 +1396,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
 </PROJECT_RULES></facts><meta><unprocessed_from>4</unprocessed_from></meta></output>"#
         ),
         length_capped: false,
+        model: None,
     };
     let target = rig.target();
     let publish = |output: ProducerOutput,
@@ -1512,6 +1514,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
         ProducerOutput {
             text: rejected,
             length_capped: false,
+            model: None,
         },
         &later,
         &[StoredHistorySegmentRange {
@@ -1798,6 +1801,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
 </PROJECT_RULES></facts><meta><unprocessed_from>4</unprocessed_from></meta></output>"#
                 .to_string(),
             length_capped: false,
+            model: None,
         },
         observed_chunk_fingerprint: "fp",
         validation_chunk: &chunk,

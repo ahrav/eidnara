@@ -24728,6 +24728,7 @@ mod tests {
             Ok(ProducerOutput {
                 text,
                 length_capped: false,
+                model: None,
             })
         }
 
@@ -34926,6 +34927,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
@@ -35012,6 +35014,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(&ids),
                     length_capped: false,
+                    model: None,
                 }));
             let harness = MemoryClassifierHarness::start(&producer).await;
             let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
@@ -35070,6 +35073,7 @@ mod tests {
             results.push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         }
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -35179,6 +35183,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         harness
@@ -35238,6 +35243,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(&ids),
                     length_capped: false,
+                    model: None,
                 }));
             let harness = MemoryClassifierHarness::start(&producer).await;
             let operation_key = memory_classifier_operation_key("ses", "fenced-mid-run");
@@ -35326,6 +35332,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
@@ -35435,6 +35442,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         harness
@@ -35583,6 +35591,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text,
                     length_capped: false,
+                    model: None,
                 }));
             let harness = MemoryClassifierHarness::start(&producer).await;
             let payload = classify_payload(std::slice::from_ref(&id), TEST_CLASSIFY_TIMEOUT_MS);
@@ -36431,6 +36440,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
@@ -37413,6 +37423,7 @@ mod tests {
                     ids[0], ids[1]
                 ),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         // Caller-asserted provenance literals ride along in the payload; the
@@ -37476,6 +37487,7 @@ mod tests {
                      <memory id=\"{other}\" importance=\"50\" scope=\"ecosystem\" shareable=\"true\"/></classify>"
                 ),
                 length_capped: false,
+                model: None,
             }));
             results.push_back(Ok(ProducerOutput {
                 text: format!(
@@ -37483,6 +37495,7 @@ mod tests {
                      <memory id=\"{second}\" importance=\"95\" scope=\"project\" shareable=\"true\"/></classify>"
                 ),
                 length_capped: false,
+                model: None,
             }));
         }
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -37641,6 +37654,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(std::slice::from_ref(&memory)),
                     length_capped: false,
+                    model: None,
                 }));
             let outcome = harness
                 .handler
@@ -37690,6 +37704,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(std::slice::from_ref(&memory)),
                     length_capped: false,
+                    model: None,
                 }));
         }
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -37784,6 +37799,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(std::slice::from_ref(&memory)),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
@@ -38093,6 +38109,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(std::slice::from_ref(&memory)),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let own_scope = binding_with_harness(&harness.route_root, "pi", "ses")
@@ -38194,6 +38211,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let store = Arc::clone(&harness.store);
@@ -38535,10 +38553,12 @@ mod tests {
             Ok(ProducerOutput {
                 text: classify_manifest(&[requested.clone(), unexpected]),
                 length_capped: false,
+                model: None,
             }),
             Ok(ProducerOutput {
                 text: classify_manifest(std::slice::from_ref(&requested)),
                 length_capped: false,
+                model: None,
             }),
         ]);
         let mut payload =
@@ -41974,6 +41994,7 @@ mod tests {
                         "A stale snapshot must not publish this fact.",
                     ),
                     length_capped: false,
+                    model: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -42108,6 +42129,7 @@ mod tests {
                         "Atomic cleanup race fact.",
                     ),
                     length_capped: false,
+                    model: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -42187,6 +42209,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: history_summarizer_output_with_fact(start, end, "Fence race fact."),
                     length_capped: false,
+                    model: None,
                 }));
             hook_handler
                 .transform_snapshots

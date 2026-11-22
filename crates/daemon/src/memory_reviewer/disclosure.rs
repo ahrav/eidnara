@@ -591,6 +591,19 @@ impl Disclosure<'_> {
                 ));
             }
         };
+        // The answer is released only when it comes from the model the route names, as on the direct route.
+        if !host.answered_by_requested(text.model.as_deref()) {
+            return Err(self.end(
+                attempt_index,
+                MemoryReviewerAttemptTerminal::Failed,
+                usage,
+                DisclosureRefusal::ModelMismatch {
+                    attempt_index,
+                    reported: text.model,
+                    expected: host.expected_model().to_string(),
+                },
+            ));
+        }
         self.finish(
             attempt_index,
             MemoryReviewerAttemptTerminal::Complete,

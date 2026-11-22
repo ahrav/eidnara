@@ -319,9 +319,19 @@ impl Worker {
     /// One pass over every project the worker runs for: first the projects the owner's activation record admits, then the projects under the review switch. Returns how many runs settled. Passes of one worker run one at a time.
     pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         let _serial = self.switched.serial.lock().await;
-        // The owner's record speaks for the projects outside the switch. When every bound project is switched, the record has nothing to open and the gate reads as the switched pass leaves it.
+        // The owner's record speaks for the projects outside the switch. When every project the worker knows is switched, bound now or seen bound earlier, the record has nothing to open and the gate reads as the switched pass leaves it.
         let routes = (self.projects)();
-        let recorded = if routes.is_empty() || routes.iter().any(|route| !self.is_switched(route)) {
+        let switched_only = if routes.is_empty() {
+            !self
+                .switched
+                .known
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        } else {
+            routes.iter().all(|route| self.is_switched(route))
+        };
+        let recorded = if !switched_only {
             self.recorded_pass(cancel).await
         } else {
             0
@@ -371,6 +381,11 @@ impl Worker {
         };
         let routes = self.switched_routes();
         if routes.is_empty() {
+            return 0;
+        }
+        // An answer from another model closed review for the rest of the process, as it does on the direct route.
+        if self.rejection.get().is_some() {
+            self.stamp_latched();
             return 0;
         }
         let Some(kernel) = (self.kernel)() else {
@@ -568,6 +583,10 @@ impl Worker {
                     }
                     Ok(None) => {}
                     Err(InvestigationError::Capacity) => break,
+                    Err(InvestigationError::Rejected(rejection)) => {
+                        self.latch(rejection);
+                        return settled;
+                    }
                     Err(InvestigationError::Cancelled) => return settled,
                     Err(error) => {
                         eprintln!("daemon: memory_reviewer run ended without settlement: {error}");

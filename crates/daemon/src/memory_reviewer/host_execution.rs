@@ -20,6 +20,8 @@ use crate::history_summarizer_producer::{
 
 /// The credential an attempt marker names for a request the host carries: the host's own credential source, held by the host and its harness child.
 pub const HOST_CREDENTIAL_ID: &str = "host-model-execution";
+/// The harness whose child reports the model id of every answer.
+const PI_HARNESS: &str = "pi";
 /// Every child session of a review request starts with this prefix.
 pub const CHILD_SESSION_PREFIX: &str = "eidnara-memory_reviewer:";
 /// The sampling value a request carries. The host omits it for a model whose provider refuses a temperature.
@@ -82,6 +84,21 @@ impl HostExecution {
     /// The `provider/model` every request of this route names.
     pub fn model_ref(&self) -> &str {
         &self.model_ref
+    }
+
+    /// The model id an answer must report for its text to be released: the `model` of the route's `provider/model`.
+    pub fn expected_model(&self) -> &str {
+        self.model_ref
+            .split_once('/')
+            .map_or(self.model_ref.as_str(), |(_, model)| model)
+    }
+
+    /// Whether an answer that reports `reported` came from the model the route names. A Pi child's answer always carries its model id, so on that harness an answer without one is held too. An OpenCode child's transcript carries no model id; there the dispatch, which names the pair, is the binding.
+    pub fn answered_by_requested(&self, reported: Option<&str>) -> bool {
+        match reported {
+            Some(model) => model == self.expected_model(),
+            None => self.harness != PI_HARNESS,
+        }
     }
 
     /// The child session of one attempt: a digest of the job, its receipt generation, and the attempt index, so each attempt runs in a session of its own.
@@ -190,7 +207,7 @@ impl HostExecution {
             } else {
                 StopReason::EndTurn
             }),
-            model: None,
+            model: output.model,
             accounting: *accounting,
         })
     }
