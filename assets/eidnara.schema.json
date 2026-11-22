@@ -699,6 +699,10 @@
             "contest",
             "apply"
           ]
+        },
+        "classifier": {
+          "description": "User-only: the provider/model of a typed classifier that decides each review first, for example typesafe/jev-latest. A harness that can call it answers the daemon's classifier work; the chat model then writes a proposal only for a memory the classifier flags, and no memory changes that the classifier did not flag. Absent, or on a harness that cannot call a classifier, the chat model decides.",
+          "type": "string"
         }
       },
       "additionalProperties": false

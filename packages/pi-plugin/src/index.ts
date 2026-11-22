@@ -720,6 +720,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // leaf: entries its last checkpoint could not store must stay available for retry, and
     // the daemon replays the rest as no-ops.
     pi.on("session_start", async (event, ctx) => {
+        // A session that is open answers classifier work from its start, before its first prompt.
+        answerReviewClassifierFor(ctx);
         if (event.reason !== "fork") return;
         const sessionId = ctx.sessionManager.getSessionId();
         const leaf = ctx.sessionManager.getLeafId();
@@ -826,8 +828,6 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             warn("memory review classifier not started:", error);
         }
     }
-    // A session that is open answers classifier work from its start, before its first prompt.
-    pi.on("session_start", (_event, ctx) => answerReviewClassifierFor(ctx));
     /** Resolves after bounded daemon calls. Returns the scope whenever capture applies, even when
      * the daemon refused the checkpoint: draining is what frees a full queue. */
     async function checkpointMemory(
