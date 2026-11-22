@@ -62,7 +62,7 @@ sizes before payloads (`:490-526`), then `decisions_for_objects_as_of` for the
 retained ids (`:527-542`). `domain_decisions_in_serving_order`
 (`read.rs:404-432`) is the second consumer: it applies the same prefilter and
 `ScopeFilter`, sorts every kept row in serving order, and applies no row cap,
-for the canonical-memory delivery walk (`crates/daemon/src/canonical_memory.rs:291`).
+for the canonical-memory delivery walk (`crates/daemon/src/canonical_memory.rs:318`).
 `kernel.read` does not use this API: a request
 with `object_ids` reads `visible_as_of_in_scope` through the same
 `read_visible_page` (`read.rs:469-471`), and a request with none reads, in
