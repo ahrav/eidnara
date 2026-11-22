@@ -1849,7 +1849,7 @@ output` or `the redactor's scan of the output did not finish`.
 
 The fact's `rationale` is a string that holds a JSON object. Its fields are
 `source` (`tool_failure`), `session`, `call` (the tool call's id, in at most
-128 bytes), `tool`, `command` (the command as shown), `command_digest`,
+128 bytes), `tool`, `command` (the command as shown), `digest`,
 `state` (`failed` or `resolved`), `evidence` (`tool_status`,
 `printed_status`, `shell_report`, or `failure_lines`), `output_text` (`kept`
 or `withheld`), `at_ms` and `at` (the creation time of the failed run's

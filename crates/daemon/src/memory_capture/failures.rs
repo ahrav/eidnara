@@ -1613,6 +1613,73 @@ impl Stored {
     }
 }
 
+/// The text and the rationale of the record of a failed run of `session`.
+fn failed_record(session: &str, unit: &Observed, failure: &Failure) -> kernel::DecisionPayload {
+    let mut rationale = serde_json::Map::new();
+    let text = match unit.excerpt {
+        Excerpt::Kept => "kept",
+        Excerpt::Finding | Excerpt::Unscanned => "withheld",
+    };
+    for (name, value) in [
+        ("source", json!(FAILURE_SOURCE_ID)),
+        ("session", json!(session)),
+        ("call", json!(clipped(&unit.call, MAX_ID_BYTES))),
+        (
+            "tool",
+            json!(clipped(&collapsed(&unit.tool), MAX_TOOL_BYTES)),
+        ),
+        ("command", json!(unit.command.shown)),
+        ("digest", json!(unit.command.digest)),
+        ("state", json!("failed")),
+        ("evidence", json!(failure.evidence.name())),
+        ("output_text", json!(text)),
+        ("at_ms", json!(unit.at_ms)),
+        ("at", json!(utc_time(unit.at_ms))),
+    ] {
+        rationale.insert(name.to_owned(), value);
+    }
+    for (name, value) in [
+        ("exit_code", failure.exit_code.map(Value::from)),
+        ("path", unit.path.clone().map(Value::from)),
+        ("error", unit.error.clone().map(Value::from)),
+    ] {
+        if let Some(value) = value {
+            rationale.insert(name.to_owned(), value);
+        }
+    }
+    kernel::DecisionPayload {
+        summary: summary_of(unit, session, failure),
+        rationale: Value::Object(rationale).to_string(),
+    }
+}
+
+/// The live record of a command rewritten as resolved by a passing run of
+/// `session`: its stored text with [`RESOLVED_NOTE`] at the end of its first
+/// line, and the passing run in the rationale. The record is ordered by the
+/// passing run from then on.
+fn resolved_record(
+    session: &str,
+    unit: &Observed,
+    stored: kernel::DecisionPayload,
+    mut rationale: serde_json::Map<String, Value>,
+) -> kernel::DecisionPayload {
+    let line = stored.summary.find('\n').unwrap_or(stored.summary.len());
+    let (stated, rest) = stored.summary.split_at(line);
+    for (name, value) in [
+        ("state", json!("resolved")),
+        ("resolved_session", json!(session)),
+        ("resolved_call", json!(clipped(&unit.call, MAX_ID_BYTES))),
+        ("resolved_at_ms", json!(unit.at_ms)),
+        ("resolved_at", json!(utc_time(unit.at_ms))),
+    ] {
+        rationale.insert(name.to_owned(), value);
+    }
+    kernel::DecisionPayload {
+        summary: clipped(&format!("{stated}{RESOLVED_NOTE}{rest}"), MAX_SUMMARY_BYTES),
+        rationale: Value::Object(rationale).to_string(),
+    }
+}
+
 /// The Kernel, the project, and the session one checkpoint writes for.
 struct Writer<'a> {
     kernel: &'a kernel::KernelStore,
@@ -1681,9 +1748,9 @@ impl Writer<'_> {
             None => None,
         };
         let payload = match (&unit.outcome, stored) {
-            (Outcome::Failed(failure), _) => self.failed(unit, failure),
+            (Outcome::Failed(failure), _) => failed_record(self.session, unit, failure),
             (Outcome::Passed, Some((payload, stored))) if !stored.resolved => {
-                self.resolved(unit, payload, stored.rationale)
+                resolved_record(self.session, unit, payload, stored.rationale)
             }
             (Outcome::Passed, _) => return Ok(false),
         };
@@ -1711,73 +1778,6 @@ impl Writer<'_> {
             (&key(&from)?, &key(&to)?),
             MAX_RECORDS_PER_SESSION + 1,
         )
-    }
-
-    /// The text and the rationale of the record of a failed run.
-    fn failed(&self, unit: &Observed, failure: &Failure) -> kernel::DecisionPayload {
-        let mut rationale = serde_json::Map::new();
-        let text = match unit.excerpt {
-            Excerpt::Kept => "kept",
-            Excerpt::Finding | Excerpt::Unscanned => "withheld",
-        };
-        for (name, value) in [
-            ("source", json!(FAILURE_SOURCE_ID)),
-            ("session", json!(self.session)),
-            ("call", json!(clipped(&unit.call, MAX_ID_BYTES))),
-            (
-                "tool",
-                json!(clipped(&collapsed(&unit.tool), MAX_TOOL_BYTES)),
-            ),
-            ("command", json!(unit.command.shown)),
-            ("command_digest", json!(unit.command.digest)),
-            ("state", json!("failed")),
-            ("evidence", json!(failure.evidence.name())),
-            ("output_text", json!(text)),
-            ("at_ms", json!(unit.at_ms)),
-            ("at", json!(utc_time(unit.at_ms))),
-        ] {
-            rationale.insert(name.to_owned(), value);
-        }
-        for (name, value) in [
-            ("exit_code", failure.exit_code.map(Value::from)),
-            ("path", unit.path.clone().map(Value::from)),
-            ("error", unit.error.clone().map(Value::from)),
-        ] {
-            if let Some(value) = value {
-                rationale.insert(name.to_owned(), value);
-            }
-        }
-        kernel::DecisionPayload {
-            summary: summary_of(unit, self.session, failure),
-            rationale: Value::Object(rationale).to_string(),
-        }
-    }
-
-    /// The live record of a command rewritten as resolved: its stored text
-    /// with [`RESOLVED_NOTE`] at the end of its first line, and the passing
-    /// run in the rationale. The record is ordered by the passing run from
-    /// then on.
-    fn resolved(
-        &self,
-        unit: &Observed,
-        stored: kernel::DecisionPayload,
-        mut rationale: serde_json::Map<String, Value>,
-    ) -> kernel::DecisionPayload {
-        let line = stored.summary.find('\n').unwrap_or(stored.summary.len());
-        let (stated, rest) = stored.summary.split_at(line);
-        for (name, value) in [
-            ("state", json!("resolved")),
-            ("resolved_session", json!(self.session)),
-            ("resolved_call", json!(clipped(&unit.call, MAX_ID_BYTES))),
-            ("resolved_at_ms", json!(unit.at_ms)),
-            ("resolved_at", json!(utc_time(unit.at_ms))),
-        ] {
-            rationale.insert(name.to_owned(), value);
-        }
-        kernel::DecisionPayload {
-            summary: clipped(&format!("{stated}{RESOLVED_NOTE}{rest}"), MAX_SUMMARY_BYTES),
-            rationale: Value::Object(rationale).to_string(),
-        }
     }
 
     /// Commits the record `id` at `revision` of `lineage`, in place of the
@@ -2579,6 +2579,74 @@ mod tests {
         );
         assert!(summary.ends_with(&format!("\n{long}\nCommand exited with code 1")));
         assert!(summary.matches(&long).count() < MAX_ERROR_LINES + 1);
+    }
+
+    /// A record is written when the redactor leaves its text and its
+    /// rationale as composed. The names a record carries beside secret
+    /// words (a program, a path, an error type) and the ids a provider
+    /// gives a tool call and a session are ordinary text to the redactor,
+    /// for a failed record and for its resolved copy.
+    #[test]
+    fn a_record_of_ordinary_names_and_ids_passes_the_redactor_as_composed() {
+        let failure = Failure {
+            exit_code: Some(1),
+            evidence: Evidence::ToolStatus,
+            lines: vec![Kept {
+                text: "Command exited with code 1".into(),
+                closing: true,
+                span: 0..0,
+            }],
+        };
+        let session = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        for (command, path, error) in [
+            (
+                "gh auth login --web",
+                "src/auth/token.rs:12:5",
+                "AuthenticationError",
+            ),
+            (
+                "ssh-keygen -t ed25519",
+                "lib/keys.py:40",
+                "InvalidTokenError",
+            ),
+            ("git credential fill", "config/secrets.yaml:3", "E0308"),
+            (
+                "npm token list",
+                "packages/api/password_reset.ts(8,3)",
+                "TS2307",
+            ),
+            (
+                "kubectl secret",
+                "tests/test_bearer.py::test_refresh",
+                "KeyError",
+            ),
+            ("keytool", "auth.rs:9", "java.security.KeyException"),
+        ] {
+            for call in [
+                "toolu_01A9bC3dE5fG7hJ9kL1mN3pQ",
+                "call_Zx81kLmQp09RtYvWs77AbCdE|fc_68a1b2c3d4e5f6",
+            ] {
+                for excerpt in [Excerpt::Kept, Excerpt::Finding] {
+                    let mut unit = observed(excerpt, &failure);
+                    unit.call = call.into();
+                    unit.command = named(command);
+                    unit.path = Some(path.into());
+                    unit.error = Some(error.into());
+                    let failed = failed_record(session, &unit, &failure);
+                    let stored = Stored::read(&failed.rationale).unwrap();
+                    let resolved =
+                        resolved_record(session, &unit, failed.clone(), stored.rationale);
+                    for text in [
+                        failed.summary,
+                        failed.rationale,
+                        resolved.summary,
+                        resolved.rationale,
+                    ] {
+                        assert_eq!(kernel::exact_text_refusal(&text), None, "{text}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

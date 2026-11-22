@@ -5100,7 +5100,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
     let rationale = memory_rationales(&handler, (SECOND, "s2"), &project)
         .await
         .remove(0);
-    let digest = rationale["command_digest"].as_str().unwrap().to_owned();
+    let digest = rationale["digest"].as_str().unwrap().to_owned();
     assert_eq!(digest.len(), 32, "{rationale}");
     assert_eq!(
         row["object"]["source_id"],
@@ -5116,7 +5116,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
             "call": "call-1",
             "tool": "bash",
             "command": "cargo test [arguments left out]",
-            "command_digest": digest,
+            "digest": digest,
             "state": "failed",
             "evidence": "tool_status",
             "output_text": "kept",
@@ -5218,7 +5218,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
     let rationales = memory_rationales(&handler, (THIRD, "s3"), &project).await;
     let rationale = rationales
         .iter()
-        .find(|rationale| rationale["command_digest"] == digest)
+        .find(|rationale| rationale["digest"] == digest)
         .unwrap();
     assert_eq!(rationale["state"], "resolved");
     assert_eq!(rationale["session"], "s2");
@@ -5254,7 +5254,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
     let rationales = memory_rationales(&handler, (THIRD, "s3"), &project).await;
     let rationale = rationales
         .iter()
-        .find(|rationale| rationale["command_digest"] == digest)
+        .find(|rationale| rationale["digest"] == digest)
         .unwrap();
     assert_eq!(rationale["state"], "failed");
     assert_eq!(rationale["call"], "call-7");

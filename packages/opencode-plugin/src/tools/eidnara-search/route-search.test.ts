@@ -1072,7 +1072,7 @@ describe("eidnara_search through the fused route", () => {
             at_ms: 1772446500000,
             call: "call-1",
             command: "cargo test [arguments left out]",
-            command_digest: "0f3a5c7e9b1d2f4a6c8e0b2d4f6a8c0e",
+            digest: "0f3a5c7e9b1d2f4a6c8e0b2d4f6a8c0e",
             evidence: "tool_status",
             exit_code: 101,
             output_text: "kept",
