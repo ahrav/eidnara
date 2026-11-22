@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::native::{completes_failure_line, is_output_failure_line, printable};
-use super::{CAPTURE_SOURCE_KIND, COMMIT_WAIT, capture_enabled};
+use super::{CAPTURE_SOURCE_KIND, COMMIT_WAIT, GATE_POLL, capture_enabled};
 use crate::healing::SerializerProfile;
 use crate::kernel_routes::{self, ProjectBinding};
 use crate::{HandlerCore, SessionBinding};
@@ -93,8 +93,15 @@ const MAX_OUTPUT_BYTES: usize = crate::harness_sources::MAX_SOURCE_UNIT_BYTES;
 const MAX_FIRST_LINE_BYTES: usize = 1024;
 /// Closing lines read for a stated exit code.
 const EXIT_CODE_CLOSING_LINES: usize = 3;
-/// The `echo` commands of one command line read for a printed exit status.
-const MAX_STATUS_ECHOES: usize = 8;
+/// The commands of one command line that are read, and the words of all of
+/// them. A command line with more of either is outside the reader's grammar
+/// (see [`commands_of`]), which bounds the reader's tables.
+const MAX_STEPS: usize = 64;
+const MAX_WORDS: usize = 1024;
+/// A tool call's id and a tool's name that are read, in bytes each. A
+/// harness writes ids and names far below this, and a longer one is left
+/// unread before a byte of it is copied.
+const MAX_NAME_BYTES: usize = 1024;
 /// Records one session writes in one project, resolved copies included.
 const MAX_RECORDS_PER_SESSION: usize = 64;
 /// Command results one pass hands off, the earliest unjudged ones first, so
@@ -115,9 +122,13 @@ const MAX_CHECKPOINTS: usize = 8;
 // pins, which a new session's entry replaces.
 const _: () = assert!(MAX_CHECKPOINTS < MEMO_SESSIONS);
 /// The bytes one checkpoint holds beside its copied results while it reads
-/// one of them: the redacted command, and the redactor's copies of the
-/// output.
-const CHECKPOINT_SCRATCH_BYTES: usize = 8 * MAX_OUTPUT_BYTES;
+/// one of them: the table of the output's lines, which is one entry of 32
+/// bytes for each line and so at most 32 bytes for each byte of the output,
+/// and eight more copies of a text of [`MAX_OUTPUT_BYTES`] for the redacted
+/// and the normalized command and the redactor's copies of the command and
+/// of the output. The reader's tables of commands and words are bounded by
+/// [`MAX_STEPS`] and [`MAX_WORDS`] and stay below one such copy.
+const CHECKPOINT_SCRATCH_BYTES: usize = (32 + 8) * MAX_OUTPUT_BYTES;
 /// Marks a line or a word cut to its byte limit.
 const CUT_MARK: &str = "…";
 /// The sentence a resolved record's first line ends with.
@@ -147,10 +158,11 @@ enum Evidence {
     /// The harness marked the result as an error, or the result states a
     /// nonzero exit code.
     ToolStatus,
-    /// The command line printed its own exit status, and it is nonzero.
+    /// The command line's final `echo` printed its exit status, and it is
+    /// nonzero.
     PrintedStatus,
-    /// The shell reported a program of the command line that it did not
-    /// find.
+    /// The command line hides an exit status from the tool, and a shell
+    /// reported the program of one of its commands as missing.
     ShellReport,
     /// The command line hides an exit status from the tool, and the output
     /// holds a failure line.
@@ -177,14 +189,25 @@ struct Kept {
     closing: bool,
 }
 
-/// A failure as the output states it, before the redactor has judged the
-/// output.
+/// What a result states of its command's outcome, before the redactor has
+/// judged the output (see [`outcome_of`], [`screened`]).
 #[derive(Debug, PartialEq, Eq)]
 struct Reported {
-    evidence: Evidence,
-    /// The nonzero exit code the result states or the command line printed,
+    /// The harness marked the result as an error.
+    flagged: bool,
+    /// The nonzero exit code a status line states, with the bytes of the
+    /// line that holds it.
+    stated: Option<(i64, Range<usize>)>,
+    /// The nonzero exit status the command line's final `echo` printed,
     /// with the bytes of the line that holds it.
-    exit_code: Option<(i64, Range<usize>)>,
+    printed: Option<(i64, Range<usize>)>,
+    /// What a status of 0 says of the command line.
+    reach: Reach,
+    /// A shell's report names the program of one of the commands as
+    /// missing.
+    missing: bool,
+    /// The output holds a failure line.
+    fails: bool,
     /// The lines that state an error, in output order, and then the closing
     /// lines that are none of them, each with the bytes it stands at. A
     /// text that several chosen lines share stands once.
@@ -283,9 +306,12 @@ struct SessionCalls {
 }
 
 /// Tool calls already judged, by project and session. The memo spares a
-/// pass the reading of results an earlier pass judged; the Kernel's commit
-/// log holds the receipt of each record's commit, so a call judged again
-/// after a restart writes nothing.
+/// pass the reading of results an earlier pass judged. The Kernel's commit
+/// log holds the receipt of each commit, so a call that wrote a row writes
+/// nothing when it is judged again after a restart or after the memo gave
+/// it up. A call that wrote no row left no receipt and is judged again as
+/// a new result, by the same rules and against the records as they then
+/// stand.
 #[derive(Default)]
 pub(crate) struct FailureMemo {
     sessions: HashMap<String, SessionCalls>,
@@ -297,6 +323,10 @@ pub(crate) struct FailureMemo {
     /// delete removes its entry and leaves its place here, so the session
     /// admits its next checkpoint once the running one has ended.
     active: HashMap<String, u64>,
+    /// Runs under the capture publication gate ahead of each judgment, so a
+    /// test orders a judgment against another holder of the gate.
+    #[cfg(test)]
+    pub(crate) under_gate: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// The memo's name of a tool call: the project and the call's id. The name
@@ -324,7 +354,8 @@ impl FailureMemo {
     /// session's entry, creating the entry when absent. A new entry at the
     /// session limit takes the place of the oldest entry whose session runs
     /// no checkpoint; the replaced session's calls are judged again on its
-    /// next request, where the Kernel's receipts stop a second write.
+    /// next request, where the Kernel's receipts stop a second write of a
+    /// call that wrote a row.
     fn pin(&mut self, session: &str) -> u64 {
         if !self.sessions.contains_key(session) {
             if self.sessions.len() >= MEMO_SESSIONS {
@@ -410,6 +441,22 @@ impl FailureMemo {
     pub(crate) fn active_for_test(&self) -> usize {
         self.active.len()
     }
+
+    /// The id of the record a call writes and the lineage of its command's
+    /// records, for a test that places another row there.
+    #[cfg(test)]
+    pub(crate) fn ids_for_test(
+        scope: &str,
+        session: &str,
+        call: &str,
+        command: &str,
+    ) -> (String, String) {
+        let digest = command_named(scope, command).unwrap().digest;
+        (
+            record_id(scope, session, call),
+            format!("{FAILURE_SOURCE_ID}:{digest}"),
+        )
+    }
 }
 
 /// Whether a field of a tool call's input is a command line: a string, or an
@@ -434,16 +481,43 @@ fn command_field(input: &Value) -> Option<&Value> {
         .find(|field| carries_command(field))
 }
 
-/// The command line a tool call carries, with an array's strings joined by
-/// single spaces, when it is at most [`MAX_OUTPUT_BYTES`]. The length is
-/// read before a byte is copied.
+/// Whether a string of an array command reads in a shell command line as
+/// the one word it is: ASCII letters, digits, and `_`, `.`, `/`, `+`, `-`,
+/// `:`, `@`, `%`, `,`.
+fn bare_word(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./+-:@%,".contains(&byte))
+}
+
+/// The command line a tool call carries, when it is at most
+/// [`MAX_OUTPUT_BYTES`]. An array's strings are joined by single spaces,
+/// and a string that is no [`bare_word`] stands in single quotes, with
+/// `'\''` for a quote it holds, so the joined text reads as the words the
+/// array holds. The length is read before a byte is copied.
 fn command_of(input: &Value) -> Option<String> {
     match command_field(input)? {
         Value::String(text) => (text.len() <= MAX_OUTPUT_BYTES).then(|| text.clone()),
         Value::Array(words) => {
             let words = || words.iter().filter_map(Value::as_str);
-            let bytes: usize = words().map(|word| word.len() + 1).sum();
-            (bytes <= MAX_OUTPUT_BYTES + 1).then(|| words().collect::<Vec<_>>().join(" "))
+            let quoted = |word: &str| word.len() + 2 + 3 * word.matches('\'').count();
+            let bytes: usize = words()
+                .map(|word| {
+                    1 + if bare_word(word) {
+                        word.len()
+                    } else {
+                        quoted(word)
+                    }
+                })
+                .sum();
+            (bytes <= MAX_OUTPUT_BYTES + 1).then(|| {
+                let written = words().map(|word| match bare_word(word) {
+                    true => word.to_owned(),
+                    false => format!("'{}'", word.replace('\'', "'\\''")),
+                });
+                written.collect::<Vec<_>>().join(" ")
+            })
         }
         _ => None,
     }
@@ -479,127 +553,372 @@ fn text_of(output: &OutputKind) -> Option<(String, bool)> {
     }
 }
 
-/// Each character of `text` with the quoting it stands in, by the shell's
-/// reading of single quotes, double quotes, and backslash escapes: `None`
-/// for a character outside them, the quote character for one inside a
-/// quoted span and for the quotes that open and close it, and a backslash
-/// for a backslash and the character it escapes. The reading follows quotes
-/// and backslashes and no other shell grammar, so the text of a
-/// here-document is read as command words.
-fn quoting(text: &str) -> impl Iterator<Item = (usize, char, Option<char>)> + '_ {
-    let mut quote = None;
-    let mut escaped = false;
-    text.char_indices().map(move |(index, ch)| {
-        if escaped {
-            escaped = false;
-            return (index, ch, Some('\\'));
+/// How a command of a command line is joined to the command after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Join {
+    /// `&&`: the next command runs once this one has passed, so a status of
+    /// 0 covers both.
+    And,
+    /// `||`: the next command runs once this one has failed, and its status
+    /// stands for both.
+    Or,
+    /// `|`: the shell reports the pipeline by its last command.
+    Pipe,
+    /// `;` or a line break: the next command runs whatever this one
+    /// reported, and its status stands for both.
+    Then,
+}
+
+impl Join {
+    /// The operator as a normalized command line writes it.
+    const fn text(self) -> &'static str {
+        match self {
+            Self::And => " && ",
+            Self::Or => " || ",
+            Self::Pipe => " | ",
+            Self::Then => " ; ",
         }
-        let state = match (quote, ch) {
-            (Some('\''), '\'') | (Some('"'), '"') => quote.take(),
-            (Some('\''), _) => quote,
-            (_, '\\') => {
-                escaped = true;
-                Some('\\')
+    }
+}
+
+/// One command of a command line.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Step<'a> {
+    /// The words as the command line writes them, quotes included.
+    words: Vec<&'a str>,
+    /// The operator that joins the command to the next one.
+    join: Option<Join>,
+    /// The status parameters (see [`status_parameter`]) the shell expands
+    /// in the words.
+    statuses: usize,
+    /// The command holds a redirection.
+    redirects: bool,
+}
+
+/// The first words that open a compound command or change what a command's
+/// status means. A command line with one in a command's first place is
+/// outside the reader's grammar.
+const RESERVED_WORDS: [&str; 17] = [
+    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "select", "function", "coproc", "!", "[[",
+];
+
+/// The commands read so far and the word and the command under way.
+#[derive(Default)]
+struct LineReader<'a> {
+    steps: Vec<Step<'a>>,
+    step: Step<'a>,
+    /// Where the word under way starts.
+    word: Option<usize>,
+    words: usize,
+}
+
+impl<'a> LineReader<'a> {
+    /// Ends the word under way at `end`. `None` past [`MAX_WORDS`].
+    fn end_word(&mut self, command: &'a str, end: usize) -> Option<()> {
+        if let Some(start) = self.word.take() {
+            self.words += 1;
+            if self.words > MAX_WORDS {
+                return None;
             }
-            (None, '\'' | '"') => {
-                quote = Some(ch);
-                quote
-            }
-            _ => quote,
-        };
-        (index, ch, state)
-    })
-}
-
-/// The places in `text` of the characters among `marks` that stand outside
-/// quotes and backslash escapes (see [`quoting`]).
-fn unquoted<'a>(text: &'a str, marks: &'a [char]) -> impl Iterator<Item = usize> + 'a {
-    quoting(text)
-        .filter(|(_, ch, state)| state.is_none() && marks.contains(ch))
-        .map(|(index, ..)| index)
-}
-
-/// The characters that end a shell word outside quotes.
-const WORD_ENDS: [char; 7] = [' ', '\t', '\n', '\r', ';', '&', '|'];
-
-/// The end of the shell word `text` starts with: the first whitespace, `;`,
-/// `&`, or `|` outside quotes and backslash escapes, or the end of the text.
-/// The scan stops at that character.
-fn word_end(text: &str) -> usize {
-    unquoted(text, &WORD_ENDS).next().unwrap_or(text.len())
-}
-
-/// Whether a shell word holds a command substitution, whose text the word
-/// reader has no reading of.
-fn substitutes(word: &str) -> bool {
-    word.contains("$(") || word.contains('`')
-}
-
-/// What follows a leading `cd <path> &&` or `cd <path>;` step, where the
-/// path is one shell word without a command substitution.
-fn after_cd(text: &str) -> Option<&str> {
-    let path = text.strip_prefix("cd")?;
-    if !path.starts_with(char::is_whitespace) {
-        return None;
+            self.step.words.push(&command[start..end]);
+        }
+        Some(())
     }
-    let path = path.trim_start();
-    let end = Some(word_end(path)).filter(|end| *end > 0 && !substitutes(&path[..*end]))?;
-    let tail = path[end..].trim_start();
-    let after = tail.strip_prefix("&&").or_else(|| tail.strip_prefix(';'))?;
-    Some(after.trim_start())
+
+    /// Ends the command under way with the operator `join`. A line break
+    /// with no command before it is a blank line or follows an operator and
+    /// joins nothing, and a `;` or a line break that ends the command line
+    /// joins nothing. `None` for an operator with no command before it, for
+    /// one that ends the command line, and past [`MAX_STEPS`].
+    fn end_step(&mut self, join: Option<Join>, line_break: bool) -> Option<()> {
+        if self.step.words.is_empty() {
+            return match (join, self.steps.last_mut()) {
+                (Some(Join::Then), _) if line_break => Some(()),
+                (None, Some(last)) if last.join == Some(Join::Then) => {
+                    last.join = None;
+                    Some(())
+                }
+                _ => None,
+            };
+        }
+        if self.steps.len() == MAX_STEPS {
+            return None;
+        }
+        let mut step = std::mem::take(&mut self.step);
+        step.join = join;
+        self.steps.push(step);
+        Some(())
+    }
 }
 
-/// What follows a leading `NAME=value` assignment, where the value is one
-/// shell word without a command substitution that whitespace ends.
-fn after_assignment(text: &str) -> Option<&str> {
-    let name = text.find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))?;
-    if name == 0 || text.starts_with(|ch: char| ch.is_ascii_digit()) {
-        return None;
+/// The length of the shell parameter that expands to an exit status at the
+/// start of `text`: `$?`, `${?}`, and `${PIPESTATUS[<index>]}`, the status
+/// of the last command and of the commands of the last pipeline.
+fn status_parameter(text: &str) -> Option<usize> {
+    if text.starts_with("$?") {
+        return Some(2);
     }
-    let value = text[name..].strip_prefix('=')?;
-    let end = word_end(value);
-    if substitutes(&value[..end]) {
-        return None;
+    if text.starts_with("${?}") {
+        return Some(4);
     }
-    let after = &value[end..];
-    after
-        .starts_with(char::is_whitespace)
-        .then(|| after.trim_start())
+    let index = text.strip_prefix("${PIPESTATUS[")?;
+    let plain = index
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit() || matches!(byte, b'@' | b'*'))
+        .count();
+    (plain > 0 && index[plain..].starts_with("]}")).then_some("${PIPESTATUS[".len() + plain + 2)
 }
 
-/// `text` with each whitespace run that stands outside quotes and backslash
-/// escapes as one space, and without such whitespace at its ends. Whitespace
-/// inside a quoted or escaped span is an argument's own text and stays.
-fn folded(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut gap = false;
-    for (_, ch, state) in quoting(text) {
-        if state.is_none() && ch.is_whitespace() {
-            gap = !out.is_empty();
+/// The bytes of the expansion that `text` opens with its first character,
+/// a `$`, and whether it is a [`status_parameter`]: a braced parameter that
+/// is a name alone, or the `$` itself, which a name or a special parameter
+/// follows. `None` for a command substitution and for a braced parameter
+/// that holds more than a name, which are outside the reader's grammar.
+fn expansion(text: &str) -> Option<(usize, bool)> {
+    if let Some(length) = status_parameter(text) {
+        return Some((length, true));
+    }
+    let Some(braced) = text.strip_prefix("${") else {
+        return (!text.starts_with("$(")).then_some((1, false));
+    };
+    let name = braced
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    (name > 0 && braced[name..].starts_with('}')).then_some((name + 3, false))
+}
+
+/// The delimiter of the here-document that `text` opens right after its
+/// `<<`, whether a `-` before it strips the tabs that lead its closing
+/// line, and the bytes read: an optional `-`, spaces and tabs, and one word
+/// of ASCII letters, digits, and `_`, bare or inside one pair of single or
+/// double quotes, that whitespace, an operator, or the end of the text
+/// follows. `None` for a here-string and for a delimiter of any other
+/// form, which are outside the reader's grammar.
+fn here_document(text: &str) -> Option<(&str, bool, usize)> {
+    let dash = text.starts_with('-');
+    let word = text[usize::from(dash)..].trim_start_matches([' ', '\t']);
+    let lead = text.len() - word.len();
+    let name = |text: &str| {
+        text.bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            .count()
+    };
+    let (delimiter, length) = match word.chars().next()? {
+        quote @ ('\'' | '"') => {
+            let length = name(&word[1..]);
+            word[1 + length..]
+                .starts_with(quote)
+                .then_some((&word[1..=length], length + 2))?
+        }
+        _ => (&word[..name(word)], name(word)),
+    };
+    let follows = word[length..].chars().next();
+    let ends = follows.is_none_or(|ch| " \t\n;|&<>".contains(ch));
+    (!delimiter.is_empty() && ends).then_some((delimiter, dash, lead + length))
+}
+
+/// The commands of a command line, in the grammar this reader follows
+/// whole: words, single and double quotes, backslash escapes, `$NAME` and
+/// `${NAME}` parameters, redirections to a file or a descriptor, comments,
+/// one here-document to a line (see [`here_document`]), and the operators
+/// `&&`, `||`, `|`, `;`, and a line break between commands. The body of a
+/// here-document, to its closing line, is one word of the last command of
+/// the line that opens it, so two command lines that differ in a body are
+/// two texts.
+///
+/// `None` for a command line that holds anything else, since a form the
+/// reader does not follow can hide a command or an exit status from it: a
+/// command or process substitution, a subshell or a brace group, a
+/// here-string, a here-document without its closing line, a second one on
+/// a line, `$'…'` and `$"…"` quoting, a
+/// `${…}` that holds more than a name, a background `&`, `|&`, `>|`, `;;`,
+/// an open quote, a backslash that ends the text, an operator with no
+/// command on one of its sides, one of [`RESERVED_WORDS`] in a command's
+/// first place, and more than [`MAX_STEPS`] commands or [`MAX_WORDS`]
+/// words. The scan passes over each byte once.
+fn commands_of(command: &str) -> Option<Vec<Step<'_>>> {
+    let bytes = command.as_bytes();
+    let mut reader = LineReader::default();
+    let mut quote: Option<char> = None;
+    // The delimiter of the here-document the line under way opens, and
+    // whether tabs may lead its closing line.
+    let mut opened: Option<(&str, bool)> = None;
+    let mut skip = 0;
+    for (index, ch) in command.char_indices() {
+        if index < skip {
             continue;
         }
-        if std::mem::take(&mut gap) {
-            out.push(' ');
+        let after = index + ch.len_utf8();
+        let next = bytes.get(after).copied();
+        if let Some(open) = quote {
+            match ch {
+                _ if ch == open => quote = None,
+                '\\' if open == '"' => {
+                    skip = after + command[after..].chars().next()?.len_utf8();
+                }
+                '`' if open == '"' => return None,
+                '$' if open == '"' => {
+                    let (length, status) = expansion(&command[index..])?;
+                    reader.step.statuses += usize::from(status);
+                    skip = index + length;
+                }
+                _ => {}
+            }
+            continue;
         }
-        out.push(ch);
+        match ch {
+            ' ' | '\t' | '\r' => reader.end_word(command, index)?,
+            '\n' | ';' => {
+                if ch == ';' && next == Some(b';') {
+                    return None;
+                }
+                reader.end_word(command, index)?;
+                if let Some((delimiter, dash)) = opened.take_if(|_| ch == '\n') {
+                    // The body runs from the next line to the closing
+                    // line, which is the delimiter alone.
+                    let mut end = after;
+                    let closed = command[after..].split('\n').any(|line| {
+                        end += line.len() + 1;
+                        let line = if dash {
+                            line.trim_start_matches('\t')
+                        } else {
+                            line
+                        };
+                        line == delimiter
+                    });
+                    if !closed || reader.step.words.is_empty() {
+                        return None;
+                    }
+                    reader.word = Some(after);
+                    reader.end_word(command, end - 1)?;
+                    skip = end - 1;
+                }
+                reader.end_step(Some(Join::Then), ch == '\n')?;
+            }
+            '|' => {
+                if next == Some(b'&') || bytes[..index].last() == Some(&b'>') {
+                    return None;
+                }
+                reader.end_word(command, index)?;
+                let join = match next {
+                    Some(b'|') => {
+                        skip = after + 1;
+                        Join::Or
+                    }
+                    _ => Join::Pipe,
+                };
+                reader.end_step(Some(join), false)?;
+            }
+            '&' if next == Some(b'&') => {
+                reader.end_word(command, index)?;
+                skip = after + 1;
+                reader.end_step(Some(Join::And), false)?;
+            }
+            '&' => {
+                // The `&` of `>&2`, `2>&1`, `<&3`, and `&>file` is part of
+                // a redirection, which is a word of its command.
+                let redirects =
+                    next == Some(b'>') || matches!(bytes[..index].last(), Some(b'>' | b'<'));
+                if !redirects {
+                    return None;
+                }
+                reader.step.redirects = true;
+                reader.word.get_or_insert(index);
+            }
+            '<' if next == Some(b'<') => {
+                let (delimiter, dash, length) = here_document(&command[after + 1..])?;
+                if opened.replace((delimiter, dash)).is_some() {
+                    return None;
+                }
+                reader.step.redirects = true;
+                reader.word.get_or_insert(index);
+                skip = after + 1 + length;
+            }
+            '<' | '>' => {
+                reader.step.redirects = true;
+                reader.word.get_or_insert(index);
+            }
+            '(' | ')' | '{' | '}' | '`' => return None,
+            // A `#` that begins a word opens a comment, which runs to the
+            // end of its line.
+            '#' if reader.word.is_none() => {
+                skip = command[index..]
+                    .find('\n')
+                    .map_or(command.len(), |end| index + end);
+            }
+            '\\' => {
+                skip = after + command[after..].chars().next()?.len_utf8();
+                reader.word.get_or_insert(index);
+            }
+            '\'' | '"' => {
+                quote = Some(ch);
+                reader.word.get_or_insert(index);
+            }
+            '$' => {
+                if matches!(next, Some(b'\'' | b'"')) {
+                    return None;
+                }
+                let (length, status) = expansion(&command[index..])?;
+                reader.step.statuses += usize::from(status);
+                skip = index + length;
+                reader.word.get_or_insert(index);
+            }
+            _ => {
+                reader.word.get_or_insert(index);
+            }
+        }
     }
-    out
+    if quote.is_some() || opened.is_some() {
+        return None;
+    }
+    reader.end_word(command, command.len())?;
+    reader.end_step(None, false)?;
+    let reserved = reader
+        .steps
+        .iter()
+        .any(|step| RESERVED_WORDS.contains(&step.words[0]));
+    (!reserved).then_some(reader.steps)
 }
 
-/// The command without what varies between runs of one operation: leading
-/// `cd <path> &&` and `cd <path>;` steps, leading `NAME=value` assignments,
-/// and the width of whitespace runs between words. A step or an assignment
-/// that ends the command stays, and so does one whose word holds a command
-/// substitution.
-fn normalized(command: &str) -> String {
-    let mut rest = command.trim_start();
-    while let Some(after) = after_cd(rest)
-        .or_else(|| after_assignment(rest))
-        .filter(|after| !after.is_empty())
-    {
-        rest = after;
+/// The commands that name a command line and decide its outcome: its
+/// commands after each leading `cd <directory>` that `&&`, `;`, or a line
+/// break joins to a later command. Such a step varies between runs of one
+/// operation, and the command after it reports for it.
+fn after_directory<'s, 'a>(steps: &'s [Step<'a>]) -> &'s [Step<'a>] {
+    let mut rest = steps;
+    while let [first, later @ ..] = rest {
+        let moves = first.words.len() == 2
+            && first.words[0] == "cd"
+            && matches!(first.join, Some(Join::And | Join::Then))
+            && !later.is_empty();
+        if !moves {
+            break;
+        }
+        rest = later;
     }
-    folded(rest)
+    rest
+}
+
+/// Whether `word` opens with a `NAME=` assignment.
+fn assigns(word: &str) -> bool {
+    let name = word
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    name > 0 && !word.as_bytes()[0].is_ascii_digit() && word[name..].starts_with('=')
+}
+
+/// The words of a command after its leading `NAME=value` assignments, and
+/// all of its words when it holds assignments alone. The first is the
+/// program the command runs.
+fn program_words<'s, 'a>(step: &'s Step<'a>) -> &'s [&'a str] {
+    let lead = step.words.iter().take_while(|word| assigns(word)).count();
+    match lead < step.words.len() {
+        true => &step.words[lead..],
+        false => &step.words,
+    }
 }
 
 /// `text` with each whitespace run as one space.
@@ -651,36 +970,73 @@ fn plain_word(word: &str) -> bool {
 /// scan of it does not finish. The command line passes the redactor first,
 /// so the words shown and the digest derive from redacted text: two command
 /// lines that differ in a credential the redactor finds are one command.
-/// The record shows the first word of the normalized command when it is a
-/// plain word, and the word after it when that is a plain word that begins
-/// with no `-`; every other argument stays out of the record.
+///
+/// A command line the reader follows (see [`commands_of`]) is normalized to
+/// what stays the same between runs of one operation: its commands after
+/// the leading `cd` steps (see [`after_directory`]), the first of them
+/// without its leading assignments, each command's words joined by single
+/// spaces, and each operator in one spelling, a line break as `;`. The
+/// record shows the first word of that text when it is a plain word, and
+/// the word after it when that is a plain word that begins with no `-`. A
+/// command line outside the reader's grammar is kept as written, without
+/// the whitespace at its ends, and the record shows the word it begins
+/// with when that is a plain word and none of [`RESERVED_WORDS`]. Every
+/// other argument stays out of the record.
+///
+/// The digest is the SHA-256 of the project and that text, so it follows
+/// the redactor's rules and this normalization: a build that changes
+/// either names a command's later records by a new lineage and leaves the
+/// earlier lineage as it stands.
 fn command_named(scope: &str, command: &str) -> Option<Command> {
     let redacted = context_core::redaction::redact_windowed_durable_text(command, usize::MAX)
         .ok()?
         .text;
-    let normal = normalized(&redacted);
+    let (normal, name, operand) = match commands_of(&redacted) {
+        Some(steps) => {
+            let steps = after_directory(&steps);
+            let first = program_words(&steps[0]);
+            let mut normal = String::with_capacity(redacted.len());
+            for (index, step) in steps.iter().enumerate() {
+                let words = if index == 0 { first } else { &step.words[..] };
+                for (place, word) in words.iter().enumerate() {
+                    if place > 0 {
+                        normal.push(' ');
+                    }
+                    normal.push_str(word);
+                }
+                normal.push_str(step.join.map_or("", Join::text));
+            }
+            let operand = first.get(1).filter(|word| !word.starts_with('-'));
+            (
+                normal,
+                Some(first[0].to_owned()),
+                operand.map(|word| (*word).to_owned()),
+            )
+        }
+        None => {
+            let written = redacted.trim();
+            let name = written
+                .split_whitespace()
+                .next()
+                .filter(|word| !RESERVED_WORDS.contains(word));
+            (written.to_owned(), name.map(str::to_owned), None)
+        }
+    };
     let mut hash = Sha256::new();
     for part in [scope, normal.as_str()] {
         hash.update((part.len() as u64).to_le_bytes());
         hash.update(part.as_bytes());
     }
     let digest = format!("{:x}", hash.finalize())[..32].to_owned();
-    let name = &normal[..word_end(&normal)];
-    if !plain_word(name) {
+    let Some(mut shown) = name.filter(|name| plain_word(name)) else {
         return Some(Command {
             shown: LEFT_OUT.to_owned(),
             digest,
         });
-    }
-    let rest = &normal[name.len()..];
-    let operand = rest
-        .strip_prefix(' ')
-        .map(|rest| &rest[..word_end(rest)])
-        .filter(|word| plain_word(word) && !word.starts_with('-'));
-    let mut shown = name.to_owned();
-    if let Some(operand) = operand {
+    };
+    if let Some(operand) = operand.filter(|word| plain_word(word)) {
         shown.push(' ');
-        shown.push_str(operand);
+        shown.push_str(&operand);
     }
     if shown.len() < normal.len() {
         shown.push_str(ARGUMENTS_NOTE);
@@ -772,210 +1128,190 @@ fn stated_exit_code(line: &str) -> Option<i64> {
         })
 }
 
-/// The characters that part two commands of a command line.
-const COMMAND_ENDS: [char; 4] = [';', '|', '&', '\n'];
-
-/// The commands of a command line, each with the character that ends it:
-/// the text between two of [`COMMAND_ENDS`] outside quotes and backslash
-/// escapes. `||` and `&&` leave an empty command between their two
-/// characters.
-fn steps(command: &str) -> Vec<(&str, Option<char>)> {
-    let mut start = 0;
-    let mut steps = Vec::new();
-    for end in unquoted(command, &COMMAND_ENDS) {
-        steps.push((&command[start..end], command[end..].chars().next()));
-        start = end + 1;
-    }
-    steps.push((&command[start..], None));
-    steps
-}
-
 /// The placeholder of the status parameter in an echo's template. A command
-/// line holds no such character in a word.
+/// line holds no such character in a word that is read.
 const STATUS_PLACE: char = '\u{0}';
 
-/// The length of the shell parameter that expands to an exit status at the
-/// start of `text`: `$?`, `${?}`, and `${PIPESTATUS[<index>]}`, the status
-/// of the last command and of the commands of the last pipeline.
-fn status_parameter(text: &str) -> Option<usize> {
-    if text.starts_with("$?") {
-        return Some(2);
-    }
-    if text.starts_with("${?}") {
-        return Some(4);
-    }
-    let index = text.strip_prefix("${PIPESTATUS[")?;
-    let close = index.find("]}")?;
-    let plain = index[..close]
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || byte == b'@' || byte == b'*');
-    plain.then_some("${PIPESTATUS[".len() + close + 2)
+/// What a command line does with its own exit status.
+#[derive(Debug, PartialEq, Eq)]
+enum StatusUse {
+    /// The command line reads no status parameter.
+    Unused,
+    /// The last command is an `echo` that prints one status between these
+    /// two texts, and the command line reads no other status parameter.
+    Echo { before: String, after: String },
+    /// The command line reads a status parameter in some other way, which
+    /// the reader does not follow.
+    Unfollowed,
 }
 
-/// The text an `echo` command prints around the exit status it prints, when
-/// `step` is an `echo` whose words hold a status parameter the shell
-/// expands: outside single quotes and backslash escapes. The text before
-/// and after the parameter is returned as the shell prints it, without
-/// quote characters and escaping backslashes and with whitespace runs as
-/// single spaces, when exactly one parameter expands; `Some(None)` is an
-/// echo of several statuses, whose line is left unread. The words end at a
-/// redirection, with the descriptor number before it, and at the `)` that
-/// closes a subshell. A parameter in single quotes or behind a backslash is
-/// text the echo prints as written.
-fn status_echo(step: &str) -> Option<Option<(String, String)>> {
-    let step = step.trim_start_matches(|ch: char| ch.is_whitespace() || "({".contains(ch));
-    let words = step
-        .strip_prefix("echo")
-        .filter(|words| words.starts_with(char::is_whitespace))?;
-    let end = unquoted(words, &['>', ')']).next().unwrap_or(words.len());
-    let cut = &words[..end];
-    // `1>&2` names a descriptor, which is no word of the echo.
-    let descriptor = cut.trim_end_matches(|ch: char| ch.is_ascii_digit());
-    let words = match words[end..].starts_with('>')
-        && descriptor.len() < cut.len()
-        && descriptor.ends_with(char::is_whitespace)
-    {
-        true => descriptor,
-        false => cut,
-    };
-    let mut template = String::new();
-    let mut statuses = 0;
+/// Appends the text the shell prints for one word of an `echo` to `out`,
+/// with [`STATUS_PLACE`] for a status parameter: the word without its quote
+/// characters and without the backslashes that escape a character. `None`
+/// for a word whose printed text depends on more than the exit status: any
+/// other `$` outside single quotes, and `*`, `?`, `[`, or `~` outside
+/// quotes, which the shell matches against file names.
+fn printed_word(word: &str, out: &mut String) -> Option<()> {
+    let mut quote: Option<char> = None;
     let mut skip = 0;
-    let mut escaping = false;
-    for (index, ch, state) in quoting(words) {
+    for (index, ch) in word.char_indices() {
         if index < skip {
             continue;
         }
-        let expands = ch == '$' && matches!(state, None | Some('"'));
-        if let Some(length) = expands.then(|| status_parameter(&words[index..])).flatten() {
-            statuses += 1;
-            skip = index + length;
-            template.push(STATUS_PLACE);
-            continue;
+        let after = index + ch.len_utf8();
+        match (quote, ch) {
+            (Some(open), _) if ch == open => quote = None,
+            (Some('\''), _) => out.push(ch),
+            (None, '\'' | '"') => quote = Some(ch),
+            (_, '$') => {
+                skip = index + status_parameter(&word[index..])?;
+                out.push(STATUS_PLACE);
+            }
+            (_, '\\') => {
+                let escaped = word[after..].chars().next()?;
+                skip = after + escaped.len_utf8();
+                // Inside double quotes a backslash escapes `$`, `` ` ``,
+                // `"`, and itself, and stands as written before any other
+                // character.
+                if quote.is_some() && !"$`\"\\".contains(escaped) {
+                    out.push('\\');
+                }
+                out.push(escaped);
+            }
+            (None, '*' | '?' | '[' | '~') => return None,
+            _ if ch == STATUS_PLACE => return None,
+            _ => out.push(ch),
         }
-        // The quotes that open and close a span and the backslash that
-        // escapes a character are the shell's own and print nothing.
-        let quote = matches!(state, Some(quote) if quote == ch && quote != '\\');
-        let escaper = state == Some('\\') && ch == '\\' && !escaping;
-        escaping = escaper;
-        if !quote && !escaper && ch != STATUS_PLACE {
-            template.push(ch);
-        }
     }
-    if statuses == 0 {
-        return None;
-    }
-    if statuses > 1 {
-        return Some(None);
-    }
-    let template = collapsed(&template);
-    let (before, after) = template.split_once(STATUS_PLACE)?;
-    Some(Some((before.to_owned(), after.to_owned())))
+    Some(())
 }
 
-/// The nonzero exit status the command line printed, with the line that
-/// holds it. The first [`MAX_STATUS_ECHOES`] `echo` commands that print one
-/// status are read (see [`status_echo`]). An echo's line is the last line
-/// of the output that is the echo's text with one or more numbers in the
-/// place of the parameter, whitespace runs as single spaces; an echo of
-/// the parameter alone is read from the last non-empty line alone, since a
-/// bare number stands in other lines of an output too. The greatest number
-/// over the echoes is the status. The shell printed each for the command
-/// before its echo, so a nonzero one has the strength of the tool's status.
-fn printed_status(command: &str, lines: &[(&str, Range<usize>)]) -> Option<(i64, Range<usize>)> {
-    let echoes: Vec<(String, String)> = steps(command)
-        .into_iter()
-        .filter_map(|(step, _)| status_echo(step).flatten())
-        .take(MAX_STATUS_ECHOES)
-        .collect();
-    if echoes.is_empty() {
-        return None;
+/// What the commands of a command line do with the line's exit status. The
+/// echo that is read prints its words alone: it holds no redirection, its
+/// first word after `echo` begins with no `-`, and each of its words prints
+/// a fixed text (see [`printed_word`]). Its text is returned with
+/// whitespace runs as single spaces.
+fn status_use(steps: &[Step<'_>]) -> StatusUse {
+    let read: usize = steps.iter().map(|step| step.statuses).sum();
+    if read == 0 {
+        return StatusUse::Unused;
     }
-    let filled: Vec<(String, &Range<usize>)> = lines
-        .iter()
-        .filter(|(line, _)| !line.is_empty())
-        .map(|(line, span)| (collapsed(line), span))
-        .collect();
-    let numbers = |middle: &str| -> Option<i64> {
-        middle
-            .split(' ')
-            .map(|number| {
-                (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
-                    .then(|| number.parse::<i64>().ok())
-                    .flatten()
-            })
-            .collect::<Option<Vec<_>>>()?
-            .into_iter()
-            .max()
-    };
-    echoes
-        .iter()
-        .filter_map(|(before, after)| {
-            let bare = before.is_empty() && after.is_empty();
-            let considered = if bare {
-                filled.len().min(1)
-            } else {
-                filled.len()
-            };
-            filled
-                .iter()
-                .rev()
-                .take(considered)
-                .find_map(|(line, span)| {
-                    let middle = line
-                        .strip_prefix(before.as_str())?
-                        .strip_suffix(after.as_str())?;
-                    Some((numbers(middle)?, (*span).clone()))
-                })
+    let template = steps
+        .last()
+        .filter(|last| read == 1 && last.statuses == 1 && !last.redirects)
+        .and_then(|last| match last.words.as_slice() {
+            ["echo", first, ..] if !first.starts_with('-') => {
+                let mut template = String::new();
+                for word in &last.words[1..] {
+                    template.push(' ');
+                    printed_word(word, &mut template)?;
+                }
+                Some(collapsed(&template))
+            }
+            _ => None,
+        });
+    match template
+        .as_deref()
+        .and_then(|text| text.split_once(STATUS_PLACE))
+    {
+        Some((before, after)) => StatusUse::Echo {
+            before: before.to_owned(),
+            after: after.to_owned(),
+        },
+        None => StatusUse::Unfollowed,
+    }
+}
+
+/// The exit status an echo printed in `line`: the line, with whitespace
+/// runs as single spaces, is `before`, one number or several that single
+/// spaces part, as `${PIPESTATUS[@]}` prints them, and `after`. The
+/// greatest number is the status.
+fn echoed_status(before: &str, after: &str, line: &str) -> Option<i64> {
+    let line = collapsed(line);
+    let middle = line.strip_prefix(before)?.strip_suffix(after)?;
+    middle
+        .split(' ')
+        .map(|number| {
+            (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| number.parse::<i64>().ok())
+                .flatten()
         })
-        .max_by_key(|(status, _)| *status)
-        .filter(|(status, _)| *status != 0)
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .max()
 }
 
-/// Whether the command line hides an exit status from the tool: a pipe,
-/// `||`, or `;` outside quotes and backslash escapes stands between two of
-/// its commands. The shell reports a pipeline or a list by its last
-/// command, so the tool's status covers that command alone. An `echo` that
-/// prints an exit status is the line's own report and counts as no command
-/// here, an `&&` chain ends at its first failure, and a `;` or a `|` at the
-/// end of the line joins nothing.
-fn hides_status(command: &str) -> bool {
-    let steps = steps(command);
-    let commands = |steps: &[(&str, Option<char>)]| {
-        steps
-            .iter()
-            .any(|(step, _)| !step.trim().is_empty() && status_echo(step).is_none())
-    };
-    steps.iter().enumerate().any(|(index, (_, end))| {
-        matches!(end, Some('|' | ';'))
-            && commands(&steps[..=index])
-            && commands(&steps[index + 1..])
-    })
+/// What a tool status of 0 says of a command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Every command passed: the command line is one command or an `&&`
+    /// chain, which ends at its first failure.
+    Whole,
+    /// The last command passed. A `|`, a `||`, a `;`, or a line break
+    /// joins two commands, and the shell reports such a pipeline or list by
+    /// its later command, so the status of an earlier one is hidden from
+    /// the tool.
+    Last,
+    /// Nothing the reader can state: the command line is outside the
+    /// reader's grammar, or it reads its own exit status in a way the
+    /// reader does not follow.
+    Unread,
+}
+
+/// The reach of a status of 0 over commands the reader follows.
+fn reach_of(steps: &[Step<'_>]) -> Reach {
+    let joins = &steps[..steps.len().saturating_sub(1)];
+    let hides = joins
+        .iter()
+        .any(|step| !matches!(step.join, Some(Join::And)));
+    match hides {
+        true => Reach::Last,
+        false => Reach::Whole,
+    }
 }
 
 /// The words a shell prints when it finds no program of the name it was
 /// given.
 const MISSING_COMMAND: &str = "command not found";
 
-/// The program a line reports as missing when the line is a shell's own
-/// report: `<shell>: <program>: command not found`, with `line <n>:` before
-/// the program for a script, as bash and sh print it, or
-/// `<shell>: command not found: <program>`, as zsh prints it. The program
-/// is one word.
+/// The program a line reports as missing when the whole line is a shell's
+/// own report: `<shell>: <program>: command not found`, with
+/// `line <number>:` before the program for a script, as bash and sh print
+/// it, or `<shell>: command not found: <program>`, as zsh prints it. The
+/// shell and the program are one word each without a `:`, so a line that a
+/// search printed with a file name and a line number before the report is
+/// no report.
 fn missing_program(line: &str) -> Option<&str> {
-    let program = match line.strip_suffix(": command not found") {
-        Some(report) => report.rsplit_once(": ")?.1,
-        None => line.split_once(": command not found: ")?.1,
+    let (shell, program) = match line.strip_suffix(": command not found") {
+        Some(report) => {
+            let (prefix, program) = report.rsplit_once(": ")?;
+            let shell = match prefix.rsplit_once(": line ") {
+                Some((shell, number))
+                    if !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()) =>
+                {
+                    shell
+                }
+                _ => prefix,
+            };
+            (shell, program)
+        }
+        None => line.split_once(": command not found: ")?,
     };
-    (!program.is_empty() && !program.contains(char::is_whitespace)).then_some(program)
+    let word =
+        |text: &str| !text.is_empty() && !text.contains(|ch: char| ch.is_whitespace() || ch == ':');
+    (word(shell) && word(program)).then_some(program)
 }
 
-/// Whether `program` is a word of the command line, so the shell's report
-/// of it concerns this command line.
-fn names_program(command: &str, program: &str) -> bool {
-    command
-        .split(|ch: char| ch.is_whitespace() || ";|&(){}<>\"'`$=".contains(ch))
-        .any(|word| word == program)
+/// Whether the line is the note Pi's shell tool writes after an output it
+/// cut: `[Showing lines <range> of <count>. Full output: <path>]`, with the
+/// byte limit before the `.` when that cut the output, and
+/// `[Showing last <size> of line <number> (line is <size>). Full output:
+/// <path>]`. The note is the harness's text, and its path is a log of the
+/// harness.
+fn truncation_note(line: &str) -> bool {
+    line.strip_prefix("[Showing l")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .is_some_and(|rest| rest.contains(". Full output: "))
 }
 
 /// Level words that mark a line of a failed command's output as one that
@@ -1012,11 +1348,12 @@ fn states_error(line: &str) -> bool {
 /// The closing line a harness writes when it ended the command itself: Pi
 /// on an abort and on its timeout. The command's own outcome stays unknown,
 /// so such a result is skipped.
-const HARNESS_ENDED: [&str; 4] = [
+const HARNESS_ENDED: [&str; 5] = [
     "Command aborted",
     "Operation aborted",
     "Tool execution aborted",
     "Command timed out after ",
+    "Command terminated without an exit code",
 ];
 
 /// The whole text of the result Pi writes for a tool call that an extension
@@ -1025,12 +1362,29 @@ const HARNESS_BLOCKED: &str = "Tool execution was blocked";
 /// The first line of the result Pi writes for a tool call whose arguments
 /// its schema refuses, up to the tool's name.
 const HARNESS_INVALID: &str = "Validation failed for tool \"";
+/// How the result Pi writes for a tool call it left unrun begins, up to
+/// the tool's name, and how it goes on after the name: the model's reply
+/// ended at its output limit, so the call's arguments may be cut.
+const HARNESS_UNRUN: (&str, &str) = (
+    "Tool call \"",
+    " was not executed: the response hit the output token limit",
+);
+/// How the result Pi writes begins when its shell tool finds no working
+/// directory to run the command in, and when an extension's hook failed
+/// before the tool ran.
+const HARNESS_UNSTARTED: [&str; 2] = [
+    "Working directory does not exist: ",
+    "Extension failed, blocking execution: ",
+];
 
 /// Whether the harness ended or refused the command itself, which leaves
 /// the command's own outcome unknown: the result carries the harness's
 /// error mark and its last non-empty line begins with one of
 /// [`HARNESS_ENDED`], its whole text is [`HARNESS_BLOCKED`] or
-/// `Tool <name> not found`, or it begins with [`HARNESS_INVALID`].
+/// `Tool <name> not found`, or it begins with [`HARNESS_INVALID`], with one
+/// of [`HARNESS_UNSTARTED`], or with [`HARNESS_UNRUN`] around a tool's
+/// name. The forms are Pi's texts, read as written, so a command that
+/// prints one of them as its last or only output is skipped too.
 fn harness_decided(text: &str, flagged: bool) -> bool {
     if !flagged {
         return false;
@@ -1045,11 +1399,21 @@ fn harness_decided(text: &str, flagged: bool) -> bool {
             .iter()
             .any(|mark| last.trim().starts_with(mark))
     });
-    ended || text.starts_with(HARNESS_INVALID) || text == HARNESS_BLOCKED || missing
+    let unrun = text
+        .strip_prefix(HARNESS_UNRUN.0)
+        .and_then(|rest| rest.split_once('"'))
+        .is_some_and(|(_, rest)| rest.starts_with(HARNESS_UNRUN.1));
+    let unstarted = HARNESS_UNSTARTED.iter().any(|mark| text.starts_with(mark));
+    ended
+        || unrun
+        || unstarted
+        || text.starts_with(HARNESS_INVALID)
+        || text == HARNESS_BLOCKED
+        || missing
 }
 
-/// What a command's result reports: `None` for a result that reports no
-/// failure.
+/// What a command's result states of its outcome, before the redactor has
+/// judged the output.
 ///
 /// The tool's own status decides first. The harness's error mark is a
 /// failure, and so is a nonzero exit code that a status line states (see
@@ -1060,35 +1424,47 @@ fn harness_decided(text: &str, flagged: bool) -> bool {
 /// and the last [`EXIT_CODE_CLOSING_LINES`] non-empty lines; the last of
 /// them that states a code decides.
 ///
-/// A result without that status, or with status 0, is the result of a
-/// command line whose last command passed. Three grounds make it a failure,
-/// each for a stated reason. A nonzero exit status that the command line
-/// itself printed (see [`printed_status`]) is the shell's report of the
-/// command before the `echo`, so it has the tool status's strength. The
-/// shell's report of a program of the command line that it did not find
-/// (see [`missing_program`]) names a command that did not run, whose status
-/// a later command of the line replaced. A failure line, as capture reads
-/// one in an output block, is a failure where the command line hides an
-/// exit status (see [`hides_status`]): the tool's status then covers the
-/// line's last command alone, and the output is the only report of the
-/// others. A failure line in the output of a single command whose status is
-/// 0, such as a search through a log, is that command's ordinary output.
+/// A result without that status, or with status 0, is read with its command
+/// line (see [`commands_of`], [`Reach`]). A final `echo` of the line's exit
+/// status (see [`status_use`]) is the shell's own report of the commands
+/// before it, so the number it printed in the output's last non-empty line
+/// stands for the tool's status: a nonzero one is a failure, and a zero is
+/// a status of 0 for the commands before the echo. A status of 0 over one
+/// command or an `&&` chain is a pass. Where the command line hides the
+/// status of an earlier command, the output is the only report of that
+/// command, and two things in it are a failure: a shell's report that a
+/// program of the command line is missing (see [`missing_program`]), and a
+/// failure line, as capture reads one in an output block. A failure line in
+/// the output of one command whose status is 0, such as a search through a
+/// log, is that command's ordinary output. A command line the reader does
+/// not follow gets no reading from a status of 0.
 ///
 /// The chosen lines are the first lines that state an error, each failure
 /// line with the line that completes it, and then the closing lines of the
 /// output. A line with a control character or a Unicode line separator is
-/// left out, and a text that several lines share is chosen once.
-fn outcome_of(command: &str, text: &str, flagged: bool) -> Option<Reported> {
+/// left out, a text that several lines share is chosen once, and Pi's note
+/// after an output it cut (see [`truncation_note`]) is read as no line.
+fn outcome_of(command: &str, text: &str, flagged: bool) -> Reported {
     let mut start = 0;
     // Each line, trimmed, with the bytes it stands at.
-    let lines: Vec<(&str, Range<usize>)> = text
-        .split('\n')
-        .map(|line| {
-            let span = start..start + line.len();
-            start = span.end + 1;
-            (line.trim(), span)
-        })
-        .collect();
+    let mut lines: Vec<(&str, Range<usize>)> = Vec::with_capacity(text.split('\n').count());
+    for line in text.split('\n') {
+        let span = start..start + line.len();
+        start = span.end + 1;
+        lines.push((line.trim(), span));
+    }
+    // The harness writes its note last, or before the status line it adds
+    // to a failed result.
+    for line in lines
+        .iter_mut()
+        .rev()
+        .filter(|line| !line.0.is_empty())
+        .take(2)
+    {
+        if truncation_note(line.0) {
+            line.0 = "";
+        }
+    }
     let shown = |line: &str| {
         !line.is_empty() && printable(line) && !line.contains(['\u{2028}', '\u{2029}'])
     };
@@ -1110,7 +1486,33 @@ fn outcome_of(command: &str, text: &str, flagged: bool) -> Option<Reported> {
             }
         }
     };
-    let code = stated.filter(|(code, _)| *code != 0);
+    let steps = commands_of(command);
+    let commands = steps.as_deref().map(after_directory);
+    let (printed, reach) = match commands.map(|commands| (commands, status_use(commands))) {
+        None | Some((_, StatusUse::Unfollowed)) => (None, Reach::Unread),
+        Some((commands, StatusUse::Unused)) => (None, reach_of(commands)),
+        Some((commands, StatusUse::Echo { before, after })) => {
+            let last = lines.iter().rev().find(|(line, _)| !line.is_empty());
+            let printed = last.and_then(|(line, span)| {
+                Some((echoed_status(&before, &after, line)?, span.clone()))
+            });
+            // The echo's number is the status of the commands before it.
+            let before = reach_of(&commands[..commands.len() - 1]);
+            match printed {
+                None => (None, Reach::Unread),
+                Some((0, _)) => (None, before),
+                Some(printed) => (Some(printed), before),
+            }
+        }
+    };
+    // The program of each command, which a shell's report of a missing
+    // program names.
+    let programs: Vec<&str> = match (reach, commands) {
+        (Reach::Last, Some(commands)) => {
+            commands.iter().map(|step| program_words(step)[0]).collect()
+        }
+        _ => Vec::new(),
+    };
     let mut fails = false;
     let mut missing = false;
     let mut errors: Vec<usize> = Vec::new();
@@ -1118,7 +1520,7 @@ fn outcome_of(command: &str, text: &str, flagged: bool) -> Option<Reported> {
     for (index, (line, _)) in lines.iter().enumerate().filter(|(_, line)| shown(line.0)) {
         let failure = is_output_failure_line(line);
         fails |= failure;
-        missing |= missing_program(line).is_some_and(|program| names_program(command, program));
+        missing |= missing_program(line).is_some_and(|program| programs.contains(&program));
         let completing = index > 0
             && is_output_failure_line(lines[index - 1].0)
             && completes_failure_line(lines[index - 1].0, line);
@@ -1129,17 +1531,6 @@ fn outcome_of(command: &str, text: &str, flagged: bool) -> Option<Reported> {
             errors.push(index);
         }
     }
-    let (evidence, exit_code) = if flagged || code.is_some() {
-        (Evidence::ToolStatus, code)
-    } else if let Some(printed) = printed_status(command, &lines) {
-        (Evidence::PrintedStatus, Some(printed))
-    } else if missing {
-        (Evidence::ShellReport, None)
-    } else if fails && hides_status(command) {
-        (Evidence::FailureLines, None)
-    } else {
-        return None;
-    };
     let mut closing: Vec<usize> = (0..lines.len())
         .rev()
         .filter(|index| shown(lines[*index].0))
@@ -1161,11 +1552,15 @@ fn outcome_of(command: &str, text: &str, flagged: bool) -> Option<Reported> {
             None => kept.push((Kept { text, closing }, span.clone())),
         }
     }
-    Some(Reported {
-        evidence,
-        exit_code,
+    Reported {
+        flagged,
+        stated: stated.filter(|(code, _)| *code != 0),
+        printed,
+        reach,
+        missing,
+        fails,
         lines: kept,
-    })
+    }
 }
 
 /// The bytes of `text` that hold the redactor's findings, by source
@@ -1205,18 +1600,40 @@ fn named_in(
     (named(named_path), named(named_error))
 }
 
-/// The failure a record states, once the redactor has judged the output
-/// `text` that `reported` was read from. The rule is source capture's rule
-/// for a tool span: text in which the redactor finds nothing is kept as it
-/// is, and text with a finding is withheld whole. With no finding the
-/// chosen lines stand in the record. With a finding the record holds no
-/// line, and the path, the error name, and the exit code come from lines
-/// that hold no finding; when the scan does not finish, no text of the
-/// output reaches the record. `None` for a failure that rests on an exit
-/// code alone whose line holds a finding or was left unscanned: the result
-/// then changes no record. A result the harness marks stays a failure
-/// without that code.
-fn screened(reported: Reported, text: &str, flagged: bool) -> Option<Failure> {
+/// What a result says of its command once the redactor has judged the
+/// output `text` that `reported` was read from: a failure, a pass, or
+/// `None` for a result that changes no record.
+///
+/// The grounds of a failure are tried from the strongest: the harness's
+/// mark, a stated exit code, a printed exit status, and, behind a hidden
+/// status, a shell's report of a missing program and then a failure line.
+/// An exit code counts when the redactor finds nothing in its line, so a
+/// code whose line holds a finding, or whose output was left unscanned,
+/// gives way to the next ground, and a result whose only grounds are such
+/// codes changes no record. A result the harness marks stays a failure
+/// without the code. A result with no ground is a pass where its status
+/// of 0 reaches a command (see [`Reach`]).
+///
+/// The text kept follows source capture's rule for a tool span: text in
+/// which the redactor finds nothing is kept as it is, and text with a
+/// finding is withheld whole. With no finding the chosen lines stand in
+/// the record. With a finding the record holds no line, and the path and
+/// the error name come from lines that hold no finding; when the scan does
+/// not finish, no text of the output reaches the record.
+fn screened(reported: Reported, text: &str) -> Option<Outcome> {
+    let Reported {
+        flagged,
+        stated,
+        printed,
+        reach,
+        missing,
+        fails,
+        lines,
+    } = reported;
+    let hidden = reach == Reach::Last;
+    if !(flagged || stated.is_some() || printed.is_some() || hidden && (missing || fails)) {
+        return (reach != Reach::Unread).then_some(Outcome::Passed);
+    }
     let findings = findings_in(text);
     let clear = |span: &Range<usize>| {
         findings.as_ref().is_some_and(|findings| {
@@ -1225,25 +1642,37 @@ fn screened(reported: Reported, text: &str, flagged: bool) -> Option<Failure> {
                 .all(|finding| finding.end <= span.start || span.end <= finding.start)
         })
     };
-    let exit_code = match &reported.exit_code {
-        Some((code, span)) if clear(span) => Some(*code),
-        Some(_) if flagged && reported.evidence == Evidence::ToolStatus => None,
-        Some(_) => return None,
-        None => None,
+    let clean = |code: &Option<(i64, Range<usize>)>| {
+        code.as_ref()
+            .filter(|(_, span)| clear(span))
+            .map(|(code, _)| *code)
     };
-    let (path, error) = named_in(&reported.lines, text, clear);
+    let (evidence, exit_code) = if flagged {
+        (Evidence::ToolStatus, clean(&stated))
+    } else if let Some(code) = clean(&stated) {
+        (Evidence::ToolStatus, Some(code))
+    } else if let Some(code) = clean(&printed) {
+        (Evidence::PrintedStatus, Some(code))
+    } else if hidden && missing {
+        (Evidence::ShellReport, None)
+    } else if hidden && fails {
+        (Evidence::FailureLines, None)
+    } else {
+        return None;
+    };
+    let (path, error) = named_in(&lines, text, clear);
     let excerpt = match findings.as_deref() {
-        Some([]) => Excerpt::Kept(reported.lines.into_iter().map(|(line, _)| line).collect()),
+        Some([]) => Excerpt::Kept(lines.into_iter().map(|(line, _)| line).collect()),
         Some(_) => Excerpt::Finding,
         None => Excerpt::Unscanned,
     };
-    Some(Failure {
-        evidence: reported.evidence,
+    Some(Outcome::Failed(Failure {
+        evidence,
         exit_code,
         path,
         error,
         excerpt,
-    })
+    }))
 }
 
 /// The source location a line names: its first word that is a file path
@@ -1452,15 +1881,18 @@ impl HandlerCore {
     /// memo has not judged, for a primary Pi session whose configuration
     /// permits memory capture and consents to source capture: a record is a
     /// durable copy of part of a tool result, which source capture retains
-    /// under that consent. A result under an execution id that two tool
-    /// calls of the window share is left out, since the id names neither
-    /// call alone. The pass considers the last [`MEMO_CALLS_PER_SESSION`]
+    /// under that consent. The consent read is the one the session's route
+    /// saved when it was bound. A result under an execution id that two
+    /// tool calls or two tool results of the window carry is left out,
+    /// since the id names no one execution. The pass considers the last [`MEMO_CALLS_PER_SESSION`]
     /// command results of the window and hands off the earliest
     /// [`MAX_RESULTS_PER_PASS`] unjudged ones whose commands and outputs
     /// fit [`MAX_HANDOFF_BYTES`] together; each is copied within
-    /// [`MAX_OUTPUT_BYTES`], and a result that can change no record (see
-    /// [`Input::of`]) is handed off by name alone and settled unread. The
-    /// task holds no message of the pass. One checkpoint of a session runs
+    /// [`MAX_OUTPUT_BYTES`] for its command and for its text and within
+    /// [`MAX_NAME_BYTES`] for its id and for its tool's name, so every
+    /// single result fits, and a result that [`Input::of`] leaves out is
+    /// handed off by name alone and settled unread. The task holds no
+    /// message of the pass. One checkpoint of a session runs
     /// at a time, and [`MAX_CHECKPOINTS`] over all sessions. Returns `None`
     /// when the window holds no unjudged result, so the caller spawns no
     /// task.
@@ -1477,7 +1909,7 @@ impl HandlerCore {
             pi,
             &binding.harness,
         );
-        if !consents || !capture_enabled(binding) {
+        if !consents || !capture_enabled(binding) || self.kernel.kernel_store().is_err() {
             return None;
         }
         let scope = binding.kernel_project.digest();
@@ -1485,7 +1917,8 @@ impl HandlerCore {
         // the result's output, and the result's creation time.
         type Candidate<'a> = (&'a str, &'a str, &'a Value, &'a OutputKind, Option<i64>);
         let mut calls: HashMap<&str, (&str, &Value)> = HashMap::new();
-        let (mut named, mut shared) = (HashSet::new(), HashSet::new());
+        let (mut named, mut answered, mut shared) =
+            (HashSet::new(), HashSet::new(), HashSet::new());
         let mut considered: VecDeque<Candidate<'_>> = VecDeque::new();
         for message in &request.messages {
             for block in message.ck.content() {
@@ -1503,6 +1936,9 @@ impl HandlerCore {
                     }
                     BlockKind::ToolResult { id, output, .. } => {
                         let id = execution_id(block, id);
+                        if !answered.insert(id) {
+                            shared.insert(id);
+                        }
                         let Some(&(tool, input)) = calls.get(id) else {
                             continue;
                         };
@@ -1562,9 +1998,11 @@ impl Input {
     /// The copied inputs of one command result, or `None` for a result that
     /// changes no record whatever it holds: one that is no text or whose
     /// text or command line passes [`MAX_OUTPUT_BYTES`] (see [`text_of`],
-    /// [`command_of`]), and one whose message carries no creation time or a
-    /// time outside the years the calendar renders, which has no place
-    /// among the command's runs.
+    /// [`command_of`]), one whose call id or tool name passes
+    /// [`MAX_NAME_BYTES`], and one whose message carries no creation time
+    /// or a time outside the years the calendar renders, which has no place
+    /// among the command's runs. Each length is read before a byte is
+    /// copied.
     fn of(
         id: &str,
         tool: &str,
@@ -1573,6 +2011,9 @@ impl Input {
         at_ms: Option<i64>,
     ) -> Option<Self> {
         let at_ms = at_ms.filter(|at_ms| utc_time(*at_ms).is_some())?;
+        if id.len() > MAX_NAME_BYTES || tool.len() > MAX_NAME_BYTES {
+            return None;
+        }
         let command = command_of(input)?;
         let (text, flagged) = text_of(output)?;
         Some(Self {
@@ -1590,24 +2031,29 @@ impl Input {
         self.call.len() + self.tool.len() + self.command.len() + self.text.len()
     }
 
-    /// Reads the command and the result's outcome. `None` for a result that
-    /// changes no record: one the harness refused or ended itself, one
-    /// whose tool name or call id the redactor would change or whose
-    /// command line fails the redactor's scan, and a failure that rests on
-    /// an exit code alone whose line holds a finding (see [`screened`]).
-    /// The tool's name and the call's id are judged whole, before they are
-    /// cut for display.
-    fn observe(&self, scope: &str) -> Option<Observed> {
-        let passes = |text: &str| kernel::exact_text_refusal(text).is_none();
-        if harness_decided(&self.text, self.flagged) || !passes(&self.tool) || !passes(&self.call) {
-            return None;
+    /// Reads the command and the result's outcome. `Err` for a result that
+    /// changes no record, with the reason when an operator can act on it:
+    /// a tool name or a call id that the redactor would change or that
+    /// holds a control character or a Unicode line separator, and a command
+    /// line whose redactor scan does not finish. A result the harness
+    /// refused or ended itself, and one whose outcome stays unstated (see
+    /// [`screened`]), change no record for no such reason. The tool's name
+    /// and the call's id are judged whole, before they are cut for display.
+    fn observe(&self, scope: &str) -> Result<Observed, Option<&'static str>> {
+        if harness_decided(&self.text, self.flagged) {
+            return Err(None);
         }
-        let command = command_named(scope, &self.command)?;
-        let outcome = match outcome_of(&self.command, &self.text, self.flagged) {
-            None => Outcome::Passed,
-            Some(reported) => Outcome::Failed(screened(reported, &self.text, self.flagged)?),
-        };
-        Some(Observed {
+        if !(names_whole(&self.tool) && names_whole(&self.call)) {
+            return Err(Some(
+                "the redactor changes the tool's name or the call's id, or one of them holds a control character",
+            ));
+        }
+        let command = command_named(scope, &self.command).ok_or(Some(
+            "the redactor's scan of the command line did not finish",
+        ))?;
+        let reported = outcome_of(&self.command, &self.text, self.flagged);
+        let outcome = screened(reported, &self.text).ok_or(None)?;
+        Ok(Observed {
             call: self.call.clone(),
             tool: tool_shown(&self.tool),
             command,
@@ -1615,6 +2061,28 @@ impl Input {
             outcome,
         })
     }
+}
+
+/// Whether a tool's name, a call's id, or a session's id stands in a record
+/// as it is: the redactor passes it whole, and it holds no control
+/// character and no Unicode line separator, so it opens no line of its own
+/// in the record's text.
+fn names_whole(text: &str) -> bool {
+    kernel::exact_text_refusal(text).is_none()
+        && !text
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+}
+
+/// Whether a Kernel error leaves a call for a later pass: the Kernel is
+/// busy or failing, or another writer changed a row under the judgment.
+/// Any other refusal would meet the same result again.
+const fn leaves_for_later(error: &kernel::KernelError) -> bool {
+    use kernel::KernelError::{Busy, Deadline, Fault, FenceLost, Held, Io, NotFound};
+    matches!(
+        error,
+        Deadline | Busy | Held | Io | FenceLost | Fault | NotFound
+    )
 }
 
 /// What judging one command result did.
@@ -1627,15 +2095,23 @@ enum Judged {
 
 impl FailureCheckpoint {
     /// Text scans, Kernel reads, and commits run on the blocking pool, and
-    /// the task ends once they have. A daemon shutdown raises the task's
-    /// interrupt, which ends the pass before its next result and ends a
-    /// wait for the Kernel that is under way. Returns the number of rows
+    /// the task ends once they have. A daemon shutdown that came first ends
+    /// the task before any of them; one that comes later raises the task's
+    /// interrupt, which ends the pass before its next result, ends its wait
+    /// for the capture publication gate, and ends a wait for the Kernel
+    /// that is under way. A panic of the pass is reported through the
+    /// daemon's redacting panic boundary. Returns the number of rows
     /// written.
     pub(crate) async fn run(self) -> usize {
+        if self.cancel.is_cancelled() {
+            return 0;
+        }
         let interrupt = Arc::new(AtomicBool::new(false));
         let cancel = self.cancel.clone();
         let raised = Arc::clone(&interrupt);
-        let mut join = tokio::task::spawn_blocking(move || self.record(&raised));
+        let mut join = tokio::task::spawn_blocking(move || {
+            host_runtime::redact_panics(|| self.record(&raised))
+        });
         let joined = tokio::select! {
             joined = &mut join => joined,
             () = cancel.cancelled() => {
@@ -1654,15 +2130,18 @@ impl FailureCheckpoint {
 
     /// Judges the results in window order. Each result is read ahead of the
     /// capture publication gate and judged under it, while the session's
-    /// memo entry is the one this checkpoint pinned; the memo learns a call
-    /// once its judgment has ended. A Kernel that is busy or failing, and a
-    /// row another writer changed under the judgment, end the pass with the
-    /// call unlearned, so a later pass whose window still carries the call
-    /// and its result judges it and the results after it again, in the
-    /// order they ran. Any other refusal of the Kernel settles the call:
-    /// the same result would meet it again. A panic under the gate leaves
-    /// the gate usable: the guard is released before the panic goes on. A
-    /// refusal is reported on stderr after the gate is released.
+    /// memo entry is the one this checkpoint pinned and holds no judgment
+    /// of the call; the memo learns a call once its judgment has ended. The
+    /// gate is taken by polling, so a shutdown ends the wait for it. A
+    /// Kernel that is busy or failing, and a row another writer changed
+    /// under the judgment, end the pass with the call unlearned (see
+    /// [`leaves_for_later`]), so a later pass whose window still carries
+    /// the call and its result judges it and the results after it again, in
+    /// the order they ran. Any other refusal of the Kernel settles the
+    /// call. A panic under the gate leaves the gate usable: the guard is
+    /// released before the panic goes on. A refusal is reported on stderr
+    /// after the gate is released, by a fixed sentence that holds no text
+    /// of the result.
     fn record(self, interrupt: &Arc<AtomicBool>) -> usize {
         let Self {
             kernel,
@@ -1670,7 +2149,7 @@ impl FailureCheckpoint {
             project,
             pin,
             pending,
-            cancel: _,
+            cancel,
         } = self;
         let Ok(kernel) = kernel.kernel_store() else {
             return 0;
@@ -1681,39 +2160,62 @@ impl FailureCheckpoint {
             scope: project.digest(),
             session: &pin.session,
         };
-        // The session's id stands in a record's text and rationale, so the
-        // redactor judges it whole, once.
-        let session_passes = kernel::exact_text_refusal(&pin.session).is_none();
-        let stopped = || interrupt.load(Ordering::Acquire);
+        let left = |reason: &dyn std::fmt::Display| {
+            eprintln!("daemon: tool failure record left unwritten: {reason}");
+        };
+        // The session's id stands in a record's text and rationale, so it is
+        // judged whole, once.
+        let session_whole = names_whole(&pin.session);
+        if !session_whole {
+            left(&"the redactor changes the session's id, or it holds a control character");
+        }
+        let stopped = || cancel.is_cancelled() || interrupt.load(Ordering::Acquire);
         let mut written = 0;
         for result in &pending {
             if stopped() {
                 break;
             }
-            let unit = result
-                .input
-                .as_ref()
-                .filter(|_| session_passes)
-                .and_then(|input| input.observe(writer.scope));
+            let unit = match &result.input {
+                Some(input) if session_whole => input.observe(writer.scope),
+                _ => Err(None),
+            };
             // The gate orders the Kernel reads, the commit, and the memo
             // update of every checkpoint, and session deletion takes it too.
-            let gate = commit_gate.lock().expect("capture publication mutex");
+            let gate = loop {
+                if stopped() {
+                    return written;
+                }
+                match commit_gate.try_lock() {
+                    Ok(gate) => break gate,
+                    Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(GATE_POLL),
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        panic!("capture publication mutex")
+                    }
+                }
+            };
             let judged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let memo = || pin.memo.lock().expect("failure memo mutex");
                 if stopped() || !memo().current(&pin.session, pin.epoch) {
                     return None;
                 }
+                if memo().has_seen(&pin.session, result.digest) {
+                    return Some(Ok(Judged::Nothing));
+                }
+                #[cfg(test)]
+                {
+                    let hook = memo().under_gate.clone();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
                 let budget =
                     EvalBudget::new(Some(Instant::now() + COMMIT_WAIT), Arc::clone(interrupt));
                 let judged = match &unit {
-                    Some(unit) => writer.judge(unit, &budget),
-                    None => Ok(Judged::Nothing),
+                    Ok(unit) => writer.judge(unit, &budget),
+                    Err(Some(reason)) => Ok(Judged::Left(reason)),
+                    Err(None) => Ok(Judged::Nothing),
                 };
-                use kernel::KernelError::{Busy, Deadline, Fault, FenceLost, Held, Io, NotFound};
-                if !matches!(
-                    judged,
-                    Err(Deadline | Busy | Held | Io | FenceLost | Fault | NotFound)
-                ) {
+                if !matches!(&judged, Err(error) if leaves_for_later(error)) {
                     memo().learn(&pin.session, pin.epoch, result.digest);
                 }
                 Some(judged)
@@ -1724,18 +2226,10 @@ impl FailureCheckpoint {
                 Ok(None) => break,
                 Ok(Some(Ok(Judged::Wrote))) => written += 1,
                 Ok(Some(Ok(Judged::Nothing))) => {}
-                Ok(Some(Ok(Judged::Left(reason)))) => {
-                    eprintln!("daemon: tool failure record left unwritten: {reason}");
-                }
+                Ok(Some(Ok(Judged::Left(reason)))) => left(&reason),
                 Ok(Some(Err(error))) => {
-                    eprintln!("daemon: tool failure record left unwritten: {error}");
-                    use kernel::KernelError::{
-                        Busy, Deadline, Fault, FenceLost, Held, Io, NotFound,
-                    };
-                    if matches!(
-                        error,
-                        Deadline | Busy | Held | Io | FenceLost | Fault | NotFound
-                    ) {
+                    left(&error);
+                    if leaves_for_later(&error) {
                         break;
                     }
                 }
@@ -1777,22 +2271,35 @@ struct Stored {
     rationale: serde_json::Map<String, Value>,
     resolved: bool,
     at_ms: i64,
+    /// The session whose commit wrote the record: the one that ran the
+    /// failed command, or the one that ran the passing command once the
+    /// record is resolved.
+    session: String,
 }
 
 impl Stored {
-    /// `None` for a rationale that holds no run, which the recorder never
-    /// writes.
+    /// `None` for a rationale that states no run as the recorder writes
+    /// one: a state of `failed` or `resolved`, the session of that run, and
+    /// its time, which the calendar renders.
     fn read(rationale: &str) -> Option<Self> {
         let Ok(Value::Object(rationale)) = serde_json::from_str(rationale) else {
             return None;
         };
-        let resolved = rationale.get("state").and_then(Value::as_str) == Some("resolved");
-        let field = if resolved { "resolved_at_ms" } else { "at_ms" };
-        let at_ms = rationale.get(field).and_then(Value::as_i64)?;
+        let (resolved, time, session) = match rationale.get("state").and_then(Value::as_str)? {
+            "failed" => (false, "at_ms", "session"),
+            "resolved" => (true, "resolved_at_ms", "resolved_session"),
+            _ => return None,
+        };
+        let at_ms = rationale
+            .get(time)
+            .and_then(Value::as_i64)
+            .filter(|at_ms| utc_time(*at_ms).is_some())?;
+        let session = rationale.get(session).and_then(Value::as_str)?.to_owned();
         Some(Self {
             rationale,
             resolved,
             at_ms,
+            session,
         })
     }
 }
@@ -1872,40 +2379,52 @@ struct Writer<'a> {
 }
 
 impl Writer<'_> {
+    /// The operation key of the commit that wrote, or writes, the record
+    /// `id` for a run of `session`.
+    fn record_key(&self, session: &str, id: &str) -> Result<String, kernel::KernelError> {
+        let (session_key, _) = session_keys(session);
+        self.project
+            .operation_key(FAILURE_SOURCE_ID, &format!("{session_key}{id}"))
+            .ok_or(kernel::KernelError::InvalidInput)
+    }
+
+    /// Whether the Kernel's commit log holds a commit of this recorder
+    /// under `key`. A record id has one length, so the keys from this one
+    /// to its successor in byte order are this key alone.
+    fn committed(&self, key: &str, budget: &EvalBudget) -> Result<bool, kernel::KernelError> {
+        let held = self.kernel.commit_count_in_key_range_within_budget(
+            budget,
+            FAILURE_SOURCE_ID,
+            (key, &format!("{key}~")),
+            1,
+        )?;
+        Ok(held > 0)
+    }
+
     /// Writes what one command result calls for. The caller holds the
     /// capture publication gate, so no other checkpoint writes between the
-    /// reads and the commit. Every wait for a Kernel connection ends at the
-    /// budget's deadline.
+    /// reads and the commit. Every wait for a Kernel connection and every
+    /// read ends at the budget's deadline.
     ///
     /// A call whose commit the Kernel's log holds writes nothing: the log's
     /// receipt under this recorder's producer name is the proof that the
     /// call's record was written, whatever became of the row. The command's
     /// record is the newest decision of its lineage, live or retired, when
-    /// that decision is a failure record of this project that states its
-    /// run; a lineage whose newest decision is anything else is left as it
-    /// is. A run follows a record when its result's creation time is
-    /// greater than the time of the record's run. A failure writes the first
-    /// row of a lineage, a row after a retired record that it follows, and
-    /// a row in place of a live record that it follows. A pass rewrites a
-    /// live, unresolved record that it follows as resolved. Either writes
-    /// while the session has written fewer than
+    /// this recorder wrote it: the decision is a failure record of this
+    /// project, its rationale states its run (see [`Stored::read`]), and
+    /// the commit log holds the recorder's commit of that row for that
+    /// run's session. A lineage whose newest decision is anything else is
+    /// left as it is. A run follows a record when its result's creation
+    /// time is greater than the time of the record's run. A failure writes
+    /// the first row of a lineage, a row after a retired record that it
+    /// follows, and a row in place of a live record that it follows. A pass
+    /// rewrites a live, unresolved record that it follows as resolved.
+    /// Either writes while the session has written fewer than
     /// [`MAX_RECORDS_PER_SESSION`] records by the Kernel's commit log.
     fn judge(&self, unit: &Observed, budget: &EvalBudget) -> Result<Judged, kernel::KernelError> {
         let id = record_id(self.scope, self.session, &unit.call);
-        let (session_key, _) = session_keys(self.session);
-        let key = self
-            .project
-            .operation_key(FAILURE_SOURCE_ID, &format!("{session_key}{id}"))
-            .ok_or(kernel::KernelError::InvalidInput)?;
-        // A record id has one length, so the keys from this one to its
-        // successor in byte order are this key alone.
-        let committed = self.kernel.commit_count_in_key_range_within_budget(
-            budget,
-            FAILURE_SOURCE_ID,
-            (&key, &format!("{key}~")),
-            1,
-        )?;
-        if committed > 0 {
+        let key = self.record_key(self.session, &id)?;
+        if self.committed(&key, budget)? {
             return Ok(Judged::Nothing);
         }
         let lineage = format!("{FAILURE_SOURCE_ID}:{}", unit.command.digest);
@@ -1944,18 +2463,24 @@ impl Writer<'_> {
                 let decision = self
                     .kernel
                     .decisions_for_objects_as_of_within_budget(ids, as_of, budget)?
-                    .pop()
-                    .ok_or(kernel::KernelError::NotFound)?;
-                let owned = decision.decision_kind == FAILURE_CATEGORY
-                    && decision.scope_id.as_deref() == Some(self.project.scope_id().as_str());
-                let Some(stored) = Stored::read(&decision.payload.rationale).filter(|_| owned)
-                else {
+                    .pop();
+                let stored = decision.and_then(|decision| {
+                    let owned = decision.decision_kind == FAILURE_CATEGORY
+                        && decision.scope_id.as_deref() == Some(self.project.scope_id().as_str());
+                    let stored = Stored::read(&decision.payload.rationale).filter(|_| owned)?;
+                    Some((decision.payload, stored))
+                });
+                let Some((payload, stored)) = stored else {
                     return Ok(unread);
                 };
+                let wrote = self.record_key(&stored.session, &row.object_id)?;
+                if !self.committed(&wrote, budget)? {
+                    return Ok(unread);
+                }
                 if unit.at_ms <= stored.at_ms {
                     return Ok(Judged::Nothing);
                 }
-                (revision, Some((row, decision.payload, stored)))
+                (revision, Some((row, payload, stored)))
             }
         };
         let live = stored
@@ -2068,24 +2593,41 @@ mod tests {
 
     const SCOPE: &str = "project";
 
-    /// The ground, the exit code, and the chosen lines of a failed text
-    /// result of `command`, as the output states them.
+    /// The ground, the exit code, and the kept lines of a failed text
+    /// result of `command`: `None` for a pass and for a result that states
+    /// no outcome.
     fn failed(
         command: &str,
         text: &str,
         flagged: bool,
     ) -> Option<(Evidence, Option<i64>, Vec<String>)> {
-        outcome_of(command, text, flagged).map(|reported| {
-            (
-                reported.evidence,
-                reported.exit_code.map(|(code, _)| code),
-                reported
-                    .lines
-                    .into_iter()
-                    .map(|(line, _)| line.text)
-                    .collect(),
-            )
-        })
+        match screened(outcome_of(command, text, flagged), text)? {
+            Outcome::Passed => None,
+            Outcome::Failed(failure) => {
+                let lines = match failure.excerpt {
+                    Excerpt::Kept(lines) => lines.into_iter().map(|line| line.text).collect(),
+                    Excerpt::Finding | Excerpt::Unscanned => Vec::new(),
+                };
+                Some((failure.evidence, failure.exit_code, lines))
+            }
+        }
+    }
+
+    /// What an unmarked text result says of `command`.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Said {
+        Pass,
+        Fail(Evidence, Option<i64>),
+        /// The result states no outcome and changes no record.
+        Nothing,
+    }
+
+    fn said(command: &str, text: &str) -> Said {
+        match screened(outcome_of(command, text, false), text) {
+            None => Said::Nothing,
+            Some(Outcome::Passed) => Said::Pass,
+            Some(Outcome::Failed(failure)) => Said::Fail(failure.evidence, failure.exit_code),
+        }
     }
 
     fn named(command: &str) -> Command {
@@ -2125,7 +2667,7 @@ mod tests {
     /// The failure a text result of `command` records, as the task reads
     /// it: `None` for a pass and for a result that changes no record.
     fn recorded(command: &str, text: &str, flagged: bool) -> Option<Failure> {
-        match input(command, text, flagged).observe(SCOPE)?.outcome {
+        match input(command, text, flagged).observe(SCOPE).ok()?.outcome {
             Outcome::Passed => None,
             Outcome::Failed(failure) => Some(failure),
         }
@@ -2163,6 +2705,27 @@ mod tests {
             Some(MAX_OUTPUT_BYTES)
         );
         assert_eq!(command_of(&json!({ "command": [half, half] })), None);
+        // A string of an array that is no bare word stands in single
+        // quotes, so it reads as one word, and its quoted bytes count.
+        for (words, joined) in [
+            (json!(["pytest", "tests/a b.py"]), "pytest 'tests/a b.py'"),
+            (json!(["pytest", "tests/a", "b.py"]), "pytest tests/a b.py"),
+            (json!(["sh", "-c", "make | tail"]), "sh -c 'make | tail'"),
+            (json!(["echo", "it's", ""]), "echo 'it'\\''s' ''"),
+            (json!(["env", "MODE=fast", "make"]), "env 'MODE=fast' make"),
+        ] {
+            assert_eq!(
+                command_of(&json!({ "command": words })).as_deref(),
+                Some(joined)
+            );
+        }
+        let quoted = json!({ "command": [&half[2..], format!("{} ", &half[2..])] });
+        assert_eq!(
+            command_of(&quoted).map(|line| line.len()),
+            Some(MAX_OUTPUT_BYTES)
+        );
+        let quoted = json!({ "command": [&half[1..], format!("{} ", &half[2..])] });
+        assert_eq!(command_of(&quoted), None);
     }
 
     #[test]
@@ -2203,10 +2766,7 @@ mod tests {
         // A text that is one JSON object is text: its exit field decides
         // nothing, since a passing command can print one.
         let object = json!({ "exitCode": 137, "reason": "OOMKilled" }).to_string();
-        assert_eq!(
-            outcome_of("kubectl get pod api -o json", &object, false),
-            None
-        );
+        assert_eq!(said("kubectl get pod api -o json", &object), Said::Pass);
     }
 
     #[test]
@@ -2249,6 +2809,18 @@ mod tests {
             ("VERSION=`git describe --tags` make release", LEFT_OUT),
             ("cd $(a && b c) && make", "cd [arguments left out]"),
             ("X=$(pwd) make", LEFT_OUT),
+            // A command line outside the reader's grammar shows the plain
+            // word it begins with, and no word from inside a group.
+            ("FILES=(a.txt b.txt c.txt); wc -l a.txt", LEFT_OUT),
+            ("NAME=${NAME:-John Q Public} ./greet", LEFT_OUT),
+            ("diff <(sort a) <(sort b)", "diff [arguments left out]"),
+            (
+                "python3 - <<'PY'\nprint(1)\nPY",
+                "python3 [arguments left out]",
+            ),
+            ("if make; then ls; fi", LEFT_OUT),
+            // A line break parts two commands.
+            ("echo\nfalse", "echo [arguments left out]"),
         ] {
             assert_eq!(named(command).shown, shown, "{command}");
         }
@@ -2319,10 +2891,24 @@ mod tests {
             let shown = named(&command).shown;
             assert_eq!(shown, "deploy [arguments left out]", "{command}");
         }
-        // The word reader stops at the first word end: many leading steps
-        // are read once each.
-        let steps = "A=1 cd a; ".repeat(2_000);
-        assert_eq!(named(&format!("{steps}make")).shown, "make");
+        // A line break is a command separator and no space between two
+        // arguments, and each operator has one spelling.
+        assert_ne!(digest("cargo test\nfalse"), digest("cargo test false"));
+        assert_eq!(digest("cargo test\nfalse"), digest("cargo test;false"));
+        assert_eq!(digest("make|tail"), digest("make | tail"));
+        assert_ne!(digest("make | tail"), digest("make || tail"));
+        // Two here-documents that differ in their bodies are two commands.
+        let script = |body: &str| format!("python3 - <<'PY'\n{body}\nPY");
+        assert_ne!(digest(&script("print(1)")), digest(&script("print(2)")));
+        assert_eq!(
+            digest(&script("print(1)")),
+            digest(&format!("cd api &&  {}", script("print(1)")))
+        );
+        // Leading directory steps are read within the reader's bound of
+        // commands.
+        let steps = |count: usize| format!("{}make", "cd a; ".repeat(count));
+        assert_eq!(named(&steps(MAX_STEPS - 1)).shown, "make");
+        assert_eq!(named(&steps(MAX_STEPS)).shown, "cd [arguments left out]");
     }
 
     #[test]
@@ -2415,26 +3001,153 @@ mod tests {
     }
 
     #[test]
-    fn a_nonzero_status_the_command_line_printed_is_a_failure() {
-        let printed = |command: &str, text: &str| {
-            failed(command, text, false).map(|failure| (failure.0, failure.1))
+    fn a_command_line_is_read_as_commands_or_left_unread() {
+        let joins = |command: &str| {
+            commands_of(command).map(|steps| {
+                steps
+                    .iter()
+                    .map(|step| (step.words.join(" "), step.join))
+                    .collect::<Vec<_>>()
+            })
         };
-        let status = |code| Some((Evidence::PrintedStatus, Some(code)));
+        let step = |words: &str, join| (words.to_owned(), join);
+        assert_eq!(
+            joins("cd api && make check 2>&1 | tail -n 5; ls 'a b' || true\n"),
+            Some(vec![
+                step("cd api", Some(Join::And)),
+                step("make check 2>&1", Some(Join::Pipe)),
+                step("tail -n 5", Some(Join::Then)),
+                step("ls 'a b'", Some(Join::Or)),
+                step("true", None),
+            ])
+        );
+        // An operator in quotes or behind a backslash is a word's text, a
+        // line break after an operator joins nothing, and the `&` of a
+        // redirection is part of its word.
+        for (command, words) in [
+            ("grep -E 'error|warning' \"a; b\" c\\;d", 5),
+            ("make check &&\n  ls", 3),
+            ("make check > out.log 2>&1", 5),
+            ("make check &> out.log", 4),
+            ("make check >&2", 3),
+            ("echo ${HOME}/bin $USER \"${PWD}\" $#", 5),
+            // A comment runs from a `#` that begins a word to the end of
+            // its line, quotes and operators in it included.
+            ("make check # the default target; don't | stop", 2),
+            ("# build\nmake check\n  # then list\nls", 3),
+            ("echo a#b \\# '#' c", 5),
+            // A here-document's body, to its closing line, is one word.
+            ("python3 - <<'PY'\nprint('a | b; c')\nPY", 4),
+            (
+                "cat > out.txt <<EOF\none && two\n$(date)\nEOF\nls out.txt",
+                7,
+            ),
+            ("cat <<-\"END\"\n\tone\n\tEND\n", 3),
+            ("cat << EOF | grep one; ls\none\nEOF", 6),
+        ] {
+            let steps = commands_of(command).unwrap();
+            let read: usize = steps.iter().map(|step| step.words.len()).sum();
+            assert_eq!(read, words, "{command}");
+        }
+        assert_eq!(
+            commands_of("make >&2; ls").map(|steps| steps[0].redirects),
+            Some(true)
+        );
+        assert_eq!(
+            joins("cat > out.txt <<'EOF'\nmake | tail\nEOF\nmake check | tail"),
+            Some(vec![
+                step("cat > out.txt <<'EOF' make | tail\nEOF", Some(Join::Then)),
+                step("make check", Some(Join::Pipe)),
+                step("tail", None),
+            ])
+        );
+        for outside in [
+            "cat <<< text",
+            "cat <<EOF",
+            "cat <<EOF\nno closing line",
+            "cat <<EOF\n EOF",
+            "cat <<\\EOF\nbody\nEOF",
+            "cat <<A <<B\na\nA\nb\nB",
+            "cat <<E-F\nbody\nE-F",
+            "cat <<'E F'\nbody\nE F",
+            "cat <<EOF |\nbody\nEOF\ngrep body",
+            "cat <<EOF; ls",
+            "make check | tee >(grep error)",
+            "diff <(sort a) <(sort b)",
+            "(make check; true)",
+            "{ make check; true; }",
+            "make check & wait",
+            "make check &",
+            "make check $(cat flags)",
+            "make \"$(cat flags)\"",
+            "make check `cat flags`",
+            "make \"`cat flags`\"",
+            "if make check; then ls; fi",
+            "for f in a b; do make $f; done",
+            "! make check",
+            "[[ -f Makefile ]] && make",
+            "make check |& tail",
+            "make check >| out.log",
+            "echo ${OUT:-a | b}",
+            "echo \"${OUT:-a}\"",
+            "echo $'it\\'s' ; make check",
+            "echo $\"text\"",
+            "make check ||",
+            "make check | | tail",
+            "; make check",
+            "make check ;; ls",
+            "make 'check",
+            "make \"check",
+            "make check \\",
+            "find . -name x -exec cat {} \\;",
+            "FILES=(a.txt b.txt); wc -l a.txt",
+        ] {
+            assert_eq!(commands_of(outside), None, "{outside}");
+        }
+        // The reader's tables hold at most 64 commands and 1,024 words.
+        let many = |count: usize, part: &str| format!("{}make", part.repeat(count));
+        assert_eq!(
+            commands_of(&many(63, "ls; ")).map(|steps| steps.len()),
+            Some(64)
+        );
+        assert_eq!(commands_of(&many(64, "ls; ")), None);
+        assert!(commands_of(&many(1_023, "x ")).is_some());
+        assert_eq!(commands_of(&many(1_024, "x ")), None);
+        // A status parameter is counted where the shell expands it.
+        let statuses = |command: &str| {
+            commands_of(command)
+                .unwrap()
+                .iter()
+                .map(|step| step.statuses)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            statuses("make; echo \"$? ${?}\" '$?' \\$? ${PIPESTATUS[0]} ${PIPESTATUS[@]}"),
+            [0, 4]
+        );
+        assert_eq!(statuses("echo ${PIPESTATUS} $PIPESTATUS"), [0]);
+        assert_eq!(statuses("make # echo $?\nls"), [0, 0]);
+        assert_eq!(commands_of("echo ${PIPESTATUS[x]}"), None);
+    }
+
+    #[test]
+    fn a_final_echo_of_the_exit_status_stands_for_the_tool_s_status() {
+        use Said::{Fail, Nothing, Pass};
+        const ERROR: &str = "error: could not compile `api`";
+        let printed = |code| Fail(Evidence::PrintedStatus, Some(code));
         for (command, text, code) in [
             ("make check; echo \"exit=$?\"", "exit=2", 2),
             ("make check; echo exit=$?", "work\nexit=2\n", 2),
             ("make check; echo \"EXIT CODE: ${?}\"", "EXIT   CODE: 3", 3),
             (
                 "make check; echo \"status $? reported\"",
-                "status 4 reported\nbye",
+                "bye\nstatus 4 reported",
                 4,
             ),
             ("make check; echo $?", "work\n5", 5),
             ("make check && echo ok || echo \"rc=$?\"", "rc=6", 6),
-            ("make check; echo \"exit=$?\" >&2", "exit=7", 7),
-            ("make check; echo \"rc=$?\" 1>&2", "rc=101", 101),
-            ("make check; echo \"rc=$?\" 1>&2", "rc=1", 1),
-            ("(make check; echo \"exit=$?\") | cat", "exit=8", 8),
+            ("cd api && make check; echo \"rc=$?\"", "rc=2", 2),
+            ("make check\necho \"rc=$?\"\n", "rc=101\n\n", 101),
             (
                 "make check | tail -n 3; echo \"exit=${PIPESTATUS[0]}\"",
                 "exit=9",
@@ -2449,155 +3162,213 @@ mod tests {
             // the echo prints as written, beside the one that expands.
             ("false; echo '$?' \"$?\"", "$? 1", 1),
             ("false; echo \"\\$? is $?\"", "$? is 7", 7),
-            // Each echo that prints one status is read, and the greatest
-            // status decides: an echo that printed nothing and an earlier
-            // zero hide no later status.
+            // Pi's note after an output it cut is no line of the command.
             (
-                "false && echo pre=$?; make check; echo result=$?",
-                "result=2",
+                "make check; echo \"rc=$?\"",
+                "rc=2\n\n[Showing lines 9-40 of 40. Full output: /tmp/pi-bash-1.log]",
                 2,
             ),
+        ] {
+            assert_eq!(said(command, text), printed(code), "{command}");
+        }
+        // A printed zero is a status of 0 for the commands before the echo:
+        // a pass for one command or an `&&` chain, and the status of the
+        // last command where an earlier one is hidden.
+        let with_error = |status: &str| format!("{ERROR}\n{status}");
+        for (command, text, expected) in [
+            ("make check; echo \"exit=$?\"", with_error("exit=0"), Pass),
             (
-                "cargo build; echo \"build=$?\"; cargo test; echo \"test=$?\"",
-                "build=0\ntest=101",
-                101,
+                "cd api && make check && echo \"exit=$?\"",
+                with_error("exit=0"),
+                Pass,
             ),
-            // A malformed parameter is the echo's text, and the next echo
-            // is read.
+            ("echo $?", "0".to_owned(), Pass),
             (
-                "echo \"${PIPESTATUS[\"; make; echo \"rc=$?\"",
-                "${PIPESTATUS[\nrc=3",
-                3,
+                "make check | tail -n 40; echo \"exit=$?\"",
+                with_error("exit=0"),
+                Fail(Evidence::FailureLines, None),
+            ),
+            (
+                "make check | tail -n 40; echo \"exit=$?\"",
+                "all targets built\nexit=0".to_owned(),
+                Pass,
             ),
         ] {
-            assert_eq!(printed(command, text), status(code), "{command}");
+            assert_eq!(said(command, &text), expected, "{command}: {text}");
         }
-        // The command line asked for no status, the shell left the
-        // parameter as written, the output states none in the echo's
-        // words, or the echo prints two statuses: the line is ordinary
-        // output.
+        // The output's last line is no line of the echo, or the command
+        // line reads its status in a way the reader does not follow: the
+        // result states no outcome, whatever else the output holds.
         for (command, text) in [
-            ("make check", "exit=2"),
-            ("make check; echo 'exit=$?'", "exit=2"),
-            ("make check; echo \"exit=\\$?\"", "exit=2"),
             ("make check; echo \"exit=$?\"", "exit=two"),
             ("make check; echo \"exit=$?\"", "the exit=2 line"),
+            ("make check; echo \"exit=$?\"", "exit=2\ndone"),
             ("make check; echo $?", "2\ndone"),
+            ("make check; echo \"status $?\"", "status3"),
+            ("make check; echo \"$? done\"", "3done"),
             ("make check; echo \"$? $?\"", "2 2"),
             ("make check; printf 'exit=%s' $?", "exit=2"),
-            // The space beside the parameter is part of the echo's words.
-            ("make check; echo \"status $?\"", "status 0\nstatus3"),
-            ("make check; echo \"$? done\"", "3done"),
+            ("make check; echo \"exit=$?\" >&2", "exit=7"),
+            ("make check; echo \"rc=$?\" 1>&2", "rc=0"),
+            ("make check; echo \"rc=$?\" 0</dev/null", "rc=1"),
+            ("make check; echo -n \"rc=$?\"", "rc=1"),
+            ("make check; echo \"rc=$? in $PWD\"", "rc=1 in /srv"),
+            ("make check; echo rc=$? *", "rc=1 a b"),
+            ("make check; echo \"rc=$?\"; ls", "rc=1\nMakefile"),
+            ("make check; rc=$?; echo \"rc=$rc\"", "rc=1"),
+            ("false; echo rc=$?; true; echo rc=$?", "rc=1\nrc=0"),
+            ("grep '^error:' build.log && echo \"rc=$?\" | cat", "rc=0"),
+            ("(make check; echo \"exit=$?\") | cat", "exit=8"),
+            ("make check; exit $?", "done"),
         ] {
-            assert_eq!(printed(command, text), None, "{command}: {text}");
+            assert_eq!(said(command, text), Nothing, "{command}: {text}");
+            let text = with_error(text);
+            assert_eq!(said(command, &text), Nothing, "{command}: {text}");
         }
-        assert_eq!(
-            printed("make check; echo \"status $?\"", "status 3"),
-            status(3)
-        );
-        // A printed status of zero decides nothing: the grounds below read
-        // the command line without its echo.
-        const ERROR: &str = "error: could not compile `api`";
-        assert_eq!(
-            printed("make check; echo \"exit=$?\"", &format!("{ERROR}\nexit=0")),
-            None,
-            "the echo reports the one command before it"
-        );
-        assert_eq!(
-            printed(
-                "make check | tail -n 40; echo \"exit=$?\"",
-                &format!("{ERROR}\nexit=0")
-            ),
-            Some((Evidence::FailureLines, None)),
-            "the echo reports the last command of the pipeline"
-        );
+        // A parameter the shell leaves as written is the echo's own text,
+        // and the command line reads no status.
+        for command in [
+            "make check; echo 'exit=$?'",
+            "make check; echo \"exit=\\$?\"",
+            "make check",
+        ] {
+            assert_eq!(said(command, "exit=2"), Pass, "{command}");
+        }
     }
 
     #[test]
-    fn a_result_the_tool_reports_as_passed_fails_by_the_shell_s_report_or_behind_a_hidden_status() {
+    fn behind_a_hidden_status_a_shell_s_report_and_a_failure_line_are_failures() {
         use Evidence::{FailureLines, ShellReport};
+        use Said::{Fail, Nothing, Pass};
         const ERROR: &str = "error: could not compile `api`";
-        let ground = |command: &str, text: &str| {
-            failed(command, text, false).map(|failure| (failure.0, failure.1))
-        };
-        // The shell's own report of a program of the command line.
+        // A shell's own report of the program of one of the commands.
         for (command, text) in [
-            ("pnpm typecheck", "bash: line 1: pnpm: command not found"),
             (
                 "pnpm typecheck 2>&1 | tee check.log",
                 "/usr/bin/bash: line 1: pnpm: command not found",
             ),
-            ("cd api && pnpm build", "sh: pnpm: command not found"),
-            ("pnpm typecheck", "zsh: command not found: pnpm"),
+            (
+                "pnpm typecheck | tail -n 5",
+                "bash: line 12: pnpm: command not found",
+            ),
+            (
+                "cd api && pnpm build; ls dist",
+                "sh: pnpm: command not found",
+            ),
+            ("pnpm typecheck || true", "zsh: command not found: pnpm"),
+            (
+                "CI=1 pnpm typecheck | tail",
+                "bash: pnpm: command not found",
+            ),
         ] {
-            assert_eq!(ground(command, text), Some((ShellReport, None)), "{text}");
+            assert_eq!(said(command, text), Fail(ShellReport, None), "{command}");
         }
-        // The words in prose, a report of a program the command line does
-        // not name, and a line without the shell's name report nothing.
+        // One command and an `&&` chain report their own status, a search
+        // names the program as an operand or prints the report behind a
+        // file name, and prose and a report without the shell's name are no
+        // report.
         for (command, text) in [
-            (
-                "grep -rn \"command not found\" ci.log",
-                "ci.log:4: step failed: command not found",
-            ),
-            (
-                "cat docs/troubleshooting.md",
-                "If you see `command not found`, install pnpm.",
-            ),
+            ("pnpm typecheck", "bash: line 1: pnpm: command not found"),
+            ("cd api && pnpm build", "sh: pnpm: command not found"),
             (
                 "grep -rn pnpm ci.log | head",
+                "bash: line 1: pnpm: command not found",
+            ),
+            (
+                "pnpm typecheck | tail",
+                "ci.log:4: bash: line 1: pnpm: command not found",
+            ),
+            ("pnpm typecheck | tail", "ci.log:4: pnpm: command not found"),
+            ("pnpm typecheck | tail", "ci.log:4: command not found: pnpm"),
+            ("pnpm typecheck | tail", "pnpm: command not found"),
+            (
+                "pnpm typecheck | tail",
+                "bash: pnpm typecheck: command not found",
+            ),
+            (
+                "pnpm typecheck | tail",
+                "bash: line x: pnpm: command not found",
+            ),
+            (
+                "pnpm typecheck | tail",
                 "bash: line 1: yarn: command not found",
             ),
-            ("pnpm typecheck", "pnpm: command not found"),
-            ("pnpm typecheck", "bash: pnpm typecheck: command not found"),
+            (
+                "cat docs/troubleshooting.md | head",
+                "If you see `command not found`, install pnpm.",
+            ),
         ] {
-            assert_eq!(ground(command, text), None, "{command}: {text}");
+            assert_eq!(said(command, text), Pass, "{command}: {text}");
         }
-        // A failure line is a failure where a pipe, `||`, or `;` stands
-        // between two commands of the line.
+        // A failure line is a failure where a pipe, `||`, `;`, or a line
+        // break joins two commands.
         for command in [
             "make check | tail -n 40",
             "make check 2>&1 | tee build.log",
             "make check || true",
             "make check; ls target",
             "make check; echo done;",
+            "make check\nls target",
             "cd api && make check | head -5",
+            "make check 2>&1 | tail -3 && echo built",
+            "make check | tail # the last lines",
+            "# build, then list\nmake check\nls target",
+            "cat > check.sh <<'EOF'\nmake check\nEOF\nsh check.sh | tail",
         ] {
-            assert_eq!(
-                ground(command, ERROR),
-                Some((FailureLines, None)),
-                "{command}"
-            );
+            assert_eq!(said(command, ERROR), Fail(FailureLines, None), "{command}");
+            assert_eq!(said(command, "all targets built"), Pass, "{command}");
         }
-        // A single command, an `&&` chain, a quoted or escaped `|` and
-        // `;`, and a `;` that ends the line hide none: the tool's status is
-        // the command's own.
+        assert_eq!(
+            said("make check | tail -n 40", &format!("{ERROR}\nExit code: 0")),
+            Fail(FailureLines, None),
+            "a stated zero is the status of the last command"
+        );
+        // One command and an `&&` chain hide no status: a failure line in
+        // their output is ordinary output.
         for command in [
             "make check",
             "grep -rn error: logs/",
             "grep -rn error: logs/;",
             "grep -rn error: logs/ ; \n",
             "cd api && make check",
+            "cd api; make check",
             "make check 2>&1",
+            "make check > build.log 2>&1",
+            "make check &> build.log",
             "grep -E 'error|warning' build.log",
             "echo \"a; b\"",
-            "find . -name x -exec cat {} \\;",
-            "make check; echo \"exit=$?\"",
+            "find . -name x -exec cat '{}' \\;",
+            "make check # with -j 4; see the Makefile | notes",
+            "python3 - <<'PY'\nprint('a | b; c')\nPY",
         ] {
-            assert_eq!(ground(command, ERROR), None, "{command}");
+            assert_eq!(said(command, ERROR), Pass, "{command}");
         }
-        // Without a failure line a hidden status is a pass, and a stated
-        // status of zero is the status of the line's last command.
-        assert_eq!(
-            ground(
-                "make check | tail -n 40",
-                "warning: unused import\nall targets built"
-            ),
-            None
-        );
-        assert_eq!(
-            ground("make check | tail -n 40", &format!("{ERROR}\nExit code: 0")),
-            Some((FailureLines, None))
-        );
+        // An array command is read as the words it holds.
+        let array = json!({ "command": ["grep", "-E", "error|warning", "build.log"] });
+        let joined = command_of(&array).unwrap();
+        assert_eq!(joined, "grep -E 'error|warning' build.log");
+        assert_eq!(said(&joined, ERROR), Pass);
+        // A command line outside the reader's grammar states no outcome at
+        // a status of 0, with a failure line and without one.
+        for command in [
+            "cat <<< \"$text\" | make check",
+            "make check | tee >(grep error)",
+            "(make check; true)",
+            "make check & wait",
+            "make check $(cat flags) | tail",
+            "if make check; then ls; fi",
+            "! make check",
+            "make check |& tail",
+        ] {
+            assert_eq!(said(command, ERROR), Nothing, "{command}");
+            assert_eq!(said(command, "all targets built"), Nothing, "{command}");
+            // The tool's own status still decides.
+            assert_eq!(
+                failed(command, "Command exited with code 2", true).map(|failure| failure.1),
+                Some(Some(2)),
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -2610,10 +3381,18 @@ mod tests {
             "partial output\nOperation aborted\n",
             "Tool execution aborted",
             "error: slow\n\nCommand timed out after 120 seconds",
+            "partial output\n\nCommand terminated without an exit code",
+            "Tool call \"bash\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
+            "Working directory does not exist: /srv/gone\nCannot execute bash commands.",
+            "Extension failed, blocking execution: Error: hook timed out",
         ] {
             assert!(harness_decided(text, true), "{text}");
             assert!(!harness_decided(text, false), "unmarked: {text}");
-            assert!(input("make", text, true).observe(SCOPE).is_none(), "{text}");
+            assert_eq!(
+                input("make", text, true).observe(SCOPE).err(),
+                Some(None),
+                "{text}"
+            );
         }
         for text in [
             "Command aborted\nand then more output",
@@ -2621,9 +3400,65 @@ mod tests {
             "Tool bash and zsh not found",
             "error: Validation failed for tool \"bash\"",
             "Command exited with code 1",
+            "Tool call \"bash\" was executed",
+            "Tool call bash was not executed: the response hit the output token limit",
+            "error: Working directory does not exist: /srv/gone",
         ] {
             assert!(!harness_decided(text, true), "{text}");
         }
+    }
+
+    #[test]
+    fn pi_s_note_after_a_cut_output_is_read_as_no_line() {
+        for note in [
+            "[Showing lines 3-9 of 9. Full output: /tmp/pi-bash-77.log]",
+            "[Showing lines 3-9 of 9 (50.0KB limit). Full output: /tmp/pi-bash-77.log]",
+            "[Showing last 50.0KB of line 9 (line is 1.2MB). Full output: /tmp/pi-bash-77.log]",
+        ] {
+            assert!(truncation_note(note), "{note}");
+            let text = format!(
+                "error: boom at src/app.rs:3:1\nlast line\n\n{note}\n\nCommand exited with code 1"
+            );
+            let failure = recorded("make", &text, true).unwrap();
+            assert_eq!(
+                (failure.exit_code, failure.path.as_deref()),
+                (Some(1), Some("src/app.rs:3:1"))
+            );
+            assert_eq!(
+                failure.excerpt,
+                Excerpt::Kept(
+                    [
+                        ("error: boom at src/app.rs:3:1", false),
+                        ("last line", true),
+                        ("Command exited with code 1", true)
+                    ]
+                    .map(|(text, closing)| Kept {
+                        text: text.to_owned(),
+                        closing
+                    })
+                    .to_vec()
+                )
+            );
+            // The note of an unmarked result is its last line.
+            let unmarked = format!("work\n\nexit code 4\n\n{note}");
+            assert_eq!(
+                failed("make", &unmarked, false).map(|failure| failure.1),
+                Some(Some(4))
+            );
+        }
+        for line in [
+            "[Showing results]",
+            "Showing lines 3-9 of 9. Full output: /tmp/out.log",
+            "[Showing lines 3-9 of 9]",
+        ] {
+            assert!(!truncation_note(line), "{line}");
+        }
+        // The note is read as one among the last two lines alone.
+        let early = "[Showing lines 1-2 of 9. Full output: /tmp/a.log]\none\ntwo\nCommand exited with code 1";
+        let Excerpt::Kept(lines) = recorded("make", early, true).unwrap().excerpt else {
+            panic!("the lines are kept");
+        };
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
@@ -2793,7 +3628,10 @@ mod tests {
         );
         // An unmarked result whose one ground is that unscanned code
         // changes no record: it is no failure and no pass.
-        assert!(input("make", &block, false).observe(SCOPE).is_none());
+        assert_eq!(
+            input("make", &block, false).observe(SCOPE).err(),
+            Some(None)
+        );
     }
 
     #[test]
@@ -2807,17 +3645,23 @@ mod tests {
             kernel::exact_text_refusal(&line).is_some(),
             "the fixture is a finding"
         );
-        let reported = outcome_of(&command, &line, false).unwrap();
-        assert_eq!(
-            (
-                reported.evidence,
-                reported.exit_code.as_ref().map(|(code, _)| *code)
-            ),
-            (Evidence::PrintedStatus, Some(7))
-        );
+        let reported = outcome_of(&command, &line, false);
+        assert_eq!(reported.printed.as_ref().map(|(code, _)| *code), Some(7));
         // The digits are the one ground of the failure: the result changes
-        // no record.
-        assert!(input(&command, &line, false).observe(SCOPE).is_none());
+        // no record, and is no pass.
+        assert_eq!(
+            input(&command, &line, false).observe(SCOPE).err(),
+            Some(None)
+        );
+        // A ground that stands without the code decides: a failure line
+        // behind the hidden status of an earlier command.
+        let hidden = format!("make | tail -n 3; echo \"{key}=fixture-v$?\"");
+        let output = format!("error: could not compile `api`\n{line}");
+        let behind = recorded(&hidden, &output, false).unwrap();
+        assert_eq!(
+            (behind.evidence, behind.exit_code, &behind.excerpt),
+            (Evidence::FailureLines, None, &Excerpt::Finding)
+        );
         // A marked result stays a failure and keeps no text of the line.
         let marked = recorded(&command, &line, true).unwrap();
         assert_eq!(
@@ -2840,17 +3684,55 @@ mod tests {
         let failing = |edit: &dyn Fn(&mut Input)| {
             let mut input = input("make", "error: boom\nCommand exited with code 1", true);
             edit(&mut input);
-            input.observe(SCOPE)
+            input.observe(SCOPE).map_err(|reason| reason.is_some())
         };
-        assert!(failing(&|_| {}).is_some(), "the positive control");
+        assert!(failing(&|_| {}).is_ok(), "the positive control");
         // An id the redactor would change past the bytes a record shows
         // writes nothing: the id is judged before it is cut.
         let long_id = format!("{}{assignment}", "c".repeat(MAX_ID_BYTES));
         assert!(!clipped(&long_id, MAX_ID_BYTES).contains(&value));
-        assert!(failing(&|input| input.call = long_id.clone()).is_none());
+        assert_eq!(
+            failing(&|input| input.call = long_id.clone()).err(),
+            Some(true)
+        );
         let long_tool = format!("{} {assignment}", "t".repeat(MAX_TOOL_BYTES));
         assert!(!tool_shown(&long_tool).contains(&value));
-        assert!(failing(&|input| input.tool = long_tool.clone()).is_none());
+        assert_eq!(
+            failing(&|input| input.tool = long_tool.clone()).err(),
+            Some(true)
+        );
+        // An id or a name with a control character or a Unicode line
+        // separator would open a line of its own in the record's text.
+        for broken in ["call\n1", "call\u{2028}1", "call\u{7}1", "call\t1"] {
+            assert!(!names_whole(broken), "{broken:?}");
+            assert_eq!(
+                failing(&|input| input.call = broken.into()).err(),
+                Some(true)
+            );
+            assert_eq!(
+                failing(&|input| input.tool = broken.into()).err(),
+                Some(true)
+            );
+        }
+        for whole in ["toolu_01AbC-9", "call 1", "bash", "s1"] {
+            assert!(names_whole(whole), "{whole}");
+        }
+        // The parts a record shows have the limits the wire document states.
+        assert_eq!(
+            (
+                MAX_TOOL_BYTES,
+                MAX_WORD_BYTES,
+                MAX_ID_BYTES,
+                MAX_TOKEN_BYTES
+            ),
+            (32, 64, 96, 96)
+        );
+        assert_eq!(tool_shown("  run   shell "), "run shell");
+        assert_eq!(
+            tool_shown(&"é".repeat(40)),
+            format!("{}…", "é".repeat(14)),
+            "32 bytes: 14 two-byte letters and the cut mark"
+        );
         // The tool's name is shown with its whitespace folded, within its
         // bytes, cut at a character boundary.
         for name in [
@@ -2873,6 +3755,12 @@ mod tests {
         };
         let of = |at_ms| Input::of("call-1", "bash", &call, &output, at_ms);
         assert!(of(Some(1_000)).is_some());
+        // An id or a tool name past 1,024 bytes is left out before a byte
+        // of it is copied.
+        let (at_bound, past) = ("i".repeat(1_024), "i".repeat(1_025));
+        assert!(Input::of(&at_bound, &at_bound, &call, &output, Some(1_000)).is_some());
+        assert!(Input::of(&past, "bash", &call, &output, Some(1_000)).is_none());
+        assert!(Input::of("call-1", &past, &call, &output, Some(1_000)).is_none());
         for at_ms in [
             None,
             Some(i64::MAX),
@@ -3110,6 +3998,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Each part of a record passes the redactor alone, and the record is
+    /// judged again as composed: a tool name that ends in a secret's key
+    /// and `=` takes the words after it in the first line as its value.
+    #[test]
+    fn a_name_that_passes_alone_is_judged_again_in_the_composed_record() {
+        let tool = format!("run {}=", ["api_", "tok", "en"].concat());
+        assert!(names_whole(&tool));
+        let compose = |tool: &str| {
+            let mut unit = observed("make");
+            unit.tool = tool_shown(tool);
+            let failure = failure(Evidence::ToolStatus, Some(1), Excerpt::Kept(Vec::new()));
+            failed_record("s1", &unit, &failure)
+        };
+        let record = compose(&tool);
+        assert!(kernel::exact_text_refusal(&record.summary).is_some());
+        let plain = compose("bash");
+        assert!(kernel::exact_text_refusal(&plain.summary).is_none());
+        assert!(kernel::exact_text_refusal(&plain.rationale).is_none());
     }
 
     #[test]

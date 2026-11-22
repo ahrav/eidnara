@@ -1331,6 +1331,7 @@ impl PendingFragment {
 
 /// The user-only consent gate shared by checkpointing and draining. Both sides
 /// must agree, or sources accumulate with no drainer, or drain without consent.
+/// The failure recorder reads it beside the source capture consent.
 pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
     binding.config.memory_enabled
         && binding.config.auto_promote

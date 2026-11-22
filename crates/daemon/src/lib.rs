@@ -7069,6 +7069,11 @@ impl HandlerCore {
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
+                // A failure recorder task handed off before this delete reads its memo entry under the same gate, so the entry goes before the delete changes either store: a delete that ends partway leaves that task with nothing to write.
+                core.failure_memo
+                    .lock()
+                    .expect("failure memo mutex")
+                    .forget_session(&session_id);
                 // Captured sources retire and the session's use-outcome records are marked deleted before the memory rows go, so no deleted session keeps a live descriptor or reads as live.
                 core.delete_kernel_step(&binding, &session_id)?;
                 #[cfg(test)]
@@ -7092,10 +7097,6 @@ impl HandlerCore {
                     .lock()
                     .expect("capture memo mutex")
                     .remove_session(&session_id);
-                core.failure_memo
-                    .lock()
-                    .expect("failure memo mutex")
-                    .forget_session(&session_id);
                 // A source capture handed off before this delete rechecks its ticket under the same gate and publishes nothing.
                 core.source_capture.invalidate_sessions();
                 deleted

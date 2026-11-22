@@ -5617,18 +5617,34 @@ async fn a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writ
         handler.failure_checkpoint(&binding, &next()).is_none(),
         "one checkpoint of a session is in flight at a time"
     );
-    let deleted = handler
-        .core
-        .handle_session_delete_value(
-            test_route(FIRST),
-            &json!({ "method": "session.delete", "session_id": "s1" }),
-        )
-        .await;
+    // A delete that ends between its two stores has already retired the
+    // session's memo entry, so the task handed off before it writes
+    // nothing, and the delete sent again completes.
+    let request = json!({ "method": "session.delete", "session_id": "s1" });
+    let delete = || {
+        handler
+            .core
+            .handle_session_delete_value(test_route(FIRST), &request)
+    };
+    handler
+        .source_capture
+        .stop_after_retirement
+        .store(true, std::sync::atomic::Ordering::Release);
+    let stopped = delete().await;
+    assert!(
+        matches!(&stopped, PreparedOutcome::Error { code, .. } if code == "injected_stop"),
+        "{stopped:?}"
+    );
+    assert_eq!(handed_off.run().await, 0);
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        rows
+    );
+    let deleted = delete().await;
     assert!(
         matches!(deleted, PreparedOutcome::Response(_)),
         "{deleted:?}"
     );
-    assert_eq!(handed_off.run().await, 0);
     assert_eq!(
         explicit_search(&handler, (SECOND, "s2"), &project).await,
         rows
@@ -5778,6 +5794,39 @@ async fn a_pass_hands_off_its_bound_of_the_last_results_that_its_memo_holds() {
         "a window of judged calls hands off nothing"
     );
     assert_eq!(handler.failure_memo.lock().unwrap().active_for_test(), 0);
+}
+
+/// A pass copies at most 8 MiB of commands and outputs for its task. Results
+/// of 64 KiB each fill that after 127 of them, so the pass hands off those
+/// and leaves the later ones, a small one included, for the next pass.
+#[tokio::test]
+async fn a_pass_copies_its_bound_of_bytes_and_the_next_pass_judges_the_rest() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let output: &'static str = "x".repeat(64 * 1024).leak();
+    let mut runs: Vec<Run> = (0..130)
+        .map(|index| Run {
+            call: format!("call-{index}").leak(),
+            command: "ls src",
+            output,
+            flagged: false,
+            at_ms: 1_000 + index,
+        })
+        .collect();
+    runs.push(passed_run("call-small", "ls src", 2_000));
+    let scope = kernel_routes::ProjectBinding::new(&project);
+    let seen = |call: &str| {
+        let memo = handler.failure_memo.lock().unwrap();
+        (
+            memo.calls_for_test("s1"),
+            memo.has_seen_for_test(scope.digest(), "s1", call),
+        )
+    };
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+    assert_eq!(seen("call-126"), (127, true));
+    assert_eq!(seen("call-127"), (127, false));
+    assert_eq!(seen("call-small"), (127, false));
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+    assert_eq!(seen("call-small"), (131, true));
 }
 
 /// Another writer retires a command's record. The retired row stays the
@@ -5963,6 +6012,34 @@ async fn results_of_one_window_are_judged_in_run_order_and_a_shared_call_id_is_l
     assert_eq!(rationales[0]["state"], "resolved");
     assert_eq!(rationales[0]["call"], "call-1");
     assert_eq!(rationales[0]["resolved_call"], "call-2");
+    // A call that two results answer is left out too: its passing result
+    // and the marked result after it write nothing.
+    let mut window = command_window("s1", &[passed_run("call-twice", "npm run deploy", 4_000)]);
+    let second = IngressMessage {
+        mid: "m-second".into(),
+        ordinal: 9,
+        ck: serde_json::from_value(json!({
+            "role": "tool",
+            "content": [{ "kind": {
+                "type": "tool_result", "id": "call-twice", "tool_name": "bash",
+                "output": { "kind": { "type": "error_text", "text": PANIC_OUTPUT } },
+            } }],
+            "meta": { "harness_id": "m-second", "created_at_ms": 4_100 },
+        }))
+        .unwrap(),
+    };
+    window.messages.0.push(Arc::new(second));
+    assert_eq!(record_window(&handler, &project, "s1", &window).await, 0);
+    assert_eq!(
+        memory_rationales(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        1
+    );
+    // The positive control: the same marked result as the one answer of
+    // its call is recorded.
+    let once = [failed_run("call-once", "npm run deploy", 5_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &once).await, 1);
 }
 
 /// A Pi result whose text passes the bytes a record reads is copied for no
@@ -5973,7 +6050,7 @@ async fn a_result_past_the_bytes_read_is_settled_unread_and_the_results_after_it
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
     let earlier = [failed_run("call-0", "make bundle", 500)];
     assert_eq!(record_failures(&handler, &project, "s1", &earlier).await, 1);
-    let part = "x".repeat(12 * 1024 * 1024);
+    let part = "x".repeat(22 * 1024);
     let call = |id: &str, row: &str, command: &str, at: i64| {
         json!({ "id": row, "message": {
             "role": "assistant",
@@ -6166,60 +6243,368 @@ async fn executions_that_share_the_first_part_of_a_native_call_id_are_judged_apa
     );
 }
 
-/// The recorder judges each result under the capture publication gate,
-/// which `session.delete` holds too. While another holder has the gate the
-/// task writes nothing; a session deleted meanwhile stays without a record
-/// once the gate is free, and a session that stands is recorded.
+/// Binds `channel` to `session` as a Pi session whose window holds no
+/// command result, so a management request of the session finds its route.
+async fn bind_pi_session(handler: &Handler, channel: u16, session: &str) {
+    let mut request = request_with_usage(Vec::new(), 1_000, 200_000);
+    request["session_id"] = json!(session);
+    request["serializer_profile"] = json!("pi");
+    request["native_messages"] = json!([{ "id": "1a2b3c4d", "message": {
+        "role": "user", "content": [{ "type": "text", "text": "Run the suite." }],
+        "timestamp": 900
+    } }]);
+    call_transform_request_on_channel(handler, channel, request).await;
+}
+
+/// The recorder holds the capture publication gate from its check of the
+/// session's memo entry through its commit, and `session.delete` takes the
+/// same gate: a delete that arrives while a judgment is under way waits for
+/// the judgment's commit, and the record committed ahead of the delete
+/// stands.
 #[tokio::test]
 async fn a_result_is_judged_under_the_capture_publication_gate() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
-    let checkpoint = |session: &str| {
-        let binding = failure_binding(&project, "pi", session);
-        let window = command_window(session, &[failed_run("call-1", "cargo test -p api", 1_000)]);
-        handler.failure_checkpoint(&binding, &window).unwrap()
-    };
-    let held = hold_capture_gate(&handler);
-    let deleted = tokio::spawn(checkpoint("s1").run());
-    let standing = tokio::spawn(checkpoint("s2").run());
-    // Both tasks have read their result and wait for the gate.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        served_memory_rows(&handler, (THIRD, "s3"), &project)
+    bind_pi_session(&handler, FIRST, "s1").await;
+    let binding = failure_binding(&project, "pi", "s1");
+    let window = command_window("s1", &[failed_run("call-1", "cargo test -p api", 1_000)]);
+    let checkpoint = handler.failure_checkpoint(&binding, &window).unwrap();
+    // The judgment reports whether the gate is held and waits there.
+    let gate = Arc::clone(&handler.capture_commit_gate);
+    let (reached, reaching) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (reached, released) = (Mutex::new(reached), Mutex::new(released));
+    handler.failure_memo.lock().unwrap().under_gate = Some(Arc::new(move || {
+        let held = matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+        reached.lock().unwrap().send(held).unwrap();
+        let _ = released.lock().unwrap().recv();
+    }));
+    let task = tokio::spawn(checkpoint.run());
+    let held = tokio::task::spawn_blocking(move || reaching.recv().unwrap())
+        .await
+        .unwrap();
+    assert!(held, "the judgment runs with the gate held");
+    let delete = {
+        let core = Arc::clone(&handler.core);
+        tokio::spawn(async move {
+            core.handle_session_delete_value(
+                test_route(FIRST),
+                &json!({ "method": "session.delete", "session_id": "s1" }),
+            )
             .await
-            .is_empty(),
-        "a task writes nothing ahead of the gate"
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !delete.is_finished() && !task.is_finished(),
+        "the delete waits for the gate the judgment holds"
     );
-    assert!(!deleted.is_finished() && !standing.is_finished());
-    // What `session.delete` does under the gate it holds.
-    handler.failure_memo.lock().unwrap().forget_session("s1");
-    held.release();
-    assert_eq!(deleted.await.unwrap(), 0);
-    assert_eq!(standing.await.unwrap(), 1);
-    let rationales = memory_rationales(&handler, (THIRD, "s3"), &project).await;
+    handler.failure_memo.lock().unwrap().under_gate = None;
+    drop(release);
+    assert_eq!(task.await.unwrap(), 1, "the judgment commits first");
+    let deleted = delete.await.unwrap();
+    assert!(
+        matches!(deleted, PreparedOutcome::Response(_)),
+        "{deleted:?}"
+    );
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
     assert_eq!(rationales.len(), 1, "{rationales:?}");
-    assert_eq!(rationales[0]["session"], "s2");
+    assert_eq!(rationales[0]["session"], "s1");
 }
 
-/// A daemon that shuts down ends a recorder task before its next result:
-/// the task waiting for the gate writes nothing once the gate is free, and
-/// its call stays unjudged for the session's next request.
+/// A panic of a judgment goes on to the task's caller with the capture
+/// publication gate released and usable, the call unjudged, and the
+/// session's place among the running checkpoints free, so `session.delete`
+/// and the session's next pass run as before.
 #[tokio::test]
-async fn a_shutdown_ends_a_recorder_task_before_its_next_result() {
+async fn a_panic_under_the_gate_leaves_the_gate_usable_and_the_call_unjudged() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    bind_pi_session(&handler, FIRST, "s1").await;
+    let binding = failure_binding(&project, "pi", "s1");
+    let window = || command_window("s1", &[failed_run("call-1", "cargo test -p api", 1_000)]);
+    let checkpoint = handler.failure_checkpoint(&binding, &window()).unwrap();
+    handler.failure_memo.lock().unwrap().under_gate =
+        Some(Arc::new(|| panic!("a judgment panics in this test")));
+    let joined = tokio::spawn(checkpoint.run()).await;
+    assert!(joined.is_err_and(|error| error.is_panic()));
+    handler.failure_memo.lock().unwrap().under_gate = None;
+    assert!(
+        handler.capture_commit_gate.try_lock().is_ok(),
+        "the gate is free and holds no poison"
+    );
+    let scope = kernel_routes::ProjectBinding::new(&project);
+    {
+        let memo = handler.failure_memo.lock().unwrap();
+        assert!(!memo.has_seen_for_test(scope.digest(), "s1", "call-1"));
+        assert_eq!(memo.active_for_test(), 0);
+    }
+    assert!(
+        served_memory_rows(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+    assert_eq!(record_window(&handler, &project, "s1", &window()).await, 1);
+    let deleted = handler
+        .core
+        .handle_session_delete_value(
+            test_route(FIRST),
+            &json!({ "method": "session.delete", "session_id": "s1" }),
+        )
+        .await;
+    assert!(
+        matches!(deleted, PreparedOutcome::Response(_)),
+        "{deleted:?}"
+    );
+}
+
+/// A daemon that shuts down ends a recorder task that waits for the capture
+/// publication gate while another holder still has it, and a task first
+/// polled after the shutdown starts no work. Each leaves its call unjudged
+/// for the session's next request.
+#[tokio::test]
+async fn a_shutdown_ends_a_recorder_task_at_the_gate_and_before_its_start() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
     let binding = failure_binding(&project, "pi", "s1");
     let window = command_window("s1", &[failed_run("call-1", "cargo test -p api", 1_000)]);
     let checkpoint = handler.failure_checkpoint(&binding, &window).unwrap();
     let held = hold_capture_gate(&handler);
     let task = tokio::spawn(checkpoint.run());
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    handler.cancel.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!task.is_finished(), "the task waits for the gate");
+    handler.cancel.cancel();
+    let written = tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .expect("the task ends while the gate is still held")
+        .unwrap();
+    assert_eq!(written, 0);
     held.release();
-    assert_eq!(task.await.unwrap(), 0);
+    let unjudged = || {
+        let scope = kernel_routes::ProjectBinding::new(&project);
+        let memo = handler.failure_memo.lock().unwrap();
+        !memo.has_seen_for_test(scope.digest(), "s1", "call-1") && memo.active_for_test() == 0
+    };
+    assert!(unjudged());
+    let late = handler.failure_checkpoint(&binding, &window).unwrap();
+    assert_eq!(
+        late.run().await,
+        0,
+        "the gate is free and the task starts no work"
+    );
+    assert!(unjudged());
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let (_, lineage) = memory_capture::FailureMemo::ids_for_test(
+        binding.kernel_project.digest(),
+        "s1",
+        "call-1",
+        "cargo test -p api",
+    );
+    let budget = kernel::applicability::EvalBudget::new(None, Arc::default());
+    let (_, newest) = kernel
+        .newest_decisions_on_lineage_within_budget(&budget, "assistant", &lineage)
+        .unwrap();
+    assert!(newest.is_empty(), "no record was written");
+}
+
+/// A session's id stands in a record's text and rationale, so it is judged
+/// whole: a session whose id the redactor would change, or whose id holds a
+/// line break, writes no record, and its calls are settled.
+#[tokio::test]
+async fn a_session_whose_id_a_record_cannot_show_whole_writes_no_record() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let (assignment, _) = keyed_credential("db");
     let scope = kernel_routes::ProjectBinding::new(&project);
-    let memo = handler.failure_memo.lock().unwrap();
-    assert!(!memo.has_seen_for_test(scope.digest(), "s1", "call-1"));
-    assert_eq!(memo.active_for_test(), 0);
+    for session in [format!("ses-{assignment}"), "ses\n1".to_owned()] {
+        let runs = [failed_run("call-1", "cargo test -p api", 1_000)];
+        assert_eq!(
+            record_failures(&handler, &project, &session, &runs).await,
+            0,
+            "{session:?}"
+        );
+        assert!(
+            handler.failure_memo.lock().unwrap().has_seen_for_test(
+                scope.digest(),
+                &session,
+                "call-1"
+            ),
+            "{session:?}: the call is settled"
+        );
+    }
+    assert!(
+        served_memory_rows(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+    let runs = [failed_run("call-1", "cargo test -p api", 1_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 1);
+}
+
+/// Seeds a decision straight into the Kernel, as a writer other than the
+/// recorder leaves one.
+fn seed_decision(
+    handler: &Handler,
+    project: &Path,
+    (object, lineage): (&str, &str),
+    kind: &str,
+    rationale: Value,
+) {
+    let scope = kernel_routes::ProjectBinding::new(project);
+    let spec = kernel::DecisionSpec {
+        decision_id: format!("dec_{}", &object[4..]),
+        object_id: object.to_owned(),
+        domain_id: "memory".into(),
+        proposition_id: None,
+        scope_id: Some(scope.scope_id()),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: kind.into(),
+        payload: kernel::DecisionPayload {
+            summary: "A note of another writer.".into(),
+            rationale: rationale.to_string(),
+        },
+        source_kind: "assistant".into(),
+        source_id: lineage.to_owned(),
+        source_revision: 1,
+        sensitivity: kernel::Sensitivity::Normal,
+    };
+    handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .commit(
+            kernel::CommitIntent {
+                producer: "test".into(),
+                operation_key: scope.operation_key("test", object).unwrap(),
+                request_digest: "0".repeat(64),
+                actor: "test".into(),
+                cause: "seed a row of another writer".into(),
+            },
+            |envelope| {
+                envelope.insert_decision(spec)?;
+                Ok(object.to_owned())
+            },
+        )
+        .unwrap();
+}
+
+/// The recorder follows a lineage's newest decision only when it wrote that
+/// decision: a failure record of the project whose rationale states its run
+/// and whose commit the Kernel's log holds under the recorder's name. A
+/// lineage whose newest decision is another writer's stays as it is, for a
+/// failure and for a pass, and the calls are settled. A row of another
+/// writer at the id a call's record derives leaves that call's failure
+/// unwritten, and the command's next failure is recorded.
+#[tokio::test]
+async fn a_lineage_or_an_id_another_writer_holds_is_left_as_it_is() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    // The first record makes the project's scope and domain.
+    let first = [failed_run("call-0", "make lint", 500)];
+    assert_eq!(record_failures(&handler, &project, "s1", &first).await, 1);
+    let scope = kernel_routes::ProjectBinding::new(&project);
+    let ids = |call: &str, command: &str| {
+        memory_capture::FailureMemo::ids_for_test(scope.digest(), "s1", call, command)
+    };
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let stands = |object: &str| {
+        let (_, states) = kernel.object_states(&[object.to_owned()]).unwrap();
+        let state = states[0].as_ref().unwrap();
+        state.object.invalidated_commit_seq.is_none() && state.object.superseded_by.is_none()
+    };
+    for (index, (command, kind, rationale)) in [
+        // A row of an earlier build that states a time alone.
+        ("cargo test -p a", "TOOL_FAILURE", json!({ "at_ms": 5 })),
+        // A row shaped as the recorder's, whose commit another producer
+        // made.
+        (
+            "cargo test -p b",
+            "TOOL_FAILURE",
+            json!({ "state": "failed", "session": "s1", "at_ms": 5 }),
+        ),
+        (
+            "cargo test -p c",
+            "TOOL_FAILURE",
+            json!({ "state": "resolved", "resolved_session": "s1", "resolved_at_ms": 5 }),
+        ),
+        // A row of another category.
+        (
+            "cargo test -p d",
+            "PROJECT_RULES",
+            json!({ "state": "failed", "session": "s1", "at_ms": 5 }),
+        ),
+        // A state the recorder never writes, and a time no calendar holds.
+        (
+            "cargo test -p e",
+            "TOOL_FAILURE",
+            json!({ "state": "open", "session": "s1", "at_ms": 5 }),
+        ),
+        (
+            "cargo test -p f",
+            "TOOL_FAILURE",
+            json!({ "state": "failed", "session": "s1", "at_ms": i64::MAX }),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let object = format!("mem_{:032x}", 0xa0 + index);
+        let (_, lineage) = ids("call-1", command);
+        seed_decision(&handler, &project, (&object, &lineage), kind, rationale);
+        let runs = [
+            Run {
+                call: "call-1",
+                command,
+                output: PANIC_OUTPUT,
+                flagged: true,
+                at_ms: 1_000 + index as i64,
+            },
+            Run {
+                call: "call-2",
+                command,
+                output: "test result: ok.",
+                flagged: false,
+                at_ms: 2_000 + index as i64,
+            },
+        ];
+        assert_eq!(
+            record_failures(&handler, &project, "s1", &runs).await,
+            0,
+            "{command}"
+        );
+        assert!(stands(&object), "{command}");
+        assert!(
+            handler
+                .failure_memo
+                .lock()
+                .unwrap()
+                .has_seen_for_test(scope.digest(), "s1", "call-2"),
+            "{command}: the calls are settled"
+        );
+        // The runs carry the same call ids for each command, so the memo
+        // starts again for the next one.
+        forget_failure_memo(&handler);
+    }
+    // A row at the id the call's record derives.
+    let (record, _) = ids("call-9", "cargo test -p o");
+    seed_decision(
+        &handler,
+        &project,
+        (&record, "eidnara_memory"),
+        "PROJECT_RULES",
+        json!({}),
+    );
+    let occupied = [failed_run("call-9", "cargo test -p o", 3_000)];
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &occupied).await,
+        0
+    );
+    assert!(stands(&record));
+    assert!(
+        handler
+            .failure_memo
+            .lock()
+            .unwrap()
+            .has_seen_for_test(scope.digest(), "s1", "call-9")
+    );
+    let next = [failed_run("call-10", "cargo test -p o", 4_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &next).await, 1);
 }
 
 /// A Kernel whose readers are all held past the judgment's deadline ends
@@ -6322,6 +6707,22 @@ async fn the_generic_commit_route_writes_no_row_on_a_failure_lineage() {
     } });
     let refused = commit_operation(&handler, &project, "lineage-observation", observation).await;
     assert_eq!(refused["state"]["reason"], "invalid_input", "{refused}");
+    // An artifact registers no row there, and one on another lineage
+    // begins its upload.
+    for (upload, source, kind) in [
+        ("upload-on", lineage.as_str(), "invalid"),
+        ("upload-off", "src/upload-off", "available"),
+    ] {
+        let mut begin =
+            kernel_route_fixtures::ingest_begin_request(&project, "s2", upload, b"payload", 1);
+        begin["request"]["source_id"] = json!(source);
+        let begun = body(
+            handler
+                .dispatch_value_for_test(test_route(SECOND), begin)
+                .await,
+        );
+        assert_eq!(begun["state"]["kind"], kind, "{upload}: {begun}");
+    }
     // The positive control: the same row on another lineage is written, also
     // on one whose name only begins like the failure lineage's.
     for (key, object, source) in [
@@ -6356,9 +6757,11 @@ async fn the_generic_commit_route_writes_no_row_on_a_failure_lineage() {
             "revise",
             supersede(&record_id, "mem-revised", "TOOL_FAILURE", &lineage),
         ),
+        // A fold keeps the survivor's stored row, which stands on the
+        // lineage whatever the spec names.
         (
             "fold",
-            supersede("mem-note", &record_id, "TOOL_FAILURE", &lineage),
+            supersede("mem-note", &record_id, "PROJECT_RULES", "eidnara_memory"),
         ),
     ] {
         let refused = commit_operation(&handler, &project, key, operation).await;

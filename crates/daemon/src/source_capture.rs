@@ -332,7 +332,7 @@ impl Default for SourceCapture {
     }
 }
 
-/// Whether the route's consent snapshot, the session, and the profile admit capture at all; otherwise no adapter runs. The profile's harness must be the one the route claims, so the harness capture stamps on a descriptor is the one `session.delete` retires by.
+/// Whether the route's consent snapshot, the session, and the profile admit capture at all; otherwise no adapter runs. The profile's harness must be the one the route claims, so the harness capture stamps on a descriptor is the one `session.delete` retires by. The failure recorder reads the same consent before it records a failed command from a tool result.
 pub(crate) fn consents(
     config: &crate::config::DaemonConfig,
     is_subagent: bool,
