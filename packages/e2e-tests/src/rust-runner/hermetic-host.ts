@@ -192,6 +192,7 @@ type ControlCommand =
     | "review-witness"
     | "live-source-descriptors"
     | "source-capture-report"
+    | "review-drain"
     | "graceful-shutdown";
 
 type PendingControl = {

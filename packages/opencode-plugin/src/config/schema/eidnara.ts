@@ -620,15 +620,24 @@ export const EidnaraConfigSchema = z
             .describe("User-only attestation verifier."),
         memory_reviewer: z
             .strictObject({
-                enabled: z.boolean().default(false).describe(
-                    "User-only: review the project's memories with the configured model. The daemon selects the memories most likely to be wrong, sends each with the messages it cites and the source text recorded after it through the host's model execution, and records a proposal to retain, revise, or retire it (default: false). Also turns on source_capture and contradiction_candidates, whose rows a review reads. Project values are ignored with a warning.",
-                ),
-                model: z.string().optional().describe(
-                    "User-only: the provider/model every review request names. Absent, reviews use the history summarizer's model.",
-                ),
-                apply: z.enum(["propose", "contest", "apply"]).default("propose").describe(
-                    "User-only: what the daemon does with a proposal it records. propose leaves it for review.accept; contest marks the target of a retire or revise that cites a contradiction as disputed, which moves it from automatic delivery to explicit search; apply accepts the proposal (default: propose).",
-                ),
+                enabled: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "User-only: review the project's memories with the configured model. The daemon selects the memories most likely to be wrong, sends each with the messages it cites and the source text recorded after it through the host's model execution, and records a proposal to retain, revise, or retire it (default: false). Also turns on source_capture and contradiction_candidates, whose rows a review reads. Project values are ignored with a warning.",
+                    ),
+                model: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "User-only: the provider/model every review request names. Absent, reviews use the history summarizer's model.",
+                    ),
+                apply: z
+                    .enum(["propose", "contest", "apply"])
+                    .default("propose")
+                    .describe(
+                        "User-only: what the daemon does with a proposal it records. propose leaves it for review.accept; contest marks the target of a retire or revise that cites a contradiction as disputed, which moves it from automatic delivery to explicit search; apply accepts the proposal (default: propose).",
+                    ),
             })
             .default({ enabled: false, apply: "propose" })
             .describe("User-only model review of stored memories."),
