@@ -277,15 +277,15 @@ Open questions: None.
 ### p2-capture-publish-and-session-delete-are-serialized
 
 Type: safety
-Reachability: default-production - every capture publish, checkpoint, failed-command judgment, and session delete takes `capture_commit_gate`
+Reachability: default-production - every capture publish, checkpoint, and session delete takes `capture_commit_gate`, and so does every failed-command judgment, which runs under the source capture consent
 Status: active
 Exercised: yes - daemon tests race checkpoints and publishes against session delete
 Guarantee: Capture publication, capture checkpointing, source-capture publish, the failed-command recorder's judgment of one command result, and session deletion each hold `capture_commit_gate` for their whole store and Kernel write, so a deleted session's sources and failed-command facts land wholly before or wholly after the sweep.
-Check: `always` - no capture or source publish commit for a session has a `commit_seq` after that session's delete sweep committed; observed by holding the gate from a test thread and asserting the competing operation has not committed (refinement R5 adds this gate-hold observation method)
-Fault/timing angle: a checkpoint or publish admitted before a delete that runs after it
-Required faults and enabling state: a session delete issued while a checkpoint or publish waits on the gate
-Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1814`, the delete path at `crates/daemon/src/lib.rs:7068`, and `capture_after_response` at `crates/daemon/src/lib.rs:9332`
-Existing check: `crates/daemon/src/lib.rs:25552`, `:25890`, `:26102`, `:26755`; `crates/daemon/src/lib.rs:25277`; `crates/daemon/src/source_capture_tests.rs:1062`; `crates/daemon/src/memory_auto_delivery_tests.rs:6174`, `:5546` (unaudited)
+Check: `always` - no capture or source publish commit for a session has a `commit_seq` after that session's delete sweep committed; observed by holding the gate from a test thread and asserting the competing operation has not committed (refinement R5 adds this gate-hold observation method); a failed-command task handed off before the delete commits nothing after it, a fact committed before the delete stays live, and a later pass of the session writes as before
+Fault/timing angle: a checkpoint, a publish, or a failed-command task admitted before a delete that runs after it, also a delete that ends between its two stores
+Required faults and enabling state: a session delete issued while a checkpoint, a publish, or a failed-command judgment waits on the gate or holds it
+Confidence: high - [evidence](evidence/p2-capture-publish-and-session-delete-are-serialized.md). Read the gate in `publish` at `crates/daemon/src/memory_capture.rs:1814`, the delete path at `crates/daemon/src/lib.rs:7068`, and `capture_after_response` at `crates/daemon/src/lib.rs:9332`, and the recorder's gate in `record` at `crates/daemon/src/memory_capture/failures.rs:2188`
+Existing check: `crates/daemon/src/lib.rs:25552`, `:25890`, `:26102`, `:26755`; `crates/daemon/src/lib.rs:25277`; `crates/daemon/src/source_capture_tests.rs:1062`; `crates/daemon/src/memory_auto_delivery_tests.rs:6265`, `:5546` (unaudited)
 Impact: an interleaving would leave a deleted session's memory or descriptor live
 Open questions: None.
 
