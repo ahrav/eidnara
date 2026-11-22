@@ -1584,17 +1584,24 @@ is refused as invalid. A fact the Kernel does not serve as approved, or serves a
 sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
 by the fact already named writes nothing. A fact capture writes for a user's
-whole statement that replaces or retires a fact the Kernel serves as
-unapproved and whose text carries no `User stated` label, which an
-assistant's report and a memory the host memory tool wrote are, holds
-`replaces_observation` in its rationale, an object with `recorded_seq`, the
-commit sequence that recorded the earliest such fact. The `<project-memory>`
-block renders that statement, while its rationale holds no `contested_by`, as
+whole statement holds `replaces_observation` in its rationale when every
+fact the statement replaces or retires by name is an observation: a fact the
+Kernel serves as unapproved that is no quotation capture stored under the
+`User stated: ` label, which an assistant's report and a memory the host
+memory tool wrote are. The record is an object with `recorded_seq`, the
+commit sequence that recorded the earliest such fact. A statement that names
+an approved statement of the user, or a labeled quotation of the user, among
+the facts it replaces holds no record, and a note retired because a replaced
+statement restated it is not counted. Each fact that later rewrites the
+statement, for a contest, a settlement, or its end, keeps the record. The
+`<project-memory>` block renders a statement whose rationale holds the record
+and no `contested_by` as
 `<statement> (stated <date>; it replaces a value recorded <date> that the user had not stated)`,
 the dates being the UTC days on which the statement's first commit and the
-replaced fact's commit were recorded, `unknown date` when the commit log
-holds none; the stored statement and its explicit-search text hold the user's
-words alone. The `<project-memory>` block renders
+commit `recorded_seq` names were recorded, `unknown date` when the commit log
+holds none; a record of another shape marks nothing. The stored summary holds
+the user's words alone, and explicit search shows the rationale with the
+record as it shows every rationale field. The `<project-memory>` block renders
 a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
 the dates being the UTC days on which the statement's first commit and the

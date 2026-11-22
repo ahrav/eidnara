@@ -496,20 +496,58 @@ fn contested_line(
     memory: &str,
     text: &str,
 ) -> String {
-    let day = |at: Option<i64>| {
-        at.and_then(chrono::DateTime::from_timestamp_millis)
-            .map_or_else(
-                || "unknown date".to_owned(),
-                |at| at.format("%Y-%m-%d").to_string(),
-            )
-    };
     format!(
         "{statement} (stated {}; contested {} by {}: {})",
-        day(stated_ms),
-        day(contested_ms),
+        utc_day(stated_ms),
+        utc_day(contested_ms),
         contest_id(memory),
         contest_excerpt(text)
     )
+}
+
+/// The UTC day of `at_ms`, or `unknown date` for a time the commit log
+/// cannot supply.
+fn utc_day(at_ms: Option<i64>) -> String {
+    at_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || "unknown date".to_owned(),
+            |at| at.format("%Y-%m-%d").to_string(),
+        )
+}
+
+/// The line of a statement that replaced an observation: the statement, the
+/// day it was first recorded, and the day the replaced observation was.
+fn replaced_line(statement: &str, stated_ms: Option<i64>, recorded_ms: Option<i64>) -> String {
+    format!(
+        "{statement} (stated {}; it replaces a value recorded {} that the user had not stated)",
+        utc_day(stated_ms),
+        utc_day(recorded_ms)
+    )
+}
+
+/// The recorded times of commits, each read from the store once for a pass.
+struct CommitTimes<'s> {
+    store: &'s kernel::KernelStore,
+    times: std::collections::HashMap<i64, Option<i64>>,
+}
+
+impl<'s> CommitTimes<'s> {
+    fn new(store: &'s kernel::KernelStore) -> Self {
+        Self {
+            store,
+            times: std::collections::HashMap::new(),
+        }
+    }
+
+    fn recorded(&mut self, commit_seq: i64) -> Result<Option<i64>, kernel::KernelError> {
+        if let Some(time) = self.times.get(&commit_seq) {
+            return Ok(*time);
+        }
+        let time = self.store.commit_recorded_at(commit_seq)?;
+        self.times.insert(commit_seq, time);
+        Ok(time)
+    }
 }
 
 /// The contest a pass shows beside capture-written statement `row`: the
@@ -560,7 +598,8 @@ fn show_contests(
             ))
         })
         .collect();
-    show_replacements(store, response)?;
+    let mut times = CommitTimes::new(store);
+    show_replacements(&mut times, response)?;
     if contests.is_empty() {
         return Ok(());
     }
@@ -608,17 +647,6 @@ fn show_contests(
             }
         }
     }
-    // Each commit's time is read once for the pass, however many contested
-    // statements share it.
-    let mut times = std::collections::HashMap::new();
-    let mut recorded = |commit_seq: i64| -> Result<Option<i64>, kernel::KernelError> {
-        if let Some(time) = times.get(&commit_seq) {
-            return Ok(*time);
-        }
-        let time = store.commit_recorded_at(commit_seq)?;
-        times.insert(commit_seq, time);
-        Ok(time)
-    };
     for (statement, contested_seq, contest) in contests {
         let (Some(text), Some(decision)) = (
             observations.get(&contest.memory),
@@ -628,8 +656,8 @@ fn show_contests(
         };
         decision.payload.summary = contested_line(
             &decision.payload.summary,
-            recorded(contest.stated_seq)?,
-            recorded(contested_seq)?,
+            times.recorded(contest.stated_seq)?,
+            times.recorded(contested_seq)?,
             &contest.memory,
             text,
         );
@@ -637,51 +665,36 @@ fn show_contests(
     Ok(())
 }
 
-/// Appends to each statement of `response` that replaced an observation the
-/// day the statement was recorded and the day the observation was. A
-/// contested statement keeps its text for [`contested_line`].
+/// Rewrites each statement of `response` that replaced an observation to
+/// [`replaced_line`]'s text. A contested statement keeps its text for
+/// [`contested_line`], and a failed commit-time read fails the pass.
 fn show_replacements(
-    store: &kernel::KernelStore,
+    times: &mut CommitTimes<'_>,
     response: &mut ReadResponse,
 ) -> Result<(), kernel::KernelError> {
     let replacements: Vec<(String, i64, i64)> = response
         .rows
         .iter()
-        .filter(|row| {
-            row.visibility == SurfaceVisibility::Visible
-                && crate::memory_capture::is_capture_memory(&row.object)
-        })
+        .filter(|row| row.visibility == SurfaceVisibility::Visible)
         .filter_map(|row| {
             let decision = response.decisions.get(&row.object.object_id)?;
-            if !decision.payload.rationale.contains("replaces_observation") {
-                return None;
-            }
-            let recorded = crate::memory_capture::capture_rationale(decision);
-            if recorded.contested_by.is_some() {
+            if !crate::memory_capture::is_capture_memory(&row.object)
+                || shown_contest(row, decision).is_some()
+            {
                 return None;
             }
             Some((
                 decision.object_id.clone(),
                 crate::memory_capture::stated_commit(decision),
-                recorded.replaces_observation?.recorded_seq,
+                crate::memory_capture::replaced_observation_commit(decision)?,
             ))
         })
         .collect();
-    let day = |at: Option<i64>| {
-        at.and_then(chrono::DateTime::from_timestamp_millis)
-            .map_or_else(
-                || "unknown date".to_owned(),
-                |at| at.format("%Y-%m-%d").to_string(),
-            )
-    };
     for (statement, stated_seq, recorded_seq) in replacements {
-        let stated = day(store.commit_recorded_at(stated_seq)?);
-        let recorded = day(store.commit_recorded_at(recorded_seq)?);
+        let stated = times.recorded(stated_seq)?;
+        let recorded = times.recorded(recorded_seq)?;
         if let Some(decision) = response.decisions.get_mut(&statement) {
-            decision.payload.summary = format!(
-                "{} (stated {stated}; it replaces a value recorded {recorded} that the user had not stated)",
-                decision.payload.summary
-            );
+            decision.payload.summary = replaced_line(&decision.payload.summary, stated, recorded);
         }
     }
     Ok(())
@@ -1167,6 +1180,30 @@ mod tests {
         assert_eq!(
             contested_line("S.", None, Some(day("2026-04-09")), "mem_b", "x"),
             "S. (stated unknown date; contested 2026-04-09 by mem_b: \"x\")"
+        );
+    }
+
+    /// The replacement line shows the day the statement was first recorded
+    /// before the day the replaced observation was recorded, and names a day
+    /// the commit log cannot supply.
+    #[test]
+    fn a_replacement_line_dates_the_statement_and_then_the_observation() {
+        let day = |date: &str| {
+            chrono::DateTime::parse_from_rfc3339(&format!("{date}T23:59:59Z"))
+                .unwrap()
+                .timestamp_millis()
+        };
+        assert_eq!(
+            replaced_line(
+                "User stated: The limit is 500.",
+                Some(day("2026-04-09")),
+                Some(day("2026-03-01")),
+            ),
+            "User stated: The limit is 500. (stated 2026-04-09; it replaces a value recorded 2026-03-01 that the user had not stated)"
+        );
+        assert_eq!(
+            replaced_line("S.", Some(day("2026-04-09")), None),
+            "S. (stated 2026-04-09; it replaces a value recorded unknown date that the user had not stated)"
         );
     }
 

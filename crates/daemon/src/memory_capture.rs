@@ -3865,17 +3865,33 @@ pub(crate) struct CaptureRationale {
     source: Option<String>,
     #[serde(default)]
     lifetime: Option<Lifetime>,
-    /// The observation this user statement replaced.
-    #[serde(default)]
-    pub(crate) replaces_observation: Option<ReplacedObservation>,
 }
+
+/// The rationale key of a user statement that replaced an observation.
+const REPLACES_OBSERVATION: &str = "replaces_observation";
 
 /// A memory the user had not stated, such as an assistant's report of what a
 /// project file says, that a user statement replaced.
-#[derive(Clone, Copy, Deserialize)]
-pub(crate) struct ReplacedObservation {
-    /// The commit that recorded the replaced memory.
-    pub(crate) recorded_seq: i64,
+#[derive(Clone, Copy, Serialize)]
+struct ReplacedObservation {
+    /// The commit that recorded the earliest replaced observation.
+    recorded_seq: i64,
+}
+
+/// The commit that recorded the observation this capture decision replaced.
+/// `None` for a decision whose rationale holds no such record, and for a
+/// record of another shape, which leaves the rationale's other fields as
+/// [`capture_rationale`] reads them.
+pub(crate) fn replaced_observation_commit(decision: &kernel::DecisionRow) -> Option<i64> {
+    if !decision.payload.rationale.contains(REPLACES_OBSERVATION) {
+        return None;
+    }
+    let rationale: Value = serde_json::from_str(&decision.payload.rationale).ok()?;
+    rationale
+        .get(REPLACES_OBSERVATION)?
+        .as_object()?
+        .get("recorded_seq")?
+        .as_i64()
 }
 
 /// The user statement that ended a statement of work in progress.
@@ -4562,16 +4578,6 @@ fn write_captured_memories(
             }
             named.push((target, primary, work, live));
         }
-        // The commit that recorded the earliest replaced memory that the
-        // Kernel serves as unapproved and that carries no `User stated`
-        // label: an assistant's report or an agent's note.
-        let replaced_observation = named
-            .iter()
-            .filter(|(_, _, _, live)| stated && !live)
-            .filter_map(|(target, ..)| earlier.get(*target))
-            .filter(|held| !held.payload.summary.starts_with(USER_STATED))
-            .map(|held| held.created_commit_seq)
-            .min();
         // A correction whose approval the Kernel refused is stored labeled.
         let labeled = attributed && approval == Approval::Refused;
         // The approved targets a labeled correction leaves live. Each is
@@ -4585,8 +4591,31 @@ fn write_captured_memories(
         let mut captured = Vec::new();
         let mut ended = Vec::new();
         let mut source_revision = 1;
+        // The commit that recorded the earliest replaced observation: a
+        // target the Kernel serves as unapproved that is no quotation capture
+        // labeled as the user's, such as an assistant's report or an agent's
+        // note. A replaced statement of the user's own leaves it unset.
+        let mut replaced_observation = None;
+        let mut replaces_user_words = false;
         for (target, primary, work, live) in named {
             let revision = checked_capture_target(envelope, project, output, target, true)?;
+            let held = earlier.get(target);
+            let quotes_user = revision.is_some()
+                && held.is_some_and(|held| {
+                    held.payload
+                        .summary
+                        .strip_prefix(USER_STATED)
+                        .is_some_and(|rest| rest.starts_with(": "))
+                });
+            if live || quotes_user {
+                replaces_user_words = true;
+            } else if let Some(held) = held {
+                replaced_observation = Some(
+                    replaced_observation.map_or(held.created_commit_seq, |seq: i64| {
+                        seq.min(held.created_commit_seq)
+                    }),
+                );
+            }
             match (work, revision) {
                 (Some(statement), Some(revision)) => {
                     ended.push((target, statement, revision));
@@ -4642,10 +4671,13 @@ fn write_captured_memories(
         if let Some(lifetime) = memory.lifetime {
             rationale.insert("lifetime".to_owned(), json!(lifetime));
         }
-        if let Some(recorded_seq) = replaced_observation {
+        if let Some(recorded_seq) = replaced_observation
+            && stated
+            && !replaces_user_words
+        {
             rationale.insert(
-                "replaces_observation".to_owned(),
-                json!({"recorded_seq": recorded_seq}),
+                REPLACES_OBSERVATION.to_owned(),
+                json!(ReplacedObservation { recorded_seq }),
             );
         }
         anchor_reason.record(&mut rationale, reasons);
