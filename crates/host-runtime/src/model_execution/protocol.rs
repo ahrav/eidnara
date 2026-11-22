@@ -308,6 +308,18 @@ pub fn harness_dispatch_unit(run_id: &str, harness: Harness) -> Vec<u8> {
     }))
 }
 
+/// The longest model id an `answering_model` unit carries; the unit is appended from the terminal headroom, so its size is bounded.
+pub const MAX_ANSWERING_MODEL_BYTES: usize = 256;
+
+/// The unit that names the model the harness's deciding assistant message reports. It precedes that message's `assistant_message` unit.
+pub fn answering_model_unit(run_id: &str, model: &str) -> Vec<u8> {
+    control_event(serde_json::json!({
+        "type": "answering_model",
+        "run_id": run_id,
+        "model": model,
+    }))
+}
+
 /// `assistant_message_unit` emits the nested content-block shape consumed by `unit_text`.
 /// `finish_reason` is unit-level rather than nested under `message`.
 /// Length-class finish reasons use the unit-level `finish_reason` field.

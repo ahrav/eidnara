@@ -169,6 +169,10 @@ pub enum BackendEvent {
     HarnessDispatch {
         harness: Harness,
     },
+    /// The model id the harness's deciding assistant message reports, so a producer can hold the answer to the model its request named.
+    AnsweringModel {
+        model: String,
+    },
     AssistantText {
         text: String,
         finish_reason: Option<FinishReason>,

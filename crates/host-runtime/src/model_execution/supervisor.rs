@@ -1247,6 +1247,9 @@ fn append_event(inner: &Arc<Inner>, run: &Arc<Run>, event: BackendEvent) -> Sink
         BackendEvent::HarnessDispatch { harness } => {
             return append_reserved(run, protocol::harness_dispatch_unit(&run.run_id, harness));
         }
+        BackendEvent::AnsweringModel { model } => {
+            return append_reserved(run, protocol::answering_model_unit(&run.run_id, &model));
+        }
         BackendEvent::AssistantText {
             text,
             finish_reason,

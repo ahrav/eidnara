@@ -4087,7 +4087,7 @@ fn pi_auto_retry_supersedes_the_failed_attempts_terminal() {
         .iter()
         .filter_map(|event| match event {
             BackendEvent::AssistantText { text, .. } => Some(text.as_str()),
-            BackendEvent::HarnessDispatch { .. } => None,
+            BackendEvent::HarnessDispatch { .. } | BackendEvent::AnsweringModel { .. } => None,
         })
         .collect();
     assert_eq!(

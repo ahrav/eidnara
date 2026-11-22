@@ -679,6 +679,21 @@ fn harness_vocabulary_is_closed() {
             },
         })
     );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&protocol::answering_model_unit(
+            "model_execution-run-1",
+            "prov-model-1",
+        ))
+        .expect("answering model unit JSON"),
+        serde_json::json!({
+            "kind": "control",
+            "unit": {
+                "type": "answering_model",
+                "run_id": "model_execution-run-1",
+                "model": "prov-model-1",
+            },
+        })
+    );
 }
 
 #[tokio::test]

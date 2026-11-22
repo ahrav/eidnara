@@ -21,6 +21,7 @@ use super::backend::{
     PI_CONTEXT_CAPABILITIES,
 };
 use super::config::MAX_PI_PROVIDER_EXTENSIONS;
+use super::protocol;
 use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{
     self, EnvSnapshot, PrivateDir, ProbeSignal, StdoutFilter, SubprocessLimits, SubprocessSpec,
@@ -703,7 +704,7 @@ fn pi_line_probe_signal(line: &[u8]) -> ProbeSignal {
 /// Lines that start with `{` but fail to parse are failures, not extension stdout noise.
 /// Malformed or undocumented JSON returns one error without including the input line.
 fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTerminal), String> {
-    let mut provisional: Option<(Option<BackendEvent>, BackendTerminal)> = None;
+    let mut provisional: Option<(Vec<BackendEvent>, BackendTerminal)> = None;
     let mut agent_end_final: Option<(serde_json::Value, usize)> = None;
     for (index, line) in stdout.split(|byte| *byte == b'\n').enumerate() {
         if line.is_empty() {
@@ -774,14 +775,11 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
     // `agent_end` is authoritative: its final assistant decides, and a nonterminal final (tool request, missing or intermediate stop reason) means the run never reached a terminal answer, so the provisional `message_end` decision must not stand in for it.
     if let Some((message, line_no)) = &agent_end_final {
         return match assistant_message_terminal(message, *line_no)? {
-            Some((text, terminal)) => Ok((text.into_iter().collect(), terminal)),
+            Some((events, terminal)) => Ok((events, terminal)),
             None => Err("agent_end without a terminal final assistant message".to_owned()),
         };
     }
-    let Some((text, terminal)) = provisional else {
-        return Err("output ended without a terminal event".to_owned());
-    };
-    Ok((text.into_iter().collect(), terminal))
+    provisional.ok_or_else(|| "output ended without a terminal event".to_owned())
 }
 
 /// `BackendError::message` of a Pi run whose provider refused the requested temperature for the model.
@@ -806,13 +804,35 @@ fn rejects_temperature(provider_text: &str) -> bool {
     })
 }
 
+/// The events of a completed answer: the model id the message reports, when it is a string within [`protocol::MAX_ANSWERING_MODEL_BYTES`], then the text.
+fn answer_events(
+    message: &serde_json::Value,
+    text: String,
+    finish_reason: Option<FinishReason>,
+) -> Vec<BackendEvent> {
+    let model = message
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .filter(|model| !model.is_empty() && model.len() <= protocol::MAX_ANSWERING_MODEL_BYTES);
+    model
+        .map(|model| BackendEvent::AnsweringModel {
+            model: model.to_owned(),
+        })
+        .into_iter()
+        .chain([BackendEvent::AssistantText {
+            text,
+            finish_reason,
+        }])
+        .collect()
+}
+
 /// `message_end` and `agent_end` share this classification: `stop` and `length` succeed unless content requests tools; `error` and `aborted` fail; other spellings return `None`.
 ///
-/// The executor publishes only the winning decision's assistant text.
+/// The executor publishes only the winning decision's assistant text, preceded by the model id that message reports.
 fn assistant_message_terminal(
     message: &serde_json::Value,
     line_no: usize,
-) -> Result<Option<(Option<BackendEvent>, BackendTerminal)>, String> {
+) -> Result<Option<(Vec<BackendEvent>, BackendTerminal)>, String> {
     let stop_reason = message
         .get("stopReason")
         .and_then(serde_json::Value::as_str);
@@ -824,19 +844,17 @@ fn assistant_message_terminal(
         Some("stop" | "length") if message_requests_tools(message) => None,
         // A success message with a malformed `content` is a parse failure, not an empty answer: publishing it as completed would turn a schema change into a silently truncated result.
         Some("stop") => Some((
-            Some(BackendEvent::AssistantText {
-                text: assistant_text(message, line_no)?,
-                finish_reason: None,
-            }),
+            answer_events(message, assistant_text(message, line_no)?, None),
             BackendTerminal::Completed {
                 finish_reason: FinishReason::Completed,
             },
         )),
         Some("length") => Some((
-            Some(BackendEvent::AssistantText {
-                text: assistant_text(message, line_no)?,
-                finish_reason: Some(FinishReason::Length),
-            }),
+            answer_events(
+                message,
+                assistant_text(message, line_no)?,
+                Some(FinishReason::Length),
+            ),
             BackendTerminal::Completed {
                 finish_reason: FinishReason::Length,
             },
@@ -848,7 +866,7 @@ fn assistant_message_terminal(
                 .unwrap_or_default();
             if reason == "error" && rejects_temperature(provider_text) {
                 return Ok(Some((
-                    None,
+                    Vec::new(),
                     BackendTerminal::Failed(BackendError {
                         class: ErrorClass::Permanent,
                         retry_after_secs: None,
@@ -858,7 +876,7 @@ fn assistant_message_terminal(
                 )));
             }
             Some((
-                None,
+                Vec::new(),
                 // The emitted message uses the stop reason rather than provider text.
                 BackendTerminal::Failed(BackendError {
                     class: subprocess::classify_failure_text(provider_text),
@@ -993,6 +1011,54 @@ mod tests {
             "temperature: Input should be less than or equal to 1, top_k: Extra inputs are not permitted, unsupported",
         ] {
             assert!(!rejects_temperature(text), "{text}");
+        }
+    }
+
+    /// A producer holds an answer to the model its request named, so a completed answer carries the model id its message reports, ahead of the text.
+    #[test]
+    fn a_completed_answer_names_the_model_its_message_reports() {
+        let line = |model: serde_json::Value| {
+            serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "stop",
+                    "model": model,
+                    "content": [{"type": "text", "text": "answer"}],
+                },
+            })
+            .to_string()
+        };
+        let text = BackendEvent::AssistantText {
+            text: "answer".to_owned(),
+            finish_reason: None,
+        };
+        let (events, terminal) = parse_pi_transcript(line("prov-model-1".into()).as_bytes())
+            .expect("a clean transcript");
+        assert_eq!(
+            events,
+            [
+                BackendEvent::AnsweringModel {
+                    model: "prov-model-1".to_owned(),
+                },
+                text.clone(),
+            ]
+        );
+        assert_eq!(
+            terminal,
+            BackendTerminal::Completed {
+                finish_reason: FinishReason::Completed,
+            }
+        );
+        // A message that reports no usable id publishes its text alone; the producer decides what an unnamed answer is worth.
+        for unnamed in [
+            serde_json::Value::Null,
+            "".into(),
+            "m".repeat(protocol::MAX_ANSWERING_MODEL_BYTES + 1).into(),
+        ] {
+            let (events, _) =
+                parse_pi_transcript(line(unnamed).as_bytes()).expect("a clean transcript");
+            assert_eq!(events, std::slice::from_ref(&text));
         }
     }
 

@@ -23,6 +23,8 @@ const THURSDAY: &str = "Cut release branches from main every Thursday.";
 const TUESDAY: &str = "We cut release branches from main every Tuesday now, not Thursday.";
 const LINTER: &str = "Run the linter before every commit.";
 const MODEL: &str = "test/reviewer";
+/// The model id a child that ran [`MODEL`] reports for its answer.
+const ANSWERING_MODEL: &str = "reviewer";
 
 fn switch_config(apply: ReviewApply) -> DaemonConfig {
     DaemonConfig {
@@ -162,13 +164,19 @@ impl Rig {
         );
     }
 
-    /// Queues the model's next answers, one per request.
+    /// Queues the model's next answers, one per request, each reported by the configured model.
     fn answers(&self, steps: &[&str]) {
+        self.answers_from(Some(ANSWERING_MODEL), steps);
+    }
+
+    /// Queues answers the host reports as coming from `model`.
+    fn answers_from(&self, model: Option<&str>, steps: &[&str]) {
         let mut results = self.state.await_results.lock().unwrap();
         for step in steps {
             results.push_back(Ok(ProducerOutput {
                 text: (*step).to_string(),
                 length_capped: false,
+                model: model.map(str::to_string),
             }));
         }
     }
@@ -335,6 +343,34 @@ async fn apply_retires_a_replaced_statement_from_the_block_and_from_search() {
         rig.search().await,
         [(stated(LINTER), "visible".to_string())]
     );
+}
+
+/// An answer is released only when the host reports it came from the configured model. An answer that names another model, or on the Pi harness names none, ends its attempt with no text admitted and closes review for the rest of the process: no proposal is published, no further request is made, and both statements stay delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_from_another_model_is_withheld_and_closes_review() {
+    for reported in [Some("another-model"), None] {
+        let rig = Rig::open(ReviewApply::Apply).await;
+        rig.state_rules(&[THURSDAY, LINTER]).await;
+        rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+            .await;
+        rig.answers_from(reported, &[RETIRE_CITING_LATER, RETAIN]);
+        assert_eq!(rig.drain().await, 0, "{reported:?}");
+        assert_eq!(rig.attempts().len(), 1, "{reported:?}");
+        assert_eq!(
+            rig.status.activation_state(),
+            ActivationState::Closed("unavailable"),
+            "{reported:?}"
+        );
+        let root = rig.project.to_string_lossy().to_string();
+        let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+        assert!(outcomes.outcomes.is_empty(), "{reported:?}");
+        let block = rig.block().await;
+        assert!(block.contains(&stated(THURSDAY)), "{block}");
+        assert!(block.contains(&stated(LINTER)), "{block}");
+        // The latch holds: a later pass sends nothing.
+        assert_eq!(rig.drain().await, 0);
+        assert_eq!(rig.attempts().len(), 1);
+    }
 }
 
 /// A project whose user tier leaves the switch off is listed for no review: no authority is taken, no job is selected, and no request is made.
