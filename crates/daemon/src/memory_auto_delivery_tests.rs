@@ -5287,6 +5287,40 @@ async fn a_lowercase_rule_quoted_without_its_condition_stays_labeled() {
     }
 }
 
+/// A user's message holds a rule for the work and general talk about the
+/// team, each a whole sentence of its own paragraph. The extractor classes
+/// the rule `lasting` and the talk `status`. The next session's block holds
+/// the rule, and the talk is stored for explicit search, word for word.
+#[tokio::test]
+async fn general_talk_classed_status_stays_on_search_beside_a_delivered_rule() {
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let rule = "Run the linter before every commit.";
+    let talk = "We encourage everyone to share ideas at the weekly sync.";
+    let message = format!("{rule}\n\n{talk}");
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "user", message.as_str())],
+        |_, _| vec![classed(rule, "lasting"), classed(talk, "status")],
+    )
+    .await;
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            (stated(rule), "visible".to_string()),
+            (stated(talk), "labeled".to_string()),
+        ]
+    );
+    assert_eq!(live_statement_records(&handler, &project), [stated(rule)]);
+    let block =
+        project_memory_block(&serve(&handler, SECOND, "s2").await).expect("the rule is delivered");
+    assert!(block.contains(&stated(rule)), "{block}");
+    assert!(!block.contains("weekly sync"), "{block}");
+}
+
 /// Text the user passes on from someone else stays labeled when the
 /// extractor names another source as its speaker. This test's fake
 /// extractor does so for a sentence inside quotation marks and for a
