@@ -2641,14 +2641,31 @@ async fn words_the_user_passes_on_are_kept_for_search_and_replace_no_statement()
             Voice::Other => assert_eq!(relayed_row.3["speaker"], "other"),
             _ => assert_eq!(relayed_row.3.get("speaker"), None),
         }
+        // The relayed sentence is recorded as the observation that contests
+        // the statement, and the block shows it only on that statement's
+        // line, as a quoted excerpt.
+        let statement = memory_rows(&handler, &project)
+            .into_iter()
+            .find(|row| row.1 == stated(THURSDAY))
+            .unwrap();
+        assert_eq!(statement.3["contested_by"]["memory"], relayed_row.0);
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the approved statement is delivered");
-        assert!(block.contains(&stated(THURSDAY)), "{block}");
-        assert!(
-            !block
-                .lines()
-                .any(|line| line.contains(&format!(": {}", stated(TUESDAY)))),
+        let lines: Vec<&str> = block
+            .lines()
+            .filter(|line| line.contains("Thursday") || line.contains("Tuesday"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
             "the relayed sentence has no line of its own: {block}"
+        );
+        assert!(
+            lines[0].contains(&stated(THURSDAY))
+                && lines[0].contains("; contested ")
+                && lines[0].contains(&relayed_row.0)
+                && lines[0].contains("from Thursday to Tuesday"),
+            "the statement is shown as contested by the relayed sentence: {block}"
         );
 
         // The user's own correction replaces the statement.
@@ -2669,6 +2686,160 @@ async fn words_the_user_passes_on_are_kept_for_search_and_replace_no_statement()
         assert_eq!(
             live_statement_records(&handler, &project),
             [stated(TUESDAY)]
+        );
+    }
+}
+
+/// An extractor can propose one clause twice, with two paraphrases, and
+/// name the user for one and another source, or nobody, for the other. The
+/// quotation is then the user's in neither proposal: the two freeze as one
+/// labeled fact that keeps the clause as quoted, and no statement record is
+/// written, in either proposal order. Two proposals that both name the user
+/// are the control: the clause is widened to its sentence and approved once.
+#[tokio::test]
+async fn proposals_that_disagree_on_the_speaker_of_one_clause_write_one_labeled_fact() {
+    let sentence = "Quick correction before you go on, use tabs in every Makefile.";
+    let clause = "use tabs in every Makefile";
+    for (speakers, stored, visibility) in [
+        ([Voice::User, Voice::Other], clause, "labeled"),
+        ([Voice::Other, Voice::User], clause, "labeled"),
+        ([Voice::User, Voice::Absent], clause, "labeled"),
+        ([Voice::Absent, Voice::User], clause, "labeled"),
+        ([Voice::User, Voice::User], sentence, "visible"),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", sentence)],
+            |_, _| {
+                speakers
+                    .iter()
+                    .zip(["Makefiles use tabs.", "Tabs are the Makefile indentation."])
+                    .map(|(&speaker, content)| Extracted {
+                        content: Some(content),
+                        speaker,
+                        ..fact(clause)
+                    })
+                    .collect()
+            },
+        )
+        .await;
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!((status.completed, status.pending, status.failed), (1, 0, 0));
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(stored), visibility.to_string())],
+            "one fact with the quotation as stored"
+        );
+        let records = live_statement_records(&handler, &project);
+        if visibility == "visible" {
+            assert_eq!(records, [stated(sentence)]);
+        } else {
+            assert!(records.is_empty(), "{records:?}");
+            let rows = memory_rows(&handler, &project);
+            assert_eq!(rows.len(), 1);
+            assert_ne!(rows[0].3["speaker"], "user", "{:?}", rows[0].3);
+            assert_eq!(rows[0].3["quote"], clause);
+        }
+    }
+}
+
+/// A correction proposed twice, once under the user's name with the approved
+/// statement as its replacement target and once under another speaker, is
+/// the user's in neither proposal. Its source commits at once: one labeled
+/// correction is stored, the approved statement stays served and delivered
+/// with a contest that names the correction, and no statement record is
+/// written for it. With the user named in both proposals the correction
+/// replaces the statement.
+#[tokio::test]
+async fn a_correction_whose_copy_names_another_speaker_contests_the_statement_it_names() {
+    for (speakers, replaced) in [
+        ([Voice::User, Voice::Other], false),
+        ([Voice::Other, Voice::User], false),
+        ([Voice::User, Voice::Absent], false),
+        ([Voice::User, Voice::User], true),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY)],
+            |_, _| vec![fact(THURSDAY)],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", TUESDAY)],
+            |_, existing| {
+                speakers
+                    .iter()
+                    .zip([
+                        "The release cut is on Tuesday.",
+                        "Releases are cut on Tuesdays.",
+                    ])
+                    .enumerate()
+                    .map(|(index, (&speaker, content))| Extracted {
+                        content: Some(content),
+                        speaker,
+                        // The proposal that names the user carries the
+                        // replacement; with two of them, the first does.
+                        replaces: if matches!(speaker, Voice::User)
+                            && (index == 0 || !matches!(speakers[0], Voice::User))
+                        {
+                            ids_containing(existing, "Thursday")
+                        } else {
+                            Vec::new()
+                        },
+                        ..fact(TUESDAY)
+                    })
+                    .collect()
+            },
+        )
+        .await;
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!(
+            (status.completed, status.pending, status.failed),
+            (2, 0, 0),
+            "the source commits in the drain that extracted it"
+        );
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let records = live_statement_records(&handler, &project);
+        if replaced {
+            assert_eq!(rows, [(stated(TUESDAY), "visible".to_string())]);
+            assert_eq!(records, [stated(TUESDAY)]);
+            continue;
+        }
+        assert_eq!(
+            rows,
+            [
+                (stated(THURSDAY), "visible".to_string()),
+                (stated(TUESDAY), "labeled".to_string()),
+            ]
+        );
+        assert_eq!(records, [stated(THURSDAY)]);
+        let stored = memory_rows(&handler, &project);
+        let correction = stored.iter().find(|row| row.1 == stated(TUESDAY)).unwrap();
+        let statement = stored.iter().find(|row| row.1 == stated(THURSDAY)).unwrap();
+        assert_eq!(statement.3["contested_by"]["memory"], correction.0);
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the approved statement is delivered");
+        let line = block
+            .lines()
+            .find(|line| line.contains(&stated(THURSDAY)))
+            .expect("the approved statement is delivered");
+        assert!(
+            line.contains("; contested ") && line.contains(&correction.0),
+            "{block}"
         );
     }
 }

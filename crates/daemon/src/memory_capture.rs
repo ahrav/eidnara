@@ -122,7 +122,7 @@ pub struct CapturedMemory {
     /// and its rationale records none.
     #[serde(
         default,
-        deserialize_with = "lifetime_name",
+        deserialize_with = "wire_name",
         skip_serializing_if = "Option::is_none"
     )]
     pub lifetime: Option<Lifetime>,
@@ -134,21 +134,10 @@ pub struct CapturedMemory {
     /// explicit search.
     #[serde(
         default,
-        deserialize_with = "speaker_name",
+        deserialize_with = "wire_name",
         skip_serializing_if = "Option::is_none"
     )]
     pub speaker: Option<Speaker>,
-}
-
-/// `null` maps to `None`; a present speaker must be a string matching one
-/// of the two wire names, as [`lifetime_name`] reads a class.
-fn speaker_name<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Speaker>, D::Error> {
-    use serde::de::IntoDeserializer;
-    Option::<String>::deserialize(deserializer)?
-        .map(|name| Speaker::deserialize(name.as_str().into_deserializer()))
-        .transpose()
 }
 
 /// Whose words a quotation of a user message holds. A user's message
@@ -173,26 +162,76 @@ fn speaks_for_user(memory: &CapturedMemory) -> bool {
     memory.speaker == Some(Speaker::User)
 }
 
-/// The speaker proposals of one quotation freeze under: the user only when
-/// each of them names the user, since one reading of the quotation as
-/// another source's words withholds approval.
-fn joined_speaker(kept: Option<Speaker>, joined: Option<Speaker>) -> Option<Speaker> {
-    match (kept, joined) {
-        (Some(Speaker::User), Some(Speaker::User)) => Some(Speaker::User),
-        (None, None) => None,
-        _ => Some(Speaker::Other),
+/// Gives one speaker to the proposals of one message that quote a common
+/// stretch of it. An extractor can propose one sentence twice, or a
+/// sentence and a clause of it, and name the user for one and another
+/// source for the other. A quotation is the user's only when every proposal
+/// that quotes part of it names the user, so a proposal attributed to the
+/// user whose quotation shares text with one attributed to another source,
+/// or to nobody, takes the speaker [`Speaker::Other`]. The rule repeats
+/// until no proposal changes, so quotations that overlap in a chain end
+/// with one speaker.
+///
+/// It runs before sentences are joined and before any link is judged, so
+/// each link is judged for the speaker the plan freezes, and proposals that
+/// share a category and quotation carry one speaker when they freeze as
+/// one memory.
+///
+/// Each round changes at least one proposal and reads the message once per
+/// proposal, so the work is bounded by the square of
+/// [`MAX_CAPTURE_MEMORIES`] times the message's length.
+fn settle_speakers(text: &str, memories: &mut [CapturedMemory]) {
+    loop {
+        let relayed = relayed_text(text, memories);
+        let mut settled = true;
+        for memory in memories.iter_mut() {
+            if speaks_for_user(memory) && quotes_marked_text(text, &memory.quote, &relayed) {
+                memory.speaker = Some(Speaker::Other);
+                settled = false;
+            }
+        }
+        if settled {
+            return;
+        }
     }
 }
 
-/// `null` maps to `None`; a present lifetime must be a string matching one
-/// of the five wire names. The derived enum reader alone also reads the
-/// one-key map `{"lasting": null}` as a class.
-fn lifetime_name<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Lifetime>, D::Error> {
+/// For each byte of `text`, whether a proposal attributed to another
+/// source, or to nobody, quotes it, at any occurrence of its quotation.
+fn relayed_text(text: &str, memories: &[CapturedMemory]) -> Vec<bool> {
+    let mut relayed = vec![false; text.len()];
+    for memory in memories.iter().filter(|memory| !speaks_for_user(memory)) {
+        let quote = memory.quote.trim();
+        if !quote.is_empty() {
+            for (at, _) in text.match_indices(quote) {
+                relayed[at..at + quote.len()].fill(true);
+            }
+        }
+    }
+    relayed
+}
+
+/// Whether an occurrence of `quote` in `text` holds a byte `marked` names.
+fn quotes_marked_text(text: &str, quote: &str, marked: &[bool]) -> bool {
+    let quote = quote.trim();
+    !quote.is_empty()
+        && text
+            .match_indices(quote)
+            .any(|(at, _)| marked[at..at + quote.len()].contains(&true))
+}
+
+/// Reads a field whose value is one of an enum's wire names. `null` maps
+/// to `None`, and a present value must be a string matching one of the
+/// names. The derived enum reader alone also reads the one-key map
+/// `{"lasting": null}` as a value.
+fn wire_name<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
     use serde::de::IntoDeserializer;
     Option::<String>::deserialize(deserializer)?
-        .map(|name| Lifetime::deserialize(name.as_str().into_deserializer()))
+        .map(|name| T::deserialize(name.as_str().into_deserializer()))
         .transpose()
 }
 
@@ -305,12 +344,15 @@ struct ExistingCaptureMemory {
 }
 
 /// The batch parser's view: whole-document shape is typed once, and each
-/// decision stays untyped until its own source validates it.
+/// decision keeps its own JSON text until its own source validates it. The
+/// typed read of that text refuses a member written twice, such as two
+/// `speaker` values, as a schema defect of that source; a generic JSON
+/// value would keep the last one and hide the first.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CaptureDocument {
     version: u32,
-    decisions: Vec<Value>,
+    decisions: Vec<Box<serde_json::value::RawValue>>,
 }
 
 /// The batch parser matches a decision to its source by the untyped row's id
@@ -439,11 +481,21 @@ fn parse_capture_batch(
     if document.version != CAPTURE_SCHEMA_VERSION {
         return Err("capture output version is unsupported");
     }
-    let rows = &document.decisions;
+    // The untyped view of each decision routes it to its source and counts
+    // its memories; the decision's own text is typed later, per source.
+    let rows: Vec<(Value, &str)> = document
+        .decisions
+        .iter()
+        .map(|row| {
+            serde_json::from_str(row.get())
+                .map(|view| (view, row.get()))
+                .map_err(|_| "capture output does not match the JSON schema")
+        })
+        .collect::<Result<_, _>>()?;
     if rows.len() > messages.len()
         || rows
             .iter()
-            .map(|row| {
+            .map(|(row, _)| {
                 row.get("memories")
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len)
@@ -454,7 +506,7 @@ fn parse_capture_batch(
         return Err("capture output exceeds its decision bounds");
     }
     let mut ids = BTreeSet::new();
-    for row in rows {
+    for (row, _) in &rows {
         let id = row
             .get("message_id")
             .and_then(Value::as_str)
@@ -470,13 +522,13 @@ fn parse_capture_batch(
         .iter()
         .enumerate()
         .map(|(index, message)| {
-            let row = rows
+            let (_, row) = rows
                 .iter()
-                .find(|row| {
+                .find(|(row, _)| {
                     row.get("message_id").and_then(Value::as_str) == Some(message.id.as_str())
                 })
                 .ok_or("capture output omits a source message")?;
-            let mut decision = MessageDecision::deserialize(row)
+            let mut decision: MessageDecision = serde_json::from_str(row)
                 .map_err(|_| "capture output does not match the JSON schema")?;
             // The size bound holds before any link of the decision is read.
             if decision
@@ -500,6 +552,9 @@ fn parse_capture_batch(
                     return Err("capture output repeats a memory in one source");
                 }
             }
+            // Proposals that quote a common stretch get one speaker before
+            // anything reads it.
+            settle_speakers(&message.text, &mut decision.memories);
             // Sentences quoted one by one are joined before any link is
             // judged, so each link is judged for the statement that is stored.
             let runs = if message.role == CaptureRole::User && message.own_id {
@@ -761,7 +816,10 @@ fn unify_run_categories(memories: &mut [CapturedMemory], runs: &[Vec<usize>]) {
 /// is (see [`keeps_quotation`]); a replacement the parser released as a
 /// contest is such a proposal. So is a proposal the extractor attributed to
 /// another source or to nobody ([`speaks_for_user`]): widening makes a
-/// statement of the user, and such a quotation is none. Two proposals of
+/// statement of the user, and such a quotation is none. For the same
+/// reason a cut quotation stays as proposed when the sentence it would
+/// widen to holds text that another proposal of the message attributes to
+/// another source or to nobody ([`relayed_text`]). Two proposals of
 /// different categories that name one sentence keep their own quotations,
 /// so one sentence is stored once per category at most and each clause
 /// stays its own memory.
@@ -776,6 +834,7 @@ fn widened_statements<'t>(prose: &Prose<'t>, proposed: &[CapturedMemory]) -> Vec
             }
         })
         .collect();
+    let relayed = relayed_text(prose.text, proposed);
     (0..proposed.len())
         .map(|index| {
             let statement = widened[index]?;
@@ -783,7 +842,11 @@ fn widened_statements<'t>(prose: &Prose<'t>, proposed: &[CapturedMemory]) -> Vec
                 other.category != proposed[index].category
                     && other_widened.unwrap_or(other.quote.as_str()).trim() == statement
             });
-            (!shared).then_some(statement)
+            // The statement is a slice of the message, so its address gives
+            // its place.
+            let from = statement.as_ptr().addr() - prose.text.as_ptr().addr();
+            let relays = relayed[from..from + statement.len()].contains(&true);
+            (!shared && !relays).then_some(statement)
         })
         .collect()
 }
@@ -1065,11 +1128,7 @@ fn validate_capture_memories(
             }
             automatic |= previous.automatic;
         }
-        if automatic
-            && !(source.own_id
-                && speaks_for_user(memory)
-                && quotes_whole_statements(&prose, &memory.quote))
-        {
+        if automatic && !states_whole_statements(source.own_id, &prose, memory) {
             return Err("only a whole user statement may replace an automatic memory");
         }
         if let Some(primary) = memory
@@ -2262,8 +2321,9 @@ fn stores_the_quotation_alone(memory: &CapturedMemory) -> bool {
 /// Whether the memory's quotation is the user's statement: it spans whole
 /// statements of a user message the job holds whole, and the extractor
 /// attributed it to the user ([`speaks_for_user`]); `states_whole` is
-/// [`states_whole_message`] of that job. Parsing and publication both judge
-/// a replacement by this answer.
+/// [`states_whole_message`] of that job, or the same fact of the message a
+/// parse reads. Parsing, validation, and publication all judge a
+/// replacement by this answer.
 pub(super) fn states_whole_statements(
     states_whole: bool,
     prose: &Prose<'_>,
@@ -2956,7 +3016,13 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         .scan(0, |offset, line| {
             let at = *offset;
             *offset += line.len();
-            Some((at, line.trim_end_matches(['\n', '\r'])))
+            // One terminator is stripped, a line feed with the carriage
+            // return before it. Any other carriage return stays in the line,
+            // where it marks the line unreadable.
+            let body = line
+                .strip_suffix('\n')
+                .map_or(line, |body| body.strip_suffix('\r').unwrap_or(body));
+            Some((at, body))
         })
         .collect();
     // The last line that closes each tag name, found in one pass, so an
@@ -5126,6 +5192,25 @@ mod tests {
             (
                 "Can we always deploy on Fridays? Thanks.",
                 "always deploy on Fridays",
+                None,
+            ),
+            // The words widening adds may hold an ASCII quotation mark, a
+            // character of the sentence; whose words the sentence holds is
+            // the speaker's question (`widened_statements`). A typographic
+            // mark is outside the plain characters widening adds.
+            (
+                "He said \"use tabs everywhere\" yesterday.",
+                "use tabs everywhere",
+                Some("He said \"use tabs everywhere\" yesterday."),
+            ),
+            (
+                "Set the 'retries' key to 3 everywhere.",
+                "key to 3 everywhere",
+                Some("Set the 'retries' key to 3 everywhere."),
+            ),
+            (
+                "He said \u{201c}use tabs everywhere\u{201d} yesterday.",
+                "use tabs everywhere",
                 None,
             ),
             ("- Use pnpm.\n- Keep logs.", "Use pnpm.", None),
@@ -8914,6 +8999,30 @@ mod tests {
             Some(&"capture output does not match the JSON schema")
         );
         assert_eq!(parsed[1].as_ref().unwrap().memories.len(), 1);
+        // A decision that writes a member twice is a schema defect of its
+        // source, whichever value comes last, and its sibling is kept. The
+        // text is literal: a JSON value would hold one of the two.
+        for repeated in [
+            r#""speaker":"the reviewer","speaker":"user""#,
+            r#""speaker":"user","speaker":"other""#,
+            r#""speaker":"user","speaker":"user""#,
+            r#""quote":"Run the suite.","speaker":"user","quote":"Run the integration suite before every merge.""#,
+        ] {
+            let response = format!(
+                r#"{{"version":1,"decisions":[{{"message_id":"m1","memories":[{{"category":"PROJECT_RULES","content":"Run the suite.","quote":"Run the integration suite before every merge.",{repeated}}}]}},{{"message_id":"m2","memories":[{{"category":"PROJECT_RULES","content":"Run the suite.","quote":"Run the integration suite before every merge.","speaker":"user"}}]}}]}}"#
+            );
+            let parsed = parse_batch(&response, &messages, &[]).unwrap();
+            assert_eq!(
+                parsed[0].as_ref().err(),
+                Some(&"capture output does not match the JSON schema"),
+                "{repeated}"
+            );
+            assert_eq!(
+                parsed[1].as_ref().unwrap().memories[0].speaker,
+                Some(Speaker::User),
+                "{repeated}"
+            );
+        }
         // A frozen plan keeps the speaker, and leaves the key out for a
         // proposal that named none.
         let frozen = |speaker| {
@@ -9089,6 +9198,59 @@ mod tests {
                 "`it_` is the prefix of every test name.",
                 false,
             ),
+            // A line break other than a line feed hides where a line
+            // starts, so a colon line or a list item may stand behind it:
+            // its paragraph and every later one are left out, and the
+            // paragraphs before it stay.
+            (
+                "Notes follow\rHere is what the guide has:\n\nPrefix every test name with 'it_'.",
+                "Prefix every test name with 'it_'.",
+                false,
+            ),
+            (
+                "Notes follow\u{2028}- Prefix every test name with 'it_'.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                false,
+            ),
+            (
+                "Notes follow\u{b}as pasted.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                false,
+            ),
+            (
+                "Notes follow\u{c}as pasted.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                false,
+            ),
+            (
+                "Notes follow\u{85}as pasted.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                false,
+            ),
+            (
+                "Use pnpm here.\n\nNotes follow\u{2029}as pasted.",
+                "Use pnpm here.",
+                true,
+            ),
+            // A line that ends in a carriage return and a line feed is an
+            // ordinary line. A second carriage return before that pair, and
+            // one that ends the message with no line feed, are line breaks
+            // of their own.
+            (
+                "Use pnpm here.\r\n\r\nPrefix every test name with 'it_'.\r\n",
+                "Prefix every test name with 'it_'.",
+                true,
+            ),
+            (
+                "Pasted note.\r\r\n\r\nPrefix every test name with 'it_'.\r\n",
+                "Prefix every test name with 'it_'.",
+                false,
+            ),
+            (
+                "Pasted note.\r\n\r\nPrefix every test name with 'it_'.\r",
+                "Prefix every test name with 'it_'.",
+                false,
+            ),
         ] {
             if quotes_whole_statements(&Prose::of(text), quote) != whole {
                 wrong.push(format!("{quote:?} in {text:?}: expected {whole}"));
@@ -9176,22 +9338,34 @@ mod tests {
     /// statement when its structure passes and the extractor attributed it
     /// to the user. Each proposal is its quotation, its speaker, and the
     /// memory it names under `replaces`. `mem_branch` is an approved
-    /// statement the proposals may name.
+    /// statement and `mem_note` a labeled report the proposals may name.
     fn attributed_memories(
         text: &str,
         proposals: &[(&str, Option<&str>, Option<&str>)],
     ) -> Vec<CapturedMemory> {
-        let existing = [ExistingCaptureMemory {
-            id: "mem_branch".into(),
+        let stored = |id: &str, content: &str, automatic: bool| ExistingCaptureMemory {
+            id: id.into(),
             category: "PROJECT_RULES".into(),
-            content: "User stated: Cut release branches from main.".into(),
+            content: content.into(),
             can_replace: true,
             source_revision: 1,
             created_commit_seq: 1,
-            automatic: true,
+            automatic,
             contested: false,
             current_work: false,
-        }];
+        };
+        let existing = [
+            stored(
+                "mem_branch",
+                "User stated: Cut release branches from main.",
+                true,
+            ),
+            stored(
+                "mem_note",
+                "Assistant reported: Release branches are cut from main.",
+                false,
+            ),
+        ];
         let messages = [CaptureMessage {
             id: "m".into(),
             role: CaptureRole::User,
@@ -9321,8 +9495,11 @@ mod tests {
                 "{speaker:?} in {text:?}"
             );
         }
-        // A stored plan that names the replacement for a quotation with
-        // another speaker is refused as extraction refuses it.
+        // Validation, which extraction runs on the links it kept, refuses
+        // the replacement of an approved statement by a quotation with
+        // another speaker or none. Publication of a stored plan of that
+        // shape is covered by
+        // `a_stored_plan_with_a_target_shape_extraction_refuses_is_refused_whole`.
         let messages = [CaptureMessage {
             id: "m".into(),
             role: CaptureRole::User,
@@ -9454,33 +9631,188 @@ mod tests {
         );
     }
 
-    /// One quotation proposed twice freezes as one memory. It is the user's
-    /// only when each proposal names the user; a proposal that names another
-    /// speaker, or none beside one that names a speaker, withholds it.
+    /// Proposals of one message that quote a common stretch take one
+    /// speaker: the user only when each of them names the user. A copy, a
+    /// padded copy, a clause of the sentence, and a quotation that reaches
+    /// the sentence through another all follow a proposal that names another
+    /// source or none, and proposals that quote separate sentences keep
+    /// their own speakers.
     #[test]
-    fn memories_that_collapse_are_the_users_only_when_each_names_the_user() {
-        let spoken = |speaker: Option<Speaker>| CapturedMemory {
-            speaker,
-            ..memory("Run the integration suite before every merge.")
-        };
+    fn proposals_that_quote_a_common_stretch_take_one_speaker() {
+        let text = "The staging port is 4321. Cut release branches from the stable branch. Tag every release.";
+        let port = "The staging port is 4321.";
+        let branches = "Cut release branches from the stable branch.";
+        let tags = "Tag every release.";
         let (user, other) = (Some(Speaker::User), Some(Speaker::Other));
-        for (proposed, kept) in [
-            (vec![user, user], user),
-            (vec![user, user, user], user),
-            (vec![user, other], other),
-            (vec![other, user], other),
-            (vec![user, None], other),
-            (vec![None, user], other),
-            (vec![other, None], other),
-            (vec![user, user, other], other),
-            (vec![None, None], None),
+        let settled = |proposals: &[(&str, Option<Speaker>)]| -> Vec<Option<Speaker>> {
+            let mut memories: Vec<CapturedMemory> = proposals
+                .iter()
+                .map(|&(quote, speaker)| CapturedMemory {
+                    speaker,
+                    ..memory(quote)
+                })
+                .collect();
+            settle_speakers(text, &mut memories);
+            memories.into_iter().map(|memory| memory.speaker).collect()
+        };
+        for (proposals, speakers) in [
+            (vec![(port, user), (branches, user)], vec![user, user]),
+            (vec![(port, user), (branches, other)], vec![user, other]),
+            (vec![(port, user), (branches, None)], vec![user, None]),
+            (
+                vec![(branches, user), (branches, other)],
+                vec![other, other],
+            ),
+            (
+                vec![(branches, other), (branches, user)],
+                vec![other, other],
+            ),
+            (vec![(branches, user), (branches, None)], vec![other, None]),
+            (
+                vec![(branches, user), (branches, user), (branches, other)],
+                vec![other, other, other],
+            ),
+            // A copy with edge whitespace, a clause, and a longer quotation.
+            (
+                vec![
+                    (" Cut release branches from the stable branch. ", user),
+                    (branches, other),
+                ],
+                vec![other, other],
+            ),
+            (
+                vec![
+                    ("release branches from the stable", user),
+                    (branches, other),
+                ],
+                vec![other, other],
+            ),
+            (
+                vec![(branches, user), ("the stable branch", None)],
+                vec![other, None],
+            ),
+            // The first reaches the third through the second.
+            (
+                vec![
+                    (port, user),
+                    ("port is 4321. Cut release", user),
+                    ("Cut release branches", other),
+                    (tags, user),
+                ],
+                vec![other, other, other, user],
+            ),
+            // A quotation the message does not hold shares no stretch.
+            (
+                vec![(branches, user), ("Cut branches from main.", other)],
+                vec![user, other],
+            ),
         ] {
-            let collapsed = native::collapse_quotations(
-                USER_STATED,
-                proposed.iter().copied().map(spoken).collect(),
+            assert_eq!(settled(&proposals), speakers, "{proposals:?}");
+        }
+        // A sentence that occurs twice shares its stretch at either copy.
+        let mut twice = vec![
+            CapturedMemory {
+                speaker: user,
+                ..memory("Go now.")
+            },
+            CapturedMemory {
+                speaker: other,
+                ..memory("then said. Go now. I waited")
+            },
+        ];
+        settle_speakers(
+            "Go now. He paused and then said. Go now. I waited.",
+            &mut twice,
+        );
+        assert_eq!(twice[0].speaker, other);
+    }
+
+    /// The speakers of one message are settled before a link is judged and
+    /// before a quotation is widened, so a quotation one proposal attributes
+    /// to another source is the user's in no proposal: its copy that names
+    /// the user replaces no approved statement, and a clause of the user's
+    /// stays cut when its sentence holds the relayed words.
+    #[test]
+    fn a_disputed_quotation_replaces_nothing_and_is_not_widened() {
+        let correction = "Cut release branches from the stable branch.";
+        for twin in [Some("other"), None] {
+            let memories = attributed_memories(
+                correction,
+                &[
+                    (correction, Some("user"), Some("mem_branch")),
+                    (correction, twin, None),
+                ],
             );
-            assert_eq!(collapsed.len(), 1, "{proposed:?}");
-            assert_eq!(collapsed[0].speaker, kept, "{proposed:?}");
+            assert_eq!(memories.len(), 2, "{twin:?}");
+            assert_eq!(memories[0].speaker, Some(Speaker::Other), "{twin:?}");
+            assert_eq!(
+                (memories[0].replaces.as_deref(), &memories[0].contests),
+                (None, &vec!["mem_branch".to_owned()]),
+                "{twin:?}: the disputed copy contests the statement it named"
+            );
+            // The two freeze as one labeled memory that names no
+            // replacement, which publication accepts.
+            let collapsed = native::collapse_quotations(USER_STATED, memories);
+            assert_eq!(collapsed.len(), 1, "{twin:?}");
+            assert_eq!(collapsed[0].replaces, None, "{twin:?}");
+            assert!(!speaks_for_user(&collapsed[0]), "{twin:?}");
+        }
+        // Two proposals of one quotation that name two replacement targets
+        // stay two memories, since a memory supersedes one predecessor, and
+        // still carry one speaker. The copy that named the user contests
+        // the approved statement, and the labeled report is replaced, which
+        // any quotation of a user message may do.
+        for (first, second) in [(Some("user"), Some("other")), (Some("other"), Some("user"))] {
+            let memories = attributed_memories(
+                correction,
+                &[
+                    (correction, first, Some("mem_branch")),
+                    (correction, second, Some("mem_note")),
+                ],
+            );
+            assert_eq!(memories.len(), 2);
+            for memory in &memories {
+                assert_eq!(memory.speaker, Some(Speaker::Other), "{first:?}");
+            }
+            assert_eq!(
+                (memories[0].replaces.as_deref(), &memories[0].contests),
+                (None, &vec!["mem_branch".to_owned()]),
+                "{first:?}"
+            );
+            assert_eq!(
+                memories[1].replaces.as_deref(),
+                Some("mem_note"),
+                "{first:?}"
+            );
+        }
+        // A clause of the user's widens to its sentence, unless the
+        // sentence holds words another proposal attributes to another
+        // source.
+        let text = "Dana asked for a freeze on Friday, so keep the deploy flag off this week.";
+        let relayed = "a freeze on Friday";
+        let clause = "keep the deploy flag off this week";
+        let proposed = |speaker| {
+            [
+                CapturedMemory {
+                    speaker: Some(Speaker::User),
+                    ..memory(clause)
+                },
+                CapturedMemory {
+                    speaker,
+                    ..memory(relayed)
+                },
+            ]
+        };
+        assert_eq!(
+            widened_statements(&Prose::of(text), &proposed(Some(Speaker::User))),
+            [Some(text), Some(text)]
+        );
+        for speaker in [Some(Speaker::Other), None] {
+            assert_eq!(
+                widened_statements(&Prose::of(text), &proposed(speaker)),
+                [None, None],
+                "{speaker:?}"
+            );
         }
     }
 
@@ -10554,6 +10886,8 @@ mod tests {
     /// replacement, or a duplicate target beside a replacement, has a shape
     /// extraction refuses. Publication refuses it the same way: the commit
     /// writes nothing, and the approved statement it names stays as it was.
+    /// So does a stored plan whose correction carries another speaker or
+    /// none: its replacement of the approved statement meets a conflict.
     #[test]
     fn a_stored_plan_with_a_target_shape_extraction_refuses_is_refused_whole() {
         let dir = tempfile::tempdir().unwrap();
@@ -10624,6 +10958,35 @@ mod tests {
             );
             assert!(
                 matches!(refused, Err(kernel::KernelError::InvalidInput)),
+                "{key}: {:?}",
+                refused.map(|receipt| receipt.commit_seq)
+            );
+            assert_eq!(kernel.tip().unwrap(), tip, "{key} writes nothing");
+        }
+        // A stored plan whose correction the extractor attributed to
+        // another source, or to nobody, is no statement of the user: its
+        // replacement of the approved statement meets a conflict, so the
+        // commit writes nothing and the source is planned again.
+        for (key, speaker) in [
+            ("job-relayed", Some(Speaker::Other)),
+            ("job-unattributed", None),
+        ] {
+            let correction = "The staging cluster alias is harbor-west.".to_string();
+            let (source, mut output) = stated_job(key, std::slice::from_ref(&correction));
+            output.existing = serde_json::from_value(json!([target])).unwrap();
+            output.memories[0].replaces = Some(id.clone());
+            output.memories[0].speaker = speaker;
+            let refused = publish_now(
+                &kernel,
+                &project,
+                &source,
+                &output,
+                &serde_json::to_string(&output).unwrap(),
+                SettlementOutcome::Settled,
+                &mut Vec::new(),
+            );
+            assert!(
+                matches!(refused, Err(kernel::KernelError::Conflict)),
                 "{key}: {:?}",
                 refused.map(|receipt| receipt.commit_seq)
             );

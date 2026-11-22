@@ -1044,9 +1044,12 @@ a fact served on `auto_inject` with another text names the served fact of its ow
 holds the widened sentence, up to its attribution label, edge whitespace,
 and closing `.` or `!`, or drops that link and is
 stored as the user's own statement: the extractor matched the clause it
-quoted, and the whole sentence can say the opposite. A sentence with a reporting clause before a
-colon, such as `My teammate wrote: always rebase.`, is the user's sentence
-and is stored whole with that clause. Quotations of one user message that
+quoted, and the whole sentence can say the opposite. A sentence with a lead-in clause before a
+colon, such as `Quick correction: use tabs in every Makefile.`, is one sentence
+of the structure check and is stored whole with that clause when the extractor
+names the user as its speaker; the extractor names another source for a
+sentence such as `My teammate wrote: always rebase.`, whose words after the
+colon are the teammate's, and that sentence stays on explicit search. Quotations of one user message that
 follow one another in a paragraph are joined into one quotation before any
 link of the proposals is judged, when the later one is whole statements under
 the statement rule below, or is but for a colon earlier in its paragraph, and starts
@@ -1219,7 +1222,7 @@ line. An inline code span runs from a run of backticks through the next run
 of the same length in its paragraph; an odd number of backslashes directly
 before an opening run makes its first backtick literal text, and an opening
 run that no later run of its paragraph closes is unclosed and spans to the
-paragraph's end. A paragraph that holds a carriage return inside a line, a vertical
+paragraph's end. A paragraph that holds a carriage return other than the one that ends a line together with its line feed, a vertical
 tab, a form feed, or a Unicode next-line, line, or paragraph separator is
 left out with every paragraph after it, since its lines cannot be told apart
 and a fence, a tag, or a colon line may hide in it. The quotation starts the
@@ -1285,17 +1288,27 @@ of a document, an issue, or a web page, the output or the error message of a
 tool, or what an assistant said earlier, whether those words stand between
 quotation marks, after a lead-in, on pasted lines, or directly in the
 sentence. A value outside these two is a schema defect of its source's
-decision, and a `speaker` given as `null` reads as absent. Only the value
+decision, and a `speaker` given as `null` reads as absent. A decision that
+writes one of its members twice, such as two `speaker` values, is a schema
+defect of its source's decision too, whichever value stands last. Only the value
 `user` attributes a quotation to the user: a quotation with `speaker` `other`
 or with none is stored as a labeled memory for explicit search under the
 rules of every labeled memory, has no statement record, replaces no fact
 served on `auto_inject` (each such target becomes a contest candidate, as
 for a quotation that fails the structure check), is left as proposed by the
 widening rule, and takes no place in a run of joined sentences, so a copy of
-its stretch joins none either. When proposals of one source that share a
-category and quotation freeze as one fact, that fact's speaker is `user`
-only when each of them names `user`, `other` when any of them names a
-speaker and they do not all name `user`, and absent when none names one. A
+its stretch joins none either. The proposals of one source that quote a
+common stretch of its message carry one speaker, settled before sentences
+are joined and before any link is judged: a proposal that names `user` and
+whose quotation, at any of its occurrences in the message, shares text with
+the quotation of a proposal that names `other` or no speaker is read as
+`other`, and the rule repeats until no proposal changes, so quotations that
+overlap in a chain end with one speaker. A quotation is therefore the
+user's only when every proposal that quotes part of it names the user, the
+proposals of one source that share a category and quotation freeze as one
+fact under one speaker, and the widening rule leaves a cut quotation as
+proposed when the sentence it would widen to holds text that a proposal of
+the source attributes to another speaker or to none. A
 captured fact's rationale holds the value under `speaker` when its proposal
 carried one. A `speaker` on a proposal of an assistant source is stored in
 the same way and changes nothing. The attribution is a model's reading and
