@@ -43,7 +43,7 @@ fn capture_config() -> DaemonConfig {
 }
 
 #[derive(Default)]
-struct Extracted {
+pub(super) struct Extracted {
     quote: String,
     replaces: Vec<String>,
     duplicate_of: Option<String>,
@@ -83,7 +83,7 @@ fn relayed(quote: &str) -> Extracted {
 }
 
 /// A proposal the extractor classed by how long its statement holds.
-fn classed(quote: &str, lifetime: &'static str) -> Extracted {
+pub(super) fn classed(quote: &str, lifetime: &'static str) -> Extracted {
     Extracted {
         lifetime: Some(lifetime),
         ..fact(quote)
@@ -127,7 +127,7 @@ async fn enqueue(
         .collect()
 }
 
-async fn capture(
+pub(super) async fn capture(
     handler: &Handler,
     channel: u16,
     session: &str,
@@ -220,7 +220,7 @@ async fn drain(
     }
 }
 
-fn body(outcome: PreparedOutcome) -> Value {
+pub(super) fn body(outcome: PreparedOutcome) -> Value {
     match outcome {
         PreparedOutcome::Error { code, message } => panic!("{code}: {message}"),
         other => tool_body(other),
@@ -235,7 +235,7 @@ fn ids_containing(existing: &[Value], needle: &str) -> Vec<String> {
         .collect()
 }
 
-async fn serve(handler: &Handler, channel: u16, session: &str) -> Value {
+pub(super) async fn serve(handler: &Handler, channel: u16, session: &str) -> Value {
     let messages = vec![
         ck("00000001", 1, "Please tidy the README headings."),
         wire_with_role(
@@ -250,7 +250,7 @@ async fn serve(handler: &Handler, channel: u16, session: &str) -> Value {
     call_transform_request_on_channel(handler, channel, request).await
 }
 
-fn project_memory_block(response: &Value) -> Option<String> {
+pub(super) fn project_memory_block(response: &Value) -> Option<String> {
     let served = serde_json::to_string(response).unwrap();
     let start = served.find("<project-memory>")?;
     let end = served[start..].find("</project-memory>")? + start;

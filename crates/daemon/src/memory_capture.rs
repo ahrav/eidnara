@@ -1289,7 +1289,7 @@ const FUNCTION_WORDS: [&str; 24] = [
 ];
 
 /// Stored text after the attribution label capture gives a quotation.
-fn unattributed(content: &str) -> &str {
+pub(crate) fn unattributed(content: &str) -> &str {
     [USER_STATED, ASSISTANT_REPORTED]
         .iter()
         .find_map(|attribution| content.strip_prefix(attribution)?.strip_prefix(": "))
@@ -3870,6 +3870,18 @@ pub(crate) struct Contest {
 
 pub(crate) fn capture_rationale(decision: &kernel::DecisionRow) -> CaptureRationale {
     serde_json::from_str(&decision.payload.rationale).unwrap_or_default()
+}
+
+/// Whether an observation contests the statement `decision` records.
+pub(crate) fn is_contested(decision: &kernel::DecisionRow) -> bool {
+    decision.payload.rationale.contains("contested_by")
+        && capture_rationale(decision).contested_by.is_some()
+}
+
+/// Whether `decision` records work the user left in progress.
+pub(crate) fn states_current_work(decision: &kernel::DecisionRow) -> bool {
+    decision.payload.rationale.contains("current_work")
+        && capture_rationale(decision).lifetime == Some(Lifetime::CurrentWork)
 }
 
 /// Retires the live memory a replaced statement recorded as restated, when

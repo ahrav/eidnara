@@ -1115,13 +1115,23 @@ pub fn accept_selected_proposal(
         return Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch));
     }
     let scope_id = format!("project:{}", run.project_digest);
+    // The acceptance names the revision of the template the proposal was written under, which the selected row records. A settled proposal replays before any revision is compared, so a row that can no longer be read falls back to the fact-set template.
+    let question = match store.read_selected_review_input(&reference, selected_at) {
+        Ok(row) => match row.payload {
+            ReviewPayload::Proposal(proposal) => {
+                QuestionTemplate::of_staged(proposal.policy_dependencies.question_template)
+            }
+            _ => QuestionTemplate::ExtractedFacts,
+        },
+        Err(_) => QuestionTemplate::ExtractedFacts,
+    };
     let acceptance = kernel::ProposalAcceptance {
         intent: caller_intent(&run, causal_identity, operation_key, target),
         run,
         proposal: reference,
         selected_at,
         target: target.clone(),
-        question_template_revision: QuestionTemplate::ExtractedFacts.revision(),
+        question_template_revision: question.revision(),
         scope_id: Some(scope_id),
     };
     store

@@ -36,6 +36,10 @@ const MIN_TERM_BYTES: usize = 4;
 /// Longest subject token used as a matcher: the excerpt after its lead must hold the whole term.
 const MAX_TERM_BYTES: usize = MAX_EXCERPT_BYTES - EXCERPT_LEAD_BYTES;
 const CURSOR_PREFIX: &str = "cur-";
+/// The representation of a decision that records its provenance.
+const RATIONALE_REPRESENTATION: &str = "rationale";
+/// Distinct subject terms a candidate's text must hold to be related to a memory under review, or every term of a subject with fewer.
+const MIN_SHARED_TERMS: usize = 3;
 /// Discovery walks the classes the production selector walks, so a related memory is always a form of a decision.
 const CLASSES: &[OccurrenceClass] = MEMORY_CLASSES;
 
@@ -77,6 +81,10 @@ pub struct RelatedMemoryDiscovery {
     /// Issued cursors, oldest first; a cursor token not in this table was never issued by this run or has been forgotten.
     cursors: VecDeque<(String, Cursor)>,
     issued: usize,
+    /// Set for a memory's review: a page then delivers one form per decision, passes the subject's own decision and every rationale, and relates a candidate only on [`MIN_SHARED_TERMS`] shared terms. A fact-set review keeps every form and relates on one shared term.
+    by_decision: bool,
+    /// Decisions a page passes under `by_decision`: the subject's own, and every decision this run already delivered a form of.
+    passed_decisions: std::collections::BTreeSet<String>,
 }
 
 impl RelatedMemoryDiscovery {
@@ -95,7 +103,18 @@ impl RelatedMemoryDiscovery {
             dropped_terms,
             cursors: VecDeque::new(),
             issued: 0,
+            by_decision: false,
+            passed_decisions: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Discovery for the review of the memory `decision` states, whose text is `subject_text`. A decision has up to three descriptors: its summary, its rationale, and its promoted form. The rationale records where the statement came from, and the other two state it, so a page delivers one stating form per decision and passes every form of `decision` itself. A candidate is related when it holds [`MIN_SHARED_TERMS`] of the subject's terms, so the label every recorded statement opens with relates nothing on its own.
+    pub fn for_memory(subject_text: &str, decision: &str) -> Self {
+        // The attribution label is capture's, the same on every statement, so the subject's terms come from the statement after it.
+        let mut discovery = Self::new(crate::memory_capture::unattributed(subject_text));
+        discovery.by_decision = true;
+        discovery.passed_decisions.insert(decision.to_string());
+        discovery
     }
 
     /// The subject tokens that act as matchers.
@@ -179,7 +198,15 @@ impl RelatedMemoryDiscovery {
                     }
                     return Err(refusal(RefusalCode::Store));
                 }
+                // A decision's rationale is its writer's record of where the statement came from; its summary forms carry the statement. A decision already passed has nothing further to deliver.
+                let decision =
+                    originating_decision(CLASSES[cursor.class_index], &row.detail.identity);
+                let restates = self.by_decision
+                    && (row.detail.representation == RATIONALE_REPRESENTATION
+                        || decision
+                            .is_some_and(|decision| self.passed_decisions.contains(decision)));
                 let step = match expectation(row, &revisions) {
+                    _ if restates => Step::Unrelated { probed_bytes: 0 },
                     None => Step::Skipped { probed_bytes: 0 },
                     Some(expectation) => {
                         let room = MAX_PAGE_PROBE_BYTES.saturating_sub(probed);
@@ -197,6 +224,9 @@ impl RelatedMemoryDiscovery {
                     Step::Hit { hit, probed_bytes } => {
                         probed += probed_bytes;
                         hits.push(hit);
+                        if let (true, Some(decision)) = (self.by_decision, decision) {
+                            self.passed_decisions.insert(decision.to_string());
+                        }
                     }
                     Step::Unrelated { probed_bytes } => probed += probed_bytes,
                     Step::Skipped { probed_bytes } => {
@@ -317,12 +347,46 @@ impl RelatedMemoryDiscovery {
     /// The excerpt window around the first subject term in `text`, or `None` when no term occurs.
     fn excerpt_span(&self, text: &str) -> Option<Range<usize>> {
         let folded = text.to_ascii_lowercase();
-        let position = self
+        let positions: Vec<usize> = self
             .terms
             .iter()
             .filter_map(|term| folded.find(term.as_str()))
-            .min()?;
-        Some(excerpt_window(text, position))
+            .collect();
+        let required = if self.by_decision {
+            MIN_SHARED_TERMS.min(self.terms.len())
+        } else {
+            1
+        };
+        if positions.len() < required {
+            return None;
+        }
+        Some(excerpt_window(text, positions.into_iter().min()?))
+    }
+}
+
+#[cfg(test)]
+mod memory_review_tests {
+    use super::RelatedMemoryDiscovery;
+
+    /// A memory's review relates another statement on three shared terms of the statement itself. The attribution label and one common word relate nothing, where a fact set's review relates on any one shared term.
+    #[test]
+    fn a_memorys_review_relates_on_three_shared_terms_of_the_statement() {
+        let subject = "User stated: Cut release branches from main every Thursday.";
+        let unrelated = "User stated: Run the linter before every commit.";
+        let related = "User stated: Release branches are cut from main on Tuesday.";
+        let memory = RelatedMemoryDiscovery::for_memory(subject, "decision-1");
+        assert!(
+            !memory
+                .terms()
+                .iter()
+                .any(|term| term == "user" || term == "stated"),
+            "{:?}",
+            memory.terms()
+        );
+        assert!(memory.excerpt_span(unrelated).is_none());
+        assert!(memory.excerpt_span(related).is_some());
+        let facts = RelatedMemoryDiscovery::new(subject);
+        assert!(facts.excerpt_span(unrelated).is_some());
     }
 }
 

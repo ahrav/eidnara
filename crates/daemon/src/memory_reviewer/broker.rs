@@ -35,6 +35,8 @@ const ALIAS_PREFIX: &str = "ref-";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionTemplate {
     ExtractedFacts,
+    /// The review of one stored memory: whether later sessions should still receive it.
+    MemoryStatement,
 }
 
 impl QuestionTemplate {
@@ -43,12 +45,40 @@ impl QuestionTemplate {
             Self::ExtractedFacts => {
                 "Review the extracted facts against the referenced memories. Report support, contradiction, supersession, and shared origins with citations; abstain when the evidence does not warrant a conclusion."
             }
+            Self::MemoryStatement => {
+                "ref-1 is a memory of this project: one statement recorded in an earlier session, which later sessions receive as something the user said or as an observation. Decide whether later sessions should still receive it. The host lists each linked reference with who wrote it and when, and those labels are facts: a message the host says the user wrote is the user's, whatever its wording suggests. Propose `retain` when the memory matches what its author wrote and no later message changes it; a memory that repeats its source word for word is supported by that source. Propose `retire` when a later message from the user withdraws the statement, replaces it with another value, or reports its work finished, and cite that message under `contradictions`. Propose `revise` only when a later message from the user changes part of the statement while the rest still holds; give the statement as it now stands in `new_text`, in the user's words, and cite the later message under `contradictions`. Propose `no_change` when the evidence neither supports nor changes the memory. Keep the user's wording: a memory is left as it is when its only flaw is brevity, a pronoun, or missing context. A later message that repeats or builds on the statement supports it. Abstain when the evidence cannot be read."
+            }
         }
     }
 
     pub const fn id(self) -> &'static str {
         match self {
             Self::ExtractedFacts => "extracted_facts",
+            Self::MemoryStatement => "memory_statement",
+        }
+    }
+
+    /// The proposal actions a subject under this template admits, as the step instructions list them.
+    pub const fn actions(self) -> &'static str {
+        match self {
+            Self::ExtractedFacts => "create|revise|retain|retire|no_change",
+            Self::MemoryStatement => "revise|retain|retire|no_change",
+        }
+    }
+
+    /// The template as a staged proposal records it.
+    pub const fn staged(self) -> kernel::ReviewQuestionTemplate {
+        match self {
+            Self::ExtractedFacts => kernel::ReviewQuestionTemplate::ExtractedFacts,
+            Self::MemoryStatement => kernel::ReviewQuestionTemplate::MemoryStatement,
+        }
+    }
+
+    /// The template a staged proposal records.
+    pub const fn of_staged(template: kernel::ReviewQuestionTemplate) -> Self {
+        match template {
+            kernel::ReviewQuestionTemplate::ExtractedFacts => Self::ExtractedFacts,
+            kernel::ReviewQuestionTemplate::MemoryStatement => Self::MemoryStatement,
         }
     }
 
@@ -59,8 +89,9 @@ impl QuestionTemplate {
 
     /// Only the fixed identifiers resolve; any other input, including one carrying question text, is refused with [`RefusalCode::UnsupportedQuestion`].
     pub fn parse(id: &str) -> Result<Self, Refusal> {
-        (id == Self::ExtractedFacts.id())
-            .then_some(Self::ExtractedFacts)
+        [Self::ExtractedFacts, Self::MemoryStatement]
+            .into_iter()
+            .find(|template| template.id() == id)
             .ok_or_else(|| refuse(None, RefusalCode::UnsupportedQuestion))
     }
 }

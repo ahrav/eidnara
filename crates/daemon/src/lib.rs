@@ -2903,6 +2903,8 @@ pub struct HandlerCore {
     memory_reviewer_host: Mutex<Option<Arc<memory_reviewer::worker::MemoryReviewerHost>>>,
     /// The data home the owner's MemoryReviewer records live under, known once the SQLite store opens; `review.accept` reads the acceptance record there.
     memory_reviewer_home: Arc<std::sync::OnceLock<std::path::PathBuf>>,
+    /// The MemoryReviewer worker, once the store-open task has spawned it, so a caller that holds the core can run its passes to completion.
+    memory_reviewer_worker: Arc<std::sync::OnceLock<Arc<memory_reviewer::worker::Worker>>>,
     /// The owner's acceptance record, held open between `review.accept` requests while its path still names it unchanged.
     memory_reviewer_acceptance_record: Arc<Mutex<Option<projection_lifecycle::HeldRecord>>>,
     source_health: Mutex<Option<host_runtime::model_execution::source_health::SourceHealthCell>>,
@@ -3613,6 +3615,15 @@ impl Handler {
     }
 }
 
+impl HandlerCore {
+    /// Runs MemoryReviewer passes until one settles nothing and returns the runs settled; `None` before the store-open task has spawned the worker. A harness calls it between sessions so every review the last session caused has ended before the next begins.
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    pub async fn drain_memory_reviewer(&self) -> Option<usize> {
+        let worker = self.memory_reviewer_worker.get().cloned()?;
+        Some(worker.drain(&self.cancel).await)
+    }
+}
+
 impl Deref for Handler {
     type Target = HandlerCore;
 
@@ -3840,6 +3851,7 @@ impl Handler {
             verifier_counters: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
             memory_reviewer_home: Arc::default(),
+            memory_reviewer_worker: Arc::default(),
             memory_reviewer_acceptance_record: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
@@ -4010,6 +4022,9 @@ impl HandlerCore {
         let contradiction_candidates = Arc::clone(&self.contradiction_candidates);
         let candidates_enabled = self.candidates_enabled();
         let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
+        let memory_reviewer_worker = Arc::clone(&self.memory_reviewer_worker);
+        let review_producers = Arc::clone(&self.producer_factory);
+        let review_search_lifecycle = Arc::clone(&self.search_lifecycle);
         let memory_reviewer_host = self
             .memory_reviewer_host
             .lock()
@@ -4119,27 +4134,39 @@ impl HandlerCore {
                                     .get("AWS_REGION")
                                     .map(|region| region.as_str()),
                             );
-                            task_admission.spawn(memory_reviewer::worker::run(
-                                Arc::new(memory_reviewer::worker::Worker {
-                                    host,
-                                    home,
-                                    store,
-                                    kernel: Arc::new(move || {
-                                        memory_reviewer::worker::ready_kernel(&kernel_source)
-                                    }),
-                                    projects: Arc::new(move || {
-                                        memory_reviewer::worker::module_projects(
-                                            &project_store,
-                                            &project_bindings,
-                                        )
-                                    }),
-                                    status: Arc::clone(&memory_reviewer_status),
-                                    permits: memory_reviewer_permits,
-                                    providers,
-                                    rejection: Default::default(),
+                            // The search lifecycle owner publishes claim descriptors where it runs; the worker publishes them for a switched project on a host without one.
+                            let claims_published: Arc<dyn Fn() -> bool + Send + Sync> =
+                                Arc::new(move || {
+                                    review_search_lifecycle
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .is_some()
+                                });
+                            let worker = Arc::new(memory_reviewer::worker::Worker {
+                                host,
+                                home,
+                                store,
+                                kernel: Arc::new(move || {
+                                    memory_reviewer::worker::ready_kernel(&kernel_source)
                                 }),
-                                cancel.clone(),
-                            ));
+                                projects: Arc::new(move || {
+                                    memory_reviewer::worker::module_projects(
+                                        &project_store,
+                                        &project_bindings,
+                                    )
+                                }),
+                                status: Arc::clone(&memory_reviewer_status),
+                                permits: memory_reviewer_permits,
+                                providers,
+                                rejection: Default::default(),
+                                switched: memory_reviewer::worker::SwitchedReview::through(
+                                    review_producers,
+                                    Some(claims_published),
+                                ),
+                            });
+                            let _ = memory_reviewer_worker.set(Arc::clone(&worker));
+                            task_admission
+                                .spawn(memory_reviewer::worker::run(worker, cancel.clone()));
                         }
                         if kernel.state() == kernel_routes::KernelState::Ready
                             && kernel.background_sampler_enabled()
@@ -4391,6 +4418,7 @@ impl Handler {
             verifier_counters: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
             memory_reviewer_home: Arc::default(),
+            memory_reviewer_worker: Arc::default(),
             memory_reviewer_acceptance_record: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
@@ -19300,6 +19328,8 @@ mod tests {
     mod fold_authority_handler_tests;
     #[path = "memory_auto_delivery_tests.rs"]
     mod memory_auto_delivery_tests;
+    #[path = "memory_reviewer_switch_tests.rs"]
+    mod memory_reviewer_switch_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
     #[path = "transform/recorded_goldens.rs"]
@@ -27019,6 +27049,7 @@ mod tests {
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
             verifier_enabled: false,
+            memory_reviewer: crate::config::MemoryReviewerConfig::default(),
             auto_search: crate::config::AutoSearchConfig::default(),
             terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,

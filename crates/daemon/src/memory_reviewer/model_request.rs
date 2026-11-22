@@ -179,6 +179,8 @@ enum Material {
         /// The session token as the `x-amz-security-token` value each request carries and signs.
         session_token: Option<HeaderValue>,
     },
+    /// The host holds the credential; the sender names it and carries none.
+    Host,
 }
 
 impl Credential {
@@ -822,11 +824,16 @@ pub struct Sender {
     provider: Provider,
     credential: Credential,
     timing: Timing,
+    /// The host route this sender's requests take in place of a connection of its own.
+    host: Option<Arc<super::host_execution::HostExecution>>,
 }
 
 impl Sender {
     /// The provider identity a disclosure marker records: the host this sender actually dials, the API surface, and the API version it speaks.
     pub fn provider_identity(&self) -> String {
+        if let Some(host) = &self.host {
+            return host.identity().to_string();
+        }
         self.provider.identity()
     }
 
@@ -850,7 +857,27 @@ impl Sender {
             provider,
             credential,
             timing: Timing::PRODUCTION,
+            host: None,
         }
+    }
+
+    /// A sender whose requests the host's model execution carries. The body keeps the Anthropic Messages shape, so its digest and size bounds are the ones every marker records; the credential names the host's own source and holds no secret.
+    pub fn through_host(host: Arc<super::host_execution::HostExecution>) -> Self {
+        static SHAPE: std::sync::LazyLock<Provider> = std::sync::LazyLock::new(Provider::anthropic);
+        Self {
+            provider: SHAPE.clone(),
+            credential: Credential {
+                id: super::host_execution::HOST_CREDENTIAL_ID.to_string(),
+                material: Arc::new(Material::Host),
+            },
+            timing: Timing::PRODUCTION,
+            host: Some(host),
+        }
+    }
+
+    /// The host route of a sender built by [`Self::through_host`].
+    pub fn host_route(&self) -> Option<&Arc<super::host_execution::HostExecution>> {
+        self.host.as_ref()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -859,11 +886,16 @@ impl Sender {
             provider,
             credential,
             timing,
+            host: None,
         }
     }
 
     /// Opens a fresh connection and completes the TCP, TLS, and HTTP/1 handshakes by `deadline`, clamped to [`Timing::connect`]. No request byte is written.
     pub async fn connect(&self, deadline: Instant) -> Result<Connected, SendError> {
+        // A host-routed sender owns no endpoint; its requests go through `HostExecution::complete`.
+        if self.host.is_some() {
+            return Err(SendError::Endpoint);
+        }
         let endpoint = self.provider.endpoint();
         let handshakes = async {
             let tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port))

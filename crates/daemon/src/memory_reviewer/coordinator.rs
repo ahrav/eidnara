@@ -14,8 +14,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     EvidenceReference, KernelStore, ManifestReference, MemoryReviewerHoldBinding,
-    PolicyDependencies, ProposalTarget, ReviewBinding, ReviewProposal, ReviewQuestionTemplate,
-    ReviewStagedReference, SourceDescriptorDetail, SourceSpan,
+    PolicyDependencies, ProposalTarget, ReviewBinding, ReviewProposal, ReviewStagedReference,
+    SourceDescriptorDetail, SourceSpan,
 };
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_jobs::{MemoryReviewerJob, MemoryReviewerJobInput, ReviewTarget};
@@ -236,7 +236,12 @@ impl Coordinator {
             RunBinding {
                 hold: prepared.hold_binding.clone(),
                 hold_id: prepared.hold_id,
-                destination: kernel::ArtifactDestination::Remote,
+                // A host-routed run goes to the model the user configured, which reads what a local reader is served short of `Secret`; a run on the reviewer's own connection keeps the remote rule.
+                destination: if self.sender.host_route().is_some() {
+                    kernel::ArtifactDestination::ConfiguredModel
+                } else {
+                    kernel::ArtifactDestination::Remote
+                },
             },
             context.question,
         )
@@ -623,9 +628,17 @@ impl Run<'_> {
         let alias = broker.aliases.issue(subject.clone());
         match broker.read(&self.coordinator.store, alias.as_str(), None, now) {
             Ok(read) => {
-                self.discovery = RelatedMemoryDiscovery::new(
-                    std::str::from_utf8(read.buffer.bytes()).unwrap_or(""),
-                );
+                let text = std::str::from_utf8(read.buffer.bytes()).unwrap_or("");
+                self.discovery = match subject {
+                    // A memory under the memory template is related to other decisions; a fact set is related to every stored form.
+                    ReferenceExpectation::CanonicalSource {
+                        originating_decision_id,
+                        ..
+                    } if self.context.question == QuestionTemplate::MemoryStatement => {
+                        RelatedMemoryDiscovery::for_memory(text, originating_decision_id)
+                    }
+                    _ => RelatedMemoryDiscovery::new(text),
+                };
                 self.push_labeled(broker, read.buffer);
             }
             Err(Refusal {
@@ -640,19 +653,44 @@ impl Run<'_> {
         }
         // The opening disclosure is the host's, not a batch the model issued.
         broker.accounting.end_batch();
-        let issued: Vec<String> = starting
+        // A memory's linked references are what its review rests on: the host says who wrote each and when, and reads each once, so the first request carries the statement, its source, and what was written later. A fact-set subject names its references and the model reads the ones it wants.
+        let reviews_memory = matches!(subject, ReferenceExpectation::CanonicalSource { .. })
+            && self.context.question == QuestionTemplate::MemoryStatement;
+        let labels = if reviews_memory {
+            reference_labels(&self.coordinator.store, subject, &starting)
+        } else {
+            Vec::new()
+        };
+        let issued: Vec<Alias> = starting
             .into_iter()
-            .map(|expectation| broker.aliases.issue(expectation).as_str().to_string())
+            .map(|expectation| broker.aliases.issue(expectation))
             .collect();
         let notice = if issued.is_empty() {
             "\nno linked references\n".to_string()
+        } else if labels.len() == issued.len() {
+            let mut notice = "\nlinked references:\n".to_string();
+            for (alias, label) in issued.iter().zip(&labels) {
+                notice.push_str(&format!("{}: {label}\n", alias.as_str()));
+            }
+            notice
         } else {
-            format!("\nlinked references: {}\n", issued.join(", "))
+            let names: Vec<&str> = issued.iter().map(Alias::as_str).collect();
+            format!("\nlinked references: {}\n", names.join(", "))
         };
         let notice = broker
             .render_host_text(&notice)
             .map_err(|refusal| InvestigationError::Kernel(refusal.code))?;
         self.transcript.push(notice);
+        if reviews_memory {
+            for alias in &issued {
+                match broker.read(&self.coordinator.store, alias.as_str(), None, now) {
+                    Ok(read) => self.push_labeled(broker, read.buffer),
+                    Err(refusal) => refused(broker, &mut self.transcript, &refusal),
+                }
+            }
+            // These reads are the host's opening disclosure, as the subject's is.
+            broker.accounting.end_batch();
+        }
         Ok(Ok(()))
     }
 
@@ -706,10 +744,16 @@ impl Run<'_> {
             if guard.accounting.charge_render(None, resend).is_err() {
                 return Ok(Attempt::Exhausted);
             }
+            // The instructions list the actions the subject's template admits, so a memory's run is offered no action its step would refuse.
+            let question = self.context.question;
             let system = guard
                 .render_host_text(&format!(
-                    "{}\n\n{STEP_INSTRUCTIONS}",
-                    self.context.question.text()
+                    "{}\n\n{}",
+                    question.text(),
+                    STEP_INSTRUCTIONS.replace(
+                        QuestionTemplate::ExtractedFacts.actions(),
+                        question.actions()
+                    )
                 ))
                 .map_err(|refusal| InvestigationError::Kernel(refusal.code))?;
             match prepare_body(
@@ -720,6 +764,11 @@ impl Run<'_> {
                 self.transcript.iter().map(RenderedBuffer::resend).collect(),
             ) {
                 Ok(prepared) => prepared,
+                // The assembled prompt formed a secret or a marker where two buffers meet: nothing is sent, and the run settles on that refusal as it does when the disclosure finds one.
+                Err(DisclosureRefusal::RenderCheck) => {
+                    guard.accounting.refund_render(resend);
+                    return Ok(Attempt::Refused(RefusalCode::RenderCheck));
+                }
                 // A body over the wire bound spends the budget; a profile the encoder refuses is a configuration fault that leaves the receipt open for a corrected deployment.
                 Err(DisclosureRefusal::Send { error, .. }) => {
                     guard.accounting.refund_render(resend);
@@ -751,75 +800,100 @@ impl Run<'_> {
             .checked_add(Duration::from_millis(MEMORY_REVIEWER_ATTEMPT_MAX_MS as u64))
             .map_or(cutoff, |attempt| attempt.min(cutoff));
         let request_bytes = prepared.body().len();
-        let outcome: Arc<Mutex<Option<Result<Disclosed, DisclosureRefusal>>>> =
-            Arc::new(Mutex::new(None));
-        let launch = {
-            let store = Arc::clone(&coordinator.store);
-            let ledger = Arc::clone(&coordinator.ledger);
-            let broker = Arc::clone(&self.broker);
-            let sender = Arc::clone(&coordinator.sender);
-            let approval = coordinator.approval.clone();
-            let now_ms = Arc::clone(&coordinator.now_ms);
-            let claim_id = self.context.claim.claim_id.clone();
-            let project = self.context.job.project.clone();
-            let outcome = Arc::clone(&outcome);
-            move |sink: EventSink, token: CancellationToken| {
-                Box::pin(async move {
-                    let broker = broker.lock().await;
-                    let disclosure = Disclosure {
-                        store: &store,
-                        ledger: &ledger,
-                        project: &project,
-                        broker: &broker,
-                        sender: &sender,
-                        approval: approval.as_ref(),
-                        claim_id: &claim_id,
-                        now_ms: &move || now_ms(),
-                    };
-                    let disclosed = disclosure.disclose(&prepared, &token, deadline).await;
-                    let terminal = match &disclosed {
-                        Ok(disclosed) => {
-                            // A provider stop at the token limit is a cut answer, not a completed one; the run record says so.
-                            let finish_reason =
-                                if disclosed.text.stop_reason == Some(StopReason::MaxTokens) {
-                                    FinishReason::Length
-                                } else {
-                                    FinishReason::Completed
-                                };
-                            sink.emit(BackendEvent::AssistantText {
-                                text: disclosed.text.text.clone(),
-                                finish_reason: Some(finish_reason),
-                            });
-                            BackendTerminal::Completed { finish_reason }
-                        }
-                        Err(refusal) => BackendTerminal::Failed(BackendError {
-                            class: ErrorClass::Permanent,
-                            message: format!("memory_reviewer disclosure: {refusal}"),
-                            retry_after_secs: None,
-                            provider_code: None,
-                        }),
-                    };
-                    *outcome.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(disclosed);
-                    terminal
-                }) as BackendFuture
-            }
+        let (settled, disclosed) = if coordinator.sender.host_route().is_some() {
+            // The host's model execution supervises its own run: the backend permit, the cutoff, cancellation, and physical completion are that run's, so the request is disclosed here and takes no second run of the supervisor.
+            let broker = self.broker.lock().await;
+            let disclosure = Disclosure {
+                store: &coordinator.store,
+                ledger: &coordinator.ledger,
+                project: &self.context.job.project,
+                broker: &broker,
+                sender: &coordinator.sender,
+                approval: coordinator.approval.as_ref(),
+                claim_id: &self.context.claim.claim_id,
+                now_ms: &|| (coordinator.now_ms)(),
+            };
+            let disclosed = disclosure.disclose(&prepared, cancel, deadline).await;
+            let settled = match &disclosed {
+                _ if cancel.is_cancelled() => InternalOutcome::Cancelled,
+                Ok(_) => InternalOutcome::Completed,
+                Err(_) if Instant::now() >= cutoff => InternalOutcome::Cutoff,
+                Err(_) => InternalOutcome::Failed,
+            };
+            (settled, Some(disclosed))
+        } else {
+            let outcome: Arc<Mutex<Option<Result<Disclosed, DisclosureRefusal>>>> =
+                Arc::new(Mutex::new(None));
+            let launch = {
+                let store = Arc::clone(&coordinator.store);
+                let ledger = Arc::clone(&coordinator.ledger);
+                let broker = Arc::clone(&self.broker);
+                let sender = Arc::clone(&coordinator.sender);
+                let approval = coordinator.approval.clone();
+                let now_ms = Arc::clone(&coordinator.now_ms);
+                let claim_id = self.context.claim.claim_id.clone();
+                let project = self.context.job.project.clone();
+                let outcome = Arc::clone(&outcome);
+                move |sink: EventSink, token: CancellationToken| {
+                    Box::pin(async move {
+                        let broker = broker.lock().await;
+                        let disclosure = Disclosure {
+                            store: &store,
+                            ledger: &ledger,
+                            project: &project,
+                            broker: &broker,
+                            sender: &sender,
+                            approval: approval.as_ref(),
+                            claim_id: &claim_id,
+                            now_ms: &move || now_ms(),
+                        };
+                        let disclosed = disclosure.disclose(&prepared, &token, deadline).await;
+                        let terminal = match &disclosed {
+                            Ok(disclosed) => {
+                                // A provider stop at the token limit is a cut answer, not a completed one; the run record says so.
+                                let finish_reason =
+                                    if disclosed.text.stop_reason == Some(StopReason::MaxTokens) {
+                                        FinishReason::Length
+                                    } else {
+                                        FinishReason::Completed
+                                    };
+                                sink.emit(BackendEvent::AssistantText {
+                                    text: disclosed.text.text.clone(),
+                                    finish_reason: Some(finish_reason),
+                                });
+                                BackendTerminal::Completed { finish_reason }
+                            }
+                            Err(refusal) => BackendTerminal::Failed(BackendError {
+                                class: ErrorClass::Permanent,
+                                message: format!("memory_reviewer disclosure: {refusal}"),
+                                retry_after_secs: None,
+                                provider_code: None,
+                            }),
+                        };
+                        *outcome.lock().unwrap_or_else(|poison| poison.into_inner()) =
+                            Some(disclosed);
+                        terminal
+                    }) as BackendFuture
+                }
+            };
+            let run = coordinator
+                .supervisor
+                .launch_internal(key, request_bytes, cutoff, Box::new(launch))
+                .map_err(|error| InvestigationError::Supervisor(error.code.to_string()))?;
+            let settled = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    let _ = run.cancel().await;
+                    return Err(InvestigationError::Cancelled);
+                }
+                settled = run.settled() => settled,
+            };
+            let disclosed = outcome
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .take();
+            (settled, disclosed)
         };
-        let run = coordinator
-            .supervisor
-            .launch_internal(key, request_bytes, cutoff, Box::new(launch))
-            .map_err(|error| InvestigationError::Supervisor(error.code.to_string()))?;
-        let settled = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                let _ = run.cancel().await;
-                return Err(InvestigationError::Cancelled);
-            }
-            settled = run.settled() => settled,
-        };
-        let disclosed = outcome
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take();
         // Buffers count as sent once a request byte left the host; a refusal before the handoff returns the resend charge, so only sends that happened are charged.
         let left_host = matches!(
             &disclosed,
@@ -957,6 +1031,100 @@ impl Run<'_> {
             Err(refusal) => refused(broker, &mut self.transcript, &refusal),
         }
     }
+}
+
+/// What the host knows about each of a memory's linked references, in order: who wrote it, when, and whether the memory cites it or it was written after the memory's source. The writer is the source class the Kernel admitted the descriptor under, and the time is the message's own, which a message descriptor carries as its revision. A reference whose facts cannot be read is labeled as a source of unrecorded origin.
+fn reference_labels(
+    store: &KernelStore,
+    subject: &ReferenceExpectation,
+    starting: &[ReferenceExpectation],
+) -> Vec<String> {
+    let ReferenceExpectation::CanonicalSource {
+        originating_decision_id,
+        ..
+    } = subject
+    else {
+        return Vec::new();
+    };
+    let budget = EvalBudget::new(
+        Some(std::time::Instant::now() + Duration::from_secs(5)),
+        Arc::default(),
+    );
+    let cited: BTreeSet<String> = store
+        .tip_within_budget(&budget)
+        .and_then(|tip| {
+            store.linked_decision_evidence_within_budget(
+                originating_decision_id,
+                tip,
+                super::selection::MAX_LINKED_EVIDENCE,
+                &budget,
+            )
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|linked| linked.evidence_id)
+        .collect();
+    let facts: Vec<(Option<&'static str>, Option<i64>, bool)> = starting
+        .iter()
+        .map(|expectation| match expectation {
+            ReferenceExpectation::NativeSource {
+                object_id,
+                class,
+                source_revision,
+                evidence_id,
+                ..
+            } => {
+                let writer = store
+                    .preview(
+                        std::time::Instant::now() + Duration::from_secs(5),
+                        |preview| preview.subject_admission(object_id),
+                    )
+                    .ok()
+                    .and_then(|(_, admission)| admission)
+                    .map(|(prior, _)| match prior.source_class {
+                        kernel::SourceClass::ExplicitUser => "the user",
+                        kernel::SourceClass::TrustedToolResult => "a tool",
+                        kernel::SourceClass::UntrustedRepoText => "a repository file",
+                        _ => "the assistant",
+                    });
+                // A message's revision is its own time in milliseconds; other classes revise by other counters.
+                let written = (*class == OccurrenceClass::Messages).then_some(*source_revision);
+                (writer, written, cited.contains(evidence_id))
+            }
+            _ => (None, None, false),
+        })
+        .collect();
+    let newest_cited = facts
+        .iter()
+        .filter(|(_, _, cited)| *cited)
+        .filter_map(|(_, written, _)| *written)
+        .max();
+    facts
+        .into_iter()
+        .map(|(writer, written, cited)| {
+            let mut label = match writer {
+                Some(writer) => format!("a message {writer} wrote"),
+                None => "a source of unrecorded origin".to_string(),
+            };
+            if let Some(time) = written.and_then(chrono::DateTime::from_timestamp_millis) {
+                label.push_str(&format!(
+                    " at {}",
+                    time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ));
+            }
+            label.push_str(match (cited, written, newest_cited) {
+                (true, _, _) => "; the memory cites it as its source",
+                (false, Some(written), Some(source)) if written > source => {
+                    "; written after the memory's source"
+                }
+                (false, Some(written), Some(source)) if written < source => {
+                    "; written before the memory's source"
+                }
+                _ => "",
+            });
+            label
+        })
+        .collect()
 }
 
 /// Records a refused operation in the transcript. A capacity bound hit inside a read (bytes, buffers, or the execution hold's backing) truncates the evidence set the same way a refused admission does, so the disclosure is marked partial.
@@ -1315,7 +1483,7 @@ fn bind_proposal(
             digest: format!("{:x}", manifest.finalize()),
         },
         policy_dependencies: PolicyDependencies {
-            question_template: ReviewQuestionTemplate::ExtractedFacts,
+            question_template: context.question.staged(),
             disclosed_inputs: vec![],
             uncited_disclosed_inputs: vec![],
             ancestry: vec![],

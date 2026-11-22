@@ -26,11 +26,17 @@ use super::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
 use super::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, Rejection,
 };
-use super::disclosure::ModelProfile;
+use super::disclosure::{DisclosureApproval, ModelProfile};
+use super::host_execution::{HOST_CREDENTIAL_ID, HostExecution};
 use super::lifecycle::{ActivationState, MemoryReviewerStatus};
 use super::model_request::{Provider, Providers, Sender};
 use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
+use super::review_cycle::{self, Applied, ApplyScope, SelectionScope};
+use super::settlement::Settled;
 use super::settlement::TaskClaim;
+use crate::HistorySummarizerProducerFactory;
+use crate::claim_sources::ClaimProgress;
+use crate::config::ReviewApply;
 
 /// Idle interval between passes when no job was run.
 pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
@@ -72,6 +78,46 @@ pub struct ProjectRoute {
     pub authority_generation: u64,
     /// Newest binding first.
     pub roots: Vec<RootScope>,
+    /// The review switch of the project's newest bound root, when its user tier set one.
+    pub review: Option<ReviewSwitch>,
+}
+
+/// One project's `memory_reviewer` settings as its newest route froze them at bind, with the route facts a host-routed request connects under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewSwitch {
+    /// The `provider/model` every request of the project's reviews names.
+    pub model_ref: String,
+    pub apply: ReviewApply,
+    pub harness: String,
+    pub credential_fingerprints: BTreeMap<String, String>,
+}
+
+/// What the worker holds for projects under the review switch: the way to the host's model execution, whether another owner publishes claim descriptors, the claim consumer's position when this worker publishes them, and the switched projects seen bound in this process.
+#[derive(Default)]
+pub struct SwitchedReview {
+    /// The factory host-routed requests connect through. Without one, a switched project is listed and left unreviewed.
+    pub producers: Option<Arc<dyn HistorySummarizerProducerFactory>>,
+    /// Whether the search lifecycle owner runs the claim consumer; this worker runs it otherwise.
+    pub claims_published: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    claims: Mutex<ClaimProgress>,
+    /// A switched project stays under review after its last route closes, for the life of the process: the user's consent is the switch, and a review started after a session ends needs no open session.
+    known: Mutex<BTreeMap<String, ProjectRoute>>,
+    /// One pass runs at a time, whether the loop or a caller of [`Worker::drain`] started it.
+    serial: tokio::sync::Mutex<()>,
+}
+
+impl SwitchedReview {
+    /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer.
+    pub fn through(
+        producers: Arc<dyn HistorySummarizerProducerFactory>,
+        claims_published: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Self {
+        Self {
+            producers: Some(producers),
+            claims_published,
+            ..Self::default()
+        }
+    }
 }
 
 /// One bound root and the Kernel scope derived from it.
@@ -95,6 +141,7 @@ pub struct Worker {
     pub permits: Arc<InvestigationPermits>,
     pub providers: Providers,
     pub rejection: RejectionLatch,
+    pub switched: SwitchedReview,
 }
 
 /// The rejection that latched the gate closed for the rest of the process, once one has. Only the worker's own pass sets it; a new worker, as after a restart, starts unlatched.
@@ -123,6 +170,23 @@ pub(crate) fn module_projects(
     let mut projects: BTreeMap<String, ProjectRoute> = BTreeMap::new();
     for (_, binding) in roots {
         let root = binding.project_root.to_string_lossy().to_string();
+        let review = binding
+            .config
+            .memory_reviewer_model()
+            .map(|model| ReviewSwitch {
+                model_ref: model.to_string(),
+                apply: binding.config.memory_reviewer.apply,
+                harness: binding.harness.clone(),
+                credential_fingerprints: binding.credential_fingerprints.clone(),
+            });
+        // The switch is the user's consent to review this root's memories, so the root takes the authority every review row is keyed and fenced by.
+        if review.is_some()
+            && let Err(error) = review_cycle::grant_authority(store, &root)
+        {
+            eprintln!(
+                "daemon: memory_reviewer could not take memories authority for a switched root: {error}"
+            );
+        }
         if let Ok(MemoriesAuthority::Module(authority)) = memories_authority_for_route(store, &root)
         {
             projects
@@ -131,6 +195,7 @@ pub(crate) fn module_projects(
                     project: authority.project,
                     authority_generation: authority.generation,
                     roots: Vec::new(),
+                    review,
                 })
                 .roots
                 .push(RootScope {
@@ -251,8 +316,270 @@ impl Worker {
         }
     }
 
-    /// One pass: nothing runs unless the gate is open; then every Ready job of every MODULE project is claimed and investigated. Returns how many runs settled. Store and filesystem work runs on the blocking pool; only the investigation itself is awaited on the runtime. A latched rejection closes the gate before the record is read, and every pass stamps it again.
+    /// One pass over every project the worker runs for: first the projects the owner's activation record admits, then the projects under the review switch. Returns how many runs settled. Passes of one worker run one at a time.
     pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
+        let _serial = self.switched.serial.lock().await;
+        // The owner's record speaks for the projects outside the switch. When every bound project is switched, the record has nothing to open and the gate reads as the switched pass leaves it.
+        let routes = (self.projects)();
+        let recorded = if routes.is_empty() || routes.iter().any(|route| !self.is_switched(route)) {
+            self.recorded_pass(cancel).await
+        } else {
+            0
+        };
+        recorded + self.switched_pass(cancel).await
+    }
+
+    /// Runs passes until one settles nothing, so every job the switch selects and every review it leads to has ended when this returns. Returns the runs settled.
+    pub async fn drain(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
+        let mut settled = 0;
+        loop {
+            let pass = self.pass(cancel).await;
+            settled += pass;
+            if pass == 0 || cancel.is_cancelled() {
+                return settled;
+            }
+        }
+    }
+
+    /// Whether a route's project is reviewed under the switch: its newest root set one and the worker can reach the host's model execution.
+    fn is_switched(&self, route: &ProjectRoute) -> bool {
+        route.review.is_some() && self.switched.producers.is_some()
+    }
+
+    /// The switched projects: those bound now, and those seen bound earlier in this process at the facts their last binding froze.
+    fn switched_routes(&self) -> Vec<ProjectRoute> {
+        let mut known = self
+            .switched
+            .known
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for route in (self.projects)() {
+            if self.is_switched(&route) {
+                known.insert(route.project.clone(), route);
+            } else {
+                // A root rebound with the switch off leaves review at once.
+                known.remove(&route.project);
+            }
+        }
+        known.values().cloned().collect()
+    }
+
+    /// The pass over switched projects: claim descriptors are brought up to the Kernel's tip, each project's most suspicious unreviewed memories are enqueued, its Ready jobs run through the host's model execution, and each published proposal is treated as the project's apply mode says.
+    async fn switched_pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
+        let Some(producers) = self.switched.producers.clone() else {
+            return 0;
+        };
+        let routes = self.switched_routes();
+        if routes.is_empty() {
+            return 0;
+        }
+        let Some(kernel) = (self.kernel)() else {
+            return 0;
+        };
+        // The gate the History Summarizer and the status block read is open while a switched project is under review.
+        self.status.set_activation(ActivationState::Open);
+        let prepared = {
+            let worker = Arc::clone(self);
+            let kernel = Arc::clone(&kernel);
+            tokio::task::spawn_blocking(move || {
+                if !worker
+                    .switched
+                    .claims_published
+                    .as_ref()
+                    .is_some_and(|published| published())
+                {
+                    let mut claims = worker
+                        .switched
+                        .claims
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms());
+                }
+                let budget = kernel::applicability::EvalBudget::new(
+                    Some(std::time::Instant::now() + Duration::from_secs(5)),
+                    Arc::default(),
+                );
+                Some((
+                    kernel.database_incarnation_id_within_budget(&budget).ok()?,
+                    worker.store.memory_reviewer_store_incarnation().ok()?,
+                ))
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        let Some((kernel_incarnation, memstore_incarnation)) = prepared else {
+            return 0;
+        };
+        let mut settled = 0;
+        for route in routes {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let (Some(switch), Some(root)) = (route.review.clone(), route.roots.first().cloned())
+            else {
+                continue;
+            };
+            let Ok(host) = HostExecution::new(
+                Arc::clone(&producers),
+                root.project_root.clone(),
+                switch.harness.clone(),
+                switch.credential_fingerprints.clone(),
+                switch.model_ref.clone(),
+            ) else {
+                eprintln!(
+                    "daemon: memory_reviewer model reference for a switched project names no host route; its reviews wait for a corrected memory_reviewer.model"
+                );
+                continue;
+            };
+            let sender = Arc::new(Sender::through_host(Arc::new(host)));
+            let coordinator = Coordinator {
+                store: Arc::clone(&kernel),
+                ledger: Arc::clone(&self.store),
+                supervisor: Arc::clone(&self.host.supervisor),
+                approval: Some(DisclosureApproval {
+                    provider: sender.provider_identity(),
+                    model: switch.model_ref.clone(),
+                    credential_id: HOST_CREDENTIAL_ID.to_string(),
+                    kernel_incarnation: kernel_incarnation.clone(),
+                    memstore_incarnation: memstore_incarnation.clone(),
+                }),
+                sender,
+                profile: ModelProfile {
+                    model: switch.model_ref.clone(),
+                    max_tokens: MAX_TOKENS,
+                    temperature: None,
+                },
+                credential_id: HOST_CREDENTIAL_ID.to_string(),
+                permits: Arc::clone(&self.permits),
+                now_ms: Arc::new(crate::now_ms),
+                inspection_limit: MAX_ISSUED_INSPECTIONS,
+            };
+            let route = Arc::new(route);
+            let ready = {
+                let store = Arc::clone(&self.store);
+                let kernel = Arc::clone(&kernel);
+                let route = Arc::clone(&route);
+                let root = root.clone();
+                tokio::task::spawn_blocking(move || {
+                    let now = crate::now_ms();
+                    let list = |store: &MemoryStore| {
+                        store
+                            .ready_memory_reviewer_jobs(
+                                &route.project,
+                                MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT,
+                                now,
+                            )
+                            .map_err(|error| error.to_string())
+                    };
+                    let pending = list(&store)?;
+                    let scope = kernel::ProjectScope::new(&root.project_digest)
+                        .map_err(|error| error.to_string())?;
+                    let selected = review_cycle::select_and_enqueue(
+                        &kernel,
+                        &store,
+                        &SelectionScope {
+                            project: &scope,
+                            project_digest: &root.project_digest,
+                            ledger_project: &route.project,
+                        },
+                        review_cycle::room(pending.len(), JOBS_PER_PASS),
+                        now,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    if selected.total() == 0 {
+                        return Ok(pending);
+                    }
+                    eprintln!(
+                        "daemon: memory_reviewer selected {} of {} memories for review: {:?}",
+                        selected.total(),
+                        selected.examined,
+                        review_cycle::describe(&selected)
+                    );
+                    list(&store)
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()))
+            };
+            let mut ready = match ready {
+                Ok(ready) => ready,
+                Err(error) => {
+                    eprintln!(
+                        "daemon: memory_reviewer selection for a switched project failed: {error}"
+                    );
+                    continue;
+                }
+            };
+            // A selection numbers its jobs most suspicious first; the jobs of one selection share a queue deadline, so its order decides which run first.
+            ready.sort_by_key(|job| (job.queue_deadline_ms, job.producer.ordinal));
+            let mut runs = 0;
+            for job in ready {
+                if cancel.is_cancelled() || runs == JOBS_PER_PASS {
+                    break;
+                }
+                let job = Arc::new(job);
+                let outcome = self
+                    .run_job(&coordinator, &kernel, &route, Arc::clone(&job), cancel)
+                    .await;
+                if !matches!(outcome, Ok(None)) {
+                    runs += 1;
+                }
+                match outcome {
+                    Ok(Some(outcome)) => {
+                        settled += 1;
+                        if matches!(outcome, Settled::Published(_)) {
+                            let applied = {
+                                let kernel = Arc::clone(&kernel);
+                                let store = Arc::clone(&self.store);
+                                let route = Arc::clone(&route);
+                                let root = root.clone();
+                                let (kernel_incarnation, memstore_incarnation) =
+                                    (kernel_incarnation.clone(), memstore_incarnation.clone());
+                                let mode = switch.apply;
+                                tokio::task::spawn_blocking(move || {
+                                    review_cycle::apply_proposal(
+                                        &kernel,
+                                        &store,
+                                        &ApplyScope {
+                                            ledger_project: &route.project,
+                                            project_digest: &root.project_digest,
+                                            kernel_incarnation: &kernel_incarnation,
+                                            memstore_incarnation: &memstore_incarnation,
+                                        },
+                                        &job.causal_identity,
+                                        mode,
+                                        crate::now_ms(),
+                                    )
+                                })
+                                .await
+                                .unwrap_or_else(|error| Applied::Refused(error.to_string()))
+                            };
+                            match &applied {
+                                Applied::Left => {}
+                                Applied::Refused(reason) => eprintln!(
+                                    "daemon: memory_reviewer left a published proposal unapplied: {reason}"
+                                ),
+                                applied => eprintln!(
+                                    "daemon: memory_reviewer applied a proposal: {}",
+                                    applied.kind()
+                                ),
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(InvestigationError::Capacity) => break,
+                    Err(InvestigationError::Cancelled) => return settled,
+                    Err(error) => {
+                        eprintln!("daemon: memory_reviewer run ended without settlement: {error}");
+                    }
+                }
+            }
+        }
+        settled
+    }
+
+    /// The pass over projects the owner's activation record admits: nothing runs unless the gate is open; then every Ready job of every MODULE project outside the review switch is claimed and investigated. Returns how many runs settled. Store and filesystem work runs on the blocking pool; only the investigation itself is awaited on the runtime. A latched rejection closes the gate before the record is read, and every pass stamps it again.
+    async fn recorded_pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         if self.rejection.get().is_some() {
             self.stamp_latched();
             return 0;
@@ -298,6 +625,10 @@ impl Worker {
             if cancel.is_cancelled() {
                 break;
             }
+            // A switched project runs in the switched pass, through the host's model execution.
+            if self.is_switched(&route) {
+                continue;
+            }
             let ready = {
                 let store = Arc::clone(&self.store);
                 let project = route.project.clone();
@@ -341,12 +672,12 @@ impl Worker {
                 let outcome = self
                     .run_job(&coordinator, &kernel, &route, Arc::new(job), cancel)
                     .await;
-                if !matches!(outcome, Ok(false)) {
+                if !matches!(outcome, Ok(None)) {
                     runs += 1;
                 }
                 match outcome {
-                    Ok(true) => settled += 1,
-                    Ok(false) => {}
+                    Ok(Some(_)) => settled += 1,
+                    Ok(None) => {}
                     Err(InvestigationError::Capacity) => break,
                     Err(InvestigationError::Unavailable) => {
                         self.status
@@ -367,7 +698,7 @@ impl Worker {
         settled
     }
 
-    /// Claims one Ready job under the authority's lease, begins or takes over its receipt, and investigates it. `Ok(false)` means another worker holds it, this worker's slot still holds another job's claim, it already settled, or no bound root holds its staged subject. A run that ends without settling leaves its receipt in progress; the next pass takes the receipt over under a fresh claim at the next generation, so a lease that lapsed under an abandoned run never runs again on its stale fence.
+    /// Claims one Ready job under the authority's lease, begins or takes over its receipt, and investigates it, returning how the run settled. `Ok(None)` means another worker holds it, this worker's slot still holds another job's claim, it already settled, or no bound root holds its staged subject. A run that ends without settling leaves its receipt in progress; the next pass takes the receipt over under a fresh claim at the next generation, so a lease that lapsed under an abandoned run never runs again on its stale fence.
     async fn run_job(
         self: &Arc<Self>,
         coordinator: &Coordinator,
@@ -375,9 +706,9 @@ impl Worker {
         route: &Arc<ProjectRoute>,
         job: Arc<MemoryReviewerJob>,
         cancel: &CancellationToken,
-    ) -> Result<bool, InvestigationError> {
+    ) -> Result<Option<Settled>, InvestigationError> {
         let MemoryReviewerJobState::Ready(input) = &job.state else {
-            return Ok(false);
+            return Ok(None);
         };
         let kernel_incarnation = coordinator
             .approval
@@ -396,9 +727,9 @@ impl Worker {
             .map_err(|error| InvestigationError::Store(error.to_string()))??
         };
         let Some(mut prepared) = prepared else {
-            return Ok(false);
+            return Ok(None);
         };
-        coordinator
+        let settled = coordinator
             .investigate(
                 JobContext {
                     job: &job,
@@ -410,13 +741,15 @@ impl Worker {
                         slot: 0,
                     },
                     binding: &prepared.binding,
-                    question: QuestionTemplate::ExtractedFacts,
+                    // The job names the template it was reserved under; a name this build does not hold is read as the fact-set template.
+                    question: QuestionTemplate::parse(&job.question_template)
+                        .unwrap_or(QuestionTemplate::ExtractedFacts),
                     project_root: prepared.project_text.as_mut(),
                 },
                 cancel,
             )
             .await?;
-        Ok(true)
+        Ok(Some(settled))
     }
 
     /// The synchronous prefix of a run: the root the job is read under, the lease claim, the receipt, and the project inspection. `Ok(None)` is a job this pass leaves alone.

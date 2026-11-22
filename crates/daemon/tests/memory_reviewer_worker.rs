@@ -190,6 +190,7 @@ impl Rig {
         self.worker_with_projects(
             host,
             vec![ProjectRoute {
+                review: None,
                 project: PROJECT.to_string(),
                 authority_generation: self.generation,
                 roots,
@@ -213,6 +214,7 @@ impl Rig {
             permits: Arc::new(InvestigationPermits::default()),
             providers: self.providers(),
             rejection: Default::default(),
+            switched: Default::default(),
         })
     }
 
