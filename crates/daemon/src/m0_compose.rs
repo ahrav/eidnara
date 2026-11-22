@@ -16,8 +16,8 @@ use crate::decay_render::{
     PRESSURE_WINDOW, TokenCount, counting, fold_plan, m0_block, render_owned_rows,
 };
 use crate::memory_render::{
-    CURRENT_WORK_SECTION, M0Inputs, is_positive_memory_category, push_category_open,
-    render_m0_counted, render_memory_block, render_memory_line,
+    CURRENT_WORK_SECTION, M0Inputs, PROJECT_MEMORY_NOTE, is_positive_memory_category,
+    push_category_open, render_delivered_memory_block, render_m0_counted, render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
 
@@ -82,7 +82,9 @@ pub(crate) fn trim_memories_to_budget(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> (Vec<CanonicalMemory>, u64) {
     let budget = budget_tokens.max(1.0);
-    let wrapper = estimate_tokens("<project-memory>\n</project-memory>");
+    let wrapper = estimate_tokens(&format!(
+        "<project-memory>\n{PROJECT_MEMORY_NOTE}\n</project-memory>"
+    ));
     if wrapper as f64 > budget {
         return (Vec::new(), 0);
     }
@@ -278,7 +280,7 @@ pub fn compose_m0(
         },
         tokens,
     );
-    let project_memory = render_memory_block(selected_memories, "project-memory");
+    let project_memory = render_delivered_memory_block(selected_memories);
     if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(&project_memory);
@@ -318,7 +320,9 @@ mod trim_memories_tests {
         let budget = budget_tokens.max(1.0);
         let mut selected = Vec::new();
         let mut categories = std::collections::HashSet::<&str>::new();
-        let mut used = estimate_tokens("<project-memory>\n</project-memory>") as f64;
+        let mut used = estimate_tokens(&format!(
+            "<project-memory>\n{PROJECT_MEMORY_NOTE}\n</project-memory>"
+        )) as f64;
         for memory in memories
             .iter()
             .filter(|memory| is_positive_memory_category(&memory.category))
@@ -352,7 +356,9 @@ mod trim_memories_tests {
             3,
             "the positive rows are admitted under a generous budget"
         );
-        let wrapper = bytes("<project-memory>\n</project-memory>") as f64;
+        let wrapper = bytes(&format!(
+            "<project-memory>\n{PROJECT_MEMORY_NOTE}\n</project-memory>"
+        )) as f64;
         for budget in [
             f64::NAN,
             -3.0,
@@ -385,11 +391,13 @@ mod trim_memories_tests {
     /// The tokens of the `CURRENT_WORK` element `rows` render, through the
     /// line break that follows it, by `estimate`.
     fn section_tokens(rows: &[CanonicalMemory], estimate: impl Fn(&str) -> usize) -> usize {
-        let block = render_memory_block(rows, "project-memory");
+        let block = render_delivered_memory_block(rows);
         block
             .find(&format!("<{CURRENT_WORK_SECTION}"))
             .map_or(0, |start| {
-                estimate(&block[start..block.len() - "</project-memory>".len()])
+                let close = format!("</{CURRENT_WORK_SECTION}>\n");
+                let end = block.find(&close).expect("the element closes") + close.len();
+                estimate(&block[start..end])
             })
     }
 
@@ -424,7 +432,7 @@ mod trim_memories_tests {
                 "budget {budget}"
             );
             assert!(
-                bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget,
+                bytes(&render_delivered_memory_block(&kept)) as f64 <= budget,
                 "budget {budget}"
             );
         }
@@ -477,12 +485,12 @@ mod trim_memories_tests {
             "the section holds fewer rows than its quarter admits: {}",
             section.len()
         );
-        assert!(bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget);
+        assert!(bytes(&render_delivered_memory_block(&kept)) as f64 <= budget);
         // Fewer lasting rows, and one too long for the room they leave, which
         // is positive and below the quarter: the long row is skipped, and
         // the section is a run from the first supplied row that fits the
         // room, with the next row exceeding it.
-        let some = &lasting[..22];
+        let some = &lasting[..20];
         let mut pressed = some.to_vec();
         pressed.push(memory("PROJECT_RULES", &"x".repeat(budget as usize)));
         let (kept_lasting, unspent) = trim_memories_to_budget(&pressed, budget, bytes);

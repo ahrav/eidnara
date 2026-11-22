@@ -238,6 +238,23 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
     block
 }
 
+/// The sentence a delivered `<project-memory>` block ends with.
+pub(crate) const PROJECT_MEMORY_NOTE: &str = "The statements above were said in earlier sessions of this project. This memory holds what was said to it; conventions kept in the repository's files stay in those files.";
+
+/// The `<project-memory>` block of a session's m0.
+pub fn render_delivered_memory_block(memories: &[CanonicalMemory]) -> String {
+    const CLOSE: &str = "</project-memory>";
+    let mut block = render_memory_block(memories, "project-memory");
+    if block.is_empty() {
+        return block;
+    }
+    block.truncate(block.len() - CLOSE.len());
+    push_escaped_xml_content(&mut block, PROJECT_MEMORY_NOTE);
+    block.push('\n');
+    block.push_str(CLOSE);
+    block
+}
+
 /// The caller token-trims user memories; an empty set renders as an empty string.
 pub fn render_user_profile_block(profile_lines: &[String], wrapper: &str) -> String {
     if profile_lines.is_empty() {
@@ -674,6 +691,31 @@ mod tests {
         assert!(renders_in_block(CURRENT_WORK_SECTION));
         assert!(!is_positive_memory_category(CURRENT_WORK_SECTION));
         assert!(!renders_in_block("WARNING"));
+    }
+
+    /// The delivered block holds the rows' block with the note on the line
+    /// before the closing tag. The block rendered for the summarizer holds
+    /// no note, and no rows render no block.
+    #[test]
+    fn the_delivered_block_ends_with_its_note_before_the_closing_tag() {
+        let rows = [CanonicalMemory {
+            object_id: "mem_5".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content: "a project rule".to_string(),
+        }];
+        assert_eq!(
+            render_delivered_memory_block(&rows),
+            format!(
+                "<project-memory>\n<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 {PROJECT_MEMORY_NOTE}\n</project-memory>"
+            )
+        );
+        assert!(!render_memory_block(&rows, "project-memory").contains(PROJECT_MEMORY_NOTE));
+        assert_eq!(render_delivered_memory_block(&[]), "");
+        assert!(
+            !PROJECT_MEMORY_NOTE.contains(['<', '>', '&', '\n']),
+            "the note renders as written on one line"
+        );
     }
 
     #[test]
