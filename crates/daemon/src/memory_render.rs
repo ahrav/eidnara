@@ -240,28 +240,36 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
 
 /// The sentence a delivered `<project-memory>` block ends with, on the line
 /// before its closing tag.
-pub(crate) const PROJECT_MEMORY_NOTE: &str = "The lines above are this project's memory, recorded in its sessions: it holds what was said or recorded there, and conventions kept in the repository's files stay in those files.";
+pub(crate) const PROJECT_MEMORY_NOTE: &str = "The lines above are a partial record of this project's sessions: they hold what was said or recorded there, and conventions kept in the repository's files stay in those files.";
 
-const DELIVERED_OPEN: &str = "<project-memory>";
+/// The first line of a delivered block.
+const DELIVERED_OPEN: &str = "<project-memory>\n";
 const DELIVERED_CLOSE: &str = "</project-memory>";
 
-/// The delivered block of no rows: its tags and [`PROJECT_MEMORY_NOTE`].
-/// The budget charges these bytes, and [`render_delivered_memory_block`]
-/// writes the rows' elements between the opening tag and the note.
+/// The delivered block of no rows: its opening line, [`PROJECT_MEMORY_NOTE`],
+/// and its closing tag. The budget charges these bytes, and
+/// [`render_delivered_memory_block`] writes the rows' elements after the
+/// opening line.
 pub(crate) fn delivered_memory_frame() -> String {
-    format!("{DELIVERED_OPEN}\n{PROJECT_MEMORY_NOTE}\n{DELIVERED_CLOSE}")
+    delivered_block("")
+}
+
+/// A delivered block whose rows render as `elements`, each element ending
+/// with a line break.
+fn delivered_block(elements: &str) -> String {
+    format!("{DELIVERED_OPEN}{elements}{PROJECT_MEMORY_NOTE}\n{DELIVERED_CLOSE}")
 }
 
 /// The `<project-memory>` block of a session's m0: the rows' elements as
-/// [`render_memory_block`] writes them, then [`PROJECT_MEMORY_NOTE`].
+/// [`render_memory_block`] writes them, then [`PROJECT_MEMORY_NOTE`]. No
+/// rows render no block.
 pub fn render_delivered_memory_block(memories: &[CanonicalMemory]) -> String {
-    let mut block = render_memory_block(memories, "project-memory");
-    if block.is_empty() {
-        return block;
-    }
-    block.truncate(block.len() - DELIVERED_CLOSE.len());
-    block.push_str(&delivered_memory_frame()[DELIVERED_OPEN.len() + 1..]);
+    let block = render_memory_block(memories, "project-memory");
     block
+        .strip_prefix(DELIVERED_OPEN)
+        .and_then(|rest| rest.strip_suffix(DELIVERED_CLOSE))
+        .map(delivered_block)
+        .unwrap_or_default()
 }
 
 /// The caller token-trims user memories; an empty set renders as an empty string.
@@ -713,8 +721,8 @@ mod tests {
             category: "PROJECT_RULES".to_string(),
             content: "a project rule".to_string(),
         }];
-        let note = "The lines above are this project's memory, recorded in its sessions: \
-                    it holds what was said or recorded there, and conventions kept in the \
+        let note = "The lines above are a partial record of this project's sessions: \
+                    they hold what was said or recorded there, and conventions kept in the \
                     repository's files stay in those files.";
         let delivered = render_delivered_memory_block(&rows);
         assert_eq!(
@@ -726,9 +734,13 @@ mod tests {
         );
         let elements = "<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n";
         assert_eq!(
-            delivered.len(),
-            delivered_memory_frame().len() + elements.len(),
+            delivered.replacen(elements, "", 1),
+            delivered_memory_frame(),
             "the frame the budget charges is the frame the block renders"
+        );
+        assert_eq!(
+            delivered_memory_frame(),
+            format!("<project-memory>\n{note}\n</project-memory>")
         );
         assert!(!render_memory_block(&rows, "project-memory").contains(note));
         assert_eq!(render_delivered_memory_block(&[]), "");
