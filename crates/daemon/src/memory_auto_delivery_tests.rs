@@ -6222,6 +6222,54 @@ async fn a_shutdown_ends_a_recorder_task_before_its_next_result() {
     assert_eq!(memo.active_for_test(), 0);
 }
 
+/// A Kernel whose readers are all held past the judgment's deadline ends
+/// the pass: the failure writes nothing, and it and the pass after it stay
+/// unjudged. The session's next pass, with the Kernel free, judges both in
+/// the order they ran, so the failure is recorded and then resolved.
+#[tokio::test]
+async fn a_busy_kernel_ends_the_pass_and_the_next_pass_judges_its_results_in_order() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let runs = || {
+        [
+            failed_run("call-1", "cargo test -p api", 1_000),
+            passed_run("call-2", "cargo test -p api", 2_000),
+        ]
+    };
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let held = Arc::new(std::sync::Barrier::new(2));
+    let holder = {
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || {
+            kernel.hold_readers_for_test(&held, Duration::from_secs(7));
+        })
+    };
+    held.wait();
+    assert_eq!(record_failures(&handler, &project, "s1", &runs()).await, 0);
+    assert_eq!(
+        handler.failure_memo.lock().unwrap().calls_for_test("s1"),
+        0,
+        "neither call is settled"
+    );
+    holder.join().unwrap();
+    assert!(
+        served_memory_rows(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+    assert_eq!(record_failures(&handler, &project, "s1", &runs()).await, 2);
+    let rationale = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .remove(0);
+    assert_eq!(
+        (
+            &rationale["state"],
+            &rationale["call"],
+            &rationale["resolved_call"]
+        ),
+        (&json!("resolved"), &json!("call-1"), &json!("call-2"))
+    );
+}
+
 /// The generic commit route starts no row on a failure lineage and
 /// supersedes no row onto one, off one, or along one, so the recorder's
 /// rows are the only ones there and the newest row of a lineage is the
