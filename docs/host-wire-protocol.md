@@ -1252,9 +1252,9 @@ single opening mark, so that paragraph is left out as one with a double
 mark inside a span is; the empty literal keeps the paragraphs after it in
 prose. A single mark opens a quotation where it starts a word; the opening
 mark `‘` and the low-9 mark `‚` directly after a letter or digit, as in
-`wrote‘Use`, are read both ways, as a mark inside the word and as an
-opening mark, and the paragraph's quotations are open or unknown when
-either reading leaves one open, while `'`, `’`, and `＇` there stay
+`wrote‘Use`, may open a quotation or stand inside the word, so where such a
+mark closes no open quotation of one word the paragraph's quotations are
+unknown, while `'`, `’`, and `＇` there stay
 inside the word. A single mark closes a quotation of one word when it ends a
 word after a letter other than `s` or `S` or after `.`, `,`, `!`, or `;`; a mark
 after `s`, `S`, a number, or a letter that is a number, which may be a plural
@@ -1327,8 +1327,7 @@ is plain prose only while every earlier paragraph of the message that
 holds a quotation mark is a paragraph of literals whose closing marks each
 have one reading; below any other paragraph that holds a mark, a paragraph
 that holds a quotation mark is left out whatever it holds. The pairing
-rules above read every paragraph that holds a mark except a paragraph of
-literals whose closing marks each have one reading. When they leave open
+rules above read every paragraph that holds a mark. When they leave open
 or unknown a paragraph in which every quotation has a literal's shape, as
 they do for a single mark after `s`, `S`, a number, `_`, or a bracket and
 for a double mark after a number, every later paragraph of the message is
@@ -1337,19 +1336,16 @@ first paragraph of the message that holds one; the paragraphs of literals
 up to that paragraph keep their statements. When they leave any other
 paragraph open or unknown, every paragraph from the first one that holds a
 mark is left out, paragraphs of literals included. A paragraph without a
-mark is otherwise read as the pairing rules leave it. After a
-single-quoted literal whose token ends in `_`, which the pairing rules
-would leave unknown, a single mark in a later paragraph that ends a word
-and closes no quotation opened in that paragraph may be the closing mark
-of a quotation the literal's opening mark began, so every paragraph from
-the first one that holds a mark is left out.
+mark is otherwise read as the pairing rules leave it.
 Wherever this section reads a paragraph's first colon, in the join of
 sentences quoted one by one, in the sentence quoted alone after it, and in
 the contest a sentence after it keeps, it reads the opening mark of such a
 literal the same way. The rule keeps four readings it cannot rule out, each
 stated here: a single mark after a token's trailing `_` and before
-whitespace or punctuation closes its literal, so the paragraphs after
-`Prefix every test name with 'it_'.` are read as after any other literal; a quotation that starts at or before a literal with a second
+whitespace or punctuation closes its literal for the sentences of its own
+paragraph, so the sentence after `Prefix every test name with 'it_'.` in
+that paragraph may be a statement, while the pairing rules read that mark
+as unknown and the later paragraphs are left out; a quotation that starts at or before a literal with a second
 reading and meets every other condition of this section is a statement
 whole, with whatever stands between the literal's marks and after them up
 to the quotation's end, which sentences joined to it extend; a one-word quotation of speech without a sentence mark is

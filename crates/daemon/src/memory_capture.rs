@@ -2971,7 +2971,6 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
     // Whether the pairing rules leave a paragraph in which every quotation
     // has a literal's shape open or unknown.
     let mut literal_open = false;
-    let mut underscore_closed = false;
     for (first, index) in blocks {
         let block = &lines[first..index];
         let (at, last) = block[block.len() - 1];
@@ -3013,14 +3012,11 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         // A block that holds or follows the first unreadable line is left
         // out with every block after it.
         let readable = unreadable_from.is_none_or(|line| index <= line);
-        let underscore = found.as_ref().is_some_and(|found| found.underscore_closed);
         let introduction = found.and_then(|found| found.introduces_from);
         let open = quotes
-            && !(literal && introduction.is_none())
             && (!quotations_close_in_turn(block, &code_spans[kept..])
                 || leaves_single_quotation_open(block, &code_spans[kept..]));
-        unpaired |= (open && !shaped)
-            || (underscore_closed && ends_word_with_unclaimed_mark(block, &code_spans[kept..]));
+        unpaired |= open && !shaped;
         literal_open |= open && shaped;
         if quotes && before_quotation.is_none() {
             before_quotation = Some(prose.len());
@@ -3036,8 +3032,7 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
             code_spans.truncate(kept);
         }
         lead_in |= introduces;
-        literal_exception &= !quotes || (literal && introduction.is_none());
-        underscore_closed |= literal && underscore;
+        literal_exception &= !quotes || (literal && introduction.is_none() && !open);
         unclosed_code |= unclosed;
     }
     // A closing mark inside quoted text passes the pairing rules as the
@@ -3088,9 +3083,6 @@ struct Literals {
     /// opens a quotation that runs on. `None` when every literal of the
     /// paragraph closes in one reading.
     introduces_from: Option<usize>,
-    /// A single-quoted token ending in `_` can hide a quotation that spans
-    /// paragraphs.
-    underscore_closed: bool,
 }
 
 /// The quoted literals of one paragraph, when every quotation mark in it
@@ -3117,7 +3109,6 @@ struct Literals {
 fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option<Literals> {
     let mut found = Literals {
         introduces_from: None,
-        underscore_closed: false,
     };
     let mut spans = CodeSpanCursor::new(code_spans);
     let mut single_closed = false;
@@ -3152,7 +3143,6 @@ fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option
                 && previous.is_none_or(|before| before.is_whitespace() || "([{".contains(before));
             let (token, closer) = opens.then(|| literal_token(single, ch, rest)).flatten()?;
             let after = rest[token.len() + closer.len_utf8()..].chars().next();
-            found.underscore_closed |= single && token.ends_with('_');
             let single = single
                 || [ch, closer]
                     .iter()
@@ -3295,33 +3285,6 @@ fn closes_literal(opener: char, closer: char) -> bool {
         '\u{2018}' | '\u{201a}' | '\u{201f}' => false,
         _ => !OPENING_ONLY.contains(&closer),
     }
-}
-
-/// Quotation pairing spans lines within `block`; word boundaries are
-/// line-local.
-fn ends_word_with_unclaimed_mark(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> bool {
-    let mut spans = CodeSpanCursor::new(code_spans);
-    let mut opened = false;
-    for &(start, line) in block {
-        let mut previous: Option<char> = None;
-        for (at, ch) in line.char_indices() {
-            if is_apostrophe(ch) {
-                let rest = &line[at + ch.len_utf8()..];
-                if !previous.is_some_and(char::is_alphanumeric) {
-                    opened = true;
-                } else if !rest.starts_with(char::is_alphanumeric)
-                    && !joins_suffix_to_code(spans.place(start + at), ch, rest)
-                {
-                    if !opened {
-                        return true;
-                    }
-                    opened = false;
-                }
-            }
-            previous = Some(ch);
-        }
-    }
-    false
 }
 
 /// A run of backticks opens a code span that the next run of the same length
@@ -3572,19 +3535,6 @@ fn joins_suffix_to_code(place: CodePlace, ch: char, rest: &str) -> bool {
 /// text, so a span can hold the mark that opens or closes a quotation.
 /// `code_spans` are the paragraph's inline code spans, ascending.
 fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> bool {
-    // `\u{2018}` or `\u{201a}` directly after a letter or digit may open a
-    // quotation or stand inside its word, and either reading can leave a
-    // quotation open.
-    [false, true]
-        .into_iter()
-        .any(|attached| single_quotation_stays_open(block, code_spans, attached))
-}
-
-fn single_quotation_stays_open(
-    block: &[(usize, &str)],
-    code_spans: &[(usize, usize)],
-    attached: bool,
-) -> bool {
     let mut open = 0_usize;
     // Whether the innermost open quotation holds whitespace.
     let mut several_words = false;
@@ -3629,9 +3579,14 @@ fn single_quotation_stays_open(
                     // An outer quotation that held a nested one holds
                     // several words.
                     several_words = open > 0;
-                } else if can_open_single(ch, previous, attached) {
+                } else if previous.is_none_or(|before| !before.is_alphanumeric()) {
                     open += 1;
                     several_words = false;
+                } else if matches!(ch, '\u{2018}' | '\u{201a}') {
+                    // An opening glyph directly after a letter or digit may
+                    // open a quotation or stand inside its word, so the
+                    // paragraph's quotations are unknown.
+                    return true;
                 }
             } else if open > 0 && ch.is_whitespace() {
                 several_words = true;
@@ -3686,7 +3641,8 @@ fn opens_single_quotation(start: usize, line: &str, spans: &mut CodeSpanCursor<'
     for (at, ch) in line.char_indices() {
         let rest = &line[at + ch.len_utf8()..];
         if SINGLE_QUOTATION_MARKS.contains(&ch)
-            && can_open_single(ch, previous, true)
+            && (matches!(ch, '\u{2018}' | '\u{201a}')
+                || previous.is_none_or(|before: char| !before.is_alphanumeric()))
             && !joins_suffix_to_code(spans.place(start + at), ch, rest)
         {
             return true;
@@ -3694,16 +3650,6 @@ fn opens_single_quotation(start: usize, line: &str, spans: &mut CodeSpanCursor<'
         previous = Some(ch);
     }
     false
-}
-
-/// `\u{2018}` and `\u{201a}` signal the start of a quotation, so either
-/// may open one directly after a letter or digit, as in
-/// `wrote\u{2018}Use`. The parser accepts every other single mark as an
-/// opener only at the start of input or after a non-alphanumeric character,
-/// which keeps an apostrophe inside its word.
-fn can_open_single(ch: char, before: Option<char>, attached: bool) -> bool {
-    (attached && matches!(ch, '\u{2018}' | '\u{201a}'))
-        || before.is_none_or(|before| !before.is_alphanumeric())
 }
 
 fn is_list_item(line: &str) -> bool {
@@ -6610,7 +6556,7 @@ mod tests {
             (
                 "Prefix every test name with 'it_'.\n\nNever skip the linter.",
                 "Never skip the linter.",
-                true,
+                false,
             ),
             // A statement holds a literal with both marks or leaves it out.
             ("Call the flag 'fast' in the docs.", "fast", false),
@@ -7250,7 +7196,7 @@ mod tests {
             (
                 "Bob wrote\u{2018}Wait\u{2019} today.\n\nKeep the log.",
                 "Keep the log.",
-                true,
+                false,
             ),
             (
                 "Bob wrote 'state_' is the key.\n\nKeep both logs!\n\nThat is the whole note'",
@@ -7260,22 +7206,22 @@ mod tests {
             (
                 "Bob wrote 'state_' is the key.\n\nKeep both logs!\n\nThat is the whole note'",
                 "Bob wrote 'state_' is the key.",
-                false,
+                true,
             ),
             (
                 "Prefix every test name with 'it_'.\n\nDon't skip the linter.",
                 "Don't skip the linter.",
-                true,
+                false,
             ),
             (
                 "Prefix every test name with 'it_'.\n\nUse 'main' as the branch.",
                 "Use 'main' as the branch.",
-                true,
+                false,
             ),
             (
                 "Prefix every test name with 'it_'.\n\nKeep the tests' names short.",
                 "Prefix every test name with 'it_'.",
-                false,
+                true,
             ),
             (
                 "Bob wrote \"Hi team\" today.\n\nKeep the log.\n\nKeep the offset at '+6' hours.",
