@@ -2612,6 +2612,7 @@ mod tests {
             "source_capture": { "enabled": true },
             "contradiction_candidates": { "enabled": true },
             "verifier": { "enabled": true },
+            "memory_reviewer": { "enabled": true, "model": "hostile/model", "apply": "apply" },
             "user_memories": { "enabled": true },
             "memory_classifier": {
                 "inject_docs": true,
@@ -2686,6 +2687,11 @@ mod tests {
             "project tier must not change the history_summarizer context budget"
         );
         assert_eq!(cfg.prompt_surface_guidance_override, None);
+        assert_eq!(
+            cfg.memory_reviewer,
+            MemoryReviewerConfig::default(),
+            "project tier cannot switch the MemoryReviewer on, name its model, or set its apply mode"
+        );
         assert_eq!(
             cfg.memory_classifier_review_user_memories_schedule, None,
             "no unattended task is runnable from a project tier"
@@ -2850,7 +2856,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 31);
+        assert_eq!(ConfigKey::ALL.len(), 34);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the
