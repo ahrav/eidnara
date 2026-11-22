@@ -1291,7 +1291,7 @@ quotation marks, after a lead-in, on pasted lines, or directly in the
 sentence. A value outside these two is a schema defect of its source's
 decision, and a `speaker` given as `null` reads as absent. The member is
 decoded as every member of a proposal is: of a member a proposal writes
-twice the last value stands, so each proposal has one speaker, and an answer
+twice the last value stands, so each proposal has at most one speaker, and an answer
 whose JSON a generic reader cannot hold, such as a number out of range, is
 a malformed document and fails whole. Only the value
 `user` attributes a quotation to the user: a quotation with `speaker` `other`
@@ -1299,12 +1299,14 @@ or with none is stored as a labeled memory for explicit search under the
 rules of every labeled memory, has no statement record, replaces no fact
 served on `auto_inject` (each such target becomes a contest candidate, as
 for a quotation that fails the structure check), is left as proposed by the
-widening rule, and takes no place in a run of joined sentences, so a copy of
-its stretch joins none either. The proposals of one source that quote a
-common stretch of its message carry one speaker, settled before sentences
-are joined and before any link is judged, whatever category and targets
-they name. Each quotation is compared without its edge whitespace, at every
-occurrence in the message, occurrences that overlap one another included: a
+widening rule, and takes no place in a run of joined sentences. The
+proposals of one source that quote a common stretch of its message are the
+user's together or not at all, settled before sentences are joined and
+before any link is judged, whatever category and targets they name. Each quotation is compared without its edge whitespace, at every
+occurrence in the message, occurrences that overlap one another included,
+and an occurrence of the user's quotation that stops directly before a `.`
+or `!` is read through that mark, which the structure check reads as the
+close of its sentence: a
 proposal that names `user` and whose quotation shares text with the
 quotation of a proposal that names `other` or no speaker is read as
 `other`, and the rule repeats until no proposal changes, so quotations that
@@ -1321,10 +1323,11 @@ or none, and each records the speaker of the memories joined into it,
 `user`, and none when none of them carried one. The
 widening rule leaves a cut quotation as proposed when the sentence it would
 widen to holds, at any place the message has that sentence, text that a
-proposal of the source attributes to another speaker or to none, and a run
-of sentences is joined only when the joined statement, the text between its
-sentences and their closing marks included, holds no such text at any place
-the message has the joined words. A
+proposal of the source attributes to another speaker or to none. A run of
+sentences joins quotations the agreement rule left with the user and
+sentences the widening rule judged, with their closing marks and the
+whitespace between them, so the joined statement holds no such text at any
+place the message has the joined words. A
 captured fact's rationale holds the value under `speaker` when its proposal
 carried one. A `speaker` on a proposal of an assistant source is stored in
 the same way and changes nothing. The attribution is a model's reading and

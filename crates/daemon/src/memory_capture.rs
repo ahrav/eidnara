@@ -162,14 +162,16 @@ fn speaks_for_user(memory: &CapturedMemory) -> bool {
     memory.speaker == Some(Speaker::User)
 }
 
-/// Gives one speaker to the proposals of one message that quote a common
-/// stretch of it. An extractor can propose one sentence twice, or a
+/// Makes the proposals of one message that quote a common stretch of it
+/// the user's together or not at all. An extractor can propose one sentence twice, or a
 /// sentence and a clause of it, and name the user for one and another
 /// source for the other. A quotation is the user's only when every proposal
 /// that quotes part of it names the user, so a proposal attributed to the
 /// user whose quotation shares text with one attributed to another source,
 /// or to nobody, takes the speaker [`Speaker::Other`]. Every occurrence of
-/// a quotation in the message counts ([`Relayed`]). The rule repeats until
+/// a quotation in the message counts ([`Relayed`]), and the user's
+/// quotation is read through the closing mark of its sentence, which the
+/// statement rule reads as part of it. The rule repeats until
 /// no proposal changes, so quotations that overlap in a chain are the
 /// user's together or not at all. The rule settles that one question: a
 /// proposal that named no speaker keeps none beside one that names
@@ -186,7 +188,7 @@ fn settle_speakers(text: &str, memories: &mut [CapturedMemory]) {
         let relayed = Relayed::of(text, memories);
         let mut settled = true;
         for memory in memories.iter_mut() {
-            if speaks_for_user(memory) && relayed.quoted_by(text, &memory.quote) {
+            if speaks_for_user(memory) && relayed.quoted_by(&memory.quote) {
                 memory.speaker = Some(Speaker::Other);
                 settled = false;
             }
@@ -200,13 +202,14 @@ fn settle_speakers(text: &str, memories: &mut [CapturedMemory]) {
 /// The text of one message that proposals attributed to another source, or
 /// to nobody, quote: every occurrence of each such quotation, read without
 /// its edge whitespace, occurrences that overlap one another included.
-struct Relayed {
+struct Relayed<'t> {
+    text: &'t str,
     /// `before[at]` counts the relayed bytes of the message before `at`.
     before: Vec<u32>,
 }
 
-impl Relayed {
-    fn of(text: &str, memories: &[CapturedMemory]) -> Self {
+impl<'t> Relayed<'t> {
+    fn of(text: &'t str, memories: &[CapturedMemory]) -> Self {
         let mut relayed = vec![false; text.len()];
         for memory in memories.iter().filter(|memory| !speaks_for_user(memory)) {
             let quote = memory.quote.trim();
@@ -225,21 +228,21 @@ impl Relayed {
             count += u32::from(byte);
             before.push(count);
         }
-        Self { before }
-    }
-
-    /// Whether the stretch `from..to` of the message holds a relayed byte.
-    fn holds(&self, from: usize, to: usize) -> bool {
-        self.before[to] > self.before[from]
+        Self { text, before }
     }
 
     /// Whether any occurrence of `quote` in the message holds a relayed
-    /// byte.
-    fn quoted_by(&self, text: &str, quote: &str) -> bool {
+    /// byte. An occurrence that stops directly before its sentence's
+    /// closing mark is read through that mark, as the statement rule reads
+    /// it, so the statement a join builds from two such quotations holds
+    /// only text this has judged.
+    fn quoted_by(&self, quote: &str) -> bool {
         let quote = quote.trim();
         let mut found = false;
-        each_occurrence(text, quote, |at| {
-            found = self.holds(at, at + quote.len());
+        each_occurrence(self.text, quote, |at| {
+            let end = at + quote.len();
+            let end = end + closing_mark_len(quote, &self.text[end..]);
+            found = self.before[end] > self.before[at];
             !found
         });
         found
@@ -621,8 +624,8 @@ fn parse_capture_batch(
                     return Err("capture output repeats a memory in one source");
                 }
             }
-            // Proposals that quote a common stretch get one speaker before
-            // anything reads it.
+            // Proposals that quote a common stretch are the user's together
+            // or not at all before anything reads a speaker.
             settle_speakers(&message.text, &mut decision.memories);
             // Sentences quoted one by one are joined before any link is
             // judged, so each link is judged for the statement that is stored.
@@ -745,7 +748,7 @@ fn join_sentence_runs(
         let (start, end) = stretch_at(quote, at);
         // A quotation the extractor attributed to another source, or to
         // nobody, is no statement of the user: it takes no place, so it
-        // starts and joins no run and keeps a copy of its stretch out of one.
+        // starts and joins no run.
         let place = if !speaks_for_user(memory) {
             None
         } else if quotes_whole_statements(&prose, quote) {
@@ -801,17 +804,20 @@ fn join_sentence_runs(
                     && run.to < start
                     && text[run.to..start].chars().all(char::is_whitespace)))
                 && to - run.from <= MAX_CAPTURE_MEMORY_BYTES
-                // The joined statement holds the text between its
-                // sentences and their closing marks. Its words are the
-                // user's only where no proposal attributes them elsewhere,
-                // at any place the message holds them.
-                && !relayed.quoted_by(text, &text[run.from..to])
                 && quotes_whole_statements(&prose, &text[run.from..to])
         });
         if joins && let Some(run) = runs.last_mut() {
             run.to = run.to.max(end);
             run.members.extend(quoting);
             run.joined = true;
+            // The joined statement is the user's at every place the message
+            // holds its words. It is made of its members' places and the
+            // whitespace between them. Speaker agreement judged each
+            // quotation through its closing mark and widening judged each
+            // widened sentence, at every occurrence, and a relayed
+            // quotation starts and ends on text, so one that reached the
+            // whitespace would reach a member.
+            debug_assert!(!relayed.quoted_by(&text[run.from..run.to]));
         } else if alone {
             runs.push(SentenceRun {
                 from: start,
@@ -908,7 +914,7 @@ fn widened_statements<'t>(prose: &Prose<'t>, proposed: &[CapturedMemory]) -> Vec
 fn widened_beside<'t>(
     prose: &Prose<'t>,
     proposed: &[CapturedMemory],
-    relayed: &Relayed,
+    relayed: &Relayed<'_>,
 ) -> Vec<Option<&'t str>> {
     let widened: Vec<Option<&str>> = proposed
         .iter()
@@ -929,7 +935,7 @@ fn widened_beside<'t>(
             });
             // The stored text is the statement's words, wherever the
             // message holds them.
-            (!shared && !relayed.quoted_by(prose.text, statement)).then_some(statement)
+            (!shared && !relayed.quoted_by(statement)).then_some(statement)
         })
         .collect()
 }
@@ -3099,9 +3105,9 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         .scan(0, |offset, line| {
             let at = *offset;
             *offset += line.len();
-            // One terminator is stripped, a line feed with the carriage
-            // return before it. Any other carriage return stays in the line,
-            // where it marks the line unreadable.
+            // A line feed ends the line, and one carriage return directly
+            // before it belongs to that ending. Any other carriage return
+            // stays in the line, where it marks the line unreadable.
             let body = line
                 .strip_suffix('\n')
                 .map_or(line, |body| body.strip_suffix('\r').unwrap_or(body));
@@ -9087,12 +9093,14 @@ mod tests {
         assert_eq!(parsed[1].as_ref().unwrap().memories.len(), 1);
         // The answer is decoded as on main for every member. Of a member a
         // proposal writes twice the last value stands, so the proposal has
-        // one speaker, and an answer whose JSON a generic reader cannot
-        // hold fails whole. The text is literal: a JSON value would hold
-        // one of the two members.
+        // at most one speaker, and an answer whose JSON a generic reader
+        // cannot hold fails whole. The text is literal: a JSON value would
+        // hold one of the two members. The second source carries a valid
+        // proposal throughout.
         let answer = |members: &str| {
+            let fact = r#""category":"PROJECT_RULES","content":"Run the suite.","quote":"Run the integration suite before every merge.""#;
             format!(
-                r#"{{"version":1,"decisions":[{{"message_id":"m1","memories":[{{"category":"PROJECT_RULES","content":"Run the suite.","quote":"Run the integration suite before every merge.",{members}}}]}},{{"message_id":"m2","memories":[]}}]}}"#
+                r#"{{"version":1,"decisions":[{{"message_id":"m1","memories":[{{{fact},{members}}}]}},{{"message_id":"m2","memories":[{{{fact},"speaker":"user"}}]}}]}}"#
             )
         };
         for (members, read) in [
@@ -9107,6 +9115,16 @@ mod tests {
             assert_eq!(
                 parsed[0].as_ref().unwrap().memories[0].speaker,
                 read,
+                "{members}"
+            );
+            let sibling = &parsed[1].as_ref().unwrap().memories;
+            assert_eq!(sibling.len(), 1, "{members}");
+            assert_eq!(
+                (sibling[0].quote.as_str(), sibling[0].speaker),
+                (
+                    "Run the integration suite before every merge.",
+                    Some(Speaker::User)
+                ),
                 "{members}"
             );
         }
@@ -9761,14 +9779,15 @@ mod tests {
         );
     }
 
-    /// Proposals of one message that quote a common stretch take one
-    /// speaker: the user only when each of them names the user. A copy, a
+    /// Proposals of one message that quote a common stretch are the user's
+    /// together or not at all: the user's only when each of them names the
+    /// user. A copy, a
     /// padded copy, a clause of the sentence, and a quotation that reaches
     /// the sentence through another all follow a proposal that names another
     /// source or none, and proposals that quote separate sentences keep
     /// their own speakers.
     #[test]
-    fn proposals_that_quote_a_common_stretch_take_one_speaker() {
+    fn proposals_that_quote_a_common_stretch_are_the_users_together_or_not_at_all() {
         let text = "The staging port is 4321. Cut release branches from the stable branch. Tag every release.";
         let port = "The staging port is 4321.";
         let branches = "Cut release branches from the stable branch.";
@@ -9896,6 +9915,9 @@ mod tests {
             // fallback steps after a partial match.
             ("aabaabaaabaabaaab", "aabaaab", vec![3, 10]),
             ("abababcabababab", "ababab", vec![0, 7, 9]),
+            // The second copy starts inside the first, through a prefix
+            // the table reaches by a fallback step of its own.
+            ("aabaaabaaa", "aabaaa", vec![0, 4]),
             ("caf\u{e9} caf\u{e9}", "caf\u{e9}", vec![0, 6]),
             ("\u{e9}\u{e9}\u{e9}", "\u{e9}\u{e9}", vec![0, 2]),
         ] {
@@ -10142,8 +10164,9 @@ mod tests {
     /// Whatever an extractor proposes for a message, a quotation capture
     /// would approve holds no text that a proposal of the same message
     /// attributes to another source or to nobody. The check takes every
-    /// ordered triple of a pool of quotations (sentences, clauses, padded
-    /// copies, quotations that bridge two sentences, a repeated sentence)
+    /// ordered triple of distinct entries of a pool of quotations (sentences, clauses, padded
+    /// copies, quotations that bridge two sentences or start at a closing
+    /// mark, a repeated sentence)
     /// under every assignment of speakers, parses it, widens it as
     /// publication does, and compares each approved quotation with the
     /// relayed ones byte by byte, at every place either stands, by a plain
@@ -10172,6 +10195,8 @@ mod tests {
                     "logs! Use",
                     "Ask Dana first.",
                     "tabs! Ask",
+                    "! Keep",
+                    "!",
                 ],
             ),
             (
@@ -10185,6 +10210,23 @@ mod tests {
                     "rebase main. Never",
                     "fixups. Dana",
                     "main.\n\nWe",
+                    ". Never",
+                ],
+            ),
+            // Padded quotations stand once where their words stand twice,
+            // so they join in the first paragraph while the second holds
+            // the same words before a pasted sentence.
+            (
+                "Context.\n\n Use tabs! Keep logs! Ask Dana first!\n\nUse tabs! Keep logs! Pasted note.",
+                vec![
+                    " Use tabs",
+                    " Use tabs! Keep logs",
+                    " Use tabs! Keep logs! Ask Dana first!",
+                    "Ask Dana first",
+                    "! Pasted note.",
+                    "Pasted note.",
+                    "! Ask",
+                    "logs! Pasted",
                 ],
             ),
         ];
@@ -10204,6 +10246,14 @@ mod tests {
                                 (pool[second], speakers[code / 3 % 3], None),
                                 (pool[third], speakers[code / 9], None),
                             ];
+                            // The relayed places come from the proposals as
+                            // given and from the parsed ones, which add
+                            // those the agreement rule took from the user.
+                            let mut relayed: Vec<(usize, usize)> = proposals
+                                .iter()
+                                .filter(|proposal| proposal.1 != Some("user"))
+                                .flat_map(|proposal| places(text, proposal.0))
+                                .collect();
                             let mut memories = attributed_memories(text, &proposals);
                             let widened = widened_statements(&prose, &memories);
                             for (memory, statement) in memories.iter_mut().zip(widened) {
@@ -10211,11 +10261,12 @@ mod tests {
                                     memory.quote = statement.to_owned();
                                 }
                             }
-                            let relayed: Vec<(usize, usize)> = memories
-                                .iter()
-                                .filter(|memory| memory.speaker != Some(Speaker::User))
-                                .flat_map(|memory| places(text, &memory.quote))
-                                .collect();
+                            relayed.extend(
+                                memories
+                                    .iter()
+                                    .filter(|memory| memory.speaker != Some(Speaker::User))
+                                    .flat_map(|memory| places(text, &memory.quote)),
+                            );
                             for memory in &memories {
                                 if !states_whole_statements(true, &prose, memory) {
                                     continue;
@@ -10283,64 +10334,105 @@ mod tests {
             }
         }
         // Two sentences quoted without their closing marks join into the
-        // statement that holds those marks, unless a proposal attributes a
-        // mark to another source.
+        // statement that holds those marks. A quotation is read through
+        // its sentence's closing mark, so a proposal that attributes a mark
+        // to another source leaves the sentence before it with that source.
         let first = "Quick note before you go on: two tasks are open";
         let second = "One is a retry counter for the upload client";
         let paragraph = format!("{first}. {second}.");
-        let quotes = |proposals: &[(&str, Option<&str>, Option<&str>)]| -> Vec<String> {
-            attributed_memories(&paragraph, proposals)
+        let parsed = |text: &str,
+                      proposals: &[(&str, Option<&str>, Option<&str>)]|
+         -> Vec<(String, Option<Speaker>)> {
+            attributed_memories(text, proposals)
                 .into_iter()
-                .map(|memory| memory.quote)
+                .map(|memory| (memory.quote, memory.speaker))
                 .collect()
         };
+        // The quotations publication would approve as statements: the
+        // parsed proposals, widened as publication widens them.
+        let approved =
+            |text: &str, proposals: &[(&str, Option<&str>, Option<&str>)]| -> Vec<String> {
+                let prose = Prose::of(text);
+                let mut memories = attributed_memories(text, proposals);
+                let widened = widened_statements(&prose, &memories);
+                for (memory, statement) in memories.iter_mut().zip(widened) {
+                    if let Some(statement) = statement {
+                        memory.quote = statement.to_owned();
+                    }
+                }
+                memories
+                    .into_iter()
+                    .filter(|memory| states_whole_statements(true, &prose, memory))
+                    .map(|memory| memory.quote)
+                    .collect()
+            };
+        let user = Some(Speaker::User);
+        let other = Some(Speaker::Other);
         assert_eq!(
-            quotes(&[(first, Some("user"), None), (second, Some("user"), None)]),
-            [paragraph.as_str(); 2]
+            parsed(
+                &paragraph,
+                &[(first, Some("user"), None), (second, Some("user"), None)]
+            ),
+            [(paragraph.clone(), user), (paragraph.clone(), user)]
         );
         assert_eq!(
-            quotes(&[
-                (first, Some("user"), None),
-                (second, Some("user"), None),
-                (".", Some("other"), None),
-            ]),
-            [first, second, "."]
-        );
-        // The joined statement is judged at every place the message holds
-        // its words. Two quotations that overlap join where they stand, in
-        // the indented paragraph, unless the same words in the last
-        // paragraph hold a mark another proposal attributes elsewhere.
-        let text =
-            "Context.\n\n Note: Use tabs! Keep logs!\n\nNote: Use tabs! Keep logs! Pasted note.";
-        let joined = |relay: Option<&str>| -> Vec<String> {
-            let mut proposals = vec![
-                (" Note: Use tabs", Some("user"), None),
-                (" Note: Use tabs! Keep logs", Some("user"), None),
-            ];
-            if let Some(relay) = relay {
-                proposals.push((relay, Some("other"), None));
-            }
-            attributed_memories(text, &proposals)
-                .into_iter()
-                .map(|memory| memory.quote)
-                .collect()
-        };
-        assert_eq!(joined(None), ["Note: Use tabs! Keep logs!"; 2]);
-        assert_eq!(
-            joined(Some("! Pasted note.")),
+            parsed(
+                &paragraph,
+                &[
+                    (first, Some("user"), None),
+                    (second, Some("user"), None),
+                    (".", Some("other"), None),
+                ]
+            ),
             [
-                " Note: Use tabs",
-                " Note: Use tabs! Keep logs",
-                "! Pasted note."
+                (first.to_owned(), other),
+                (second.to_owned(), other),
+                (".".to_owned(), other)
             ]
         );
+        // The mark is read at every place the message holds the quotation.
+        // Quotations that overlap join where they stand, in the indented
+        // paragraph. When the same words in the last paragraph end in a
+        // mark another proposal attributes elsewhere, the quotation that
+        // ends there and each one that overlaps it leave the user together,
+        // so no shorter statement of theirs is approved beside the rest.
+        let text = "Context.\n\n Note: Use tabs! Keep logs! Ask Dana first!\n\nNote: Use tabs! Keep logs! Pasted note.";
+        let nested = [
+            " Note: Use tabs",
+            " Note: Use tabs! Keep logs",
+            " Note: Use tabs! Keep logs! Ask Dana first!",
+        ];
+        let whole = "Note: Use tabs! Keep logs! Ask Dana first!";
+        let proposals: Vec<_> = nested
+            .iter()
+            .map(|quote| (*quote, Some("user"), None))
+            .collect();
+        assert_eq!(parsed(text, &proposals), vec![(whole.to_owned(), user); 3]);
+        assert_eq!(approved(text, &proposals), [whole; 3]);
+        for order in [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2]] {
+            let all = [
+                (nested[0], Some("user"), None),
+                (nested[1], Some("user"), None),
+                (nested[2], Some("user"), None),
+                ("! Pasted note.", Some("other"), None),
+            ];
+            let proposals = order.map(|at| all[at]);
+            assert_eq!(
+                parsed(text, &proposals),
+                order.map(|at| (all[at].0.to_owned(), other)),
+                "{order:?}"
+            );
+            assert_eq!(approved(text, &proposals), [""; 0], "{order:?}");
+        }
     }
 
-    /// The speakers of one message are settled before a link is judged and
-    /// before a quotation is widened, so a quotation one proposal attributes
-    /// to another source is the user's in no proposal: its copy that names
-    /// the user replaces no approved statement, and a clause of the user's
-    /// stays cut when its sentence holds the relayed words.
+    /// The speakers of one message are settled before a link is judged, so
+    /// a quotation one proposal attributes to another source is the user's
+    /// in no proposal: its copy that names the user replaces no approved
+    /// statement. The widening rule reads the speakers it is given: a
+    /// clause of the user's stays cut when its sentence holds words a
+    /// proposal attributes to another source or to nobody, and widens when
+    /// both proposals name the user.
     #[test]
     fn a_disputed_quotation_replaces_nothing_and_is_not_widened() {
         let correction = "Cut release branches from the stable branch.";
@@ -10364,7 +10456,7 @@ mod tests {
             let collapsed = native::collapse_quotations(USER_STATED, memories);
             assert_eq!(collapsed.len(), 1, "{twin:?}");
             assert_eq!(collapsed[0].replaces, None, "{twin:?}");
-            assert!(!speaks_for_user(&collapsed[0]), "{twin:?}");
+            assert_eq!(collapsed[0].speaker, Some(Speaker::Other), "{twin:?}");
         }
         // Two proposals of one quotation that name two replacement targets
         // carry one speaker. The proposal that named the approved statement
@@ -11305,6 +11397,7 @@ mod tests {
                 "{key}: {:?}",
                 refused.map(|receipt| receipt.commit_seq)
             );
+            assert_eq!(kernel.tip().unwrap(), tip, "{key} writes nothing");
         }
         // A clause of the sentence is no whole statement, so it ends no
         // work in progress.
@@ -11319,6 +11412,7 @@ mod tests {
             publish(&source, &output),
             Err(kernel::KernelError::Conflict)
         ));
+        assert_eq!(kernel.tip().unwrap(), tip, "job-clause writes nothing");
         // A whole sentence the extractor attributed to another source, or
         // to nobody, is no statement of the user, so it ends no work in
         // progress either. Each plan is decoded from stored plan bytes, with
@@ -11352,6 +11446,7 @@ mod tests {
                 "{key}: {:?}",
                 refused.map(|receipt| receipt.commit_seq)
             );
+            assert_eq!(kernel.tip().unwrap(), tip, "{key} writes nothing");
         }
         assert_eq!(
             rows().iter().map(|row| row.0.clone()).collect::<Vec<_>>(),
@@ -11363,7 +11458,6 @@ mod tests {
             before.iter().map(|row| row.1).collect::<Vec<_>>(),
             "the plan and the rule stay approved"
         );
-        assert_eq!(kernel.tip().unwrap(), tip, "no refused plan committed");
 
         // The remark's stored text holds a line appended after its
         // quotation, as a failure line is.

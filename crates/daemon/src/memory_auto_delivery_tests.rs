@@ -2706,6 +2706,8 @@ async fn proposals_that_disagree_on_the_speaker_of_one_clause_write_one_labeled_
         ([Voice::Other, Voice::User], clause, "labeled"),
         ([Voice::User, Voice::Absent], clause, "labeled"),
         ([Voice::Absent, Voice::User], clause, "labeled"),
+        ([Voice::Other, Voice::Absent], clause, "labeled"),
+        ([Voice::Absent, Voice::Other], clause, "labeled"),
         ([Voice::User, Voice::User], sentence, "visible"),
     ] {
         let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
@@ -2749,13 +2751,13 @@ async fn proposals_that_disagree_on_the_speaker_of_one_clause_write_one_labeled_
     }
 }
 
-/// Agreement on a speaker is a matter of the quoted text, whatever category
-/// a proposal files it under. One whole sentence proposed under two
+/// Whether a quotation is the user's is a matter of the quoted text,
+/// whatever category a proposal files it under. One whole sentence proposed under two
 /// categories, for the user in one and for another source in the other, is
 /// stored as two labeled facts with no statement record. With the user named
 /// in both, each category gets its approved statement.
 #[tokio::test]
-async fn one_sentence_under_two_categories_takes_one_speaker() {
+async fn one_sentence_under_two_categories_is_the_users_in_both_or_neither() {
     let sentence = "The staging port is 4321.";
     for (speakers, visibility, records) in [
         ([Voice::User, Voice::Other], "labeled", 0),
@@ -2809,6 +2811,7 @@ async fn a_correction_whose_copy_names_another_speaker_contests_the_statement_it
         ([Voice::User, Voice::Other], false),
         ([Voice::Other, Voice::User], false),
         ([Voice::User, Voice::Absent], false),
+        ([Voice::Absent, Voice::User], false),
         ([Voice::User, Voice::User], true),
     ] {
         let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
@@ -5281,9 +5284,10 @@ async fn a_lowercase_rule_quoted_without_its_condition_stays_labeled() {
     }
 }
 
-/// Text the user passes on from someone else stays labeled. The extractor
-/// names another source as the speaker of a sentence inside quotation
-/// marks and of a paragraph inside a quotation that spans paragraphs. The
+/// Text the user passes on from someone else stays labeled when the
+/// extractor names another source as its speaker. This test's fake
+/// extractor does so for a sentence inside quotation marks and for a
+/// paragraph inside a quotation that spans paragraphs. The
 /// structure of the message withholds the record whatever speaker the
 /// extractor names: a paragraph a colon line introduces, a question, and an
 /// assistant message. A proposal that names no speaker is attributed to
