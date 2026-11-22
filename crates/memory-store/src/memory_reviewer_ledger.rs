@@ -1017,6 +1017,16 @@ pub fn list_memory_reviewer_attempts_in_tx(
     rows.collect()
 }
 
+/// Every operation a ledger write names in its scan owner key, beside the job's causal identity. The retirement sweep retires the owners of each for the jobs it deletes.
+pub(crate) const LEDGER_OPERATIONS: [&str; 6] = [
+    "begin",
+    "take-over",
+    "cancel",
+    "finish-attempt",
+    "dispatch",
+    "complete",
+];
+
 impl MemoryStore {
     fn ledger_transaction<T>(
         &self,
@@ -1025,6 +1035,7 @@ impl MemoryStore {
         causal_identity: &str,
         body: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, MemoryReviewerLedgerError> {
+        debug_assert!(LEDGER_OPERATIONS.contains(&operation));
         let write = memory_reviewer_write(
             project,
             &["memory_reviewer-ledger", operation, causal_identity],

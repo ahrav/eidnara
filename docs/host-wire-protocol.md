@@ -642,7 +642,7 @@ payload, a reason string, or a project.
 | field | type | rule |
 | --- | --- | --- |
 | `memory_reviewer_state` | `"ready" \| "starting" \| "unavailable"` | required; any other value, a non-string, or a non-object block drops `memory_reviewer` whole |
-| `activation_state` | `"open" \| "unknown" \| "stale" \| "missing" \| "refused" \| "unreadable" \| "malformed" \| "identity_mismatch" \| "unacknowledged" \| "unknown_credential" \| "unavailable" \| "store"` | whether the deployment owner's activation record admits MemoryReviewer disclosure, as the worker last evaluated it; `unknown` before its first pass; `stale` once that evaluation is older than 300 s; any other value drops the field |
+| `activation_state` | `"open" \| "unknown" \| "stale" \| "missing" \| "refused" \| "unreadable" \| "malformed" \| "identity_mismatch" \| "unacknowledged" \| "unknown_credential" \| "unavailable" \| "store"` | whether MemoryReviewer disclosure is admitted, as the worker last evaluated it: `open` while the deployment owner's activation record admits it or a bound project's user tier sets `memory_reviewer.enabled`; `unknown` before its first pass; `stale` once that evaluation is older than 300 s; any other value drops the field |
 | `sampled_at_ms` | unsigned integer or `null` | `null` means no sample yet; a `ready` block older than five minutes reports as `unavailable` |
 | `swept_jobs`, `swept_selections` | unsigned integer | jobs and frozen selections the last expiry sweep closed |
 | `jobs_reserved`, `jobs_ready` | unsigned integer | pending review jobs by state |
@@ -650,17 +650,17 @@ payload, a reason string, or a project.
 | `selections_frozen`, `selections_enqueued`, `selections_expired`, `selections_failed_slot` | unsigned integer | Memory Classifier selection pages by state |
 | `attempts_attempted`, `attempts_acknowledged`, `attempts_failed`, `attempts_cancelled`, `attempts_unknown`, `attempts_not_dispatched`, `attempts_open` | unsigned integer | model attempts consumed, by terminal kind; `acknowledged` is a complete provider response, `open` has no terminal yet |
 | `receipts_in_progress`, `receipts_complete` | unsigned integer | execution receipts by state |
-| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | permanent receipt charges, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
+| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | receipt charges of jobs and frozen selection pages the store still holds, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
 | `nonadmissions`, `sessions_with_reservation` | unsigned integer | producer-owned History Summarizer nonadmissions summed over sessions, and sessions whose producer state records a MemoryReviewer reservation |
 | `latest_nonadmission_memory_reviewer_unavailable`, `latest_nonadmission_capacity_full`, `latest_nonadmission_evidence_unavailable`, `latest_nonadmission_fact_set_rejected`, `latest_nonadmission_subject_refused` | unsigned integer | sessions whose latest nonadmission carries each closed code |
 
 The same integer rules as `kernel` apply: every counter MUST be no greater
 than 2^53; a larger, negative, non-integer, or `null` counter is dropped to
 absent, never reported as `null`; unknown fields are dropped; fields are
-additive. Permanent receipt charges never shrink within a store incarnation,
-so `metadata_headroom_bytes` reaching zero means new review work is refused
-until a new incarnation; it is a safety ceiling, not a measured service
-lifetime.
+additive. A job keeps its receipt charge until the retirement sweep deletes
+it, ninety days after its queue deadline, so `metadata_headroom_bytes`
+reaching zero means new review work is refused until older jobs retire; the
+quota bounds the review work of one ninety-day window.
 
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of
@@ -1170,7 +1170,10 @@ contain zero facts. `memory.auto_capture` is user-only and defaults to true.
 It, `memory.enabled`, and `memory.auto_promote` must all
 permit capture. `source_capture.enabled` is user-only and defaults to false;
 the daemon ignores a project-tier value with a warning, and each plugin strips
-it from the project tier before merging. It consents to a different capture:
+it from the project tier before merging. The user-only
+`memory_reviewer.enabled` (default false) also turns it on, together with
+`contradiction_candidates.enabled`, because a memory review reads the message
+blocks a memory cites and the source text recorded after it. It consents to a different capture:
 the daemon retaining the exact bytes of user and completed assistant message
 text, tool outputs, tool errors, and the configured repository documents a
 pass reads for its prompt block, as Kernel source descriptors, published by
