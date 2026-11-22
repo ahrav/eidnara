@@ -6052,6 +6052,29 @@ async fn results_of_one_window_are_judged_in_run_order_and_a_shared_call_id_is_l
             "{call}"
         );
     }
+    // An id that two tool calls carry names neither of them: one marked
+    // result right after the second call is handed off by no pass.
+    let mut window = command_window("s1", &[]);
+    let call = |mid: &str, at_ms: i64| {
+        message(
+            mid,
+            "assistant",
+            json!({ "type": "tool_call", "id": "call-shared", "name": "bash", "input": { "command": "npm run deploy" } }),
+            at_ms,
+        )
+    };
+    window.messages.0.extend([
+        call("m-call-a", 4_000),
+        message(
+            "m-user",
+            "user",
+            json!({ "type": "text", "text": "Again." }),
+            4_050,
+        ),
+        call("m-call-b", 4_100),
+        result("m-result", "call-shared", true, 4_200),
+    ]);
+    assert!(handler.failure_checkpoint(&binding, &window).is_none());
     // A result that arrives after its call's turn has closed answers no
     // call of the turn under way: a user message, or the assistant's next
     // message, stands between them.
@@ -6628,6 +6651,30 @@ async fn a_lineage_or_an_id_another_writer_holds_is_left_as_it_is() {
         // starts again for the next one.
         forget_failure_memo(&handler);
     }
+    // A row whose id is the first part of a record's id, on a lineage of
+    // its own, with a rationale that names the session of that record: the
+    // commit log holds a key that begins with this row's key, and the row
+    // is another writer's all the same.
+    let (written, _) = ids("call-0", "make lint");
+    let (_, lineage) = ids("call-11", "cargo test -p g");
+    seed_decision(
+        &handler,
+        &project,
+        (&written[..20], &lineage),
+        "TOOL_FAILURE",
+        json!({ "state": "failed", "session": "s1", "at_ms": 5 }),
+    );
+    let runs = [
+        failed_run("call-11", "cargo test -p g", 1_000),
+        passed_run("call-12", "cargo test -p g", 2_000),
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+    assert!(stands(&written[..20]));
+    assert!(handler.failure_memo.lock().unwrap().has_seen_for_test(
+        scope.digest(),
+        "s1",
+        "call-12"
+    ));
     // A row at the id the call's record derives.
     let (record, _) = ids("call-9", "cargo test -p o");
     seed_decision(
@@ -6758,6 +6805,7 @@ async fn the_generic_commit_route_writes_no_row_on_a_failure_lineage() {
     // begins its upload.
     for (upload, source, kind) in [
         ("upload-on", lineage.as_str(), "invalid"),
+        ("upload-bare", "tool_failure", "invalid"),
         ("upload-off", "src/upload-off", "available"),
     ] {
         let mut begin =

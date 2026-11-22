@@ -1053,7 +1053,7 @@ fn apply(
                 // it finds a command's record as the newest row there and
                 // orders runs by the rationale it wrote, so a caller's
                 // successor on or off the lineage would stand in that place.
-                // Reviewer acceptance refuses such a target too (see
+                // The MemoryReviewer forms no proposal on such a target (see
                 // `memory_reviewer::coordinator::proposal_target`).
                 let recorded = crate::memory_capture::is_failure_lineage;
                 if recorded(&predecessor.object.source_id) || recorded(&spec.source_id) {
