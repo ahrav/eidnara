@@ -1201,10 +1201,10 @@ item (a line whose first word is a bullet, one character that is no letter
 or digit such as `-`, `*`, `+`, `•`, or a dash; an ordinal, digits or numeric
 letters of any script closed by `.` or `)` or wrapped in parentheses, or one
 letter closed by `)` or wrapped; or an enclosed numeral such as `①`), a heading, a blockquote, an indented code line (one that begins with four spaces, or with a tab after at most three spaces), a double quotation mark
-of any script, a single opening quotation mark that starts a word, or a line
+of any script or a single opening quotation mark that starts a word (a paragraph in which each quotation of either kind holds one literal, below, stays plain prose while every quotation of the message closes), or a line
 ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
 after such a line, every paragraph after one whose quotations do not close
-in it or that holds an unclosed inline code span, every paragraph after the first one that holds a double quotation mark or a single opening mark when the quotations of any paragraph of the message do not close in it, and
+in it or that holds an unclosed inline code span, every paragraph from the first one that holds a double quotation mark or a single opening mark when the quotations of any paragraph of the message do not close in it (that first one is left out by its own mark, or as a paragraph of literals, below), and
 every paragraph that a fence or tag line borders without a blank
 line. An inline code span runs from a run of backticks through the next run
 of the same length in its paragraph; an odd number of backslashes directly
@@ -1255,11 +1255,89 @@ word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
 after `s`, a number, or a letter that is a number, which may be a plural
 possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
 word-final mark inside a quotation of several words, which may be an elision,
-close nothing, so such a quotation stays open. A closing mark inside quoted text passes these rules as the mark that closes its quotation, and the mark that closes the quotation then fails them in a later paragraph. So when any paragraph of the message leaves a double or single quotation open or unknown, every paragraph after the first one that holds a double quotation mark or a single opening mark is left out.
-The rule reads marks by their place and cannot tell every arrangement of
-symmetric marks apart; where it cannot, the text is left out. The quotation starts the
+close nothing, so such a quotation stays open. A closing mark inside quoted text passes these rules as the mark that closes its quotation, and the mark that closes the quotation then fails them in a later paragraph. So when any paragraph of the message leaves a double or single quotation open or unknown, every paragraph after the first one that holds a double quotation mark or a single opening mark is left out, and that first one too when it is a paragraph of literals (below).
+A user who writes `prefix test names with 'it_'` or `the branch is "main"`
+names a value, an identifier, a path, a flag, or a key inside a sentence of
+their own, so a paragraph in which every quotation holds one literal is plain
+prose with those literals in it. A quotation holds a literal when its opening
+mark follows the line start, whitespace, or `(`, `[`, or `{`; its closing mark
+is the next quotation mark of the line and of the opening mark's style (one of
+`'`, `‘`, `’`, `＇` for a single mark; a mark of the same family for a double
+one), with no letter or digit after it; and the text between the marks is one
+token: at least one character, no whitespace, and every character printable
+ASCII other than a backtick and the ASCII quotation marks, a cased letter of
+another script (lowercase, uppercase, or titlecase), or an apostrophe (`'`,
+`’`, or `＇`) between two letters or digits. A quotation of several words may be
+what another speaker said, and the scripts that write sentences without
+spaces have no letter case. A closing mark directly after a backslash may
+be an escaped character of quoted text and closes no literal. A token that ends in `.`, `!`, or `?`, behind
+any `)`, `]`, `}`, `*`, or `_`, is a one-word utterance such as `"Wait!"`
+and no literal; a one-word quotation without such a mark, as in
+`He said "no" to that.`, is read as a literal, and its sentence is the
+user's with the speaker in it. The low-9 mark `‚` and a glyph every script
+writes on the other side of a quotation open or close no literal. An
+apostrophe (`'`, `’`, or `＇`) between two letters or digits stays inside
+its word; a low-9 or opening single mark (`‚`, `‘`) directly after a letter
+or digit may open a quotation there, so its paragraph is read by the
+pairing rules above. An apostrophe
+after a letter or digit with no letter or digit after it ends a word,
+as a plural possessive or an elision does: it opens and closes nothing in a
+paragraph that holds no single-quoted literal before it, and after such a
+literal it may close a quotation that the literal's opening mark opened, so
+the paragraph is read by the pairing rules above. A paragraph that holds
+any other quotation mark, or a quotation mark inside an inline code span
+that the paragraph rule counts, is read by the pairing rules above and is
+left out. A closing mark has one reading when its token, read without the
+`_` characters that end it, ends in a letter, and for a single mark in a
+letter other than `s` or `S`; the pairing rules above close a one-word
+quotation after the same letters, and this section adds the `_`, so that
+`'it_'` closes. Any other closing mark has a second reading and introduces
+what follows its
+literal: a single mark after `s`, `S`, or a number may be a plural
+possessive or a feet mark, a double mark after a number an inch mark, a
+mark after a bracket or another character that is no letter a prime, a mark
+of code such as the lifetime in `&'_`, or the opening mark of a nested
+quotation, and markup such as `~~6~~`, `<em>6</em>`, `*Parsers*`, or
+`[users](accounts.md)` hides a plural or a number behind its last
+character; under that reading the opening mark opens a quotation that runs
+on. The
+opening mark of the first such literal of a paragraph is therefore read as
+the paragraph's first colon is (below): a quotation that starts at or
+before it may be a statement, so `Use the 'requests' library.` is one, and a
+sentence that starts after it in the paragraph is none, so the second
+sentence of `Prefix boolean getters with 'is_'. Never abbreviate them.`, of
+`Call "init()" first. Never call it twice.`, and of
+`Use ',' as the separator. Never use tabs.` is none. When the pairing rules
+above leave the quotations of that paragraph open or unknown, as they do
+for a single mark after `s`, a number, `_`, or a bracket and for a double
+mark after a number, every later
+paragraph of the message is left out, as after a line that ends in a colon;
+when they close them, as they do for a double mark after `)` or `]` and for
+either mark after `,` or `;`, the later paragraphs are read as the pairing
+rules leave them.
+Wherever this section reads a paragraph's first colon, in the join of
+sentences quoted one by one, in the sentence quoted alone after it, and in
+the contest a sentence after it keeps, it reads the opening mark of such a
+literal the same way. The rule keeps three readings it cannot rule out, each
+stated here: a quotation that starts at or before a literal with a second
+reading and meets every other condition of this section is a statement
+whole, with whatever stands between the literal's marks and after them up
+to the quotation's end, which sentences joined to it extend; a one-word quotation of speech without a sentence mark is
+read as a literal; and a single-quoted first word of a longer quotation
+that closes after a letter other than `s` or `S`, as an elision such as `'Goin'`
+does, is read as a literal when no later single mark that closes no literal ends
+a word in its paragraph, so the sentences after it are plain prose, in its
+paragraph and, as the pairing rules above already read a one-word single
+quotation, in the later ones; a later single-quoted literal, in that
+paragraph or a later one, takes its own marks and leaves this reading as it
+is.
+When a quotation of the message is open or unknown, a paragraph of literals
+that is the first one to hold a quotation mark is left out with the later
+ones, since the marks of its literal may stand inside that quotation.
+The pairing rules read marks by their place and cannot tell every arrangement of
+symmetric marks apart; where they find a quotation open or unknown, the text is left out. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
-that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
+that is not lowercase, and no colon and no opening mark of a literal whose closing mark has a second reading (above) comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, whitespace or the
 paragraph's end follows that mark, and no lowercase word
 follows it past any punctuation; a paragraph whose first letter is lowercase
@@ -1305,11 +1383,9 @@ such as `e.g.` or `U.S.`, at a capitalized title (`Mr`, `Mrs`, `Ms`, `Dr`,
 or `Approx` in any letter case before a number, which may follow one character that is no letter, digit, whitespace, or period and then a decimal point, as in `No. 2`, `approx. -5`, or `approx. .5`; a quotation's closing period that ends its paragraph ends the sentence at any of these words; these lists are a heuristic
 for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
-an inline code span, so a quotation may hold a whole span; and its trimmed text holds a letter or digit and contains
+an inline code span, so a quotation may hold a whole span; a quotation starts at the paragraph's start or after whitespace and ends at the paragraph's end, before whitespace, or directly before a closing `.` or `!`, and a literal holds no whitespace and ends in no sentence mark, so a quotation holds a literal with both of its marks or leaves it out; and its trimmed text holds a letter or digit and contains
 no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
-finite), contains no double
-quotation mark, does not start with a backtick, and neither starts nor closes
-a single quotation. The rule reads sentence ends in `.` and `!` only, so text
+finite) and its first letter, digit, backtick, or quotation mark, single or double, is a letter or digit, so brackets or emphasis marks before a leading quotation mark or backtick leave it no statement; a quotation of several sentences is judged at its own first character, as its sentence edges are judged at its two ends. The rule reads sentence ends in `.` and `!` only, so text
 in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source may carry `lifetime`, the extractor's class of
 how long the statement holds: `lasting`, a rule, preference, convention,
 decision, constraint, or stable fact that still guides a different task in a

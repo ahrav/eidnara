@@ -4920,6 +4920,67 @@ async fn general_talk_classed_status_stays_on_search_beside_a_delivered_rule() {
     assert!(!block.contains("weekly sync"), "{block}");
 }
 
+/// A user names a value or an identifier between quotation marks inside a
+/// sentence of their own. The sentence gets a statement record and reaches
+/// the next session word for word, with the literal and its marks. A
+/// sentence that quotes several words of another speaker, and a correction
+/// cut from inside a quotation, stay on explicit search.
+#[tokio::test]
+async fn a_sentence_that_quotes_one_literal_is_the_users_statement_and_quoted_speech_stays_labeled()
+{
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    let prefix = "Prefix every test name with 'it_'.";
+    let branch = "The release branch is \"main\" in this repository.";
+    let library = "Wrap every handler in '@count_calls' from now on.";
+    let teammate = "My teammate wrote 'always rebase first' in the guide.";
+    let reviewer = "The reviewer said \"Skip the flaky tests.\" and I doubt it.";
+    let derivative = "Bob wrote '(f(x))' is the derivative! Never change the tests.";
+    let messages = [
+        ("m1", "user", prefix),
+        ("m2", "user", branch),
+        ("m3", "user", library),
+        ("m4", "user", teammate),
+        ("m5", "user", reviewer),
+        ("m6", "user", derivative),
+    ];
+    capture(&handler, FIRST, "s1", &messages, |text, _| {
+        vec![fact(match text {
+            text if text == derivative => "Never change the tests.",
+            // The extractor cuts the quoted words out of these two.
+            text if text == teammate => "always rebase first",
+            text if text == reviewer => "Skip the flaky tests.",
+            text => text,
+        })]
+    })
+    .await;
+
+    let mut rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    rows.sort();
+    let mut expected = vec![
+        (stated(prefix), "visible".to_string()),
+        (stated(branch), "visible".to_string()),
+        (stated(library), "visible".to_string()),
+        (stated("always rebase first"), "labeled".to_string()),
+        (stated("Skip the flaky tests."), "labeled".to_string()),
+        (stated("Never change the tests."), "labeled".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
+    let mut records = live_statement_records(&handler, &project);
+    records.sort();
+    let mut approved = vec![stated(prefix), stated(branch), stated(library)];
+    approved.sort();
+    assert_eq!(records, approved);
+    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+        .expect("the statements with a literal are delivered");
+    for statement in [prefix, branch, library] {
+        assert!(block.contains(&stated(statement)), "{block}");
+    }
+    assert!(!block.contains("always rebase first"), "{block}");
+    assert!(!block.contains("Skip the flaky tests"), "{block}");
+    assert!(!block.contains("Never change the tests"), "{block}");
+}
+
 /// Text the user quotes from someone else stays labeled: a sentence inside
 /// quotation marks, a paragraph inside a quotation that spans paragraphs, a
 /// paragraph a colon line introduces, and a question.

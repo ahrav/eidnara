@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:1071`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:1099`). The object id of each decision a job's extraction writes is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:4601`). A contested, settled, or ended statement's revision takes its id from the statement it supersedes and the contesting fact, the settling job, or the ending fact (`crates/daemon/src/memory_capture.rs:4089`).
+`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:1027`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:1055`). The object id of each decision a job's extraction writes is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:4677`). A contested or settled statement's revision takes its id from the statement it supersedes and the contesting fact or the settling job (`crates/daemon/src/memory_capture.rs:4185`).
 
 ## Failure scenario
 
@@ -18,13 +18,13 @@ None.
 
 ## What a test must construct
 
-The same source enqueued twice; a secret-bearing source; an out-of-grammar id; a retried publish asserting the same object ids; a statement that ends work in progress, asserting the ended revision's id.
+The same source enqueued twice; a secret-bearing source; an out-of-grammar id; a retried publish asserting the same object ids.
 
 ## Investigation log
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:9980`, `:10029`, `:11084`, `:11062`, `:11354`; `crates/daemon/src/lib.rs:24958`, `:26418`, read at the branch that adds this part (base `3a3b916b7`); `crates/daemon/src/memory_capture.rs:10529`, the test of an ended revision's id, read at the branch that adds it.
+- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:10253`, `:10302`, `:11041`, `:11019`, `:11309`; `crates/daemon/src/lib.rs:24958`, `:26418`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
