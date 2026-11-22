@@ -127,6 +127,26 @@ pub(crate) const OPENCODE_PROVIDER_ERROR_MESSAGE: &str = "opencode provider repo
 /// `BackendError::message` of a Pi run whose model provider rejected the request.
 pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with reason \"error\"";
 
+/// A first line of `system` with which a caller asks that the model receive the rest of the text exactly as written, without the lines a harness adds about its own process, such as the current date. A caller whose evidence carries its own times asks for this. [`plain_system`] reads it, and each adapter removes it before the text reaches a harness.
+pub const PLAIN_SYSTEM_DIRECTIVE: &str = "[eidnara: send this system text as written]\n";
+
+/// Splits `system` into whether it opens with [`PLAIN_SYSTEM_DIRECTIVE`] and the text after the directive.
+pub fn plain_system(system: &str) -> (bool, &str) {
+    system
+        .strip_prefix(PLAIN_SYSTEM_DIRECTIVE)
+        .map_or((false, system), |rest| (true, rest))
+}
+
+/// `BackendError::message` of a Pi run whose provider completed the response under a stop outside end, length, and tool use, such as a content filter, and so returned no answer.
+pub const PI_PROVIDER_STOP_MESSAGE: &str = "pi provider ended the response without an answer";
+
+/// Whether a `BackendError::message` says the provider itself ended the response without an answer. The same request meets the same stop again, so a caller with a bounded number of requests settles on the first one.
+pub fn is_provider_stop(message: &str) -> bool {
+    message
+        .strip_prefix(PI_PROVIDER_STOP_MESSAGE)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("; additionally "))
+}
+
 /// Whether a `BackendError::message` names a failure the model provider reported about the request's content, as opposed to one the host raised while preparing, launching, or supervising the harness, or one about the configuration.
 /// `ErrorClass::Permanent` covers all of these; a caller that reacts to the request's content needs the distinction, because a host or configuration failure recurs for any request until the environment changes.
 /// Only an OpenCode terminal carrying a status from `CONTENT_REJECTION_STATUSES` qualifies. A Pi `"error"` stop drops the provider's text, and an OpenCode terminal without a status keeps only a text classification whose default is `Permanent`, so neither separates a content refusal from an unknown model or an exhausted account.

@@ -36,6 +36,8 @@ pub const EIDNARA_PI_SUBAGENT_ENV: &str = "EIDNARA_PI_SUBAGENT";
 /// The variables carry only bounded numbers, never requested text.
 pub const MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV: &str = "EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS";
 pub const MODEL_EXECUTION_TEMPERATURE_ENV: &str = "EIDNARA_MODEL_EXECUTION_TEMPERATURE";
+/// Set to `1` for a request whose system text opens with `backend::PLAIN_SYSTEM_DIRECTIVE`; the bundled hook then gives the model the system text as the caller wrote it.
+pub const MODEL_EXECUTION_PLAIN_SYSTEM_ENV: &str = "EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM";
 
 /// Pi materializes the hook per run in an owner-only temporary file and loads it last.
 /// explicit extension.
@@ -449,9 +451,15 @@ async fn run_pi(
         Err(abort) => return abort_setup_with_dir(abort, dir, limits.termination_grace).await,
     };
     // `run_pi` writes caller-private system prompts to a private 0600 file instead of passing them through argv.
+    // A caller's directive to send its system text as written is read here and never reaches the harness; the hook receives it as an environment flag.
+    let plain_system = request
+        .system
+        .as_deref()
+        .is_some_and(|system| backend::plain_system(system).0);
     let system_prompt_write = match &request.system {
         None => Ok(None),
         Some(system) => {
+            let system = backend::plain_system(system).1;
             let mut write = std::pin::pin!(
                 dir.write_private_async("system-prompt.txt".to_owned(), system.as_bytes().to_vec())
             );
@@ -521,6 +529,12 @@ async fn run_pi(
         child_env.push((
             OsString::from(MODEL_EXECUTION_TEMPERATURE_ENV),
             OsString::from(temperature.to_string()),
+        ));
+    }
+    if plain_system {
+        child_env.push((
+            OsString::from(MODEL_EXECUTION_PLAIN_SYSTEM_ENV),
+            OsString::from("1"),
         ));
     }
     child_env.push((OsString::from("HOME"), dir.path().as_os_str().to_owned()));
@@ -804,6 +818,14 @@ fn rejects_temperature(provider_text: &str) -> bool {
     })
 }
 
+/// Whether Pi's error text says the provider completed the response under a stop Pi maps to no answer. Pi names the stop (`Provider stopped with: content_filtered`, `Provider finish_reason: content_filter`); a Pi from before that naming reports every such stop of a completed response as `An unknown error occurred`.
+fn names_provider_stop(provider_text: &str) -> bool {
+    let text = provider_text.trim();
+    text.starts_with("Provider stopped with: ")
+        || text.starts_with("Provider finish_reason: ")
+        || text == "An unknown error occurred"
+}
+
 /// The events of a completed answer: the model id the message reports, when it is a string within [`protocol::MAX_ANSWERING_MODEL_BYTES`], then the text.
 fn answer_events(
     message: &serde_json::Value,
@@ -864,6 +886,17 @@ fn assistant_message_terminal(
                 .get("errorMessage")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
+            if reason == "error" && names_provider_stop(provider_text) {
+                return Ok(Some((
+                    Vec::new(),
+                    BackendTerminal::Failed(BackendError {
+                        class: ErrorClass::Permanent,
+                        retry_after_secs: None,
+                        message: backend::PI_PROVIDER_STOP_MESSAGE.to_owned(),
+                        provider_code: None,
+                    }),
+                )));
+            }
             if reason == "error" && rejects_temperature(provider_text) {
                 return Ok(Some((
                     Vec::new(),
@@ -1060,6 +1093,45 @@ mod tests {
                 parse_pi_transcript(line(unnamed).as_bytes()).expect("a clean transcript");
             assert_eq!(events, std::slice::from_ref(&text));
         }
+    }
+
+    /// A response the provider completed under its own stop, with no answer, is reported as a provider stop in each spelling Pi gives it; a provider error of another kind keeps the plain error message.
+    #[test]
+    fn a_response_the_provider_stopped_is_reported_as_a_provider_stop() {
+        let terminal = |error_message: &str| {
+            let message = serde_json::json!({
+                "role": "assistant",
+                "stopReason": "error",
+                "errorMessage": error_message,
+                "content": [],
+            });
+            let Some((events, BackendTerminal::Failed(error))) =
+                assistant_message_terminal(&message, 1).expect("a known stop reason")
+            else {
+                panic!("expected a failed terminal");
+            };
+            assert!(events.is_empty());
+            error
+        };
+        for stopped in [
+            "Provider stopped with: content_filtered",
+            "Provider stopped with: guardrail_intervened",
+            "Provider finish_reason: content_filter",
+            "An unknown error occurred",
+        ] {
+            let error = terminal(stopped);
+            assert_eq!(error.class, ErrorClass::Permanent, "{stopped}");
+            assert!(backend::is_provider_stop(&error.message), "{stopped}");
+            assert!(!backend::is_provider_reported_failure(&error.message));
+        }
+        for other in ["model not found: prov/typo", "429 rate limit exceeded"] {
+            let error = terminal(other);
+            assert!(!backend::is_provider_stop(&error.message), "{other}");
+        }
+        assert!(backend::is_provider_stop(&format!(
+            "{}; additionally cleanup failed",
+            backend::PI_PROVIDER_STOP_MESSAGE
+        )));
     }
 
     /// The emitted message drops `errorMessage`, so a content refusal and a model the provider does not know arrive as the same string; neither can count against the chunk.

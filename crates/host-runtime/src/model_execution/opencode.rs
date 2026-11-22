@@ -155,7 +155,9 @@ fn inline_config(request: &BackendRequest, base_url: Option<&str>) -> String {
         agent["temperature"] = serde_json::json!(temperature);
     }
     if let Some(system) = &request.system {
-        agent["prompt"] = serde_json::Value::String(system.clone());
+        // The agent prompt is the caller's text; a directive that opens it is addressed to the adapter and is left out.
+        let system = crate::model_execution::backend::plain_system(system).1;
+        agent["prompt"] = serde_json::Value::String(system.to_owned());
     }
     let mut provider = serde_json::json!({
         "models": {
