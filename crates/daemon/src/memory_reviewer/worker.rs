@@ -92,7 +92,7 @@ pub struct ReviewSwitch {
     pub credential_fingerprints: BTreeMap<String, String>,
 }
 
-/// What the worker holds for projects under the review switch: the way to the host's model execution, whether another owner publishes claim descriptors, the claim consumer's position when this worker publishes them, and the switched projects seen bound in this process.
+/// What the worker holds for projects under the review switch: the way to the host's model execution, whether another owner publishes claim descriptors, and the claim consumer's position when this worker publishes them.
 #[derive(Default)]
 pub struct SwitchedReview {
     /// The factory host-routed requests connect through. Without one, a switched project is listed and left unreviewed.
@@ -100,8 +100,6 @@ pub struct SwitchedReview {
     /// Whether the search lifecycle owner runs the claim consumer; this worker runs it otherwise.
     pub claims_published: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     claims: Mutex<ClaimProgress>,
-    /// A switched project stays under review after its last route closes, for the life of the process: the user's consent is the switch, and a review started after a session ends needs no open session.
-    known: Mutex<BTreeMap<String, ProjectRoute>>,
     /// One pass runs at a time, whether the loop or a caller of [`Worker::drain`] started it.
     serial: tokio::sync::Mutex<()>,
 }
@@ -154,7 +152,7 @@ impl RejectionLatch {
     }
 }
 
-/// MODULE-authority bound routes grouped by authority project, newest binding first within each project's roots.
+/// The worker's roots with MODULE authority, grouped by authority project, newest binding first within each project's roots: every bound root, and each root under the review switch whose routes have closed.
 pub(crate) fn module_projects(
     store: &MemoryStore,
     bindings: &Mutex<RouteBindings>,
@@ -162,7 +160,7 @@ pub(crate) fn module_projects(
     let mut roots: Vec<(u64, SessionBinding)> = bindings
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .latest_per_root()
+        .review_roots()
         .into_values()
         .map(|(seq, binding)| (seq, binding.clone()))
         .collect();
@@ -319,19 +317,9 @@ impl Worker {
     /// One pass over every project the worker runs for: first the projects the owner's activation record admits, then the projects under the review switch. Returns how many runs settled. Passes of one worker run one at a time.
     pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         let _serial = self.switched.serial.lock().await;
-        // The owner's record speaks for the projects outside the switch. When every project the worker knows is switched, bound now or seen bound earlier, the record has nothing to open and the gate reads as the switched pass leaves it.
+        // The owner's record speaks for the projects outside the switch. When every project the worker runs for is switched, the record has nothing to open and the gate reads as the switched pass leaves it.
         let routes = (self.projects)();
-        let switched_only = if routes.is_empty() {
-            !self
-                .switched
-                .known
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-        } else {
-            routes.iter().all(|route| self.is_switched(route))
-        };
-        let recorded = if !switched_only {
+        let recorded = if routes.is_empty() || routes.iter().any(|route| !self.is_switched(route)) {
             self.recorded_pass(cancel).await
         } else {
             0
@@ -356,22 +344,12 @@ impl Worker {
         route.review.is_some() && self.switched.producers.is_some()
     }
 
-    /// The switched projects: those bound now, and those seen bound earlier in this process at the facts their last binding froze.
+    /// The switched projects: those bound now, and those whose routes have closed, at the facts the binding that last set the switch froze. A root rebound with the switch off leaves review at once.
     fn switched_routes(&self) -> Vec<ProjectRoute> {
-        let mut known = self
-            .switched
-            .known
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for route in (self.projects)() {
-            if self.is_switched(&route) {
-                known.insert(route.project.clone(), route);
-            } else {
-                // A root rebound with the switch off leaves review at once.
-                known.remove(&route.project);
-            }
-        }
-        known.values().cloned().collect()
+        (self.projects)()
+            .into_iter()
+            .filter(|route| self.is_switched(route))
+            .collect()
     }
 
     /// The pass over switched projects: claim descriptors are brought up to the Kernel's tip, each project's most suspicious unreviewed memories are enqueued, its Ready jobs run through the host's model execution, and each published proposal is treated as the project's apply mode says.
@@ -571,6 +549,10 @@ impl Worker {
                             };
                             match &applied {
                                 Applied::Left => {}
+                                // A proposal that keeps its memory is accepted in every mode and changes nothing worth a line.
+                                Applied::Accepted(settlement)
+                                    if settlement.effect == kernel::SettlementEffect::Unchanged => {
+                                }
                                 Applied::Refused(reason) => eprintln!(
                                     "daemon: memory_reviewer left a published proposal unapplied: {reason}"
                                 ),
