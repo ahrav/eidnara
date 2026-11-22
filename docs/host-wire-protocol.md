@@ -1047,9 +1047,10 @@ stored as the user's own statement: the extractor matched the clause it
 quoted, and the whole sentence can say the opposite. A sentence with a lead-in clause before a
 colon, such as `Quick correction: use tabs in every Makefile.`, is one sentence
 of the structure check and is stored whole with that clause when the extractor
-names the user as its speaker; the extractor names another source for a
-sentence such as `My teammate wrote: always rebase.`, whose words after the
-colon are the teammate's, and that sentence stays on explicit search. Quotations of one user message that
+names the user as its speaker. In a sentence of the same shape such as
+`My teammate wrote: always rebase.` the words after the colon are the
+teammate's; when the extractor names another source for it, that sentence
+stays on explicit search. Quotations of one user message that
 follow one another in a paragraph are joined into one quotation before any
 link of the proposals is judged, when the later one is whole statements under
 the statement rule below, or is but for a colon earlier in its paragraph, and starts
@@ -1222,7 +1223,7 @@ line. An inline code span runs from a run of backticks through the next run
 of the same length in its paragraph; an odd number of backslashes directly
 before an opening run makes its first backtick literal text, and an opening
 run that no later run of its paragraph closes is unclosed and spans to the
-paragraph's end. The message is read line by line, a line ending at a line feed with the carriage return directly before it. The first line that holds a carriage return of its own, a vertical
+paragraph's end. The message is read line by line: a line ends at a line feed, and a carriage return directly before that line feed belongs to the line's ending. The first line that holds a carriage return of its own, a vertical
 tab, a form feed, or a Unicode next-line, line, or paragraph separator cuts the message off: the paragraph that holds that line and every paragraph after the line are
 left out, whether the line stands in a paragraph, between paragraphs, or inside a fenced or tag block, since its lines cannot be told apart
 and a fence, a tag, or a colon line may hide in it. The paragraphs that end before that line are judged as usual. The quotation starts the
@@ -1289,8 +1290,8 @@ tool, or what an assistant said earlier, whether those words stand between
 quotation marks, after a lead-in, on pasted lines, or directly in the
 sentence. A value outside these two is a schema defect of its source's
 decision, and a `speaker` given as `null` reads as absent. The member is
-decoded as every member of a decision is: of a member the extractor writes
-twice the last value stands, so a decision has one speaker, and an answer
+decoded as every member of a proposal is: of a member a proposal writes
+twice the last value stands, so each proposal has one speaker, and an answer
 whose JSON a generic reader cannot hold, such as a number out of range, is
 a malformed document and fails whole. Only the value
 `user` attributes a quotation to the user: a quotation with `speaker` `other`
@@ -1302,22 +1303,28 @@ widening rule, and takes no place in a run of joined sentences, so a copy of
 its stretch joins none either. The proposals of one source that quote a
 common stretch of its message carry one speaker, settled before sentences
 are joined and before any link is judged, whatever category and targets
-they name: a proposal that names `user` and whose quotation, read without
-its edge whitespace, shares text at any of its occurrences in the message,
-occurrences that overlap one another included, with an occurrence of the
+they name. Each quotation is compared without its edge whitespace, at every
+occurrence in the message, occurrences that overlap one another included: a
+proposal that names `user` and whose quotation shares text with the
 quotation of a proposal that names `other` or no speaker is read as
 `other`, and the rule repeats until no proposal changes, so quotations that
-overlap in a chain end with one speaker. A quotation is therefore the
-user's only when every proposal that quotes part of it names the user. The
-quoted stretch has one attribution; the rule above for memories that share
-a category and quotation still keeps one fact for each replacement target
-they name, each under that attribution, and a fact frozen from proposals
-of which one named a speaker and another none carries the named one. The
+overlap in a chain are settled together. A quotation is therefore the
+user's only when every proposal that quotes part of it names the user: the
+proposals of one stretch are the user's together or not at all. The rule
+settles that one question and leaves a proposal that named no speaker with
+none. At the collapse of memories that share a category and quotation
+(above), the memories keep one fact for each distinct `replaces` target
+that survived the link checks, and one fact when none survived; such facts
+are none of them the user's when one of the proposals named another speaker
+or none, and each records the speaker of the memories joined into it,
+`other` when one of them carried a speaker and they did not all carry
+`user`, and none when none of them carried one. The
 widening rule leaves a cut quotation as proposed when the sentence it would
 widen to holds, at any place the message has that sentence, text that a
 proposal of the source attributes to another speaker or to none, and a run
 of sentences is joined only when the joined statement, the text between its
-sentences and their closing marks included, holds no such text. A
+sentences and their closing marks included, holds no such text at any place
+the message has the joined words. A
 captured fact's rationale holds the value under `speaker` when its proposal
 carried one. A `speaker` on a proposal of an assistant source is stored in
 the same way and changes nothing. The attribution is a model's reading and

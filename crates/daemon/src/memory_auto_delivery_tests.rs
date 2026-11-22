@@ -2743,7 +2743,7 @@ async fn proposals_that_disagree_on_the_speaker_of_one_clause_write_one_labeled_
             assert!(records.is_empty(), "{records:?}");
             let rows = memory_rows(&handler, &project);
             assert_eq!(rows.len(), 1);
-            assert_ne!(rows[0].3["speaker"], "user", "{:?}", rows[0].3);
+            assert_eq!(rows[0].3["speaker"], "other", "{:?}", rows[0].3);
             assert_eq!(rows[0].3["quote"], clause);
         }
     }
@@ -2886,9 +2886,11 @@ async fn a_correction_whose_copy_names_another_speaker_contests_the_statement_it
             .find(|line| line.contains(&stated(THURSDAY)))
             .expect("the approved statement is delivered");
         assert!(
-            line.contains("; contested ") && line.contains(&correction.0),
+            line.contains("; contested ")
+                && line.ends_with(&format!(" by {}: \"{}\")", correction.0, stated(TUESDAY))),
             "{block}"
         );
+        assert_eq!(correction.3["speaker"], "other", "{:?}", correction.3);
     }
 }
 
@@ -5819,9 +5821,10 @@ async fn a_correction_replaces_an_approved_statement_only_when_quoted_whole() {
 /// A clause before a colon belongs to its sentence. A cut quotation after
 /// the colon that the extractor attributes to the user is widened to the
 /// whole sentence, so the stored statement holds the clause that introduces
-/// it. In a sentence of the same shape that reports what a teammate wrote,
-/// the words after the colon are the teammate's: the extractor names
-/// another source, and the quotation stays as quoted on explicit search.
+/// it. A sentence of the same shape can report what a teammate wrote, so
+/// the words after the colon are the teammate's. When the extractor names
+/// another source for it, as the second case's fake extractor does, the
+/// quotation stays as quoted on explicit search.
 #[tokio::test]
 async fn a_clause_before_a_colon_stays_in_the_stored_statement() {
     let clause = "always rebase before merging.";
