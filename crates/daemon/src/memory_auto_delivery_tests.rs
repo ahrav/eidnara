@@ -1348,11 +1348,15 @@ async fn a_statement_that_replaced_two_observations_records_the_earlier_commit()
 async fn a_statement_stored_as_two_facts_is_judged_as_one_replacement() {
     let echo = "Understood: release branches are cut every Thursday.";
     let unclosed = TUESDAY.trim_end_matches('.');
+    // The message opens with a space, which one of the quotations keeps.
+    let spaced = format!(" {TUESDAY}");
     for (echo_first, echo_quote) in [
         (true, TUESDAY),
         (false, TUESDAY),
         (true, unclosed),
         (false, unclosed),
+        (true, spaced.as_str()),
+        (false, spaced.as_str()),
     ] {
         let case = format!("echo first {echo_first}, quote {echo_quote:?}");
         let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
@@ -1368,7 +1372,7 @@ async fn a_statement_stored_as_two_facts_is_judged_as_one_replacement() {
             &handler,
             SECOND,
             "s2",
-            &[("m3", "user", TUESDAY)],
+            &[("m3", "user", spaced.as_str())],
             |_, existing| {
                 let statement = ids_containing(existing, "User stated: Release branches");
                 let echoed = ids_containing(existing, "Understood");
@@ -1498,64 +1502,115 @@ async fn a_replacement_verdict_is_per_quotation_and_its_record_per_fact() {
     )
     .unwrap();
     let kind_of = |id: &str| read.decisions[id].decision_kind.clone();
-    let mut records: Vec<(String, String, Value)> = rows
+    // What each stored fact holds, by what the test made of it: the two
+    // rule facts of the first quotation name a report, the naming fact
+    // names none, and the second quotation replaced the user's statement.
+    let replaced_a_report =
+        |kind: &str, summary: &str| kind == "PROJECT_RULES" && summary == stated(TUESDAY);
+    let earlier = json!({"recorded_seq": older_seq});
+    let mut records: Vec<(String, String, Option<Value>)> = rows
         .iter()
         .map(|(id, summary, _, rationale)| {
             (
                 kind_of(id),
                 summary.clone(),
-                rationale
-                    .get("replaces_observation")
-                    .cloned()
-                    .unwrap_or(Value::Null),
+                rationale.get("replaces_observation").cloned(),
             )
         })
         .collect();
     records.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
-    let earlier = json!({"recorded_seq": older_seq});
     assert_eq!(
         records,
         [
-            ("NAMING".to_string(), stated(TUESDAY), Value::Null),
-            ("PROJECT_RULES".to_string(), stated(yarn), Value::Null),
+            ("NAMING".to_string(), stated(TUESDAY), None),
+            ("PROJECT_RULES".to_string(), stated(yarn), None),
             (
                 "PROJECT_RULES".to_string(),
                 stated(TUESDAY),
-                earlier.clone()
+                Some(earlier.clone())
             ),
-            ("PROJECT_RULES".to_string(), stated(TUESDAY), earlier),
+            ("PROJECT_RULES".to_string(), stated(TUESDAY), Some(earlier)),
         ],
         "the reports and the pnpm statement are retired, and four facts stand"
     );
+    // One delivered line for each stored fact: the facts that replaced a
+    // report carry the day they were stated and the day of the earlier
+    // report, and the other two are delivered as stated.
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
         .expect("the corrections are delivered");
-    let lines_of = |statement: &str| -> Vec<&str> {
-        block
-            .lines()
-            .filter(|line| line.contains(statement))
-            .collect()
-    };
-    let tuesday = lines_of(&stated(TUESDAY));
-    assert_eq!(tuesday.len(), 3, "{block}");
+    let recorded_day = commit_day(&handler, older_seq);
+    let mut expected: Vec<String> = rows
+        .iter()
+        .map(|(id, summary, stated_seq, _)| {
+            if replaced_a_report(&kind_of(id), summary) {
+                format!(
+                    "{id}: {summary} (stated {}; it replaces a value recorded {recorded_day} that the user had not stated)",
+                    commit_day(&handler, *stated_seq)
+                )
+            } else {
+                format!("{id}: {summary}")
+            }
+        })
+        .collect();
+    expected.sort_unstable();
+    let mut delivered: Vec<&str> = block
+        .lines()
+        .filter(|line| line.starts_with("mem_"))
+        .collect();
+    delivered.sort_unstable();
+    assert_eq!(delivered, expected, "{block}");
+}
+
+/// The record belongs to the user's statement. A clause the extractor cut
+/// from a sentence of the user is no statement of the user's: it replaces
+/// the assistant's report it names, is stored labeled, and holds no record,
+/// where the whole sentence that replaces the same report holds one.
+#[tokio::test]
+async fn a_cut_quotation_that_replaced_a_report_holds_no_record() {
+    let clause = "the release cut moved from Thursday to Tuesday";
+    let message = format!("Quick correction: {clause}.");
+    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+    capture(
+        &handler,
+        FIRST,
+        "s1",
+        &[("m1", "assistant", REPORTED_THURSDAY)],
+        |text, _| vec![fact(text)],
+    )
+    .await;
+    let report = format!("Assistant reported: {REPORTED_THURSDAY}");
+    stored(&handler, &project, &report);
+    capture(
+        &handler,
+        SECOND,
+        "s2",
+        &[("m2", "user", &message)],
+        |_, existing| {
+            let targets = ids_containing(existing, "release checklist");
+            assert_eq!(targets.len(), 1, "{existing:?}");
+            vec![Extracted {
+                quote: clause.to_string(),
+                replaces: targets,
+                content: Some("The release cut moved from Thursday to Tuesday."),
+                ..Extracted::default()
+            }]
+        },
+    )
+    .await;
+    let rows = memory_rows(&handler, &project);
+    assert_eq!(rows.len(), 1, "the report is retired: {rows:?}");
+    let (_, summary, _, rationale) = &rows[0];
+    assert_eq!(rationale["quote"], clause, "{rationale}");
     assert_eq!(
-        tuesday
-            .iter()
-            .filter(|line| line.ends_with("that the user had not stated)"))
-            .count(),
-        2,
-        "{block}"
+        rationale.get("replaces_observation"),
+        None,
+        "{summary}: {rationale}"
     );
     assert_eq!(
-        tuesday
-            .iter()
-            .filter(|line| line.ends_with(&stated(TUESDAY)))
-            .count(),
-        1,
-        "the fact that names no target is delivered as stated: {block}"
+        explicit_search(&handler, (THIRD, "s3"), &project).await,
+        [(summary.clone(), "labeled".to_string())],
+        "the clause is stored labeled"
     );
-    let yarn_lines = lines_of(&stated(yarn));
-    assert_eq!(yarn_lines.len(), 1, "{block}");
-    assert!(yarn_lines[0].ends_with(&stated(yarn)), "{block}");
 }
 
 /// A plan of the user that replaced an assistant's report holds the record,

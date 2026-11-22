@@ -3903,16 +3903,25 @@ pub(crate) fn replaced_observation_commit(decision: &kernel::DecisionRow) -> Opt
         .map(|replaced| replaced.recorded_seq)
 }
 
+/// A quotation as the facts of one statement share it: the words the
+/// extractor quoted, without edge whitespace and without one closing `.` or
+/// `!`, which the statement rule reads as the same sentence. Every other
+/// character stays, an attribution label the user typed among them.
+fn quotation_key(quote: &str) -> &str {
+    let quote = quote.trim();
+    quote.strip_suffix(['.', '!']).unwrap_or(quote)
+}
+
 /// For each fact of the plan, by index, the record of the observation it
 /// replaced. A fact holds one when it is the user's statement, names a
 /// replaced target, and every target the facts of its quotation name is an
 /// observation: a fact the Kernel serves as unapproved that is no quotation
 /// capture stored under the `User stated: ` label, such as an assistant's
 /// report or an agent's note. The record names the commit of the earliest of
-/// those observations. Facts share a quotation when their quotations are
-/// one [`statement_text`], and the targets of a quotation are judged
-/// together before the plan writes any fact, so one statement that the
-/// extractor stored as two facts is judged as one.
+/// those observations. Facts share a quotation when their quotations have
+/// one [`quotation_key`], and the targets of a quotation are judged together
+/// before the plan writes any fact, so one statement that the extractor
+/// stored as two facts is judged as one.
 fn replaced_observations(
     envelope: &kernel::Envelope<'_>,
     output: &PreparedCapture,
@@ -3926,7 +3935,7 @@ fn replaced_observations(
         memory.replaces.iter().chain(&memory.also_replaces)
     }
     for memory in &output.memories {
-        let quotation = statement_text(&memory.quote);
+        let quotation = quotation_key(&memory.quote);
         for target in targets(memory) {
             let served = envelope.served_rows_for(&[target.as_str()], None)?;
             let Some(row) = served.get(target.as_str()) else {
@@ -3955,7 +3964,7 @@ fn replaced_observations(
         .iter()
         .zip(stated)
         .map(|(memory, statement)| {
-            let recorded_seq = earliest.get(statement_text(&memory.quote)).copied()??;
+            let recorded_seq = earliest.get(quotation_key(&memory.quote)).copied()??;
             (statement.stated && targets(memory).next().is_some())
                 .then_some(ReplacedObservation { recorded_seq })
         })
@@ -10789,7 +10798,8 @@ mod tests {
     /// An approved memory another writer stored, whose rationale reads as
     /// capture's work in progress, is no work in progress of capture's. A
     /// statement that ends with its task and names it meets a conflict, and
-    /// the memory stays as it was.
+    /// the memory stays as it was. A lasting statement replaces it and holds
+    /// no record of a replaced observation: the memory was approved.
     #[test]
     fn a_statement_that_ends_with_its_task_ends_only_work_in_progress_capture_wrote() {
         let dir = tempfile::tempdir().unwrap();
@@ -10957,6 +10967,35 @@ mod tests {
             .expect("the correction is stored");
         let rationale: Value = serde_json::from_str(&correction.payload.rationale).unwrap();
         assert_eq!(rationale.get(REPLACES_OBSERVATION), None, "{rationale}");
+    }
+
+    /// Facts of one statement share a quotation key: edge whitespace and one
+    /// closing `.` or `!` are dropped, and every other character the user
+    /// typed stays.
+    #[test]
+    fn a_quotation_key_keeps_every_word_the_user_typed() {
+        let sentence = "The release cut moved to Tuesday";
+        for same in [
+            "The release cut moved to Tuesday.",
+            "The release cut moved to Tuesday!",
+            "  The release cut moved to Tuesday.\n",
+        ] {
+            assert_eq!(quotation_key(same), sentence, "{same:?}");
+        }
+        for other in [
+            "User stated: The release cut moved to Tuesday.",
+            "Assistant reported: The release cut moved to Tuesday.",
+            "The release cut moved to Tuesday...",
+            "The release cut moved to Tuesday?",
+            "the release cut moved to Tuesday.",
+        ] {
+            assert_ne!(quotation_key(other), sentence, "{other:?}");
+        }
+        // The stored-summary comparison drops the labels capture writes.
+        assert_eq!(
+            statement_text("User stated: The release cut moved to Tuesday."),
+            sentence
+        );
     }
 
     /// A stored plan whose memory names further targets beside no

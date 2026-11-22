@@ -1590,8 +1590,10 @@ fact under `replaces` or `also_replaces` and every fact the plan's facts of
 its quotation name there is an observation: a fact the Kernel serves as
 unapproved that is no quotation capture stored under the `User stated: `
 label, which an assistant's report and a memory the host memory tool wrote
-are. The named facts of a quotation are judged together before the plan
-writes any fact, so one statement stored as two facts is judged as one. The
+are. Two facts share a quotation when their quotations are equal once edge
+whitespace and one closing `.` or `!` are dropped. The named facts of a
+quotation are judged together before the plan writes any fact, so one
+statement stored as two facts is judged as one. The
 record is an object with `recorded_seq`, the commit sequence that recorded
 the earliest of those observations. A statement that names no fact holds no
 record. A statement whose quotation names a fact the Kernel serves as
