@@ -1002,7 +1002,7 @@ prefixed with `User stated:` for a user source and `Assistant reported:` for
 any other; a Pi row under the reserved `eidnara:` id space is an assistant
 source whatever role it carries.
 The model's paraphrase is not published. A cut quotation of a user source that
-reaches capture under its own message id and lies inside one plain-prose
+reaches capture under its own message id, carries `speaker` `user` (below), and lies inside one plain-prose
 paragraph is first widened to the whole sentence of that paragraph that
 contains it, or the sentences when the quotation itself spans more than one,
 when the widened text meets the statement rule below and fits one
@@ -1192,72 +1192,37 @@ and hashed ids, never qualifies, and neither does a `pi` source whose id is
 in the `eidnara:` space Pi reserves for the rows it derives or whose text has
 the form Pi gives a bash execution: `Ran`, the command between backticks, and
 on the next line a fence of three backticks or `(no output)`); its stored text is `User stated: ` followed
-by a verbatim quotation of that message; and the quotation is one or more
-whole sentences of a plain-prose paragraph. Plain prose leaves out code fences
+by a verbatim quotation of that message; the extractor names the user as the
+speaker of that quotation (`speaker`, below); and the quotation is one or more
+whole sentences of a plain-prose paragraph. The two checks divide the work by
+what each can decide. Who is speaking in a stretch of a user's message, the
+user or a source the user passes on, is a matter of reading the message, so
+the extractor, which reads it, answers that, and the daemon takes a quotation
+as the user's only on the answer `user`. Where the quotation stands in the
+message is a matter of structure, so the daemon checks that deterministically
+and approves no quotation that fails it, whatever speaker the extractor names.
+A quotation mark, an apostrophe, and a mark of measure are characters of a
+sentence like any other to the structure check: a user writes them around a
+literal (`Prefix every test name with 'it_'.`), in a possessive, and after a
+number, and they do not show who is speaking. Plain prose leaves out code fences
 (closed by a run of the opener's character at least as long), each block a
 line holding only a markup tag opens through the last line closing that tag
 (such as `<context_researcher-augmentation>`), every paragraph holding a list
 item (a line whose first word is a bullet, one character that is no letter
 or digit such as `-`, `*`, `+`, `•`, or a dash; an ordinal, digits or numeric
 letters of any script closed by `.` or `)` or wrapped in parentheses, or one
-letter closed by `)` or wrapped; or an enclosed numeral such as `①`), a heading, a blockquote, an indented code line (one that begins with four spaces, or with a tab after at most three spaces), a double quotation mark
-of any script, a single opening quotation mark that starts a word, or a line
+letter closed by `)` or wrapped; or an enclosed numeral such as `①`), a heading, a blockquote, an indented code line (one that begins with four spaces, or with a tab after at most three spaces), or a line
 ending in `:` (also after closing `*` or `_`, and the fullwidth colon), every paragraph
-after such a line, every paragraph after one whose quotations do not close
-in it or that holds an unclosed inline code span, every paragraph after the first one that holds a double quotation mark or a single opening mark when the quotations of any paragraph of the message do not close in it, and
+after such a line, every paragraph after one that holds an unclosed inline code span, and
 every paragraph that a fence or tag line borders without a blank
 line. An inline code span runs from a run of backticks through the next run
 of the same length in its paragraph; an odd number of backslashes directly
 before an opening run makes its first backtick literal text, and an opening
 run that no later run of its paragraph closes is unclosed and spans to the
-paragraph's end. A double quotation mark inside an inline code span is code to the pairing rules that follow: it opens and closes no quotation, and a mark beside it reads it as any other character. Its paragraph still holds a double quotation mark, so the paragraph is left out and can be the first such paragraph of the message. A paragraph's double quotations close in it when every mark of each
-style (straight, curly, angle, corner, or ornamental), read in order, takes
-its turn and none is left open: a mark after the line start, whitespace, an
-opening bracket, or a mark that opened, and before a character that is not
-whitespace, opens, and its style has no quotation open; a mark after a
-letter, one of `.`, `,`, `!`, `?`, `;`, `)`, `]`, or a mark that closed, with
-no letter or digit after it, closes, and its style has one open. A glyph
-every script writes on one side of a quotation, such as `「` or `」`, takes
-that side only. A mark of one style closes no
-quotation of another. A second opening mark inside an open quotation, a mark
-in any other place, and a mark after a number or a letter that is a number,
-which may be an inch or seconds sign, leave the paragraph's quotations
-unknown. A paragraph that holds a carriage return inside a line, a vertical
+paragraph's end. A paragraph that holds a carriage return inside a line, a vertical
 tab, a form feed, or a Unicode next-line, line, or paragraph separator is
 left out with every paragraph after it, since its lines cannot be told apart
-and a fence, a tag, or a colon line may hide in it. A quotation that
-crosses paragraphs is not tracked to its end: every paragraph after the one
-that leaves it open or unknown is left out. A paragraph
-that opens a single quotation with no closing single mark leaves out every
-later paragraph. Two ASCII apostrophes with nothing between them inside an
-inline code span are an empty string literal when they are the span's whole
-content between its opening and closing runs, as in `` `''` ``, or when a
-`,`, `)`, `]`, or `}` follows them and
-a character other than a letter or digit precedes them, as in
-`` `.get('', 0)` ``, and are code to this rule; every other single mark
-inside a span is read as a mark of the prose, since a backtick of the user's
-can pair with one inside quoted text and the span can then hold the mark
-that opens or closes a quotation. An apostrophe, `'` or `’`, directly after
-a span's closing run joins a suffix to the span when `s`, `d`, `ll`, or `ve`
-follows it and that suffix ends at the line's end or before a character
-other than a letter or digit, as in `` `Parser`'s ``; before any other text,
-as in `` `README`'Hi team. ``, the mark is read as a mark of the prose, since
-a quotation can open directly after a span. An empty literal and a suffix
-apostrophe open and close
-no quotation, and the suffix apostrophe starts no word, so it leaves its
-paragraph free of a single opening mark. A single mark inside a span that
-follows a character other than a letter or digit, the first mark of an
-empty literal included, still makes its own paragraph one that holds a
-single opening mark, so that paragraph is left out as one with a double
-mark inside a span is; the empty literal keeps the paragraphs after it in
-prose. A single mark closes a quotation of one word when it ends a
-word after a letter other than `s` or after `.`, `,`, `!`, or `;`; a mark
-after `s`, a number, or a letter that is a number, which may be a plural
-possessive or a feet mark, a mark after a bracket, the low-9 mark `‚`, and a
-word-final mark inside a quotation of several words, which may be an elision,
-close nothing, so such a quotation stays open. A closing mark inside quoted text passes these rules as the mark that closes its quotation, and the mark that closes the quotation then fails them in a later paragraph. So when any paragraph of the message leaves a double or single quotation open or unknown, every paragraph after the first one that holds a double quotation mark or a single opening mark is left out.
-The rule reads marks by their place and cannot tell every arrangement of
-symmetric marks apart; where it cannot, the text is left out. The quotation starts the
+and a fence, a tag, or a colon line may hide in it. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, whitespace or the
@@ -1307,10 +1272,39 @@ for an edge the extractor chose, and the words widening adds hold no period
 except between two ASCII letters or digits; neither boundary falls inside
 an inline code span, so a quotation may hold a whole span; and its trimmed text holds a letter or digit and contains
 no question mark (`?`, `？`, `؟`, `‽`, `⁇`, `⁈`, `⁉`, `﹖`; the list is
-finite), contains no double
-quotation mark, does not start with a backtick, and neither starts nor closes
-a single quotation. The rule reads sentence ends in `.` and `!` only, so text
-in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source may carry `lifetime`, the extractor's class of
+finite) and does not start with a backtick. The rule reads sentence ends in `.` and `!` only, so text
+in a script that ends sentences otherwise is judged a paragraph at a time. A proposal of a user source carries `speaker`, the extractor's reading of
+whose words its quotation holds, read for the whole sentence the quotation
+may be stored as: `user`, the user speaks for themselves in every word of it,
+which includes a sentence that mentions a name, a value, an identifier, a
+path, a flag, a key, or a label between quotation marks or backticks, and a
+sentence in which the user names a source and gives what it requires in the
+user's own words; or `other`, the quotation holds words the user passes on
+from another source, such as what another person said or wrote, an excerpt
+of a document, an issue, or a web page, the output or the error message of a
+tool, or what an assistant said earlier, whether those words stand between
+quotation marks, after a lead-in, on pasted lines, or directly in the
+sentence. A value outside these two is a schema defect of its source's
+decision, and a `speaker` given as `null` reads as absent. Only the value
+`user` attributes a quotation to the user: a quotation with `speaker` `other`
+or with none is stored as a labeled memory for explicit search under the
+rules of every labeled memory, has no statement record, replaces no fact
+served on `auto_inject` (each such target becomes a contest candidate, as
+for a quotation that fails the structure check), is left as proposed by the
+widening rule, and takes no place in a run of joined sentences, so a copy of
+its stretch joins none either. When proposals of one source that share a
+category and quotation freeze as one fact, that fact's speaker is `user`
+only when each of them names `user`, `other` when any of them names a
+speaker and they do not all name `user`, and absent when none names one. A
+captured fact's rationale holds the value under `speaker` when its proposal
+carried one. A `speaker` on a proposal of an assistant source is stored in
+the same way and changes nothing. The attribution is a model's reading and
+can be wrong in either direction: a quotation of the user's own read as
+`other` stays on explicit search, and words the user passed on read as
+`user` are approved when they also pass the structure check and the lifetime
+check. A user sees an approved statement in the block with the label
+`User stated:` and its exact words, and a later statement of the user
+replaces it (below). A proposal of a user source may carry `lifetime`, the extractor's class of
 how long the statement holds: `lasting`, a rule, preference, convention,
 decision, constraint, or stable fact that still guides a different task in a
 later session; `request`, an instruction the turn at hand answers, such as an
@@ -1341,14 +1335,14 @@ settled (below), is an instruction for one occasion: it is stored with
 the fact it contests under that rule's conditions. A `current_work` fact frozen with no such contest,
 because it names none, contests only labeled facts, or another fact of its
 source or batch holds the contest, keeps its class. A frozen plan carries
-plan version 2, which names the classes as this section defines them.
+plan version 3, which names the classes and the speaker of each quotation as this section defines them.
 A plan of another version meets the recoveries above in publication's
 order: frozen bytes that do not decode are `invalid_preparation`; a decoded
 plan whose receipt the Kernel holds for the same source and the same frozen
 bytes replays it, which completes its source; a receipt for the source
 under other bytes is `reconciliation_conflict`; and a decoded plan with no
 receipt is refused as invalid input (`kernel_write_refused`), so a class an
-earlier build froze is never written under these rules. A captured fact's rationale
+earlier build froze, and a statement an earlier build would approve by a rule that read its quotation marks, is never written under these rules. A captured fact's rationale
 holds the class under `lifetime` when its proposal carried one. When proposals of
 one source that share a category and quotation freeze as one fact, that fact
 carries the class that holds longest among the proposals joined into it, in

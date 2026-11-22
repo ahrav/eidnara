@@ -123,7 +123,12 @@ describe("bedrock peer", () => {
             {
                 message_id: "u1",
                 memories: [
-                    { category: "CONFIG_VALUES", content: CAPTURED_FACT, quote: CAPTURED_FACT },
+                    {
+                        category: "CONFIG_VALUES",
+                        content: CAPTURED_FACT,
+                        quote: CAPTURED_FACT,
+                        speaker: "user",
+                    },
                 ],
             },
             { message_id: "a1", memories: [] },
