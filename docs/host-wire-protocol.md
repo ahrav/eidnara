@@ -1401,11 +1401,13 @@ positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
 and leaves out facts captured from that session's own messages. The block's
 last line, before its closing tag, is one fixed sentence: it says that the
-statements above it were said in earlier sessions of the project, that memory
-holds what was said to it, and that conventions kept in the repository's
-files stay in those files. The sentence is charged to the budget with the
-block's tags, and the block the summarizer's prompt carries holds no such
-line. A session's own facts
+lines above it are the project's memory, recorded in its sessions, that the
+memory holds what was said or recorded there, and that conventions kept in
+the repository's files stay in those files. The sentence is charged to the
+budget with the block's tags. The block the summarizer's prompt carries
+holds the same selected facts and no such line. A session whose m0 an
+earlier build composed receives the sentence at its next recomposition. A
+session's own facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
 they take no place from another session's facts. The read loads at most
 eight pages of that size, the payloads of up to 64 MiB of a session's own

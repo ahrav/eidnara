@@ -327,24 +327,6 @@ async fn a_user_statement_reaches_the_next_session_and_a_correction_replaces_it(
     );
 }
 
-/// A later session's block ends with the sentence that says its lines were
-/// said in earlier sessions, on the line before the closing tag.
-#[tokio::test]
-async fn the_delivered_block_ends_with_the_sentence_about_what_it_holds() {
-    let (handler, _store, _dir, _project) = delivery_handler(capture_config()).await;
-    capture(&handler, FIRST, "s1", &[("m1", "user", PNPM)], |_, _| {
-        vec![fact(PNPM)]
-    })
-    .await;
-    let served = serve(&handler, SECOND, "s2").await;
-    let block = project_memory_block(&served).expect("the statement is delivered");
-    assert!(block.contains(&stated(PNPM)), "{block}");
-    assert!(
-        block.ends_with(&format!("\n{}\n", memory_render::PROJECT_MEMORY_NOTE)),
-        "{block}"
-    );
-}
-
 fn live_statement_records(handler: &Handler, project: &Path) -> Vec<String> {
     let read = kernel_routes::read::read_visible(
         &handler.kernel.kernel_store().unwrap(),
@@ -8696,4 +8678,27 @@ async fn a_widened_statement_takes_the_approved_copy_of_its_own_delivery_class()
         };
         the_rule_outlives_the_plan(&handler, &project, (rule, plan), done, &case).await;
     }
+}
+
+/// A later session's block ends with the sentence about what the block
+/// holds, once, on the line before the closing tag.
+#[tokio::test]
+async fn the_delivered_block_ends_with_the_sentence_about_what_it_holds() {
+    let (handler, _store, _dir, _project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", PNPM)], |_, _| {
+        vec![fact(PNPM)]
+    })
+    .await;
+    let served = serve(&handler, SECOND, "s2").await;
+    let block = project_memory_block(&served).expect("the statement is delivered");
+    assert!(block.contains(&stated(PNPM)), "{block}");
+    assert!(
+        block.ends_with(&format!("\n{}\n", memory_render::PROJECT_MEMORY_NOTE)),
+        "{block}"
+    );
+    assert_eq!(
+        block.matches(memory_render::PROJECT_MEMORY_NOTE).count(),
+        1,
+        "{block}"
+    );
 }

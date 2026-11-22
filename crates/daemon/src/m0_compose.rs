@@ -16,7 +16,7 @@ use crate::decay_render::{
     PRESSURE_WINDOW, TokenCount, counting, fold_plan, m0_block, render_owned_rows,
 };
 use crate::memory_render::{
-    CURRENT_WORK_SECTION, M0Inputs, PROJECT_MEMORY_NOTE, is_positive_memory_category,
+    CURRENT_WORK_SECTION, M0Inputs, delivered_memory_frame, is_positive_memory_category,
     push_category_open, render_delivered_memory_block, render_m0_counted, render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
@@ -82,9 +82,7 @@ pub(crate) fn trim_memories_to_budget(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> (Vec<CanonicalMemory>, u64) {
     let budget = budget_tokens.max(1.0);
-    let wrapper = estimate_tokens(&format!(
-        "<project-memory>\n{PROJECT_MEMORY_NOTE}\n</project-memory>"
-    ));
+    let wrapper = estimate_tokens(&delivered_memory_frame());
     if wrapper as f64 > budget {
         return (Vec::new(), 0);
     }
@@ -320,9 +318,7 @@ mod trim_memories_tests {
         let budget = budget_tokens.max(1.0);
         let mut selected = Vec::new();
         let mut categories = std::collections::HashSet::<&str>::new();
-        let mut used = estimate_tokens(&format!(
-            "<project-memory>\n{PROJECT_MEMORY_NOTE}\n</project-memory>"
-        )) as f64;
+        let mut used = estimate_tokens(&delivered_memory_frame()) as f64;
         for memory in memories
             .iter()
             .filter(|memory| is_positive_memory_category(&memory.category))
@@ -356,9 +352,7 @@ mod trim_memories_tests {
             3,
             "the positive rows are admitted under a generous budget"
         );
-        let wrapper = bytes(&format!(
-            "<project-memory>\n{PROJECT_MEMORY_NOTE}\n</project-memory>"
-        )) as f64;
+        let wrapper = bytes(&delivered_memory_frame()) as f64;
         for budget in [
             f64::NAN,
             -3.0,
@@ -562,8 +556,10 @@ mod trim_memories_tests {
         #[test]
         fn skip_and_continue_delegation_matches_the_replaced_loop(
             rows in proptest::collection::vec((0u8..3, 1usize..40), 0..12),
-            budget in prop_oneof![Just(f64::NAN), -50.0f64..400.0],
+            room in prop_oneof![Just(f64::NAN), -100.0f64..366.0],
         ) {
+            // The room above the delivered frame's charge, so the cases follow the note's length.
+            let budget = delivered_memory_frame().len() as f64 + room;
             let memories: Vec<CanonicalMemory> = rows
                 .iter()
                 .map(|(category, len)| {
