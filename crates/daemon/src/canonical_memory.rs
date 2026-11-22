@@ -204,7 +204,7 @@ impl CanonicalMemoryRead {
 ///
 /// Capture rows whose rationale names `session_id` are left out: the reading session holds those statements in its own conversation. They are judged before the row and byte caps apply (see [`read_other_sessions`]), so they spend neither cap, and the token budget trims what remains.
 ///
-/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of the project's verdict logs one line naming the project's digest.
+/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`, and so does a failed read of [`show_contests`], which rewrites the delivered line of a statement that carries a contest or a replacement record: the read of the contesting observations, and the commit-time reads of the statements it rewrites. A commit the log holds no time for renders `unknown date` and withholds nothing. Each change of the project's verdict logs one line naming the project's digest.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
@@ -1233,7 +1233,7 @@ mod tests {
     /// its contesting observation is served the line is the contested line
     /// alone; once that observation is served no longer the replacement
     /// line returns. A statement with no record keeps its stored text, and
-    /// a failed commit-time read fails the pass.
+    /// the line's builder returns a failed commit-time read to its caller.
     #[test]
     fn a_marked_statement_is_dated_from_its_first_commit_and_the_replaced_one() {
         let capture_row = |object_id: &str| {
@@ -1319,8 +1319,32 @@ mod tests {
                 "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded unknown date that the user had not stated)"
             )
         );
-        let failed = |_: i64| Err(kernel::KernelError::CorruptCanonicalRow);
-        assert!(marked_line(stored, &marked[0], None, failed).is_err());
+        // Each line reads two commit times, and a failure of either read is
+        // returned: the statement's first commit and the replaced commit for
+        // the replacement line, the statement's first commit and the row's
+        // own for the contested line.
+        for (mark, observation, reads) in [
+            (&marked[0], None, [4, 2]),
+            (&marked[1], Some("Assistant reported: 300."), [4, 9]),
+        ] {
+            for failing in reads {
+                let one_fails = |seq: i64| {
+                    if seq == failing {
+                        Err(kernel::KernelError::CorruptCanonicalRow)
+                    } else {
+                        Ok(Some(seq * day))
+                    }
+                };
+                assert!(
+                    matches!(
+                        marked_line(stored, mark, observation, one_fails),
+                        Err(kernel::KernelError::CorruptCanonicalRow)
+                    ),
+                    "{}: commit {failing}",
+                    mark.statement
+                );
+            }
+        }
         let unmarked = Marked {
             statement: "contested-alone".to_string(),
             row_seq: 9,

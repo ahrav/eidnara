@@ -1341,40 +1341,146 @@ async fn a_statement_that_replaced_two_observations_records_the_earlier_commit()
 /// The extractor stores one statement of the user as two facts, one that
 /// replaces the user's earlier statement and one that replaces an
 /// assistant's echo of it. The statement replaced the user's own words, so
-/// neither fact holds a record and neither line carries days, as when one
-/// fact names both.
+/// neither fact holds a record and each is delivered as stated, as when one
+/// fact names both. The facts are one statement in either proposal order,
+/// and when one of them quotes the sentence without its closing period.
 #[tokio::test]
 async fn a_statement_stored_as_two_facts_is_judged_as_one_replacement() {
     let echo = "Understood: release branches are cut every Thursday.";
+    let unclosed = TUESDAY.trim_end_matches('.');
+    for (echo_first, echo_quote) in [
+        (true, TUESDAY),
+        (false, TUESDAY),
+        (true, unclosed),
+        (false, unclosed),
+    ] {
+        let case = format!("echo first {echo_first}, quote {echo_quote:?}");
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY), ("m2", "assistant", echo)],
+            |text, _| vec![fact(text)],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m3", "user", TUESDAY)],
+            |_, existing| {
+                let statement = ids_containing(existing, "User stated: Release branches");
+                let echoed = ids_containing(existing, "Understood");
+                assert_eq!((statement.len(), echoed.len()), (1, 1), "{existing:?}");
+                let for_echo = Extracted {
+                    quote: echo_quote.to_string(),
+                    replaces: echoed,
+                    content: Some("The release cut is on Tuesdays now."),
+                    ..Extracted::default()
+                };
+                let for_statement = Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: statement,
+                    content: Some("Release branches moved from Thursday to Tuesday."),
+                    ..Extracted::default()
+                };
+                if echo_first {
+                    vec![for_echo, for_statement]
+                } else {
+                    vec![for_statement, for_echo]
+                }
+            },
+        )
+        .await;
+        let rows = memory_rows(&handler, &project);
+        assert_eq!(
+            rows.len(),
+            2,
+            "{case}: the statement and its echo are retired: {rows:?}"
+        );
+        let mut summaries: Vec<&str> = rows.iter().map(|row| row.1.as_str()).collect();
+        summaries.sort_unstable();
+        let mut expected = [stated(echo_quote), stated(TUESDAY)];
+        expected.sort_unstable();
+        assert_eq!(summaries, expected, "{case}");
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the correction is delivered");
+        for (id, summary, _, rationale) in &rows {
+            assert_eq!(
+                rationale.get("replaces_observation"),
+                None,
+                "{case}: {rationale}"
+            );
+            assert!(
+                block.lines().any(|line| line == format!("{id}: {summary}")),
+                "{case}: {summary} is delivered as stated: {block}"
+            );
+        }
+    }
+}
+
+/// The verdict belongs to a quotation and the record to a fact. Two facts
+/// of one quotation that replace reports of different commits both record
+/// the earlier commit, and a third fact of that quotation that names no
+/// target records nothing. A second quotation of the same message that
+/// replaces the user's approved statement records nothing either.
+#[tokio::test]
+async fn a_replacement_verdict_is_per_quotation_and_its_record_per_fact() {
+    let wiki = "The team wiki says release branches are cut on Thursdays.";
+    let yarn = "Use yarn for installs in this repository from now on.";
+    let message = format!("{TUESDAY} {yarn}");
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(
+    for (id, role, text) in [
+        ("m1", "user", PNPM),
+        ("m2", "assistant", REPORTED_THURSDAY),
+        ("m3", "assistant", wiki),
+    ] {
+        capture(&handler, FIRST, "s1", &[(id, role, text)], |text, _| {
+            vec![fact(text)]
+        })
+        .await;
+    }
+    let (older_seq, _) = stored(
         &handler,
-        FIRST,
-        "s1",
-        &[("m1", "user", THURSDAY), ("m2", "assistant", echo)],
-        |text, _| vec![fact(text)],
-    )
-    .await;
+        &project,
+        &format!("Assistant reported: {REPORTED_THURSDAY}"),
+    );
+    let (newer_seq, _) = stored(&handler, &project, &format!("Assistant reported: {wiki}"));
+    assert!(older_seq < newer_seq);
     capture(
         &handler,
         SECOND,
         "s2",
-        &[("m3", "user", TUESDAY)],
+        &[("m4", "user", &message)],
         |_, existing| {
-            let statement = ids_containing(existing, "User stated: Release branches");
-            let echoed = ids_containing(existing, "Understood");
-            assert_eq!((statement.len(), echoed.len()), (1, 1), "{existing:?}");
+            let one = |needle: &str| {
+                let ids = ids_containing(existing, needle);
+                assert_eq!(ids.len(), 1, "{needle}: {existing:?}");
+                ids
+            };
             vec![
                 Extracted {
                     quote: TUESDAY.to_string(),
-                    replaces: echoed,
+                    replaces: one("team wiki"),
                     content: Some("The release cut is on Tuesdays now."),
                     ..Extracted::default()
                 },
                 Extracted {
                     quote: TUESDAY.to_string(),
-                    replaces: statement,
+                    replaces: one("release checklist"),
                     content: Some("Release branches moved from Thursday to Tuesday."),
+                    ..Extracted::default()
+                },
+                Extracted {
+                    quote: TUESDAY.to_string(),
+                    content: Some("Tuesday is the day of the release cut."),
+                    category: Some("NAMING"),
+                    ..Extracted::default()
+                },
+                Extracted {
+                    quote: yarn.to_string(),
+                    replaces: one("User stated: Use pnpm"),
                     ..Extracted::default()
                 },
             ]
@@ -1382,25 +1488,74 @@ async fn a_statement_stored_as_two_facts_is_judged_as_one_replacement() {
     )
     .await;
     let rows = memory_rows(&handler, &project);
-    let corrections: Vec<&(String, String, i64, Value)> =
-        rows.iter().filter(|row| row.1 == stated(TUESDAY)).collect();
-    assert_eq!(corrections.len(), 2, "{rows:?}");
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let read = kernel_routes::read::read_visible(
+        &kernel,
+        &kernel_routes::ProjectBinding::new(&project),
+        kernel::Surface::ExplicitSearch,
+        None,
+        kernel_routes::read::RowSelection::DomainDecisions("memory"),
+    )
+    .unwrap();
+    let kind_of = |id: &str| read.decisions[id].decision_kind.clone();
+    let mut records: Vec<(String, String, Value)> = rows
+        .iter()
+        .map(|(id, summary, _, rationale)| {
+            (
+                kind_of(id),
+                summary.clone(),
+                rationale
+                    .get("replaces_observation")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+        })
+        .collect();
+    records.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let earlier = json!({"recorded_seq": older_seq});
     assert_eq!(
-        rows.len(),
-        2,
-        "the statement and its echo are retired: {rows:?}"
+        records,
+        [
+            ("NAMING".to_string(), stated(TUESDAY), Value::Null),
+            ("PROJECT_RULES".to_string(), stated(yarn), Value::Null),
+            (
+                "PROJECT_RULES".to_string(),
+                stated(TUESDAY),
+                earlier.clone()
+            ),
+            ("PROJECT_RULES".to_string(), stated(TUESDAY), earlier),
+        ],
+        "the reports and the pnpm statement are retired, and four facts stand"
     );
-    for correction in corrections {
-        assert_eq!(
-            correction.3.get("replaces_observation"),
-            None,
-            "{correction:?}"
-        );
-    }
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
-        .expect("the correction is delivered");
-    assert!(block.contains(&stated(TUESDAY)), "{block}");
-    assert!(!block.contains("it replaces a value"), "{block}");
+        .expect("the corrections are delivered");
+    let lines_of = |statement: &str| -> Vec<&str> {
+        block
+            .lines()
+            .filter(|line| line.contains(statement))
+            .collect()
+    };
+    let tuesday = lines_of(&stated(TUESDAY));
+    assert_eq!(tuesday.len(), 3, "{block}");
+    assert_eq!(
+        tuesday
+            .iter()
+            .filter(|line| line.ends_with("that the user had not stated)"))
+            .count(),
+        2,
+        "{block}"
+    );
+    assert_eq!(
+        tuesday
+            .iter()
+            .filter(|line| line.ends_with(&stated(TUESDAY)))
+            .count(),
+        1,
+        "the fact that names no target is delivered as stated: {block}"
+    );
+    let yarn_lines = lines_of(&stated(yarn));
+    assert_eq!(yarn_lines.len(), 1, "{block}");
+    assert!(yarn_lines[0].ends_with(&stated(yarn)), "{block}");
 }
 
 /// A plan of the user that replaced an assistant's report holds the record,

@@ -1629,9 +1629,11 @@ the store state of the statements it renders, and shows the contest only
 while that read serves the fact: live, not hidden, and of normal sensitivity.
 A labeled fact, such as an assistant's report, is served there; a fact a
 disposition hides, a retired fact, and a fact of another project contest
-nothing a reader is shown. The block shows the stored statement alone in
-those cases, and a pass whose contest read fails is withheld as any failed
-read of the pass is. Every session whose block holds the statement is shown
+nothing a reader is shown. In those cases the block shows the replacement
+line (above) for a statement whose rationale holds a `replaces_observation`
+record and the stored statement alone for any other, and names neither the
+contesting fact nor its text. A pass whose contest read or commit-time read
+fails is withheld as any failed read of the pass is. Every session whose block holds the statement is shown
 the contest, the one whose message recorded it included: the excerpt is the
 one text from a session's own messages that its block carries, because that
 session's observation of the newer value can leave its conversation at a
