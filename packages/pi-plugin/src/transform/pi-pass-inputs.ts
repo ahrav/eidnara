@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, sep } from "node:path";
+
 import type { EidnaraConfig } from "@eidnara/opencode/config/schema/eidnara";
 import { DEFAULT_PROTECTED_TAGS } from "@eidnara/opencode/features/context/defaults";
 import {
@@ -32,6 +35,26 @@ export interface PiPassFieldsArgs {
     /** When the response at `index` in `messages` finished streaming, or `undefined` when unknown. */
     completedAtMs(index: number): number | undefined;
     now: number;
+    /** The session's working directory beneath the project root, from {@link projectRelativeDirectory}. */
+    workingDirectory?: string;
+}
+
+/**
+ * `cwd` as a path beneath `projectRoot`, with `/` separators and empty for the root itself; the
+ * daemon resolves the relative paths of a turn's tool calls against it. Both directories are
+ * taken at their physical paths, so a working directory reached through a symbolic link names
+ * the directory the tools work in. `undefined` for a working directory outside the root and
+ * for a directory that cannot be resolved.
+ */
+export function projectRelativeDirectory(projectRoot: string, cwd: string): string | undefined {
+    let beneath: string;
+    try {
+        beneath = relative(realpathSync(projectRoot), realpathSync(cwd));
+    } catch {
+        return undefined;
+    }
+    if (isAbsolute(beneath) || beneath.split(sep).includes("..")) return undefined;
+    return beneath.split(sep).join("/");
 }
 
 function count(value: unknown): number {
@@ -108,6 +131,7 @@ export function piPassFields(args: PiPassFieldsArgs): Record<string, unknown> {
             terse_text_compression_min_chars: config.terse_text_compression?.min_chars ?? 500,
             cache_ttl: resolveCacheTtl(config.cache_ttl, modelKey ?? undefined),
             is_subagent: false,
+            working_directory: args.workingDirectory,
             tool_present: args.reduceRegistered,
             todo_tool_present: args.todowriteRegistered,
             ...promptSurfaceWireFields(args.promptSurfaceRuntime, config.prompt_surface, modelKey),

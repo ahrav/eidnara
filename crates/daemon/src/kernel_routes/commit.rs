@@ -680,13 +680,31 @@ const PROJECT_SCOPES_DOMAIN_ID: &str = "project-scopes";
 /// A caller-named domain; the route-owned one is refused as invalid input.
 fn caller_domain(domain_id: &str) -> Result<&str, KernelError> {
     // Capture alone writes the statement domain: a row there approves a
-    // captured memory as the user's statement.
+    // captured memory as the user's statement. The daemon alone writes the
+    // named-files domain: a row there says the daemon observed a file's use.
     if domain_id == PROJECT_SCOPES_DOMAIN_ID
         || domain_id == crate::memory_capture::STATEMENT_DOMAIN_ID
+        || domain_id == crate::named_files::DOMAIN_ID
     {
         return Err(KernelError::InvalidInput);
     }
     Ok(domain_id)
+}
+
+/// The object of the bound project that a caller's operation replaces,
+/// retires, or marks. An object of another project answers as absent, and a
+/// row of the named-files domain, which the daemon alone changes, is refused
+/// as invalid input.
+fn caller_target(
+    envelope: &Envelope<'_>,
+    filter: &mut ScopeFilter,
+    object_id: &str,
+) -> Result<ObjectState, KernelError> {
+    let state = scoped_object_state(envelope, filter, object_id)?;
+    if state.object.domain_id == crate::named_files::DOMAIN_ID {
+        return Err(KernelError::InvalidInput);
+    }
+    Ok(state)
 }
 
 /// Materializes the project scope, and the route-owned domain it belongs to,
@@ -782,7 +800,7 @@ fn disposition_request(
         reason,
         ..
     } = args;
-    let state = scoped_object_state(envelope, filter, object_id)?;
+    let state = caller_target(envelope, filter, object_id)?;
     if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
         return Err(KernelError::NotFound);
     }
@@ -1032,7 +1050,7 @@ fn apply(
                     &mut domains_ready,
                     refused,
                 )?;
-                let predecessor = scoped_object_state(envelope, filter, replaced_object_id)?;
+                let predecessor = caller_target(envelope, filter, replaced_object_id)?;
                 refuse_rewriting_user_authority(envelope, replaced_object_id)?;
                 // An existing replacement must belong to the bound project
                 // whether or not it is live: a foreign retired id answering
@@ -1082,7 +1100,7 @@ fn apply(
                 result.touched.push(outcome.object_id);
             }
             Operation::RetireDecision { object_id } => {
-                scoped_object_state(envelope, filter, object_id)?;
+                caller_target(envelope, filter, object_id)?;
                 refuse_rewriting_user_authority(envelope, object_id)?;
                 envelope.retire_decision(object_id)?;
                 result.touched.push(object_id.clone());
@@ -1464,7 +1482,7 @@ impl Operation {
     /// must lie outside the verifier's prefixes, and a disposition's reason
     /// must compose.
     fn validate(&mut self, reporter_taint: TaintClass) -> Result<(), InvalidReason> {
-        if self.names_verifier_ids() {
+        if self.names_verifier_ids() || self.names_recorder_ids() {
             return Err(InvalidReason::InvalidInput);
         }
         self.compose_reason(reporter_taint)
@@ -1479,6 +1497,28 @@ impl Operation {
             crate::attestation_verifier::attest::ID_PREFIXES
                 .iter()
                 .any(|prefix| id.starts_with(prefix))
+        };
+        match self {
+            Self::InsertDecision { spec } | Self::SupersedeDecision { spec, .. } => {
+                reserved(&spec.object_id) || reserved(&spec.decision_id)
+            }
+            Self::InsertObservation { spec } => {
+                reserved(&spec.object_id) || reserved(&spec.observation_id)
+            }
+            Self::RetireDecision { .. } | Self::Disposition { .. } => false,
+        }
+    }
+
+    /// Whether the operation writes a row under an id the named-file
+    /// recorder derives: a record's object id or decision id, or the object
+    /// id of the recorder's domain. A row a caller placed under one would
+    /// keep the recorder's own write of that id from committing.
+    fn names_recorder_ids(&self) -> bool {
+        let reserved = |id: &str| {
+            id == crate::named_files::DOMAIN_OBJECT_ID
+                || crate::named_files::ID_PREFIXES
+                    .iter()
+                    .any(|prefix| id.starts_with(prefix))
         };
         match self {
             Self::InsertDecision { spec } | Self::SupersedeDecision { spec, .. } => {

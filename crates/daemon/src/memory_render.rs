@@ -87,41 +87,65 @@ pub(crate) const CURRENT_WORK_SECTION: &str = "CURRENT_WORK";
 
 const CURRENT_WORK_NOTE: &str = "Work the user left open in earlier sessions, newest first, which no later statement of the user ended. It sets no standing rule and may be finished already: check the repository before resuming it.";
 
+pub(crate) const NAMED_FILES_SECTION: &str = "NAMED_FILES";
+
+const NAMED_FILES_NOTE: &str = "Files of this project that a message of the user named in an earlier session and the agent then read or passed to a command, most used first. Paths are relative to the repository root, and each file existed when this block was composed. This memory records that they were used and holds none of their content: open a file for what it says.";
+
 pub(crate) fn renders_in_block(category: &str) -> bool {
     memory_category_rank(category).is_some()
 }
 
-/// Appends the opening tag of `category`. The tag of
-/// [`CURRENT_WORK_SECTION`] carries [`CURRENT_WORK_NOTE`].
+/// Appends the opening tag of `category`. The tags of
+/// [`CURRENT_WORK_SECTION`] and [`NAMED_FILES_SECTION`] carry their notes.
 pub(crate) fn push_category_open(out: &mut String, category: &str) {
     out.push('<');
     push_escaped_xml_attr(out, category);
-    if category == CURRENT_WORK_SECTION {
+    let note = match category {
+        CURRENT_WORK_SECTION => Some(CURRENT_WORK_NOTE),
+        NAMED_FILES_SECTION => Some(NAMED_FILES_NOTE),
+        _ => None,
+    };
+    if let Some(note) = note {
         out.push_str(" note=\"");
-        push_escaped_xml_attr(out, CURRENT_WORK_NOTE);
+        push_escaped_xml_attr(out, note);
         out.push('"');
     }
     out.push('>');
 }
 
-/// Sort rank of a positive category: its index in [`MEMORY_CATEGORY_ORDER`], or one rank after
-/// them for the other positive categories. `None` marks a category the native surfaces drop.
-/// [`CURRENT_WORK_SECTION`] ranks last.
+/// Sort rank of a category the block renders. [`NAMED_FILES_SECTION`] ranks first. A positive
+/// category ranks after it by its index in [`MEMORY_CATEGORY_ORDER`], and the other positive
+/// categories share the rank after those. [`CURRENT_WORK_SECTION`] ranks last. `None` marks a
+/// category the native surfaces drop.
 ///
 /// [`MEMORY_CATEGORY_ORDER`] is a prefix of [`POSITIVE_MEMORY_CATEGORIES`], so one index serves
 /// both lists.
 fn memory_category_rank(category: &str) -> Option<usize> {
+    if category == NAMED_FILES_SECTION {
+        return Some(0);
+    }
     if category == CURRENT_WORK_SECTION {
-        return Some(MEMORY_CATEGORY_ORDER.len() + 1);
+        return Some(MEMORY_CATEGORY_ORDER.len() + 2);
     }
     let position = POSITIVE_MEMORY_CATEGORIES
         .iter()
         .position(|positive| *positive == category)?;
-    Some(position.min(MEMORY_CATEGORY_ORDER.len()))
+    Some(position.min(MEMORY_CATEGORY_ORDER.len()) + 1)
+}
+
+/// The sections that render before the facts, and the ones that render after them. Their rows
+/// render, and enter the block's revision, in the order the caller supplies: the caller ranks
+/// them by use or by recency.
+pub(crate) const SECTIONS_BEFORE_FACTS: &[&str] = &[NAMED_FILES_SECTION];
+pub(crate) const SECTIONS_AFTER_FACTS: &[&str] = &[CURRENT_WORK_SECTION];
+
+pub(crate) fn keeps_supplied_order(category: &str) -> bool {
+    SECTIONS_BEFORE_FACTS.contains(&category) || SECTIONS_AFTER_FACTS.contains(&category)
 }
 
 /// Ranked categories sort by rank, the rest by name after them, and ties by object id.
-/// Rows of [`CURRENT_WORK_SECTION`] compare equal, so a stable sort preserves their input order.
+/// Rows of a section that [`keeps_supplied_order`] compare equal, so a stable sort preserves
+/// their input order.
 fn memory_render_order(
     (left_rank, left): &(usize, &CanonicalMemory),
     (right_rank, right): &(usize, &CanonicalMemory),
@@ -129,14 +153,14 @@ fn memory_render_order(
     left_rank
         .cmp(right_rank)
         .then_with(|| {
-            if *left_rank == MEMORY_CATEGORY_ORDER.len() {
+            if *left_rank == MEMORY_CATEGORY_ORDER.len() + 1 {
                 left.category.cmp(&right.category)
             } else {
                 Ordering::Equal
             }
         })
         .then_with(|| {
-            if *left_rank > MEMORY_CATEGORY_ORDER.len() {
+            if keeps_supplied_order(&left.category) {
                 Ordering::Equal
             } else {
                 left.object_id.cmp(&right.object_id)
@@ -154,14 +178,18 @@ fn memory_line_content(memory: &CanonicalMemory) -> &str {
 }
 
 fn push_memory_line(out: &mut String, memory: &CanonicalMemory) {
-    // The object id is caller-supplied text; escaping it and folding line breaks keeps it from closing the block or forging a sibling element.
-    for (i, piece) in memory.object_id.split(['\n', '\r']).enumerate() {
-        if i > 0 {
-            out.push(' ');
+    // A fact's line opens with its id, the handle the memory tools take. A `NAMED_FILES` line is
+    // the path and its use alone: its record is no memory the tools address.
+    if memory.category != NAMED_FILES_SECTION {
+        // The object id is caller-supplied text; escaping it and folding line breaks keeps it from closing the block or forging a sibling element.
+        for (i, piece) in memory.object_id.split(['\n', '\r']).enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            push_escaped_xml_content(out, piece);
         }
-        push_escaped_xml_content(out, piece);
+        out.push_str(": ");
     }
-    out.push_str(": ");
     // `<project-memory>` continuation lines must remain indented because m0 byte accounting and the prompt cache depend on its line structure.
     for (i, line) in memory_line_content(memory).split('\n').enumerate() {
         if i > 0 {
@@ -180,8 +208,9 @@ pub fn render_memory_line(memory: &CanonicalMemory) -> String {
     line
 }
 
-/// Renders positive memories grouped in deterministic category and object-id order.
-/// The `CURRENT_WORK` rows render last, in the supplied order.
+/// Renders the rows of the categories that rank: the `NAMED_FILES` rows first, in the supplied
+/// order, the positive memories grouped in deterministic category and object-id order, and the
+/// `CURRENT_WORK` rows last, in the supplied order.
 ///
 /// Native surfaces filter non-positive categories because callers can construct
 /// [`CanonicalMemory`] directly and native surfaces lack a warning renderer.
@@ -708,6 +737,50 @@ mod tests {
         assert!(renders_in_block(CURRENT_WORK_SECTION));
         assert!(!is_positive_memory_category(CURRENT_WORK_SECTION));
         assert!(!renders_in_block("WARNING"));
+    }
+
+    /// `NAMED_FILES_SECTION` renders before every stored category, under its
+    /// note, with its rows in the supplied order. A row's line is its
+    /// content alone: the record's id is no handle the memory tools take.
+    #[test]
+    fn the_named_files_section_renders_first_with_its_note_in_the_supplied_order() {
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let rows = [
+            row("mem_5", "PROJECT_RULES", "a project rule"),
+            row("nfu_9", NAMED_FILES_SECTION, "docs/guide.md (used most)"),
+            row("mem_2", CURRENT_WORK_SECTION, "an open request"),
+            row("nfu_1", NAMED_FILES_SECTION, "tools/check.sh (used less)"),
+        ];
+        let note = "Files of this project that a message of the user named in an earlier \
+                    session and the agent then read or passed to a command, most used first. \
+                    Paths are relative to the repository root, and each file existed when this \
+                    block was composed. This memory records that they were used and holds none \
+                    of their content: open a file for what it says.";
+        assert_eq!(
+            render_memory_block(&rows, "project-memory"),
+            format!(
+                "<project-memory>\n<NAMED_FILES note=\"{note}\">\n\
+                 docs/guide.md (used most)\ntools/check.sh (used less)\n</NAMED_FILES>\n\
+                 <PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 <CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\nmem_2: an open request\n\
+                 </CURRENT_WORK>\n</project-memory>"
+            )
+        );
+        assert_eq!(
+            render_memory_line(&rows[1]),
+            "docs/guide.md (used most)",
+            "the budget prices the line the block renders"
+        );
+        assert!(renders_in_block(NAMED_FILES_SECTION));
+        assert!(!is_positive_memory_category(NAMED_FILES_SECTION));
+        assert!(
+            !NAMED_FILES_NOTE.contains(['<', '>', '&', '"']),
+            "the note renders as written in its attribute"
+        );
     }
 
     /// The delivered block holds the rows' elements, then the note on the

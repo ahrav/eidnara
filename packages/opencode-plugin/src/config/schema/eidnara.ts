@@ -736,13 +736,13 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(true)
                     .describe(
-                        "Automatically promote eligible session facts into memory (default: true)",
+                        "Automatically promote eligible session facts into memory (default: true). Capture, and with it the named-file records of a Pi session, needs this switch on.",
                     ),
                 auto_capture: z
                     .boolean()
                     .default(true)
                     .describe(
-                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. Set false to disable unattended capture.",
+                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. In a Pi session, while memory.enabled and memory.auto_promote also hold, the same switch lets the daemon record, with no model call, the paths of project files that a message of the user named and the agent then read or passed to a command; later sessions' <project-memory> blocks list those paths while the files exist and memory.auto_inject.enabled holds. Set false to disable unattended capture.",
                     ),
                 retrieval_count_promotion_threshold: z
                     .number()

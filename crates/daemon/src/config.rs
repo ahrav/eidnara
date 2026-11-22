@@ -97,7 +97,7 @@ pub struct DaemonConfig {
     /// User-only switch for the automatic `<project-memory>` and user-profile
     /// blocks.
     pub memory_auto_inject: bool,
-    /// User-only consent for unattended extraction from completed conversation text.
+    /// User-only consent for unattended extraction from completed conversation text and for a Pi session's named-file records.
     pub memory_auto_capture: bool,
     /// User-only consent to retain the exact bytes of message text and tool results as
     /// kernel source descriptors. Capture also requires `memory_enabled` and a session
@@ -113,7 +113,7 @@ pub struct DaemonConfig {
     pub auto_search: AutoSearchConfig,
     /// TerseTextCompression compression uses deterministic age-tier controls.
     pub terse_text_compression: TerseTextCompressionConfig,
-    /// `auto_promote` mirrors the TS auto-promote switch; false drops facts.
+    /// `auto_promote` mirrors the TS auto-promote switch; false drops facts and a Pi session's named-file records.
     pub auto_promote: bool,
     /// The privacy gate controls whether history_summarizer user observations may be collected for later review and promotion.
     pub user_memory_collection_enabled: bool,

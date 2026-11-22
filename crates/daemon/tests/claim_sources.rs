@@ -1618,6 +1618,9 @@ fn a_statement_record_publishes_no_units_and_its_memory_publishes_all_three() {
     let statement = units("stm-1", "user-statements", "adr_accepted");
     assert!(statement.units.is_empty(), "{:?}", statement.units);
     assert_eq!(statement.exclusions, [ClaimExclusion::OutsideMemoryDomain]);
+    let named_file = units("nfu-1", "named-files", "named_file_use");
+    assert!(named_file.units.is_empty(), "{:?}", named_file.units);
+    assert_eq!(named_file.exclusions, [ClaimExclusion::OutsideMemoryDomain]);
     let memory = units("mem-1", MEMORY, "PROJECT_RULES");
     assert_eq!(memory.units.len(), 3);
     assert!(memory.exclusions.is_empty());

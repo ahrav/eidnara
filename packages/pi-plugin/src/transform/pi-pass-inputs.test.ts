@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
 
 import { resolvePiWindowGeometry } from "../pi-context-limit";
-import { piPassFields } from "./pi-pass-inputs";
+import { piPassFields, projectRelativeDirectory } from "./pi-pass-inputs";
 
 type Json = Record<string, unknown>;
 
@@ -94,6 +97,71 @@ describe("Pi pass previous response time", () => {
         ];
         expect(fields(messages).prev_response_completed_at_ms).toBeUndefined();
         expect(fields(messages, () => Number.NaN).prev_response_completed_at_ms).toBeUndefined();
+    });
+});
+
+describe("Pi pass working directory", () => {
+    function checkout(): { base: string; project: string; app: string } {
+        const base = mkdtempSync(join(tmpdir(), "eidnara-pi-cwd-"));
+        const project = join(base, "project");
+        const app = join(project, "packages", "app");
+        mkdirSync(app, { recursive: true });
+        mkdirSync(join(base, "project-two"));
+        return { base, project, app };
+    }
+
+    it("is the session's directory beneath the project root, with / separators", () => {
+        const { base, project, app } = checkout();
+        try {
+            expect(projectRelativeDirectory(project, project)).toBe("");
+            expect(projectRelativeDirectory(project, app)).toBe("packages/app");
+            expect(projectRelativeDirectory(`${project}/`, `${app}/`)).toBe("packages/app");
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    it("names the physical directory of a working directory reached through a link", () => {
+        const { base, project, app } = checkout();
+        try {
+            symlinkSync(app, join(base, "app-link"));
+            symlinkSync(project, join(base, "project-link"));
+            expect(projectRelativeDirectory(project, join(base, "app-link"))).toBe("packages/app");
+            expect(projectRelativeDirectory(join(base, "project-link"), app)).toBe("packages/app");
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    it("is absent for a directory outside the project root or one that does not resolve", () => {
+        const { base, project } = checkout();
+        try {
+            expect(projectRelativeDirectory(project, base)).toBeUndefined();
+            expect(projectRelativeDirectory(project, join(base, "project-two"))).toBeUndefined();
+            expect(projectRelativeDirectory(project, join(project, "absent"))).toBeUndefined();
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    it("is sent when the session's directory is known and left out otherwise", () => {
+        const args = {
+            config,
+            geometry,
+            providerId: "faux",
+            modelKey: "faux/faux-model",
+            systemPromptHash: "",
+            reduceRegistered: true,
+            todowriteRegistered: false,
+            messages: [{ role: "user", content: "a", timestamp: 900 }],
+            completedAtMs: () => undefined,
+            now: 2_000,
+        };
+        expect(piPassFields({ ...args, workingDirectory: "" }).working_directory).toBe("");
+        expect(piPassFields({ ...args, workingDirectory: "packages/app" }).working_directory).toBe(
+            "packages/app",
+        );
+        expect("working_directory" in piPassFields(args)).toBe(false);
     });
 });
 
