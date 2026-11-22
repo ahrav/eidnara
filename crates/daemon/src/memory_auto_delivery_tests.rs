@@ -2660,11 +2660,12 @@ async fn words_the_user_passes_on_are_kept_for_search_and_replace_no_statement()
             1,
             "the relayed sentence has no line of its own: {block}"
         );
+        // The line ends in the contest: the observation's id and its whole
+        // stored text between quotation marks.
         assert!(
             lines[0].contains(&stated(THURSDAY))
                 && lines[0].contains("; contested ")
-                && lines[0].contains(&relayed_row.0)
-                && lines[0].contains("from Thursday to Tuesday"),
+                && lines[0].ends_with(&format!(" by {}: \"{}\")", relayed_row.0, stated(TUESDAY))),
             "the statement is shown as contested by the relayed sentence: {block}"
         );
 

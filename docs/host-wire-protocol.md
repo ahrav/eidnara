@@ -1222,10 +1222,10 @@ line. An inline code span runs from a run of backticks through the next run
 of the same length in its paragraph; an odd number of backslashes directly
 before an opening run makes its first backtick literal text, and an opening
 run that no later run of its paragraph closes is unclosed and spans to the
-paragraph's end. A paragraph that holds a carriage return other than the one that ends a line together with its line feed, a vertical
-tab, a form feed, or a Unicode next-line, line, or paragraph separator is
-left out with every paragraph after it, since its lines cannot be told apart
-and a fence, a tag, or a colon line may hide in it. The quotation starts the
+paragraph's end. The message is read line by line, a line ending at a line feed with the carriage return directly before it. The first line that holds a carriage return of its own, a vertical
+tab, a form feed, or a Unicode next-line, line, or paragraph separator cuts the message off: the paragraph that holds that line and every paragraph after the line are
+left out, whether the line stands in a paragraph, between paragraphs, or inside a fenced or tag block, since its lines cannot be told apart
+and a fence, a tag, or a colon line may hide in it. The paragraphs that end before that line are judged as usual. The quotation starts the
 paragraph, or follows a `.`, `!`, or question mark and whitespace with a first character
 that is not lowercase, and no colon comes earlier in the paragraph; it ends with `.`
 or `!`, directly before one, or at the paragraph's end, whitespace or the
@@ -1288,10 +1288,11 @@ of a document, an issue, or a web page, the output or the error message of a
 tool, or what an assistant said earlier, whether those words stand between
 quotation marks, after a lead-in, on pasted lines, or directly in the
 sentence. A value outside these two is a schema defect of its source's
-decision, and a `speaker` given as `null` reads as absent. The answer is
+decision, and a `speaker` given as `null` reads as absent. The member is
 decoded as every member of a decision is: of a member the extractor writes
-twice the last value stands, so a decision has one speaker, the one it
-would have with that member written once. Only the value
+twice the last value stands, so a decision has one speaker, and an answer
+whose JSON a generic reader cannot hold, such as a number out of range, is
+a malformed document and fails whole. Only the value
 `user` attributes a quotation to the user: a quotation with `speaker` `other`
 or with none is stored as a labeled memory for explicit search under the
 rules of every labeled memory, has no statement record, replaces no fact

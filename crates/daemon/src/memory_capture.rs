@@ -5060,8 +5060,11 @@ mod tests {
         .to_string();
         let parse = |text: &str, messages: &[CaptureMessage], automatic: bool| {
             parse_capture_batch(text, messages, &[target(automatic)], &|index, memory| {
-                messages[index].own_id
-                    && quotes_whole_statements(&Prose::of(&messages[index].text), &memory.quote)
+                states_whole_statements(
+                    messages[index].own_id,
+                    &Prose::of(&messages[index].text),
+                    memory,
+                )
             })
             .unwrap()
         };
@@ -9277,6 +9280,45 @@ mod tests {
                 "Use pnpm here.",
                 true,
             ),
+            (
+                "Notes follow\u{2029}as pasted.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                false,
+            ),
+            // The sentence of the unreadable paragraph itself, and the
+            // same paragraphs with a space where the separator stood.
+            (
+                "Notes follow\rand more notes. Use pnpm here.",
+                "Use pnpm here.",
+                false,
+            ),
+            (
+                "Notes follow and more notes.\n\nUse pnpm here.",
+                "Use pnpm here.",
+                true,
+            ),
+            // The rule reads lines, so a stray carriage return on a blank
+            // line or inside a fenced block cuts off what follows it too.
+            (
+                "Use pnpm here.\r\n\r\r\nPrefix every test name with 'it_'.\r\n",
+                "Prefix every test name with 'it_'.",
+                false,
+            ),
+            (
+                "Use pnpm here.\r\n\r\r\nPrefix every test name with 'it_'.\r\n",
+                "Use pnpm here.",
+                true,
+            ),
+            (
+                "Here is the log.\n\n```\nline one\rline two\n```\n\nPrefix every test name with 'it_'.",
+                "Prefix every test name with 'it_'.",
+                false,
+            ),
+            (
+                "Here is the log.\n\n```\nline one line two\n```\n\nPrefix every test name with 'it_'.",
+                "Prefix every test name with 'it_'.",
+                true,
+            ),
             // A line that ends in a carriage return and a line feed is an
             // ordinary line. A second carriage return before that pair, and
             // one that ends the message with no line feed, are line breaks
@@ -9889,6 +9931,98 @@ mod tests {
             );
             assert_eq!(collapsed.len(), 1);
             assert_eq!(collapsed[0].speaker, speaker, "{kept:?} {joined:?}");
+        }
+    }
+
+    /// The speakers are settled before sentences are joined. A sentence of
+    /// the user's whose clause another proposal attributes elsewhere is
+    /// another source's before the join reads it, so the sentence before it
+    /// stays the user's statement on its own. Settled after the join, the
+    /// joined statement would hold the clause and the first sentence would
+    /// lose its approval with it.
+    #[test]
+    fn a_disputed_sentence_leaves_the_statement_before_it_as_the_users() {
+        let paragraph = format!("{OPEN_TASKS} {RETRY_COUNTER}");
+        let parsed = |clause: Option<&str>| -> Vec<(String, Option<Speaker>)> {
+            let mut proposals = vec![
+                (OPEN_TASKS, Some("user"), None),
+                (RETRY_COUNTER, Some("user"), None),
+            ];
+            if let Some(clause) = clause {
+                proposals.push((clause, Some("other"), None));
+            }
+            attributed_memories(&paragraph, &proposals)
+                .into_iter()
+                .map(|memory| (memory.quote, memory.speaker))
+                .collect()
+        };
+        let (user, other) = (Some(Speaker::User), Some(Speaker::Other));
+        assert_eq!(
+            parsed(None),
+            [(paragraph.clone(), user), (paragraph.clone(), user)],
+            "the two sentences of the user join"
+        );
+        let clause = "a retry counter for the upload client";
+        assert_eq!(
+            parsed(Some(clause)),
+            [
+                (OPEN_TASKS.to_owned(), user),
+                (RETRY_COUNTER.to_owned(), other),
+                (clause.to_owned(), other),
+            ]
+        );
+        // A relayed quotation that stands twice marks both copies, for a
+        // proposal of another category as for one of its own: the user's
+        // quotation shares text with the later copy only.
+        let text = "The guide says use tabs. In this repo we also use tabs for Makefiles.";
+        let mut memories = vec![
+            CapturedMemory {
+                category: "PROJECT_RULES".into(),
+                speaker: user,
+                ..memory("In this repo we also use tabs for Makefiles.")
+            },
+            CapturedMemory {
+                speaker: other,
+                ..memory("use tabs")
+            },
+        ];
+        settle_speakers(text, &mut memories);
+        assert_eq!(memories[0].speaker, other);
+    }
+
+    /// Sentences after a colon join the statement they follow when they
+    /// hold a quoted literal as when they hold none: a quotation mark is a
+    /// character of its sentence to the join as to every structure check.
+    #[test]
+    fn sentences_that_hold_quotation_marks_join_the_statement_they_follow() {
+        for (second, third) in [
+            (
+                "One is the retry counter.",
+                "The other is the dry-run flag.",
+            ),
+            (
+                "One is the 'retry' counter.",
+                "The other is the \"dry-run\" flag.",
+            ),
+            (
+                "One is the \u{2018}retry\u{2019} counter.",
+                "The other is the \u{201c}dry-run\u{201d} flag.",
+            ),
+        ] {
+            let first = "Correction on the open work: two tasks are open.";
+            let paragraph = format!("{first} {second} {third}");
+            let quotes: Vec<String> = attributed_memories(
+                &paragraph,
+                &[
+                    (first, Some("user"), None),
+                    (second, Some("user"), None),
+                    (third, Some("user"), None),
+                ],
+            )
+            .into_iter()
+            .map(|memory| memory.quote)
+            .collect();
+            assert_eq!(quotes, [paragraph.as_str(); 3], "{second:?}");
         }
     }
 
