@@ -2071,6 +2071,13 @@ struct ProseLayout {
     paragraphs: Vec<(usize, usize)>,
     /// The inline code spans that lie in `paragraphs`.
     code_spans: Vec<(usize, usize)>,
+    /// For each paragraph, the offset of the first quoted literal whose
+    /// closing mark has a second reading ([`Literals::introduces_from`]),
+    /// or the paragraph's end.
+    introductions: Vec<usize>,
+    /// Each entry stores the offsets of a paragraph's literal opening
+    /// marks; `None` for a paragraph without a quotation mark.
+    literals: Vec<Option<Vec<usize>>>,
 }
 
 impl<'a> Prose<'a> {
@@ -2108,18 +2115,23 @@ impl<'a> Prose<'a> {
         })
     }
 
-    /// For each paragraph, the offset of its first colon, or its end when it
-    /// holds none. Each paragraph is scanned once for the message.
+    /// For each paragraph, the offset from which its text may be
+    /// introduced text: its first colon, or the opening mark of its first
+    /// quoted literal whose closing mark has a second reading, whichever
+    /// comes first, or its end when it holds neither. Each paragraph is
+    /// scanned once for the message.
     fn colons(&self) -> &[usize] {
         self.colons.get_or_init(|| {
             self.paragraphs()
                 .iter()
-                .map(|&(first, last)| {
+                .zip(&self.layout().introductions)
+                .map(|(&(first, last), &introduction)| {
                     #[cfg(test)]
                     COLON_BYTES.with(|bytes| bytes.set(bytes.get() + (last - first)));
                     self.text[first..last]
                         .find([':', '\u{ff1a}'])
                         .map_or(last, |at| first + at)
+                        .min(introduction)
                 })
                 .collect()
         })
@@ -2362,6 +2374,12 @@ pub(super) fn whole_sentences(prose: &Prose<'_>, quote: &str, after_colon: bool)
             .is_some_and(|index| {
                 let (first, last) = paragraphs[index];
                 end <= last
+                    // In a paragraph with a quotation mark, a statement
+                    // qualifies only where it holds one of the literals.
+                    && (after_colon
+                        || prose.layout().literals[index].as_ref().is_none_or(|marks| {
+                            marks.iter().any(|&mark| start <= mark && mark < end)
+                        }))
                     && !inside_code_span(code_spans, start)
                     && !inside_code_span(code_spans, end)
                     && bounds_sentences(
@@ -2422,17 +2440,27 @@ const QUESTION_MARKS: [char; 8] = [
     '?', '\u{ff1f}', '\u{61f}', '\u{203d}', '\u{2047}', '\u{2048}', '\u{2049}', '\u{fe56}',
 ];
 
-/// Whether trimmed text can be a statement: it holds a letter or digit, no question mark of
-/// [`QUESTION_MARKS`], no quotation mark of [`QUOTATION_FAMILIES`], no
-/// leading backtick, and neither starting nor closing a single quotation.
+/// Whether trimmed text can be a statement: it holds a letter or digit, no
+/// question mark of [`QUESTION_MARKS`], and its first letter, digit,
+/// backtick, or quotation mark, single or double, is a letter or digit, so
+/// a statement opens with a word of the user's whatever brackets or
+/// emphasis marks stand before it. A plain-prose paragraph holds quotation
+/// marks only around quoted literals ([`literals_of`]). A statement starts
+/// at its paragraph's start or after whitespace, and ends at the
+/// paragraph's end, before whitespace, or directly before a closing `.` or
+/// `!`; a literal holds no whitespace and ends in no sentence mark, so a
+/// statement holds a literal with both of its marks or leaves it out.
 fn reads_as_statement(trimmed: &str) -> bool {
-    trimmed.contains(char::is_alphanumeric)
-        && !(trimmed.contains(QUESTION_MARKS)
-            || trimmed.contains(is_quotation_mark)
-            || trimmed.starts_with(['\'', '\u{2018}', '`'])
-            || [".'", "!'", ",'", ".\u{2019}", "!\u{2019}", ",\u{2019}"]
-                .iter()
-                .any(|close| trimmed.contains(close)))
+    let opens_with_word = trimmed
+        .chars()
+        .find(|&ch| {
+            is_letter_or_number(ch)
+                || ch == '`'
+                || is_quotation_mark(ch)
+                || SINGLE_QUOTATION_MARKS.contains(&ch)
+        })
+        .is_some_and(is_letter_or_number);
+    opens_with_word && !trimmed.contains(QUESTION_MARKS)
 }
 
 /// Whether `paragraph[start..end]` starts and ends on sentence boundaries with
@@ -2930,7 +2958,7 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         }
         blocks.push((first, index));
     }
-    let mut paragraphs = Vec::new();
+    let mut prose: Vec<KeptParagraph> = Vec::new();
     let mut lead_in = false;
     // The first line that holds a line break other than its own line feed.
     // Its real lines cannot be told apart, so a fence, a tag, a list item,
@@ -2945,6 +2973,13 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
     // The paragraph and code span counts at the first block that holds a
     // quotation mark.
     let mut before_quotation = None;
+    // `literal_exception` remains true while every paragraph seen so far
+    // that contains a quotation mark consists of literals, closes under
+    // the pairing rules, and has `introduction == None`.
+    let mut literal_exception = true;
+    // Whether the pairing rules leave a paragraph in which every quotation
+    // has a literal's shape open or unknown.
+    let mut literal_open = false;
     for (first, index) in blocks {
         let block = &lines[first..index];
         let (at, last) = block[block.len() - 1];
@@ -2957,7 +2992,17 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         let quotes = block.iter().any(|&(start, line)| {
             line.contains(is_quotation_mark) || opens_single_quotation(start, line, &mut spans)
         });
-        let structured = quotes
+        // A paragraph whose every quotation holds one literal is the
+        // user's prose with those literals in it; the pairing rules judge
+        // every other paragraph that holds a mark.
+        let found = if quotes {
+            literals_of(block, &code_spans[kept..])
+        } else {
+            None
+        };
+        let shaped = found.is_some();
+        let literal = shaped && literal_exception;
+        let structured = (quotes && !literal)
             || bordered
             || block.iter().any(|(_, line)| {
                 let start = line.trim_start();
@@ -2976,33 +3021,288 @@ fn prose_paragraphs(text: &str) -> ProseLayout {
         // A block that holds or follows the first unreadable line is left
         // out with every block after it.
         let readable = unreadable_from.is_none_or(|line| index <= line);
-        unpaired = unpaired
-            || !quotations_close_in_turn(block, &code_spans[kept..])
-            || leaves_single_quotation_open(block, &code_spans[kept..]);
+        let (introduction, opening_marks) = match found {
+            Some(found) => (found.introduces_from, found.opening_marks),
+            None => (None, Vec::new()),
+        };
+        let open = quotes
+            && (!quotations_close_in_turn(block, &code_spans[kept..])
+                || leaves_single_quotation_open(block, &code_spans[kept..]));
+        unpaired |= open && !shaped;
+        literal_open |= open && shaped;
+        if quotes && before_quotation.is_none() {
+            before_quotation = Some(prose.len());
+        }
         if readable && !structured && !introduces && !lead_in && !unclosed_code {
-            paragraphs.push(range);
+            prose.push(KeptParagraph {
+                range,
+                introduction: introduction.unwrap_or(range.1),
+                literal,
+                literals: quotes.then_some(opening_marks),
+                code_spans: code_spans.len() - kept,
+            });
         } else {
             code_spans.truncate(kept);
         }
-        if quotes && before_quotation.is_none() {
-            before_quotation = Some((paragraphs.len(), code_spans.len()));
-        }
         lead_in |= introduces;
+        literal_exception &= !quotes || (literal && introduction.is_none() && !open);
         unclosed_code |= unclosed;
     }
     // A closing mark inside quoted text passes the pairing rules as the
     // mark that closes its quotation, and the mark that closes the
     // quotation then fails them in a later block. A failure in any block
-    // therefore leaves out every paragraph after the first block that
-    // holds a quotation mark. A block that fails holds a mark, so the
-    // counts are recorded whenever one fails.
-    if unpaired && let Some((prose, spans)) = before_quotation {
-        paragraphs.truncate(prose);
-        code_spans.truncate(spans);
+    // therefore leaves out every paragraph from the first block that
+    // holds a quotation mark: the counts are taken before that block, so
+    // a paragraph of literals that is the first to hold a mark is left
+    // out too. A block that fails holds a mark, so the counts are
+    // recorded whenever one fails.
+    let first_marked = before_quotation.unwrap_or(prose.len());
+    let mut layout = ProseLayout {
+        paragraphs: Vec::new(),
+        code_spans: Vec::new(),
+        introductions: Vec::new(),
+        literals: Vec::new(),
+    };
+    let mut spans = code_spans.into_iter();
+    for (index, paragraph) in prose.into_iter().enumerate() {
+        let own = spans.by_ref().take(paragraph.code_spans);
+        // Keeping an unmarked paragraph as prose requires every earlier
+        // quotation to have closed.
+        if index >= first_marked && (unpaired || (literal_open && !paragraph.literal)) {
+            own.for_each(drop);
+            continue;
+        }
+        layout.paragraphs.push(paragraph.range);
+        layout.introductions.push(paragraph.introduction);
+        layout.literals.push(paragraph.literals);
+        layout.code_spans.extend(own);
     }
-    ProseLayout {
-        paragraphs,
-        code_spans,
+    layout
+}
+
+/// One paragraph that [`prose_paragraphs`] keeps until every block is read.
+struct KeptParagraph {
+    range: (usize, usize),
+    introduction: usize,
+    literal: bool,
+    literals: Option<Vec<usize>>,
+    /// Each paragraph consumes `code_spans` entries from the shared span
+    /// iterator, even when the layout omits the paragraph.
+    code_spans: usize,
+}
+
+/// What the quoted literals of one paragraph leave to the statement rule.
+struct Literals {
+    /// The offset in the message of the opening mark of the first literal
+    /// whose closing mark has a second reading
+    /// ([`closes_in_one_reading`]). Under that reading the opening mark
+    /// opens a quotation that runs on. `None` when every literal of the
+    /// paragraph closes in one reading.
+    introduces_from: Option<usize>,
+    opening_marks: Vec<usize>,
+}
+
+/// The quoted literals of one paragraph, when every quotation mark in it
+/// opens or closes one. A user who writes `prefix test names with 'it_'` or
+/// `the branch is "main"` names a value, an identifier, a path, a flag, or
+/// a key inside a sentence of their own, and the sentence is theirs whole.
+/// A quotation of several words may carry what someone else said, so its
+/// paragraph is left to the pairing rules, and the answer is `None`.
+///
+/// A quotation holds a literal when its opening mark follows the line
+/// start, whitespace, or an opening bracket, and [`literal_token`] finds
+/// its token and closing mark. A single mark between two letters or digits
+/// is an apostrophe, and a mark that [`joins_suffix_to_code`] accepts joins
+/// a suffix; these open and close nothing. A single mark after a letter or
+/// digit with none after it ends a word, as a plural possessive or an
+/// elision does: it opens and closes nothing in a paragraph without a
+/// single-quoted literal before it, and after one it may close a quotation
+/// that literal opened, so the answer is `None`. An opening
+/// or low-9 single mark directly after a letter or digit can start a
+/// quotation, so the answer is `None`. Any other
+/// mark, and any mark inside an inline code span that the paragraph rule
+/// counts, makes the answer `None` too.
+/// `code_spans` are the paragraph's inline code spans, ascending.
+fn literals_of(block: &[(usize, &str)], code_spans: &[(usize, usize)]) -> Option<Literals> {
+    let mut found = Literals {
+        introduces_from: None,
+        opening_marks: Vec::new(),
+    };
+    let mut spans = CodeSpanCursor::new(code_spans);
+    let mut single_closed = false;
+    for &(start, line) in block {
+        let mut previous: Option<char> = None;
+        let mut chars = line.char_indices().peekable();
+        while let Some((at, ch)) = chars.next() {
+            let single = is_single_mark(ch);
+            if !single && !is_quotation_mark(ch) {
+                previous = Some(ch);
+                continue;
+            }
+            let place = spans.place(start + at);
+            let rest = &line[at + ch.len_utf8()..];
+            if single && joins_suffix_to_code(place, ch, rest) {
+                previous = Some(ch);
+                continue;
+            }
+            if single && previous.is_some_and(char::is_alphanumeric) {
+                // An opening or low-9 single mark immediately after a
+                // letter or digit can start a quotation.
+                if !is_apostrophe(ch) || (single_closed && !rest.starts_with(char::is_alphanumeric))
+                {
+                    return None;
+                }
+                previous = Some(ch);
+                continue;
+            }
+            let opens = place != CodePlace::Code
+                && !CLOSING_ONLY.contains(&ch)
+                && ch != '\u{201a}'
+                && previous.is_none_or(|before| before.is_whitespace() || "([{".contains(before));
+            let (token, closer) = opens.then(|| literal_token(single, ch, rest)).flatten()?;
+            let after = rest[token.len() + closer.len_utf8()..].chars().next();
+            found.opening_marks.push(start + at);
+            let single = single
+                || [ch, closer]
+                    .iter()
+                    .any(|mark| "\u{2039}\u{203a}".contains(*mark));
+            if !closes_in_one_reading(single, token, after) {
+                found.introduces_from.get_or_insert(start + at);
+            }
+            single_closed |= single;
+            let close = at + ch.len_utf8() + token.len();
+            while chars.next_if(|&(next, _)| next <= close).is_some() {}
+            previous = Some(closer);
+        }
+    }
+    Some(found)
+}
+
+/// Whether the mark that closes the literal `token` has one reading: the
+/// token ends in a letter, and for a single mark in a letter other than
+/// `s` or `S`. The rule ignores trailing underscores when testing the
+/// final character. The pairing rules close a one-word quotation after the
+/// same letters. `after` is the character after the mark, and the mark
+/// has one reading when `after` is `None` at line end or contains
+/// whitespace or one of `.,;:!?)]}`. After any other ending the mark may
+/// be a plural possessive, a measure or prime sign, or the opening mark of
+/// a nested quotation, so the literal's opening mark introduces what
+/// follows it.
+fn closes_in_one_reading(single: bool, token: &str, after: Option<char>) -> bool {
+    after.is_none_or(|next| next.is_whitespace() || ".,;:!?)]}".contains(next))
+        && token
+            .trim_end_matches('_')
+            .chars()
+            .next_back()
+            .is_some_and(|last| {
+                last.is_alphabetic() && !last.is_numeric() && !(single && matches!(last, 's' | 'S'))
+            })
+}
+
+/// Closing brackets and emphasis marks that may stand behind the last word
+/// of a token. The utterance check reads the token's ending behind them,
+/// so `"(No.)"` ends in a period.
+const TOKEN_CLOSERS: [char; 5] = [')', ']', '}', '*', '_'];
+
+/// A single quotation mark that no double-mark family lists.
+fn is_single_mark(ch: char) -> bool {
+    SINGLE_QUOTATION_MARKS.contains(&ch) && !is_quotation_mark(ch)
+}
+
+/// A single mark that writes an apostrophe between two letters or digits
+/// or at a word's end.
+fn is_apostrophe(ch: char) -> bool {
+    matches!(ch, '\'' | '\u{2019}' | '\u{ff07}')
+}
+
+/// The token a quotation holds when it is a literal, and the mark that
+/// closes it. `rest` follows the opening mark `opener`, a single mark when
+/// `single` is set. The closing mark is the next quotation mark of the
+/// line and of the opener's style, single or of the same double family,
+/// with no letter or digit after it. The parser treats `\u{2018}`,
+/// `\u{201a}`, and every glyph of [`OPENING_ONLY`] as openers. The token
+/// between
+/// the marks is at least one character, every one of them a
+/// [`is_literal_char`] or an apostrophe (`'`, `’`, or `＇`) between two
+/// letters or digits. A token that ends in `.`, `!`, or `?`, behind any
+/// closing brackets or emphasis marks, is a one-word utterance such as
+/// `"Wait!"` or `'(No.)'` and no literal.
+fn literal_token(single: bool, opener: char, rest: &str) -> Option<(&str, char)> {
+    let mut previous: Option<char> = None;
+    for (at, ch) in rest.char_indices() {
+        let after = rest[at + ch.len_utf8()..].chars().next();
+        if is_apostrophe(ch)
+            && previous.is_some_and(char::is_alphanumeric)
+            && after.is_some_and(char::is_alphanumeric)
+        {
+            previous = Some(ch);
+            continue;
+        }
+        let closes = if single {
+            is_single_mark(ch)
+        } else {
+            quotation_family(ch) == quotation_family(opener)
+        };
+        if closes {
+            let token = &rest[..at];
+            let utterance = token
+                .trim_end_matches(TOKEN_CLOSERS)
+                .ends_with(['.', '!', '?']);
+            // A mark after a backslash may be an escaped character of
+            // quoted text.
+            let closed = !token.is_empty()
+                && !utterance
+                && !token.ends_with('\\')
+                && closes_literal(opener, ch)
+                && after.is_none_or(|after| !after.is_alphanumeric());
+            return closed.then_some((token, ch));
+        }
+        if !is_literal_char(ch) {
+            return None;
+        }
+        previous = Some(ch);
+    }
+    None
+}
+
+/// A character a quoted literal may hold: printable ASCII other than a
+/// backtick and the quotation marks, or a cased letter of another script.
+/// Whitespace, a mark of another quotation, and a letter of a script
+/// that writes no spaces between words are outside it.
+fn is_literal_char(ch: char) -> bool {
+    if ch.is_ascii() {
+        return ch.is_ascii_graphic() && !matches!(ch, '`' | '"' | '\'');
+    }
+    CASED_LETTER.is_match(ch.encode_utf8(&mut [0; 4]))
+}
+
+static CASED_LETTER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[\p{Lu}\p{Ll}\p{Lt}]$").expect("static pattern")
+});
+
+static LETTER_OR_NUMBER: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[\p{L}\p{N}]$").expect("static pattern"));
+
+/// A combining mark or a symbol can carry the alphabetic property, so the
+/// statement rule reads a word's first character by general category.
+fn is_letter_or_number(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || (!ch.is_ascii() && LETTER_OR_NUMBER.is_match(ch.encode_utf8(&mut [0; 4])))
+}
+
+/// For marks that can both open and close quotations, `opener` determines
+/// the literal-closing reading.
+fn closes_literal(opener: char, closer: char) -> bool {
+    let single_angle = |mark: char| matches!(mark, '\u{2039}' | '\u{203a}');
+    if single_angle(opener) != single_angle(closer) {
+        return false;
+    }
+    match closer {
+        '\u{201c}' => opener == '\u{201e}',
+        '\u{ab}' => opener == '\u{bb}',
+        '\u{2039}' => opener == '\u{203a}',
+        '\u{2018}' | '\u{201a}' | '\u{201f}' => false,
+        _ => !OPENING_ONLY.contains(&closer),
     }
 }
 
@@ -3301,6 +3601,11 @@ fn leaves_single_quotation_open(block: &[(usize, &str)], code_spans: &[(usize, u
                 } else if previous.is_none_or(|before| !before.is_alphanumeric()) {
                     open += 1;
                     several_words = false;
+                } else if matches!(ch, '\u{2018}' | '\u{201a}') {
+                    // An opening glyph directly after a letter or digit may
+                    // open a quotation or stand inside its word, so the
+                    // paragraph's quotations are unknown.
+                    return true;
                 }
             } else if open > 0 && ch.is_whitespace() {
                 several_words = true;
@@ -3343,7 +3648,8 @@ fn fence_opener(line: &str) -> Option<&str> {
 }
 
 /// A single quotation mark opens a quotation when it starts a word after the
-/// line start, whitespace, or `(`. The apostrophe that
+/// line start, whitespace, or `(`; `\u{2018}` and `\u{201a}` open one
+/// after a letter or digit too. The apostrophe that
 /// [`joins_suffix_to_code`] accepts starts no word. `start` is the line's
 /// offset in the message and `spans` walks its paragraph's inline code
 /// spans, so the lines of a paragraph are asked in order. A mark inside a
@@ -3352,9 +3658,11 @@ fn fence_opener(line: &str) -> Option<&str> {
 fn opens_single_quotation(start: usize, line: &str, spans: &mut CodeSpanCursor<'_>) -> bool {
     let mut previous = None;
     for (at, ch) in line.char_indices() {
+        let rest = &line[at + ch.len_utf8()..];
         if SINGLE_QUOTATION_MARKS.contains(&ch)
-            && previous.is_none_or(|before: char| !before.is_alphanumeric())
-            && !joins_suffix_to_code(spans.place(start + at), ch, &line[at + ch.len_utf8()..])
+            && (matches!(ch, '\u{2018}' | '\u{201a}')
+                || previous.is_none_or(|before: char| !before.is_alphanumeric()))
+            && !joins_suffix_to_code(spans.place(start + at), ch, rest)
         {
             return true;
         }
@@ -3461,6 +3769,11 @@ const NUMBERED: [&str; 8] = ["no", "nos", "fig", "vol", "ch", "sec", "eq", "appr
 /// `No. 2`, `approx. -5`, or `approx. .5`. `word` is read with or without
 /// its period.
 fn is_abbreviation(word: &str, following: &str) -> bool {
+    let quoted = |ch: char| is_quotation_mark(ch) || SINGLE_QUOTATION_MARKS.contains(&ch);
+    let bare = word.strip_suffix('.').unwrap_or(word);
+    if bare.chars().count() > 2 && bare.starts_with(quoted) && bare.ends_with(quoted) {
+        return false;
+    }
     let word = word.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '.');
     let single = word.strip_suffix('.').unwrap_or(word);
     let spaced = following
@@ -6095,6 +6408,1064 @@ mod tests {
         );
         if widened.is_some() {
             wrong.push(format!("widened to {widened:?}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A user names a value, identifier, path, or flag between quotation
+    /// marks inside a sentence of their own. The sentence is the user's
+    /// statement whole, with the literal and both of its marks. A quotation
+    /// of several words may carry what someone else said, so its paragraph
+    /// stays out of prose. A closing mark with a second reading makes its
+    /// literal's opening mark introduce what follows, as a colon does.
+    #[test]
+    fn a_quotation_that_holds_one_literal_stays_in_the_users_sentence() {
+        let mut wrong = Vec::new();
+        // Each text is one statement when `whole` is set, and holds none
+        // otherwise.
+        for (text, whole) in [
+            // One token between single or double marks of any style.
+            ("Prefix every test name with 'it_'.", true),
+            ("The release branch is \"main\".", true),
+            (
+                "Name the config file \u{201c}app.toml\u{201d} in every service.",
+                true,
+            ),
+            (
+                "Name the lock file \u{2018}deps.lock\u{2019} in every service.",
+                true,
+            ),
+            ("Rename 'tmp' to 'cache' in the build scripts.", true),
+            // After an opening bracket, and at the start of a later line.
+            ("Pass the fast flag ('--release') to every benchmark.", true),
+            ("Keep the flags ['--locked'] in every CI job.", true),
+            ("Use the {'strict'} profile in production.", true),
+            ("Name the release branch\n'main' in every repository.", true),
+            // An apostrophe inside the token, in single and double marks,
+            // and a contraction or a possessive beside a literal.
+            ("Spell the label 'don't' in the menu.", true),
+            ("Spell the label \"don't\" in the menu.", true),
+            ("Don't push to 'main' directly.", true),
+            ("Keep the users' rows out of the 'tmp_cache' table.", true),
+            // A letter of a script with letter case, a titlecase one too.
+            ("Name the column 'gr\u{f6}\u{df}e' in the schema.", true),
+            ("Name the column '\u{1c5}ungla' in the schema.", true),
+            // A closing mark after `s`, `S`, or a number has a second
+            // reading, a plural possessive or a measure. The literal's own
+            // sentence is still one statement.
+            ("Read the 'user_ids' column first.", true),
+            ("Wrap handlers in '@count_calls' from now on.", true),
+            ("Use the 'requests' library for HTTP calls.", true),
+            ("Ask the 'end-users' group first.", true),
+            ("Keep the port at '8080' on staging.", true),
+            ("Keep the limit at '1,000' rows.", true),
+            ("Keep the port at \"8080\" on staging.", true),
+            ("Name the loop variable \"x_2\" in the examples.", true),
+            ("The reviewer said \"no\" to that.", true),
+            ("Use the \"requests\" library for HTTP calls.", true),
+            // A token that ends in a comma.
+            ("Use ',' as the separator in every export.", true),
+            // A single mark directly after an inline code span joins a
+            // suffix to it.
+            ("Check `Parser`'s output against 'main' first.", true),
+            // A one-word utterance ends in a sentence mark, behind
+            // brackets or emphasis marks too.
+            ("The reviewer said \"Wait!\" and left.", false),
+            ("The reviewer said \"(Wait!)\" and left.", false),
+            ("The reviewer said 'No.' and left.", false),
+            ("Tag the build \"v1.\" and publish it.", false),
+            ("The reviewer said \"[Wait!]\" and left.", false),
+            ("The reviewer said \"{Wait!}\" and left.", false),
+            ("The reviewer said \"*Wait!*\" and left.", false),
+            ("The reviewer said \"_Wait?_\" and left.", false),
+            // A mark after a backslash may be an escaped character.
+            ("Join the path with 'C:\\' on the test host.", false),
+            ("Join the path with 'tmp\\\\' on the test host.", false),
+            ("Join the path with \"tmp\\\" on the test host.", false),
+            ("Join the path with 'tmp\\cache' on the test host.", true),
+            // An opening or a low-9 single mark between two letters is no
+            // apostrophe.
+            ("Spell the label 'don\u{2018}t' in the menu.", false),
+            ("Spell the label \"don\u{201a}t\" in the menu.", false),
+            ("Spell the label 'don\u{ff07}t' in the menu.", true),
+            // A word-final single mark after a single-quoted literal may
+            // close a quotation the literal's opening mark opened.
+            ("Read the 'tmp_cache' table for the users' rows.", false),
+            (
+                "Bob wrote 'Alex' notes are gone, all of them' and left.",
+                false,
+            ),
+            // A statement starts with no quotation mark of any style.
+            ("'it_' is the prefix of every test name.", false),
+            ("\"main\" is the release branch.", false),
+            (
+                "\u{2019}it_\u{2019} is the prefix of every test name.",
+                false,
+            ),
+            (
+                "\u{ff07}it_\u{ff07} is the prefix of every test name.",
+                false,
+            ),
+            ("('main') is the release branch.", false),
+            ("[\"main\"]", false),
+            ("( \"main\" ) is the release branch.", false),
+            ("**\"main\"** is the release branch.", false),
+            ("=> 'main' is the release branch.", false),
+            ("(`main`) is the release branch.", false),
+            // Several words between the marks.
+            (
+                "My teammate wrote 'always rebase first' in the guide.",
+                false,
+            ),
+            ("The reviewer said \"skip the tests\" yesterday.", false),
+            // One literal beside a quotation of several words.
+            (
+                "Set 'mode' as the reviewer said \"only this once\" today.",
+                false,
+            ),
+            // A token of a script that writes no spaces between words can
+            // be a sentence.
+            (
+                "The note says '\u{5e38}\u{306b}\u{30ea}\u{30d9}\u{30fc}\u{30b9}\u{3059}\u{308b}' here.",
+                false,
+            ),
+            // A cased letter with no case mapping, and a typographic
+            // apostrophe inside a double-quoted token.
+            ("Name the column '\u{138}ra' in the schema.", true),
+            ("Spell the label \"don\u{2019}t\" in the menu.", true),
+            // A mark directly after another character, a mark before a
+            // letter, a backtick or another mark inside the token, and an
+            // empty pair.
+            ("Set key='value' in the file.", false),
+            ("Set 'a'b in the file.", false),
+            ("Set '`a`' in the file.", false),
+            ("Set '\"a\"' in the file.", false),
+            ("Set '' in the file.", false),
+            ("Set \"\" in the file.", false),
+            ("Set \"a\"b in the file.", false),
+            ("Set \u{300d}a\u{300d} in the file.", false),
+            ("Set \u{201a}a' in the file.", false),
+            // Marks of two styles around one token, and a glyph on the
+            // side it never takes.
+            ("Set \"a' in the file.", false),
+            ("Set \u{201e}a\u{201e} in the file.", false),
+            ("Set 'a\u{201a} in the file.", false),
+            // A one-token quotation inside an inline code span, whose
+            // opening mark follows whitespace there.
+            ("Run `echo 'a'` in the shell first.", false),
+            ("Run `echo \"a\"` in the shell first.", false),
+            ("Set `'a'` and 'b' in the file.", false),
+            ("Set the badge to \"\u{24d0}\" for these tests.", false),
+            ("Name the suffix \"\u{345}\" first.", false),
+            ("**\u{345}** 'main' is the branch.", false),
+            ("**7** 'main' is the branch.", true),
+        ] {
+            let found = quotes_whole_statements(&Prose::of(text), text);
+            if found != whole {
+                wrong.push(format!("{text:?}: {found}"));
+            }
+        }
+        for (text, quote, whole) in [
+            // The sentences beside the one that holds the literal.
+            (
+                "Prefix every test name with 'it_'. Never skip the linter.",
+                "Never skip the linter.",
+                false,
+            ),
+            (
+                "Prefix every test name with 'it_'. Never skip the linter.",
+                "Prefix every test name with 'it_'.",
+                true,
+            ),
+            (
+                "Prefix every test name with 'it_'.\n\nNever skip the linter.",
+                "Never skip the linter.",
+                false,
+            ),
+            // A statement holds a literal with both marks or leaves it out.
+            ("Call the flag 'fast' in the docs.", "fast", false),
+            (
+                "Call the flag 'fast' in the docs.",
+                "Call the flag 'fast",
+                false,
+            ),
+            (
+                "Call the flag 'fast' in the docs.",
+                "fast' in the docs.",
+                false,
+            ),
+            // A quotation of another speaker's sentence, and the sentence
+            // after it.
+            (
+                "The guide says \"Always rebase first.\" Follow it.",
+                "Follow it.",
+                false,
+            ),
+            // The opening mark of `'users'` may open a quotation that runs
+            // on, so it introduces what follows as a colon does: the
+            // sentence that holds it is one statement, a sentence after it
+            // is none, and every later paragraph is left out. A statement
+            // before it stands.
+            (
+                "Bob wrote 'users' data is gone. Never restore it.",
+                "Bob wrote 'users' data is gone.",
+                true,
+            ),
+            (
+                "Bob wrote 'users' data is gone. Never restore it.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote 'users' data is gone.\n\nNever restore it.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote 'users' reports go here.\n\nNever restore it.\n\nTell 'em' today.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote 'user_ids' values are stale.\n\nNever trust them.",
+                "Never trust them.",
+                false,
+            ),
+            (
+                "Bob wrote 'IDS' are stale. Never trust them.",
+                "Never trust them.",
+                false,
+            ),
+            (
+                "Bob wrote '6' is the limit. Never raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote \"6\" is the limit.\n\nNever raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Never pin versions. Use the 'requests' library.",
+                "Never pin versions.",
+                false,
+            ),
+            // The first literal with a second reading introduces what
+            // follows it, also when a later literal closes in one reading.
+            (
+                "Use the 'requests' library with 'it_' names. Never pin it.",
+                "Never pin it.",
+                false,
+            ),
+            // A literal that closes in one reading before one with a second
+            // reading leaves the sentence between them a statement of the
+            // paragraph's start.
+            (
+                "Prefix names with 'it_'. Use the 'requests' library. Never pin it.",
+                "Prefix names with 'it_'. Use the 'requests' library.",
+                true,
+            ),
+            // A double mark after `s` has one reading.
+            (
+                "Use the \"requests\" library. Never pin \"dev\".",
+                "Never pin \"dev\".",
+                true,
+            ),
+            // A number behind a prefix, in double marks.
+            (
+                "Pin the runtime to \"v2\" in CI. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            // A word-final mark after a double-quoted literal, and one
+            // inside a word after a single-quoted literal, close nothing.
+            (
+                "Keep \"tmp_cache\" out of the users' rows. Never drop \"dev\".",
+                "Never drop \"dev\".",
+                true,
+            ),
+            (
+                "Call 'it_' the tests' prefix.\nDon't rename it.",
+                "Don't rename it.",
+                false,
+            ),
+            (
+                "Prefix test names with 'it_'. Don't rename them.",
+                "Don't rename them.",
+                false,
+            ),
+            // A single-quoted first word that closes after a letter other
+            // than `s` is read as a literal, as the pairing rules read a
+            // one-word single quotation: the sentences after it are prose.
+            (
+                "Bob wrote 'Goin' home now. Always tag the release.",
+                "Always tag the release.",
+                false,
+            ),
+            (
+                "Bob wrote 'Goin' home now.\n\nAlways tag the release.",
+                "Always tag the release.",
+                true,
+            ),
+            // The parser pairs the marks around `main` independently of
+            // `'Goin'`, so the sentence containing `'main'` remains
+            // eligible for capture.
+            (
+                "Bob wrote 'Goin' home now. Always tag 'main' first.",
+                "Always tag 'main' first.",
+                true,
+            ),
+            (
+                "Bob wrote 'Goin' home now.\n\nAlways tag 'main' first.",
+                "Always tag 'main' first.",
+                true,
+            ),
+            // U+2018 and U+201A open quotations even immediately after a
+            // letter, so enclosed sentences remain ineligible for capture.
+            (
+                "Bob wrote\u{201a}Use the \"main\" branch! Keep retries off! Logs stay local\u{2018}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{2018}Use the \"main\" branch! Keep retries off! Logs stay local\u{2019}.",
+                "Keep retries off!",
+                false,
+            ),
+            // After either a line break or a paragraph break, the sentence
+            // containing `'requests'` remains eligible for capture; the
+            // following sentence does not.
+            (
+                "Keep the log.\n\nNever pin versions. Use the 'requests' library. Never float it.",
+                "Use the 'requests' library.",
+                true,
+            ),
+            (
+                "Keep the log.\n\nNever pin versions. Use the 'requests' library. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            (
+                "Never pin versions.\nKeep it. Use the 'requests' library. Never float it.",
+                "Use the 'requests' library.",
+                true,
+            ),
+            (
+                "Never pin versions.\nKeep it. Use the 'requests' library. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            (
+                "Call 'it_' the prefix and \"main\" the branch of the tests' names. Never rename them.",
+                "Never rename them.",
+                false,
+            ),
+            // A digit or punctuation before a closing mark can give the
+            // literal a second reading.
+            (
+                "Bob wrote 'user(s)' data is gone. Never restore it.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote '*Parsers*' are slow.\n\nNever tune them.",
+                "Never tune them.",
+                false,
+            ),
+            (
+                "Bob wrote '~~Parsers~~' are slow.\n\nNever tune them.",
+                "Never tune them.",
+                false,
+            ),
+            (
+                "Bob wrote '<em>6</em>' is the aisle clearance! Always use the narrow cart.",
+                "Always use the narrow cart.",
+                false,
+            ),
+            (
+                "Bob wrote '[users](accounts.md)' data is gone.\n\nNever restore it.",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote '(f(x))' is the derivative! Never change the tests. Just rerun 'em'",
+                "Never change the tests.",
+                false,
+            ),
+            (
+                "Bob wrote '&'_ str is the type in that example.\n\nKeep the lifetime examples.",
+                "Keep the lifetime examples.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}(\u{201c}--force works in dry runs.\n\nAlways preserve both logs.",
+                "Always preserve both logs.",
+                false,
+            ),
+            (
+                "Bob wrote \u{ab}(\u{2039}[Notice] The old data is gone. Never restore it. Ask the owner. \u{203a})\u{bb}",
+                "Never restore it.",
+                false,
+            ),
+            (
+                "Bob wrote '+6' is the limit. Never raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote \"+6\" is the limit. Never raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote '(6)' is the limit. Never raise it.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Prefix boolean getters with 'is_'. Never abbreviate them.",
+                "Never abbreviate them.",
+                false,
+            ),
+            // The containing sentence remains eligible for capture even
+            // when the literal has a second reading.
+            (
+                "Keep the offset at \"+6\" hours. Never raise it.",
+                "Keep the offset at \"+6\" hours.",
+                true,
+            ),
+            (
+                "Keep the limit at '(6)' rows. Never raise it.",
+                "Keep the limit at '(6)' rows.",
+                true,
+            ),
+            (
+                "Prefix boolean getters with 'is_'. Never abbreviate them.",
+                "Prefix boolean getters with 'is_'.",
+                true,
+            ),
+            (
+                "Use the 'requests' library. Never pin it.",
+                "Use the 'requests' library. Never pin it.",
+                true,
+            ),
+            // The pairing rules close a double mark after `]` and a single
+            // mark after a comma, so the later paragraphs stay prose.
+            (
+                "Prefix commit subjects with \"[JIRA-123]\". Never force-push to main.",
+                "Never force-push to main.",
+                false,
+            ),
+            (
+                "Prefix commit subjects with \"[JIRA-123]\".\n\nNever force-push to main.",
+                "Never force-push to main.",
+                true,
+            ),
+            (
+                "Use ',' as the separator. Never use tabs.",
+                "Never use tabs.",
+                false,
+            ),
+            (
+                "Use ',' as the separator.\n\nNever use tabs.",
+                "Never use tabs.",
+                true,
+            ),
+            (
+                "Join the path with \"C:\\\" on the test host.\n\nNever rename it.",
+                "Never rename it.",
+                false,
+            ),
+            // The introduction is the first literal with a second reading:
+            // a statement that starts between it and a later one is none.
+            (
+                "Use the 'requests' library. Pin 'urllib3' too. Never float them.",
+                "Pin 'urllib3' too.",
+                false,
+            ),
+            // A word-final mark on a later line of the paragraph.
+            (
+                "Call 'it_' the prefix.\nKeep the tests' names short. Never rename them.",
+                "Never rename them.",
+                false,
+            ),
+            // A question in a literal makes its paragraph one the pairing
+            // rules read.
+            ("Ask 'why?' first. Keep the log.", "Keep the log.", false),
+            // A later word-final mark in the same paragraph.
+            (
+                "Bob wrote 'Alex' notes are gone. Never restore them. Really' he said.",
+                "Never restore them.",
+                false,
+            ),
+            // A quotation left open in a later paragraph leaves out the
+            // paragraph with the literal too: the literal's marks may
+            // stand inside that quotation.
+            (
+                "Prefix every test name with 'it_'.\n\nBob wrote \"Hi team.\n\nAlways skip the CI tests.",
+                "Prefix every test name with 'it_'.",
+                false,
+            ),
+            (
+                "Prefix every test name with 'it_'.\n\nBob wrote \"Hi team.\n\nAlways skip the CI tests.",
+                "Always skip the CI tests.",
+                false,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "Use the 'main' branch.",
+                true,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "Keep the offset at '+6' hours.",
+                true,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.",
+                "Never raise it.",
+                true,
+            ),
+            (
+                "Never raise it.\n\nKeep the offset at '+6' hours.",
+                "Never raise it.",
+                true,
+            ),
+            (
+                "Bob wrote \"(6)\" is the limit.\n\nNever raise it.\n\nKeep the offset at \"+6\" hours.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the limit.\n\nNever raise it.\n\nPrefix tests with 'it_'.",
+                "Never raise it.",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the clearance!\n\nAlways use the narrow cart! Label it 'cart'.",
+                "Always use the narrow cart!",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the clearance!\n\nAlways use the narrow cart! Label it 'cart'.",
+                "Label it 'cart'.",
+                false,
+            ),
+            (
+                "Bob wrote \"(6)\" is the clearance!\n\nAlways use the narrow cart!",
+                "Always use the narrow cart!",
+                true,
+            ),
+            (
+                "Bob wrote\u{201a}Use the staging host!\n\nKeep retries off! Use the \"main\" branch.\n\nLogs stay local\u{2018}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{2018}Use the staging host!\n\nKeep retries off! Use the \"main\" branch.\n\nLogs stay local\u{2019}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{201a}Use the staging host!\n\nKeep retries off!",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{2018}Use the staging host!\n\nKeep retries off!",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{201a}Use the \"main\" branch! Keep retries off!",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Don\u{2019}t rename 'main'. Keep the log.",
+                "Don\u{2019}t rename 'main'.",
+                true,
+            ),
+            (
+                "Don\u{ff07}t rename 'main'. Keep the log.",
+                "Don\u{ff07}t rename 'main'.",
+                true,
+            ),
+            (
+                "Bob wrote \u{ab}_Notice_\u{ab}[Draft] Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote '_Notice_'[Draft] Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{ab}_Notice_\u{ab}[Draft] Keep both manifests!\n\nNever restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Use 'main'-style names. Keep them short.",
+                "Keep them short.",
+                false,
+            ),
+            (
+                "Use 'main'-style names. Keep them short.",
+                "Use 'main'-style names.",
+                true,
+            ),
+            (
+                "Use the 'main' branch (or 'dev'). Keep them short.",
+                "Use the 'main' branch (or 'dev').",
+                true,
+            ),
+            (
+                "Bob wrote \u{201c}_Heads-up_\u{201c}[Draft] Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}Heads-up\u{201c} Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{2018}Heads-up\u{2018} Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Nenne den Zweig \u{201e}main\u{201c} hier. Halte \"dev\" kurz.",
+                "Halte \"dev\" kurz.",
+                true,
+            ),
+            (
+                "Name the module '__' here. Keep it short.",
+                "Keep it short.",
+                false,
+            ),
+            (
+                "Order the 'caf\u{e9}' blend. Keep \"dev\" short.",
+                "Keep \"dev\" short.",
+                true,
+            ),
+            (
+                "Keep the log.\nUse `pip` with the 'requests' library. Never float it.",
+                "Use `pip` with the 'requests' library.",
+                true,
+            ),
+            (
+                "Keep the log.\nUse `pip` with the 'requests' library. Never float it.",
+                "Never float it.",
+                false,
+            ),
+            (
+                "Use the 'requests' library. Pin it like this: always. Never float it.",
+                "Pin it like this: always.",
+                false,
+            ),
+            (
+                "Set the tag to \"v\\\\\" in the file. Keep it.",
+                "Keep it.",
+                false,
+            ),
+            (
+                "Set the depth to \"((6))\" in the file.",
+                "Set the depth to \"((6))\" in the file.",
+                true,
+            ),
+            (
+                "Use the 'requests' library.\n\nPrefix tests with 'it_'.",
+                "Use the 'requests' library.",
+                true,
+            ),
+            (
+                "Use the 'requests' library.\n\nPrefix tests with 'it_'.",
+                "Prefix tests with 'it_'.",
+                false,
+            ),
+            (
+                "Call \"init()\" first.\n\nPrefix tests with 'it_'.",
+                "Call \"init()\" first.",
+                true,
+            ),
+            (
+                "Call \"init()\" first.\n\nPrefix tests with 'it_'.\n\nNever skip the linter.",
+                "Never skip the linter.",
+                false,
+            ),
+            (
+                "Call \"init()\" first.\n\nUse the 'main' branch.\n\nNever skip the linter.",
+                "Never skip the linter.",
+                true,
+            ),
+            (
+                "Call \"init()\" first.\n\nUse the 'main' branch.\n\nNever skip the linter.",
+                "Use the 'main' branch.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}Heads-up\u{201c} Keep both manifests!\n\nAlways use the narrow cart! Label it 'cart'.",
+                "Always use the narrow cart!",
+                false,
+            ),
+            (
+                "Bob wrote \u{2018}Heads-up\u{2018} Keep both manifests!\n\nAlways use the narrow cart! Label it 'cart'.",
+                "Always use the narrow cart!",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}Heads-up\u{201c} Keep both manifests!\n\nAlways use the narrow cart!",
+                "Always use the narrow cart!",
+                true,
+            ),
+            (
+                "My teammate wrote \"always rebase first\" in the guide.\n\nPrefix tests with 'it_'.",
+                "Prefix tests with 'it_'.",
+                false,
+            ),
+            (
+                "My teammate wrote \"always rebase first\" in the guide.\n\nNever skip the linter.",
+                "Never skip the linter.",
+                true,
+            ),
+            (
+                "Keep the \u{2039}users\u{203a} table.\n\nNever drop it.",
+                "Never drop it.",
+                false,
+            ),
+            (
+                "Keep the \u{2039}main\u{bb} branch.\n\nNever drop it.",
+                "Never drop it.",
+                false,
+            ),
+            (
+                "Keep the \u{2039}main\u{203a} branch.\n\nNever drop it.",
+                "Never drop it.",
+                true,
+            ),
+            (
+                "Keep the \u{ab}users\u{bb} table.\n\nNever drop it.",
+                "Never drop it.",
+                true,
+            ),
+            (
+                "Keep the \u{2039}main\u{203a} branch. Never drop \"dev\".",
+                "Never drop \"dev\".",
+                true,
+            ),
+            (
+                "Keep the \u{2039}users\u{203a} table. Never drop it.",
+                "Never drop it.",
+                false,
+            ),
+            (
+                "Bob wrote \u{ab}Heads-up\u{ab} Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{2039}Heads-up\u{2039} Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Bob wrote \u{201c}Heads-up\u{201f} Keep both manifests! Never restore the fixtures.",
+                "Never restore the fixtures.",
+                false,
+            ),
+            (
+                "Nenne den Zweig \u{bb}main\u{ab} hier. Halte \"dev\" kurz.",
+                "Halte \"dev\" kurz.",
+                true,
+            ),
+            (
+                "Kalla grenen \u{bb}main\u{bb} en stund. Korta \"dev\" nu.",
+                "Korta \"dev\" nu.",
+                true,
+            ),
+            (
+                "Nomme la branche \u{ab}main\u{bb} ici. Garde \"dev\" courte.",
+                "Garde \"dev\" courte.",
+                true,
+            ),
+            (
+                "Nenne den Zweig \u{203a}main\u{2039} hier. Halte \"dev\" kurz.",
+                "Halte \"dev\" kurz.",
+                true,
+            ),
+            (
+                "Bob wrote\u{2018}Stop!\u{2019}\n\nKeep the log.",
+                "Keep the log.",
+                false,
+            ),
+            (
+                "Bob wrote\u{201a}Stop!\u{2019}\n\nKeep the log.",
+                "Keep the log.",
+                false,
+            ),
+            (
+                "Bob wrote \u{2018}Goin\u{2019} home is hard.\n\nNever deploy on Fridays.\n\nSend the rest to Hawai\u{2018}i.\u{2019}",
+                "Never deploy on Fridays.",
+                false,
+            ),
+            (
+                "Bob wrote\u{2018}Wait\u{2019} today.\n\nKeep the log.",
+                "Keep the log.",
+                false,
+            ),
+            (
+                "Bob wrote 'state_' is the key.\n\nKeep both logs!\n\nThat is the whole note'",
+                "Keep both logs!",
+                false,
+            ),
+            (
+                "Bob wrote 'state_' is the key.\n\nKeep both logs!\n\nThat is the whole note'",
+                "Bob wrote 'state_' is the key.",
+                true,
+            ),
+            (
+                "Prefix every test name with 'it_'.\n\nDon't skip the linter.",
+                "Don't skip the linter.",
+                false,
+            ),
+            (
+                "Prefix every test name with 'it_'.\n\nUse 'main' as the branch.",
+                "Use 'main' as the branch.",
+                false,
+            ),
+            (
+                "Prefix every test name with 'it_'.\n\nKeep the tests' names short.",
+                "Prefix every test name with 'it_'.",
+                true,
+            ),
+            (
+                "Bob wrote \"Hi team\" today.\n\nKeep the log.\n\nKeep the offset at '+6' hours.",
+                "Keep the log.",
+                false,
+            ),
+            (
+                "Bob wrote \"Hi team\" today.\n\nKeep the log.",
+                "Keep the log.",
+                true,
+            ),
+            (
+                "Use the 'main' branch.\n\nRun `make` first.\n\nKeep the offset at '+6' in `conf.toml`.",
+                "Keep the offset at '+6' in `conf.toml`.",
+                true,
+            ),
+            (
+                "Use the 'main' branch.\n\nRun `make` first.\n\nKeep the offset at '+6' in `conf.toml`.",
+                "Run `make` first.",
+                false,
+            ),
+            (
+                "Use the 'main' branch.\n\nRun `make` first.\n\nKeep the offset at '+6' in `conf.toml`.",
+                "Use the 'main' branch.",
+                true,
+            ),
+            (
+                "Set ('main') as the default. Keep \"dev\" too.",
+                "Keep \"dev\" too.",
+                true,
+            ),
+            (
+                "Set 'main'/'dev' as the defaults. Keep them.",
+                "Keep them.",
+                false,
+            ),
+            (
+                "Nenne den Zweig \u{201a}main\u{2018} hier.\n\nHalte ihn kurz.",
+                "Halte ihn kurz.",
+                true,
+            ),
+            (
+                "Send the rest to Hawai\u{2018}i.\n\nKeep the log.",
+                "Keep the log.",
+                false,
+            ),
+            (
+                "Prefix test names with 'it_'. Don't rename \"main\".",
+                "Don't rename \"main\".",
+                true,
+            ),
+            (
+                "Prefix every test name with 'it_'. Never skip the linter.",
+                "Prefix every test name with 'it_'. Never skip the linter.",
+                true,
+            ),
+            (
+                "Use the 'requests' library. Never pin 'urllib3'.",
+                "Never pin 'urllib3'.",
+                false,
+            ),
+            (
+                "Bob wrote'Use the staging host.\n\nKeep retries off! Keep the \"main\" branch protected.\n\nLogs stay local' today.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{2019}Use the staging host.\n\nKeep retries off! Keep the \"main\" branch protected.\n\nLogs stay local\u{2019} today.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote\u{ff07}Use the staging host.\n\nKeep retries off! Keep the \"main\" branch protected.\n\nLogs stay local\u{ff07} today.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote'Use the staging host.\n\nKeep retries off! Keep the \"main\" branch protected.\n\nLogs stay local' today.",
+                "Keep the \"main\" branch protected.",
+                true,
+            ),
+            (
+                "Bob wrote \u{fe41}Use the \"main\" branch! Keep retries off! Logs stay local\u{fe42}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote \u{fe41}Use the staging host!\n\nKeep retries off! Use the \"main\" branch.\n\nLogs stay local\u{fe42}.",
+                "Keep retries off!",
+                false,
+            ),
+            (
+                "Bob wrote \u{fe41}Use the staging host!\n\nKeep retries off! Use the \"main\" branch.\n\nLogs stay local\u{fe42}.",
+                "Use the \"main\" branch.",
+                true,
+            ),
+            (
+                "Bob wrote 'Goin' home. Never skip the linter. Keep the log'\u{345} and left.",
+                "Never skip the linter.",
+                false,
+            ),
+            (
+                "Bob wrote \"f\" is the second derivative and f' is the first. Always use central differences. The Vim comment follows.\n\"TODO\"",
+                "Always use central differences.",
+                false,
+            ),
+            (
+                "The runbook uses \"print(r\". Never enable caching. \"+SUFFIX)\" as a Python example.",
+                "Never enable caching.",
+                false,
+            ),
+            (
+                "Set the column heading to \"Dr\". Use it in all exports.",
+                "Set the column heading to \"Dr\".",
+                true,
+            ),
+            (
+                "Set the column heading to \"Dr\". Use it in all exports.",
+                "Set the column heading to \"Dr\"",
+                true,
+            ),
+            (
+                "Ask Dr. Lee about the \"main\" branch. Keep the log.",
+                "Ask Dr.",
+                false,
+            ),
+            // A closing mark after sentence punctuation with nothing open.
+            (
+                "Bob wrote 'it_' is the prefix. Always use it.' Then he left.",
+                "Always use it.",
+                false,
+            ),
+        ] {
+            let found = quotes_whole_statements(&Prose::of(text), quote);
+            if found != whole {
+                wrong.push(format!("{quote:?} in {text:?}: {found}"));
+            }
+        }
+        // A cut quotation widens to the sentence that holds the literal.
+        for (text, quote, widened) in [
+            (
+                "Please prefix every test name with 'it_' from now on.",
+                "prefix every test name with 'it_'",
+                Some("Please prefix every test name with 'it_' from now on."),
+            ),
+            (
+                "My teammate wrote 'always rebase first' in the guide.",
+                "always rebase first",
+                None,
+            ),
+            // A quotation cut from inside the marks widens to the user's
+            // sentence around the literal, as one cut from a code span does.
+            (
+                "Call the flag 'fast' in the docs.",
+                "fast",
+                Some("Call the flag 'fast' in the docs."),
+            ),
+            (
+                "Use the 'requests' library. Never float it.",
+                "the 'requests' library",
+                Some("Use the 'requests' library."),
+            ),
+            (
+                "Use the 'requests' library. Never float it.",
+                "float it",
+                None,
+            ),
+            (
+                "Use the 'main' branch.\n\nNever raise it.\n\nKeep the offset at '+6' hours.",
+                "raise it",
+                None,
+            ),
+        ] {
+            let found = enclosing_statement(&Prose::of(text), quote);
+            if found != widened {
+                wrong.push(format!("{quote:?} in {text:?} widened to {found:?}"));
+            }
+        }
+        // Sentences quoted one by one after a colon join the statement
+        // they follow, with the literal one of them holds.
+        let paragraph = "Heads up: the staging branch moved. It is named 'stage_next' now.";
+        let joined: Vec<String> = parsed_quotes(
+            paragraph,
+            CaptureRole::User,
+            true,
+            &[
+                ("Heads up: the staging branch moved.", "NAMING", None),
+                ("It is named 'stage_next' now.", "NAMING", None),
+            ],
+        )
+        .into_iter()
+        .map(|(quote, _, _)| quote)
+        .collect();
+        if joined != [paragraph; 2] {
+            wrong.push(format!("joined to {joined:?}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn rule_sentences_that_name_a_literal_stay_whole_statements() {
+        let mut wrong = Vec::new();
+        for text in [
+            "Prefix every test name with 'it_'.",
+            "Always add the '@retry' decorator from the 'pedantic' module to every function.",
+            "From now on, end attribute names with '_s'.",
+            "Wrap handlers in '@count_calls' from now on.",
+            "Start function argument names with 'x_' from now on.",
+            "Always import the 'locale' module in your scripts.",
+            "The release branch is \"main\".",
+        ] {
+            if !quotes_whole_statements(&Prose::of(text), text) {
+                wrong.push(format!("{text:?} is no statement"));
+            }
+        }
+        let pair = "Prefix every test name with 'it_'. Suffix every helper with \"_h\".";
+        for quote in [pair, "Suffix every helper with \"_h\"."] {
+            if !quotes_whole_statements(&Prose::of(pair), quote) {
+                wrong.push(format!("{quote:?} of {pair:?} is no statement"));
+            }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
