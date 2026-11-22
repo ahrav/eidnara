@@ -695,25 +695,18 @@ fn expansion(text: &str) -> Option<(usize, bool)> {
     (name > 0 && braced[name..].starts_with('}')).then_some((name + 3, false))
 }
 
-/// The commands of a command line, in the grammar this reader follows
-/// whole: words that spaces and tabs part, single and double quotes,
-/// backslash escapes, a backslash and line break between two words, `$`
-/// before a name or a special parameter, `${NAME}`, redirections to a file
-/// or a descriptor, comments, and the operators `&&`, `||`, `|`, `;`, and a
-/// line break between commands. A `;` or a line break that ends the command
-/// line, a blank line, and a line break after an operator join nothing.
-///
-/// `None` for a command line that holds anything else, since the reader
-/// names a command and reads its final `echo` only where it follows every
-/// character: a `(`, `)`, `{`, `}`, or backtick outside quotes, a backtick
-/// or a `$(` inside double quotes, `$(`, `$[`, `$'`, `$"`, a `${…}` that
-/// holds more than a name, `<<`, a `&` that is no part of `&&` or of a
-/// redirection, `|&`, `>|`, `;;`, a carriage return outside quotes, a
-/// backslash and line break inside a word or inside double quotes, an open
-/// quote, a backslash that ends the text, an operator with no command on
-/// one of its sides, one of [`RESERVED_WORDS`] in a command's first place,
-/// and more than [`MAX_STEPS`] commands or [`MAX_WORDS`] words. The scan
-/// passes over each byte once.
+/// The commands of a command line, in the one grammar this reader follows
+/// whole, or `None` for a command line that holds anything outside it. The
+/// grammar is the one section 7.9 of the host wire protocol states: words
+/// that spaces and tabs part, single and double quotes, backslash escapes,
+/// a backslash and line break between two words, redirections, comments,
+/// the `$` forms that [`expansion`] reads, and the operators `&&`, `||`,
+/// `|`, `;`, and a line break between commands, within [`MAX_STEPS`]
+/// commands and [`MAX_WORDS`] words. One of [`RESERVED_WORDS`] in a
+/// command's first place, an operator with no command on one of its sides,
+/// and a command line with no command are outside it. The reader finds a
+/// final status echo and the words a record shows; the scan passes over
+/// each byte once.
 fn commands_of(command: &str) -> Option<Vec<Step<'_>>> {
     let bytes = command.as_bytes();
     let mut reader = LineReader::default();
