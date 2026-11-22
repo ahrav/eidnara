@@ -546,6 +546,18 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
+    // The block holds the user-level review switch and its two settings; the daemon reads them
+    // from the user tier only.
+    if ("memory_reviewer" in projectRaw) {
+        const reviewer = projectRaw.memory_reviewer;
+        delete projectRaw.memory_reviewer;
+        if (isPlainObject(reviewer) && Object.keys(reviewer).length > 0) {
+            warnings.push(
+                "Ignoring memory_reviewer from project config (security: sending memories and conversation text to a model for review, and applying its proposals, requires user-level consent).",
+            );
+        }
+    }
+
     // The daemon reads the document list from the user tier only, so the strip removes the
     // block and warns when it sets the list, as the daemon's tier merge does.
     if ("project_docs" in projectRaw) {

@@ -87,6 +87,44 @@ impl Default for TerseTextCompressionConfig {
     }
 }
 
+/// What the MemoryReviewer worker does with a proposal it publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewApply {
+    /// The proposal waits for `review.accept`; the worker writes nothing to a memory.
+    #[default]
+    Propose,
+    /// A `retire` or `revise` proposal that cites a contradiction lowers its target's standing: the target takes a `mark_disputed` disposition, which leaves it on explicit search as a labeled row. Every other proposal writes nothing.
+    Contest,
+    /// The worker accepts the proposal through the Kernel acceptance path `review.accept` uses.
+    Apply,
+}
+
+impl ReviewApply {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Propose => "propose",
+            Self::Contest => "contest",
+            Self::Apply => "apply",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        [Self::Propose, Self::Contest, Self::Apply]
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+}
+
+/// The user tier's MemoryReviewer switch and its two settings.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MemoryReviewerConfig {
+    /// User-only consent to review the project's memories with the configured model: the worker selects memories, sends each with its evidence through the host's model execution, and records a proposal. The switch stands in for the deployment owner's activation record.
+    pub enabled: bool,
+    /// The `provider/model` every review request names; absent, the first model of the History Summarizer's chain.
+    pub model: Option<String>,
+    pub apply: ReviewApply,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DaemonConfig {
     pub model_chain: Vec<String>,
@@ -109,6 +147,8 @@ pub struct DaemonConfig {
     /// User-only consent to run the attestation verifier's bounded background pass over the
     /// project's live decisions; read again at the start of every pass.
     pub verifier_enabled: bool,
+    /// The MemoryReviewer switch. An enabled switch also sets `source_capture_enabled` and `contradiction_candidates_enabled`, whose rows are the evidence a review starts from.
+    pub memory_reviewer: MemoryReviewerConfig,
     /// Auto-search hint controls operate independently at transform time.
     pub auto_search: AutoSearchConfig,
     /// TerseTextCompression compression uses deterministic age-tier controls.
@@ -164,6 +204,7 @@ impl Default for DaemonConfig {
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
             verifier_enabled: false,
+            memory_reviewer: MemoryReviewerConfig::default(),
             auto_search: AutoSearchConfig::default(),
             terse_text_compression: TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -199,6 +240,17 @@ pub struct ResolvedCacheTtl {
 }
 
 impl DaemonConfig {
+    /// The `provider/model` a review request names while the switch is on: the reviewer's own model, or the first model of the History Summarizer's chain. `None` with the switch off or with no model configured, which leaves the worker with nothing to dispatch for the project.
+    pub fn memory_reviewer_model(&self) -> Option<&str> {
+        if !self.memory_reviewer.enabled || self.admission != ConfigAdmission::Admitted {
+            return None;
+        }
+        self.memory_reviewer
+            .model
+            .as_deref()
+            .or_else(|| self.model_chain.first().map(String::as_str))
+    }
+
     pub fn eidnara_folds(&self) -> bool {
         self.admission == ConfigAdmission::Admitted
             && self.compaction_enabled
@@ -444,6 +496,7 @@ impl MergedConfig {
             source_capture_enabled: _,
             contradiction_candidates_enabled: _,
             verifier_enabled: _,
+            memory_reviewer,
             auto_search: _,
             terse_text_compression: _,
             auto_promote: _,
@@ -483,6 +536,7 @@ impl MergedConfig {
                 .map(|path| allocation(path.as_str().len()))
                 .sum::<usize>()
             + optional(memory_classifier_review_user_memories_schedule)
+            + optional(&memory_reviewer.model)
             + optional(prompt_surface_guidance_override)
             + allocation(cache_ttl.capacity())
             + cache_ttl_by_model
@@ -974,6 +1028,9 @@ pub enum ConfigKey {
     SourceCaptureEnabled,
     ContradictionCandidatesEnabled,
     VerifierEnabled,
+    MemoryReviewerEnabled,
+    MemoryReviewerModel,
+    MemoryReviewerApply,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
@@ -1014,6 +1071,9 @@ impl ConfigKey {
         Self::SourceCaptureEnabled,
         Self::ContradictionCandidatesEnabled,
         Self::VerifierEnabled,
+        Self::MemoryReviewerEnabled,
+        Self::MemoryReviewerModel,
+        Self::MemoryReviewerApply,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
@@ -1051,6 +1111,9 @@ impl ConfigKey {
             Self::SourceCaptureEnabled => "/source_capture/enabled",
             Self::ContradictionCandidatesEnabled => "/contradiction_candidates/enabled",
             Self::VerifierEnabled => "/verifier/enabled",
+            Self::MemoryReviewerEnabled => "/memory_reviewer/enabled",
+            Self::MemoryReviewerModel => "/memory_reviewer/model",
+            Self::MemoryReviewerApply => "/memory_reviewer/apply",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
@@ -1101,6 +1164,9 @@ impl ConfigKey {
             | Self::SourceCaptureEnabled
             | Self::ContradictionCandidatesEnabled
             | Self::VerifierEnabled
+            | Self::MemoryReviewerEnabled
+            | Self::MemoryReviewerModel
+            | Self::MemoryReviewerApply
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -1138,6 +1204,9 @@ impl ConfigKey {
             | Self::SourceCaptureEnabled
             | Self::ContradictionCandidatesEnabled
             | Self::VerifierEnabled
+            | Self::MemoryReviewerEnabled
+            | Self::MemoryReviewerModel
+            | Self::MemoryReviewerApply
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -1222,6 +1291,11 @@ pub(crate) fn merge_tiers_with_warnings(
         .execute_threshold_percentage
         .clamp(1.0, MAX_EXECUTE_THRESHOLD_PERCENTAGE);
     dedup_preserving_order(&mut cfg.model_chain);
+    // A review starts from the message blocks a memory cites and from later source text that overlaps it, so the switch carries the two consents that produce those rows.
+    if cfg.memory_reviewer.enabled {
+        cfg.source_capture_enabled = true;
+        cfg.contradiction_candidates_enabled = true;
+    }
     (cfg, warnings)
 }
 
@@ -1284,6 +1358,37 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         ConfigKey::VerifierEnabled => {
             if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
                 cfg.verifier_enabled = enabled;
+            }
+        }
+        ConfigKey::MemoryReviewerEnabled => {
+            if let Some(enabled) = tier.pointer(pointer).and_then(Value::as_bool) {
+                cfg.memory_reviewer.enabled = enabled;
+            }
+        }
+        ConfigKey::MemoryReviewerModel => {
+            if let Some(model) = tier.pointer(pointer).and_then(Value::as_str) {
+                let model = model.trim();
+                // The host's model execution takes a canonical `provider/model`; any other spelling leaves the History Summarizer's model in place.
+                if model
+                    .split_once('/')
+                    .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
+                {
+                    cfg.memory_reviewer.model = Some(model.to_string());
+                } else if !model.is_empty() {
+                    warnings.push(format!(
+                        "ignoring {pointer}: not in provider/model form; reviews use the history summarizer's model"
+                    ));
+                }
+            }
+        }
+        ConfigKey::MemoryReviewerApply => {
+            if let Some(mode) = tier.pointer(pointer).and_then(Value::as_str) {
+                match ReviewApply::parse(mode.trim()) {
+                    Some(mode) => cfg.memory_reviewer.apply = mode,
+                    None => warnings.push(format!(
+                        "ignoring {pointer}: expected propose, contest, or apply; proposals stay unapplied"
+                    )),
+                }
             }
         }
         ConfigKey::AutoSearchEnabled => {
@@ -2320,6 +2425,9 @@ mod tests {
                 ConfigKey::SourceCaptureEnabled,
                 ConfigKey::ContradictionCandidatesEnabled,
                 ConfigKey::VerifierEnabled,
+                ConfigKey::MemoryReviewerEnabled,
+                ConfigKey::MemoryReviewerModel,
+                ConfigKey::MemoryReviewerApply,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
@@ -2356,6 +2464,74 @@ mod tests {
                 .any(|warning| warning.contains("/contradiction_candidates/enabled")),
             "{warnings:?}"
         );
+    }
+
+    /// The review switch is one user-tier key. Off, a configuration names no review model and
+    /// leaves source capture and candidates as their own keys set them. On, it names the model
+    /// reviews run under, carries the two consents a review reads from, and keeps proposals
+    /// unapplied until the user picks a mode.
+    #[test]
+    fn the_review_switch_is_user_tier_only_and_carries_its_model_and_evidence_consents() {
+        let off = DaemonConfig::default();
+        assert!(!off.memory_reviewer.enabled);
+        assert_eq!(off.memory_reviewer.apply, ReviewApply::Propose);
+        assert_eq!(off.memory_reviewer_model(), None);
+
+        let summarizer = serde_json::json!({
+            "history_summarizer": { "module_model": "prov/summarizer" },
+            "memory_reviewer": { "enabled": true },
+        });
+        let cfg = merge_tiers(Some(&summarizer), None);
+        assert!(cfg.memory_reviewer.enabled);
+        assert_eq!(cfg.memory_reviewer_model(), Some("prov/summarizer"));
+        assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Propose);
+        assert!(cfg.source_capture_enabled && cfg.contradiction_candidates_enabled);
+
+        let own = serde_json::json!({
+            "history_summarizer": { "module_model": "prov/summarizer" },
+            "memory_reviewer": { "enabled": true, "model": "prov/reviewer", "apply": "contest" },
+        });
+        let cfg = merge_tiers(Some(&own), None);
+        assert_eq!(cfg.memory_reviewer_model(), Some("prov/reviewer"));
+        assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Contest);
+
+        // A switch with no model to name reviews nothing; the evidence consents still follow it.
+        let modelless = serde_json::json!({ "memory_reviewer": { "enabled": true } });
+        assert_eq!(
+            merge_tiers(Some(&modelless), None).memory_reviewer_model(),
+            None
+        );
+
+        // A model outside provider/model form and a mode outside the three are refused with a warning, and the defaults stand.
+        let malformed = serde_json::json!({
+            "history_summarizer": { "module_model": "prov/summarizer" },
+            "memory_reviewer": { "enabled": true, "model": "reviewer", "apply": "always" },
+        });
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&malformed), None);
+        assert_eq!(cfg.memory_reviewer_model(), Some("prov/summarizer"));
+        assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Propose);
+        for pointer in ["/memory_reviewer/model", "/memory_reviewer/apply"] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(pointer)),
+                "{warnings:?}"
+            );
+        }
+
+        // A project tier sets none of the three keys.
+        let (cfg, warnings) = merge_tiers_with_warnings(None, Some(&own));
+        assert!(!cfg.memory_reviewer.enabled);
+        assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Propose);
+        assert!(!cfg.source_capture_enabled && !cfg.contradiction_candidates_enabled);
+        for pointer in [
+            "/memory_reviewer/enabled",
+            "/memory_reviewer/model",
+            "/memory_reviewer/apply",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(pointer)),
+                "{warnings:?}"
+            );
+        }
     }
 
     /// The daemon-level reader follows a rewritten user tier, while a configuration resolved
