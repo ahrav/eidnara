@@ -3352,6 +3352,7 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
     });
     let kernel = Arc::clone(&rig.kernel);
     let route = ProjectRoute {
+        review: None,
         project: PROJECT.to_string(),
         authority_generation: generation,
         roots: vec![RootScope {
@@ -3371,6 +3372,7 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
         permits: Arc::new(InvestigationPermits::default()),
         providers: providers.clone(),
         rejection: Default::default(),
+        switched: Default::default(),
     });
     let cancel = tokio_util::sync::CancellationToken::new();
 

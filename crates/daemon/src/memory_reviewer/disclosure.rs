@@ -269,7 +269,13 @@ impl Disclosure<'_> {
         if prepared.broker != self.broker.id() {
             return Err(DisclosureRefusal::BrokerMismatch);
         }
-        if self.broker.binding().destination != ArtifactDestination::Remote {
+        // The broker must have judged its disclosures for the destination this sender reaches: the configured model through the host, a remote model on the sender's own connection.
+        let destination = if self.sender.host_route().is_some() {
+            ArtifactDestination::ConfiguredModel
+        } else {
+            ArtifactDestination::Remote
+        };
+        if self.broker.binding().destination != destination {
             return Err(DisclosureRefusal::DestinationNotRemote);
         }
         self.approved(prepared.model())?;
@@ -278,6 +284,11 @@ impl Disclosure<'_> {
         }
         let evidence = self.revalidate(prepared)?;
         self.guard(&evidence)?;
+        if let Some(host) = self.sender.host_route() {
+            return self
+                .disclose_through_host(host, prepared, cancel, deadline)
+                .await;
+        }
         // The handshakes carry no request byte; a commit that fails simply drops the connection.
         let connected = tokio::select! {
             biased;
@@ -461,6 +472,141 @@ impl Disclosure<'_> {
         })
     }
 
+    /// One attempt through the host's model execution. The marker commits first, under the same claim, deadline, cutoff, and allowance checks as a direct attempt, and the host is asked only once the ledger hands the attempt over; the wait ends at the attempt deadline the marker committed under. The request names the profile's `provider/model`, which the host runs as given.
+    async fn disclose_through_host(
+        &self,
+        host: &super::host_execution::HostExecution,
+        prepared: &PreparedBody,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Disclosed, DisclosureRefusal> {
+        let unsent = |error| DisclosureRefusal::Send {
+            attempt_index: None,
+            error,
+            sent: false,
+        };
+        // The prepared bytes are the Messages body the marker hashes; the host takes its system text and prompt from the same bytes.
+        let body: HostBody = serde_json::from_slice(prepared.body())
+            .map_err(|_| unsent(SendError::RequestTooLarge))?;
+        let prompt = body
+            .messages
+            .into_iter()
+            .next()
+            .map(|message| message.content)
+            .ok_or_else(|| unsent(SendError::RequestTooLarge))?;
+        let marker = AttemptMarker {
+            body_digest: prepared.body_digest().to_string(),
+            request_bytes: u64::try_from(prepared.body.len())
+                .map_err(|_| unsent(SendError::RequestTooLarge))?,
+            provider: self.sender.provider_identity(),
+            model: prepared.model.clone(),
+            credential_id: self.sender.credential_id().to_string(),
+            policy_union_digest: prepared.policy_union_digest.clone(),
+        };
+        let hold = &self.broker.binding().hold;
+        let outcome = self
+            .ledger
+            .dispatch_memory_reviewer_attempt(
+                self.project,
+                &hold.subject,
+                hold.generation,
+                self.claim_id,
+                &hold.kernel_incarnation,
+                &marker,
+                (),
+                self.now_ms,
+                |()| (),
+            )
+            .map_err(|error| match error {
+                MemoryReviewerLedgerError::Refused(reason) => DisclosureRefusal::Ledger(reason),
+                MemoryReviewerLedgerError::Store(error) => {
+                    DisclosureRefusal::Store(error.to_string())
+                }
+            })?;
+        let (attempt_index, attempt_deadline_ms, allowance) = match outcome {
+            DispatchOutcome::ChargedNotDispatched {
+                attempt_index,
+                reason,
+                finished,
+            } => {
+                return Err(DisclosureRefusal::ChargedNotDispatched {
+                    attempt_index,
+                    reason,
+                    terminal_recorded: finished,
+                });
+            }
+            DispatchOutcome::Handed {
+                attempt_index,
+                attempt_deadline_ms,
+                allowance,
+                release,
+                ..
+            } => {
+                if let Err(error) = release {
+                    return Err(self.end(
+                        attempt_index,
+                        MemoryReviewerAttemptTerminal::Failed,
+                        ResponseUsage::NONE,
+                        DisclosureRefusal::Store(error.to_string()),
+                    ));
+                }
+                (attempt_index, attempt_deadline_ms, allowance)
+            }
+        };
+        let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
+        let deadline = deadline.min(Instant::now() + Duration::from_millis(remaining));
+        let session = super::host_execution::HostExecution::child_session(
+            &hold.subject,
+            hold.generation,
+            attempt_index,
+        );
+        let mut accounting = ResponseAccounting::default();
+        let completed = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(self.end(attempt_index, MemoryReviewerAttemptTerminal::Cancelled, consumed(&accounting), DisclosureRefusal::Cancelled));
+            }
+            completed = host.complete(
+                &session,
+                (body.system.as_deref().unwrap_or(""), &prompt),
+                body.max_tokens,
+                deadline,
+                allowance,
+                &mut accounting,
+            ) => completed,
+        };
+        let usage = consumed(&accounting);
+        let text = match completed {
+            Ok(text) => text,
+            Err(failure) => {
+                return Err(self.end(
+                    attempt_index,
+                    MemoryReviewerAttemptTerminal::Failed,
+                    usage,
+                    DisclosureRefusal::Send {
+                        attempt_index: Some(attempt_index),
+                        error: failure.error,
+                        sent: failure.sent,
+                    },
+                ));
+            }
+        };
+        self.finish(
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            usage,
+        )
+        .map_err(|error| DisclosureRefusal::TerminalNotRecorded {
+            attempt_index,
+            error,
+            cause: None,
+        })?;
+        Ok(Disclosed {
+            attempt_index,
+            text,
+        })
+    }
+
     /// The approval must name exactly the provider this sender dials, the requested model, the credential, and both live incarnations. The hold's Memory Store incarnation is checked against the live store because the hold copied it at acquisition and a restored ledger changes it.
     fn approved(&self, model: &str) -> Result<(), DisclosureRefusal> {
         let approval = self.approval.ok_or(DisclosureRefusal::Unavailable)?;
@@ -577,6 +723,20 @@ impl Disclosure<'_> {
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
+}
+
+/// The fields of a prepared Messages body the host route sends: the system text, the one user message, and the output cap.
+#[derive(serde::Deserialize)]
+struct HostBody {
+    #[serde(default)]
+    system: Option<String>,
+    messages: Vec<HostMessage>,
+    max_tokens: u32,
+}
+
+#[derive(serde::Deserialize)]
+struct HostMessage {
+    content: String,
 }
 
 /// The bytes a response consumed, as the ledger records them: exact counts of what the transport delivered and the decoder measured, whether the exchange completed or stopped.
