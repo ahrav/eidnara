@@ -1039,11 +1039,13 @@ fn outcome_of(command: &str, reading: &Reading) -> Outcome {
         .chain(closing.into_iter().map(|index| (index, true)));
     for (index, closing) in chosen {
         let (line, span) = &lines[index];
-        // A closing line that an error line already holds marks that line.
-        match kept.iter_mut().find(|kept| kept.span == *span) {
+        let text = clipped(line, MAX_LINE_BYTES);
+        // A closing line whose text an earlier kept line holds marks that
+        // line, so each text is kept once.
+        match kept.iter_mut().find(|kept| kept.text == text) {
             Some(earlier) => earlier.closing |= closing,
             None => kept.push(Kept {
-                text: clipped(line, MAX_LINE_BYTES),
+                text,
                 closing,
                 span: span.clone(),
             }),
@@ -2332,6 +2334,16 @@ mod tests {
         assert_eq!(kept.len(), 2, "{kept:?}");
         assert!(kept[0].len() <= MAX_LINE_BYTES && kept[0].ends_with(CUT_MARK));
         assert_eq!(kept[1], "Command exited with code 1");
+        // A line the output repeats is kept once.
+        let repeated = "error: build failed\nexit status 1\nexit status 1";
+        let (_, code, kept) = failed("make", repeated, true).unwrap();
+        assert_eq!(
+            (code, kept),
+            (
+                Some(1),
+                vec!["error: build failed".to_owned(), "exit status 1".to_owned()]
+            )
+        );
     }
 
     #[test]
