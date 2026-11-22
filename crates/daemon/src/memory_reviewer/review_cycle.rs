@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use super::broker::{QuestionTemplate, originating_decision};
 use super::settlement::{
     AcceptRefusal, ReadRefusal, accept_selected_proposal, read_selected_proposal,
+    release_settled_review_hold,
 };
 use crate::claim_sources::{ClaimMaterializer, ClaimProgress, MaterializationEnd};
 use crate::config::ReviewApply;
@@ -536,7 +537,7 @@ pub struct ApplyScope<'a> {
     pub memstore_incarnation: &'a str,
 }
 
-/// Treats the proposal the job's completed receipt selects as `mode` says. `propose` writes nothing. `contest` disputes the target of a `retire` or `revise` that cites a contradiction, citing the first contradicting evidence row; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs.
+/// Treats the proposal the job's completed receipt selects as `mode` says. A `retain` or `no_change` proposal asks for no write, so every mode accepts it at once: the acceptance leaves the memory as it is and ends the proposal's review hold, which keeps the project's hold allowance for proposals that wait on a decision. For a proposal that would change a memory, `propose` writes nothing and leaves it for `review.accept`. `contest` disputes the target of a `retire` or `revise` that cites a contradiction, citing the first contradicting evidence row; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs.
 pub fn apply_proposal(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -545,18 +546,19 @@ pub fn apply_proposal(
     mode: ReviewApply,
     now: i64,
 ) -> Applied {
-    if mode == ReviewApply::Propose {
-        return Applied::Left;
-    }
     let selected =
         match read_selected_proposal(kernel, ledger, scope.ledger_project, causal_identity, now) {
             Ok(selected) => selected,
             Err(refusal) => return Applied::Refused(refusal.to_string()),
         };
     let proposal = &selected.proposal;
+    let keeps = matches!(
+        proposal.action,
+        ProposalAction::Retain | ProposalAction::NoChange
+    );
     match mode {
-        ReviewApply::Propose => Applied::Left,
-        ReviewApply::Contest => {
+        ReviewApply::Propose if !keeps => Applied::Left,
+        ReviewApply::Contest if !keeps => {
             let (ProposalTarget::Memory(target), Some(contradiction)) =
                 (&proposal.target, proposal.contradictions.first())
             else {
@@ -576,7 +578,7 @@ pub fn apply_proposal(
                 &contradiction.evidence_id,
             )
         }
-        ReviewApply::Apply => {
+        ReviewApply::Propose | ReviewApply::Contest | ReviewApply::Apply => {
             let receipt = match ledger
                 .lookup_memory_reviewer_receipt(scope.ledger_project, causal_identity)
             {
@@ -585,13 +587,29 @@ pub fn apply_proposal(
             };
             match accept_selected_proposal(
                 kernel,
-                receipt,
+                receipt.clone(),
                 (scope.kernel_incarnation, scope.memstore_incarnation),
                 causal_identity,
                 APPLY_OPERATION_KEY,
                 &proposal.target,
             ) {
-                Ok(outcome) => Applied::Accepted(Box::new(outcome.settlement)),
+                Ok(outcome) => {
+                    // The settlement is the decision the review hold waited for, so the hold ends with it.
+                    if let Some(receipt) = receipt
+                        && let Err(error) = release_settled_review_hold(
+                            kernel,
+                            receipt,
+                            scope.memstore_incarnation,
+                            causal_identity,
+                            now,
+                        )
+                    {
+                        eprintln!(
+                            "daemon: memory_reviewer kept the review hold of a settled proposal: {error}"
+                        );
+                    }
+                    Applied::Accepted(Box::new(outcome.settlement))
+                }
                 Err(AcceptRefusal::Receipt(refusal)) => Applied::Refused(refusal.to_string()),
                 Err(AcceptRefusal::Kernel(refusal)) => Applied::Refused(format!("{refusal:?}")),
             }
