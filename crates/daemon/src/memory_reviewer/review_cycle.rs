@@ -390,7 +390,7 @@ pub const MIN_SHARED_SUBJECT_TERMS: usize = 2;
 /// Older memories one later statement brings to review, the ones sharing most subject terms first.
 pub const REOPENED_PER_STATEMENT: usize = 4;
 
-/// The subject terms of a statement: its analyzed terms without the generic words, each plural folded to its singular spelling.
+/// The subject terms of a statement: its analyzed terms without the generic words, each cut to its stem.
 fn subject_terms(statement: &str) -> BTreeSet<String> {
     crate::contradiction_candidates::scorer::term_set(
         statement,
@@ -399,11 +399,22 @@ fn subject_terms(statement: &str) -> BTreeSet<String> {
     .unwrap_or_default()
     .into_iter()
     .filter(|term| !GENERIC_TERMS.contains(&term.as_str()))
-    .map(|term| match term.strip_suffix('s') {
-        Some(stem) if stem.len() >= 3 && !stem.ends_with('s') => stem.to_string(),
-        _ => term,
-    })
+    .map(|term| stem(&term).to_string())
     .collect()
+}
+
+/// The stem two inflections of one word share: the term without one of the endings `ing`, `ed`, `es`, `s`, and then without a final `e`, while at least three bytes remain. `naming`, `names` and `name` meet at `nam`, and `ending` and `ends` at `end`. The stem is a key for matching statements about one subject and is never shown.
+fn stem(term: &str) -> &str {
+    fn cut<'a>(term: &'a str, ending: &str) -> Option<&'a str> {
+        term.strip_suffix(ending).filter(|stem| stem.len() >= 3)
+    }
+    // A word that ends in a double `s` is whole: `class` keeps its `s`.
+    let stem = ["ing", "ed", "es", "s"]
+        .into_iter()
+        .filter(|ending| !(ending.len() <= 2 && term.ends_with("ss")))
+        .find_map(|ending| cut(term, ending))
+        .unwrap_or(term);
+    cut(stem, "e").unwrap_or(stem)
 }
 
 /// For each decision, the later decisions of its category that share at least [`MIN_SHARED_SUBJECT_TERMS`] subject terms with it, where each later decision names at most [`REOPENED_PER_STATEMENT`] earlier ones. This is the second way a memory comes back to review beside the ledger's candidate rows: a later statement about the same subject reaches the earlier one even when it shares too few words for a candidate row.
@@ -1137,16 +1148,27 @@ mod tests {
         }
     }
 
-    /// The subject terms of a statement leave out who said it and the words every rule uses, and fold a plural to its singular, so two statements about one subject share terms whatever their wording around it.
+    /// The subject terms of a statement leave out who said it and the words every rule uses, and cut each term to its stem, so two statements about one subject share terms whatever their wording around it.
     #[test]
     fn subject_terms_keep_what_a_statement_is_about() {
         let terms = subject_terms("User stated: Always name test files with the suffix _spec.");
-        for kept in ["name", "test", "file", "suffix"] {
+        for kept in ["nam", "test", "fil", "suffix"] {
             assert!(terms.contains(kept), "{kept} in {terms:?}");
         }
-        for dropped in ["user", "stated", "always", "files"] {
+        for dropped in ["user", "stated", "always", "files", "name"] {
             assert!(!terms.contains(dropped), "{dropped} in {terms:?}");
         }
+        // Inflections of one word meet at one stem, so "ending variable names" and "end variable names" share three terms.
+        for (a, b) in [
+            ("naming", "names"),
+            ("ending", "ends"),
+            ("variables", "variable"),
+            ("named", "name"),
+        ] {
+            assert_eq!(stem(a), stem(b), "{a} and {b}");
+        }
+        assert_eq!(stem("class"), "class");
+        assert_eq!(stem("use"), "use");
     }
 
     /// A later statement of the same category that shares two subject terms brings the earlier one to review. A statement of another category, one that shares a single term, and an earlier statement leave it where it is, and one later statement names at most the four earlier ones that share most with it.
