@@ -1579,7 +1579,7 @@ fn a_deferred_enqueue_leaves_the_page_frozen_even_when_its_transaction_commits()
     );
 }
 
-/// A page whose references became jobs keeps the scan audit of those identities: the audit now describes the job rows, which retain the same target, template, signals, and evidence text for the store incarnation.
+/// A page whose references became jobs keeps the scan audit of those identities: the audit now describes the job rows, which retain the same target, template, signals, and evidence text until the retirement sweep deletes them and then the page.
 #[test]
 fn an_enqueued_page_keeps_the_scan_audit_of_its_references() {
     let dir = tempfile::tempdir().unwrap();

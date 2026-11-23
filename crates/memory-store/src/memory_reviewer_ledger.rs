@@ -1019,15 +1019,9 @@ pub fn list_memory_reviewer_attempts_in_tx(
     rows.collect()
 }
 
-/// Every operation a ledger write names in its scan owner key, beside the job's causal identity. The retirement sweep retires the owners of each for the jobs it deletes.
-pub(crate) const LEDGER_OPERATIONS: [&str; 6] = [
-    "begin",
-    "take-over",
-    "cancel",
-    "finish-attempt",
-    "dispatch",
-    "complete",
-];
+/// Every operation a ledger write names in its scan owner key, beside the job's causal identity. The retirement sweep retires the owners of each for the jobs it deletes, and the completion's owner, which the task lease's write registers under its own kind.
+pub(crate) const LEDGER_OPERATIONS: [&str; 5] =
+    ["begin", "take-over", "cancel", "finish-attempt", "dispatch"];
 
 impl MemoryStore {
     fn ledger_transaction<T>(

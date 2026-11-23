@@ -41,7 +41,7 @@ pub const MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
 /// How long a settled job keeps its rows, measured from its queue deadline: ninety days. The window is far past the longest review hold (seven days) and the queue lifetime (one day), so every read, acceptance, and takeover under a live hold has ended when its rows go; a `review.read` or `review.accept` that names a retired job, a replay included, is answered as a job the store does not hold. Once the rows are gone the job's causal identity is free again, so a memory with unchanged evidence is reviewed once more at the next selection, under a later job id and a generation above the retired one: each live memory is reviewed about once per window.
 pub const MEMORY_REVIEWER_SETTLED_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
 /// The job-family writes whose scan audit a job owns under its causal identity. The retirement sweep retires the owners of each for the jobs it deletes.
-const JOB_OPERATIONS: [&str; 3] = ["reserve", "activate", "rebind"];
+const JOB_OPERATIONS: [&str; 5] = ["reserve", "activate", "rebind", "settle", "finish"];
 /// Settled jobs one retirement sweep deletes, so a sweep's write is bounded whatever the backlog.
 pub const MEMORY_REVIEWER_RETIREMENT_BATCH: usize = 256;
 /// Receipt charge every admitted job keeps until it is retired: the job row, its receipt, up to four attempt markers, and the scan-audit rows their caller text leaves, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; the primary-key index entry each row repeats, about 2.5 KiB together; and the scan audit, roughly 2.6 KiB per dispatch (one batch, one domain owner, four field scans and owner copies with their indexes), about 1 KiB for the selection, and about 3 KiB for the reservation and activation identities, some 14 KiB in all. A terminal row keeps it until [`MemoryStore::retire_settled_memory_reviewer_jobs`] deletes the row [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] after its queue deadline, so the quota bounds the jobs of one retention window: `MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT / MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES` (2,048) jobs per project and four times that per host in any ninety days, after which reservation is refused until older jobs retire.
@@ -942,7 +942,7 @@ pub(crate) fn settle_memory_reviewer_reservation(
 ) -> Result<bool, MemoryReviewerJobError> {
     store.memory_reviewer_transaction(
         project,
-        ("settle", &[]),
+        ("settle", &[&expected.causal_identity]),
         |_| Ok(()),
         |conn| {
             if !crate::clear_memory_reviewer_reservation_tx(conn, session_id, expected)? {
@@ -1617,7 +1617,7 @@ impl MemoryStore {
         }
         self.memory_reviewer_transaction(
             project,
-            ("finish", &[]),
+            ("finish", &[causal_identity]),
             |_| Ok(()),
             |conn| {
                 let job =

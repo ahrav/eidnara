@@ -244,8 +244,8 @@ pub enum GrowthRefused {
     },
     /// A cumulative count (`commit_log_rows`, `terminal_jobs`, `admitted_total`,
     /// `r24_refusals`, or frozen plus terminal pages) went down; the commit
-    /// log is append-only and job and page rows are permanent receipts, so
-    /// these never recede.
+    /// log is append-only and job and page rows stay for the ninety-day
+    /// retention window, far past a run, so these never recede.
     CountNotMonotonic {
         step: u32,
         field: &'static str,

@@ -945,7 +945,7 @@ impl MemoryStore {
                     },
                 )?;
                 facts.metadata_bytes = memory_reviewer_jobs::metadata_bytes(conn, None)?;
-                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
+                // Everything charged that is not a receipt charge is a temporary allowance: job allowances plus the frozen pages' charges.
                 facts.allowance_bytes = facts
                     .metadata_bytes
                     .saturating_sub(facts.receipt_charge_bytes);
