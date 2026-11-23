@@ -939,6 +939,7 @@ async fn a_record_written_for_the_prior_scanner_ruleset_closes_the_gate_naming_t
     // A deployment that upgrades the daemon and keeps its activation record: the worker sends
     // nothing, the status reports the closed kind, and the log names the term and the live value.
     let rig = Rig::open().await;
+    let identity = rig.ready_history_summarizer_job(now_ms());
     let worker = rig.worker();
     let cancel = CancellationToken::new();
     let live = context_core::redaction::detector_revision();
@@ -957,13 +958,33 @@ async fn a_record_written_for_the_prior_scanner_ruleset_closes_the_gate_naming_t
             "activation record names another scanner ruleset version; the live value is {live}"
         ))
     );
+    assert!(matches!(
+        rig.store
+            .lookup_memory_reviewer_job(PROJECT, &identity)
+            .unwrap()
+            .unwrap()
+            .state,
+        MemoryReviewerJobState::Ready(_)
+    ));
+    assert!(
+        rig.store
+            .lookup_memory_reviewer_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
 
     rig.write_activation();
-    assert_eq!(worker.pass(&cancel).await, 0, "no job is ready");
+    assert_eq!(worker.pass(&cancel).await, 1, "the waiting job runs");
     assert_eq!(
         rig.status.reported().activation_state.0,
         ActivationState::Open
+    );
+    assert!(
+        rig.store
+            .lookup_memory_reviewer_receipt(PROJECT, &identity)
+            .unwrap()
+            .is_some()
     );
 }
 

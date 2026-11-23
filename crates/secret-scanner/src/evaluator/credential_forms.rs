@@ -157,6 +157,10 @@ fn placeholder_shapes_are_closed() {
         "ID=npm7",
         "\u{43f}\u{430}\u{440}\u{43e}\u{43b}\u{44c}7",
         "p\u{e4}ss\u{20ac}w\u{f6}rd9",
+        "Summer\u{a3}",
+        "Geheim\u{20ac}\u{a7}",
+        "<a>Zx9!kq7",
+        "[Zx9]!kq7",
         "12;ab!9",
     ] {
         assert!(!is_placeholder_shape(text.as_bytes()), "{text:?}");
@@ -534,6 +538,7 @@ fn digits_are_reported_when_they_are_the_whole_assigned_word() {
     };
     for (template, rule) in [
         ("password={}", "magic-value-digits"),
+        ("x\\tpassword={}", "magic-value-digits"),
         ("client_secret: {}", "magic-value-digits"),
         ("{\"password\": {}}", "magic-value-digits"),
         (
@@ -549,7 +554,17 @@ fn digits_are_reported_when_they_are_the_whole_assigned_word() {
         let input = template.replace("{}", &digits);
         assert_eq!(rules(&input), [format!("{rule} {digits}")], "{input:?}");
     }
+    let four = ["12", "34"].concat();
+    assert_eq!(
+        rules(&format!("password={four}")),
+        [format!("magic-value-digits {four}")]
+    );
+    assert_eq!(
+        rules(&format!("password={}", &four[..3])),
+        Vec::<String>::new()
+    );
     for template in [
+        "x\\Tpassword={}",
         "password: {},Zx9kq7",
         "DB_PASSWORD={}$Zx9kq7",
         "password={};x9",

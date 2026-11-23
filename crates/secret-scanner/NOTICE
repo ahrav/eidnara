@@ -31,7 +31,7 @@ Embedded document digests:
 | Document | SHA-256 |
 | --- | --- |
 | `default_rules.yaml` | `5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50` |
-| `conservative_overlay.yaml` | `3fdde6caf20e8e48be0c9da6ad9ba6b8eeb3ff084698a1236f80f8fa3ce0c3d3` |
+| `conservative_overlay.yaml` | `db256fb7413080de4e2df07c53ef8b48435d40d81acc18bc074d2b76dca4240b` |
 
 The conservative overlay, `conservative_overlay.yaml`, is original policy and
 is not copied from Gossip-rs.

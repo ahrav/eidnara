@@ -306,7 +306,7 @@ fn corpus_digests_match_recorded_proof() {
     );
     assert_eq!(
         crate::rules::CONSERVATIVE_OVERLAY_SHA256,
-        "3fdde6caf20e8e48be0c9da6ad9ba6b8eeb3ff084698a1236f80f8fa3ce0c3d3"
+        "db256fb7413080de4e2df07c53ef8b48435d40d81acc18bc074d2b76dca4240b"
     );
 }
 

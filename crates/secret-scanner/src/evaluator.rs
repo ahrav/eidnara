@@ -2264,16 +2264,23 @@ fn is_reference_shape(text: &[u8]) -> bool {
         || is_environment_reference(text)
 }
 
-/// `<password>`, `<file>|<text>`, `{name}`, `[options]`: text that opens with a bracket and
-/// holds the bracket that closes it names a slot for the value.
+/// `<password>`, `<file>|<text>`, `{name}`, `[options]`: bracketed names with punctuation
+/// between and after them name a slot for the value. A letter or digit outside the brackets
+/// (`<a>Zx9`) makes `opens_a_template` return `false`.
 fn opens_a_template(text: &[u8]) -> bool {
-    let close = match text.first() {
-        Some(b'<') => b'>',
-        Some(b'{') => b'}',
-        Some(b'[') => b']',
-        _ => return false,
-    };
-    text.contains(&close)
+    if !matches!(text.first(), Some(b'<' | b'{' | b'[')) {
+        return false;
+    }
+    let mut depth = 0usize;
+    for byte in text {
+        match byte {
+            b'<' | b'{' | b'[' => depth += 1,
+            b'>' | b'}' | b']' if depth > 0 => depth -= 1,
+            _ if depth == 0 && !byte.is_ascii_punctuation() => return false,
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 /// `%DB_PASSWORD%`: a variable name between two `%`, as the Windows shell writes a reference.
@@ -2368,12 +2375,21 @@ fn is_plain_word(text: &[u8]) -> bool {
     let word = trim_end(text, |byte| {
         matches!(byte, b']' | b')' | b'}' | b',' | b'.' | b':')
     });
-    word.iter().all(|byte| {
-        byte.is_ascii_alphabetic()
-            || matches!(byte, b'_' | b'-')
-            || byte.is_ascii_whitespace()
-            || !byte.is_ascii()
+    std::str::from_utf8(word).is_ok_and(|word| {
+        word.chars().all(|character| {
+            character.is_ascii_alphabetic()
+                || matches!(character, '_' | '-')
+                || character.is_ascii_whitespace()
+                || (!character.is_ascii() && !is_typed_symbol(character))
+        })
     })
+}
+
+fn is_typed_symbol(character: char) -> bool {
+    matches!(
+        character,
+        '\u{a1}'..='\u{bf}' | '\u{d7}' | '\u{f7}' | '\u{20a0}'..='\u{20cf}'
+    )
 }
 
 fn is_mask(text: &[u8]) -> bool {

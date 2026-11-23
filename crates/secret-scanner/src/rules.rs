@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "3fdde6caf20e8e48be0c9da6ad9ba6b8eeb3ff084698a1236f80f8fa3ce0c3d3";
+    "db256fb7413080de4e2df07c53ef8b48435d40d81acc18bc074d2b76dca4240b";
 
 const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -1129,11 +1129,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "4186ddd338281820952e67c6beccd469a5cd921f85f0a6da4843fa449e3ca178",
+                "b87cc4807cd3c092b8a1f0678a90b7ee5c0afae3272dcf2deab5e88b7627757b",
             ),
             (
                 ScanProfile::Comprehensive,
-                "3347bab3b4055b5ef5470d3b0a06c9e60df2e2aba70a3eee49255eec09a84289",
+                "8039d58c4f6fed8733a6dad7ca81eae6692f5d0f089388bde08eab2d3d934980",
             ),
         ] {
             let digest = rules

@@ -237,13 +237,14 @@ rules:
 # value and decides nothing. A word whose text is one of these stand-ins is left as
 # written, whole:
 #   - every form: a mask (`***`, punctuation alone), a reference (`$NAME`, `%NAME%`, a
-#     backquoted command, `os.environ/DB_PASSWORD`), a template (`<name>`, `{name}`,
-#     `[name]`, `%s`), and the stand-in words of `value_suppressors_any`;
+#     backquoted command, `os.environ/DB_PASSWORD`), a template (`%s`, or bracketed names
+#     such as `<name>`, `{name}`, `[name]`, `<file>|<text>` with only punctuation between
+#     and after them), and the stand-in words of `value_suppressors_any`;
 #   - option, field, client, and URL forms: plain words (ASCII letters, `_`, `-`, blanks
-#     inside quotes, and characters outside ASCII, before a closing `.`, `:`, `,`, or
-#     bracket: a generated credential carries an ASCII digit or symbol), a file path, a
-#     URL, an attribute list (`id=npm,src=.npmrc`), and a port with a property list
-#     (`1433;database=sales`);
+#     inside quotes, and characters outside ASCII other than the symbols a keyboard types,
+#     U+00A1 to U+00BF, U+00D7, U+00F7, and the currency signs U+20A0 to U+20CF; a closing
+#     `.`, `:`, `,`, or bracket may follow), a file path, a URL, an attribute list
+#     (`id=npm,src=.npmrc`), and a port with a property list (`1433;database=sales`);
 #   - option, field, password-assignment, and client forms: a scalar (a number, a boolean,
 #     a null, a duration). A PIN of 4 or more digits is a value under a name that ends in
 #     `password` or `secret` and after a client's `-p`;
@@ -258,7 +259,7 @@ rules:
 
 # A command-line option; its value is the next word of the line.
 - name: magic-value-option
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\B))--?(?P<key>[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\B))--?(?P<key>(?i:[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key)))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
   anchors: [key, token, secret, password, auth, bearer, credential]
   radius: 256
   unicode: true
@@ -269,7 +270,7 @@ rules:
 # A `name: value` line of a configuration file, a header dump, or a program's report, real
 # or serialized.
 - name: magic-value-field
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>(?i:[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key)))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
   anchors: [key, token, secret, password, auth, bearer, credential]
   radius: 256
   unicode: true
@@ -298,7 +299,7 @@ rules:
 # word: up to the next blank or `&`, only quotes, `,`, `;`, and closing brackets follow
 # them. `1234.5`, `1234-abcd`, and `1234,Zx9` stay with the rules above.
 - name: magic-value-digits
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*(?:password|secret))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*=[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)(?P<value>[0-9]{4,})'
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>(?i:[A-Za-z0-9_.-]*(?:password|secret)))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*=[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)(?P<value>[0-9]{4,})'
   anchors: [key, token, secret, password, auth, bearer, credential]
   radius: 256
   unicode: true
@@ -308,7 +309,7 @@ rules:
 # The same digits between two quotes. The closing quote follows the last digit, so a quoted
 # text that only begins with digits (`"1234 abcd"`) stays with the rules above.
 - name: magic-value-digits-quoted
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*(?:password|secret))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*[=:][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)\\?["''](?P<value>[0-9]{4,})\\?["'']'
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>(?i:[A-Za-z0-9_.-]*(?:password|secret)))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*[=:][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)\\?["''](?P<value>[0-9]{4,})\\?["'']'
   anchors: [key, token, secret, password, auth, bearer, credential]
   radius: 256
   unicode: true
@@ -318,7 +319,7 @@ rules:
 # validator requires that decoding, so `Basic authentication` in prose is left alone. The
 # header stands on one line, so a header without a value ends at its line.
 - name: magic-value-basic-authorization
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|\b)Authorization[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*Basic[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+(?P<value>[A-Za-z0-9+/_-]{4,}={0,2})'
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|\b)(?i:Authorization)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?i:Basic)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+(?P<value>[A-Za-z0-9+/_-]{4,}={0,2})'
   anchors: [authorization]
   radius: 256
   unicode: true
@@ -371,9 +372,10 @@ rules:
 # more Base64 characters, and those characters are the reported part of it: an output
 # limit can cut the last line and append its own marker. A header followed by `...` or by
 # prose of shorter words stays as written. A last line of 1 to 15 Base64 characters joins
-# the body when it is a whole line. The two unnamed groups are the body with and without
-# that line; the evaluator reports the one that matched.
+# the body when it is a whole line with at most 256 blanks after it. The two unnamed
+# groups are the body with and without that line; the evaluator reports the one that
+# matched.
 - name: magic-value-private-key-body
-  regex: '(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z][A-Za-z0-9-]{0,30}:[^\n\\]{0,200}){0,4}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*)?[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*(?:([A-Za-z0-9+/=]{16,}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{16,})*[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{1,15})[\t ]*(?:(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))|\\?["''`]|\z)|([A-Za-z0-9+/=]{16,}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{16,})*))'
+  regex: '(?i:-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----)(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z][A-Za-z0-9-]{0,30}:[^\n\\]{0,200}){0,4}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*)?[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*(?:([A-Za-z0-9+/=]{16,}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{16,})*[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{1,15})[\t ]{0,256}(?:(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))|\\?["''`]|\z)|([A-Za-z0-9+/=]{16,}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{16,})*))'
   anchors: ['-----begin']
   radius: 256

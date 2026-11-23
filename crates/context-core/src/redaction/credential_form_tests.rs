@@ -326,6 +326,7 @@ fn a_field_of_types_counts_and_references_stays_exact() {
         format!("password: {chosen}\\ #two and more words"),
         format!("password: \"{chosen}\"\"\\ntwo three\" and more words"),
         format!("the tokens: {chosen}"),
+        format!("out\\Npassword: {chosen}"),
         format!("password:{chosen}"),
     ] {
         assert_exact(&input);
@@ -368,6 +369,14 @@ fn a_word_with_a_quote_a_backslash_or_a_dollar_sign_is_replaced_whole() {
         (
             "deploy --password {} --verbose",
             ["Zx9\\\\n", "kq7"].concat(),
+        ),
+        (
+            "deploy --password {} --verbose",
+            ["Summer", "\u{a3}"].concat(),
+        ),
+        (
+            "deploy --password {} --verbose",
+            ["<a>Zx9", "!kq7"].concat(),
         ),
     ] {
         assert_redacts(&template.replace("{}", &word), &word, PASSWORD);
@@ -490,6 +499,13 @@ fn basic_authorization_credentials_are_redacted() {
         assert_redacts(&input, &basic, "<REDACTED:basic>");
     }
     assert_exact("Authorization: Basic authentication is sent in clear text");
+    let shortest = ["YT", "p4"].concat();
+    assert_redacts(
+        &format!("authorization: basic {shortest}"),
+        &shortest,
+        "<REDACTED:basic>",
+    );
+    assert_exact(&format!("x\\NAuthorization: Basic {basic}"));
     assert_redacts(
         &format!("Authorization: Basic\nAuthorization: Basic {basic}"),
         &basic,
@@ -507,6 +523,12 @@ fn a_password_option_of_a_named_client_is_redacted() {
             chosen.clone(),
         ),
         (format!("/usr/bin/mariadb -p{chosen}"), chosen.clone()),
+        (format!("./mysql -p{chosen} app"), chosen.clone()),
+        (format!("mysql.exe -p{chosen} app"), chosen.clone()),
+        (
+            format!("podman  auth   login -p {chosen} registry"),
+            chosen.clone(),
+        ),
         (
             format!("sshpass -p {chosen} ssh deploy@host"),
             chosen.clone(),
@@ -641,6 +663,14 @@ fn private_key_body_lines_are_redacted_under_a_header_without_a_footer() {
     ] {
         assert_redacts(&input, &body, "<REDACTED:private_key>");
     }
+    let (sixteen, fifteen) = (&line[..16], &line[..15]);
+    assert_redacts(
+        &format!("{header}\n{sixteen}\n{fifteen}\n"),
+        &format!("{sixteen}\n{fifteen}"),
+        "<REDACTED:private_key>",
+    );
+    assert_exact(&format!("{header}\n{fifteen}\n{fifteen}\n"));
+    assert_exact(&format!("{header}\\N{line}\\N{line}"));
     let lines = |count: usize| {
         format!(
             "{header}\n{}{line}\n{line}\n",
@@ -665,7 +695,7 @@ fn private_key_body_lines_are_redacted_under_a_header_without_a_footer() {
 #[test]
 fn a_finding_of_an_added_rule_merges_with_the_finding_it_overlaps() {
     let (issued, chosen) = (issued(), chosen());
-    for (input, value, placeholder) in [
+    for (input, value, placeholder, rules) in [
         (
             format!(
                 "MY_SECRET={}",
@@ -673,19 +703,32 @@ fn a_finding_of_an_added_rule_merges_with_the_finding_it_overlaps() {
             ),
             url("https", "alice", &chosen, "db.internal/x"),
             "<REDACTED:secret>",
+            ["magic-keyed-assignment", "magic-value-url-userinfo"],
         ),
         (
             format!("dbpassword=\"{chosen} two\" run"),
             format!("\"{chosen} two\""),
             "<REDACTED:secret>",
+            [
+                "magic-keyed-assignment-double-quoted",
+                "magic-value-password-assignment",
+            ],
         ),
         (
             format!("api_key: sk-ant-api03-{issued}{issued}"),
             format!("sk-ant-api03-{issued}{issued}"),
             "<REDACTED:api_key>",
+            ["magic-anthropic-api-key", "magic-value-field"],
         ),
     ] {
         assert_redacts(&input, &value, placeholder);
+        let findings = redactor().unwrap().scanner.scan(&input).unwrap().findings;
+        for rule in rules {
+            assert!(
+                findings.iter().any(|finding| finding.rule_id == rule),
+                "{rule} on {input:?}: {findings:?}"
+            );
+        }
     }
 }
 
@@ -744,6 +787,17 @@ fn windowed_redaction_agrees_with_the_redaction_of_a_line_alone_at_every_window_
         let alone = redact_durable_text(&format!("{FILLER}{line}\n{FILLER}"));
         assert!(!alone.detections.is_empty(), "{line:?}");
         let redacted = &alone.text[FILLER.len()..alone.text.len() - FILLER.len() - 1];
+        for secret in [
+            chosen.as_str(),
+            issued.as_str(),
+            "two",
+            "a9",
+            &digits(),
+            &basic_credentials(),
+            &private_key_body_line(),
+        ] {
+            assert!(!redacted.contains(secret), "{line:?} keeps {secret:?}");
+        }
         let size = line.len();
         for edge in [
             window - EDGE_MARGIN_BYTES,
