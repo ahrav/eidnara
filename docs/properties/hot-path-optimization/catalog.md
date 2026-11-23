@@ -230,7 +230,13 @@ equal, vary valid other-domain, non-decision, hidden, and out-of-project rows;
 selected IDs, order, content, revision, and truncation must remain equal.
 Rows of the `named-files` domain are selected by the pass and are no noise:
 they enter the selected rows, the served ids, and the revision, and their
-charge of up to an eighth of the budget can displace lasting facts.
+charge of up to an eighth of the budget can displace lasting facts. For each
+of the up to eight listed files the pass also reads the work tree: the
+file's status, at most 256 KiB of its bytes for a hash against HEAD's blob,
+and, at a HEAD whose walk the daemon does not hold, up to 256 parents of the
+file's history. That reading fills the last-change clause of the file's
+line, which the revision leaves out, and a block that lists a file reads
+the commit times of its user statements in one statement.
 Compare snapshot metadata to each store's own pinned tip, not across tips.
 Fault/timing angle: An early SQL limit or changed predicate admits noise into
 the bounded set or removes candidates the baseline keeps.
@@ -789,7 +795,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8786
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L216-L487
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L227-L505
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
