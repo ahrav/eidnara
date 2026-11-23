@@ -1765,10 +1765,13 @@ nothing, when the request carries no native rows, when the rows and the
 messages differ in number, when a message's id is another than its row's
 `id`, when two messages share an id, when a message's id is longer than 128
 bytes, and when the session's id is longer than 256 bytes; the transform
-refuses the last three with `invalid_params`. A request that the transform
-refuses for another reason, such as another identity field past its bound or
-a boundary the store does not hold, is read as it was submitted, as the
-capture checkpoint reads it.
+refuses the last three with `invalid_params`. A request that is refused
+before the pass reaches its checkpoints (an absent boundary, a window or a
+profile the intake refuses, a codec decline, a route or store precondition, a
+blank tool description) hands off nothing. A request that passes them and that
+the transform then refuses while it resolves the window, such as another
+identity field past its bound or a boundary the store does not hold, is read
+as it was submitted, as the capture checkpoint reads it.
 
 The handler reads the window as the request carries it, before the pass
 resolves it, as the capture checkpoint does. A pass considers the last 1,024
@@ -1777,8 +1780,9 @@ session's earlier passes have left unjudged to a detached task, so the results
 of one command are judged in window order, which is the order the harness
 wrote them. The pass measures each result where it stands in the window and
 copies it once it fits: its command line and, for a result the harness marks,
-its text, each within 64 KiB, and its entry id, tool call id, and tool name,
-each within 1,024 bytes, 8 MiB together; the first result that lacks room and
+its text, each within 64 KiB, its entry id, within the 128 bytes of the
+window rule above, and its tool call id and tool name, each within 1,024
+bytes, 8 MiB together; the first result that lacks room and
 the results after it wait for a later pass. A result that is no text of one
 unit or is an empty text (below), one that passes one of those byte limits,
 and one whose message carries no creation time that a UTC date renders is
@@ -1788,7 +1792,12 @@ has one such task at a time and the daemon eight: a pass that finds its
 session's task running, or eight tasks running, hands off nothing, and so does
 a pass while the Kernel is not ready. A result that a pass leaves unjudged is
 judged by a later pass of the session whose window still carries the call and
-its result. A result is paired with the call it answers in its tool turn: a
+its result, while the session's windows grow by appending. A session
+remembers the last 1,024 calls it judged. A session that moves among branches
+whose windows together hold more command results than that judges the
+earliest results of a window again when it returns to it (a call with a
+receipt is settled by the commit log and writes no second fact), and a result
+behind 256 such results waits until passes over the same branch reach it. A result is paired with the call it answers in its tool turn: a
 command call of the assistant message before it, with no message of another
 role between them. A tool turn begins at an assistant message and ends at the
 next assistant message, which begins another turn, or at the next message
@@ -1816,8 +1825,9 @@ unit of its own; a result whose text is empty, which is what a Pi result
 without readable content decodes to (Pi's shell tool writes `(no output)` for
 a command that printed nothing); a result whose text, or whose command line,
 is longer than 64 KiB, the largest tool span source capture retains; a result
-whose entry id, tool call id, or tool name is empty or longer than 1,024
-bytes; a result whose message carries no creation time, or one outside the years a UTC date renders;
+whose tool call id or tool name is empty or longer than 1,024 bytes (an entry
+id is a message id, so an empty one is refused by the Pi codec and one longer
+than 128 bytes names no execution for its whole window, above); a result whose message carries no creation time, or one outside the years a UTC date renders;
 a result whose tool name, tool call id, or session id the redactor would
 change, or holds a control character, U+2028, or U+2029, each judged whole;
 and a command line on which the redactor's scan does not finish. These rules
@@ -1934,7 +1944,7 @@ line of the result, and a line Pi cut at its start is read as the text that
 remains.
 
 A fact names its command line by a digest and shows the program and its first
-plain operand; its `Command:` line and its rationale hold no other argument. The command line passes
+plain operand; its `Command:` line and its rationale's `command` field hold no other argument (the path and the error come from output lines and can repeat one). The command line passes
 the redactor first. The command's digest is the first 32 hexadecimal digits of
 a SHA-256 over the project's digest and the whole redacted line as it is
 written, each behind its length, and then, for each finding of the redactor in
@@ -2076,7 +2086,8 @@ check of the replaced fact's user authority, a replaced fact on a reserved
 stands in another project answers `invalid:not_found`, live or retired, and a
 live one of the bound project on a reserved `source_id` answers
 `invalid:admission_policy`. A
-`kernel.artifact.ingest.begin` whose `source_id` is one answers
+`kernel.artifact.ingest.begin` whose fields and size the route accepts as for
+any `source_id`, and whose `source_id` is one, answers
 `invalid:invalid_input`. The MemoryReviewer forms no proposal that targets a
 fact on one. Retiring a fact and recording a disposition on it stay open.
 

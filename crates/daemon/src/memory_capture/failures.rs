@@ -105,7 +105,8 @@ const MAX_RESULTS_PER_PASS: usize = 256;
 const MAX_HANDOFF_BYTES: usize = 8 * 1024 * 1024;
 /// Tool calls one session's memo remembers, and the command results at the
 /// end of a window that a pass considers. The two are equal, so a call the
-/// memo evicts has left the results a later pass considers.
+/// memo evicts has left the results a later pass considers while the
+/// session's windows grow by appending.
 const MEMO_CALLS_PER_SESSION: usize = 1024;
 const MEMO_SESSIONS: usize = 256;
 /// Checkpoints that read results at one time. Their judgments run one at a
@@ -1068,8 +1069,9 @@ static WORD: LazyLock<Regex> =
 
 /// A word that is a name: letters, combining marks, decimal digits, `_`,
 /// and `.` alone.
-static NAME: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[\p{L}\p{M}\p{Nd}_.]+$").expect("the name pattern compiles"));
+static NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\p{L}[\p{L}\p{M}\p{Nd}_.]*$").expect("the name pattern compiles")
+});
 
 /// The error a line names: its first word that is a type name ending in
 /// `Error` or `Exception` (`ModuleNotFoundError`,
@@ -1088,7 +1090,7 @@ fn named_error(line: &str) -> Option<&str> {
             let typed = word
                 .strip_suffix("Error")
                 .or_else(|| word.strip_suffix("Exception"))
-                .is_some_and(|stem| stem.starts_with(char::is_alphabetic))
+                .is_some_and(|stem| !stem.is_empty())
                 && NAME.is_match(word);
             let letters = word.bytes().take_while(u8::is_ascii_uppercase).count();
             let digits = word.len() - letters;
@@ -1312,10 +1314,7 @@ impl<'a> Turn<'a> {
                 }
             }
         }
-        self.calls.clear();
-        self.named.clear();
-        self.answered.clear();
-        self.shared.clear();
+        *self = Self::default();
     }
 }
 
@@ -3168,6 +3167,10 @@ mod tests {
             // names no error, and the words after it are read.
             ("\u{bd}Error then E0308", Some("E0308")),
             ("\u{bd}Error alone", None),
+            ("Parse\u{bd}Error alone", None),
+            ("Parse\u{2167}Error then ValueError", Some("ValueError")),
+            ("error: \u{345}ParseError", None),
+            ("\u{93e}Exception then E0308", Some("E0308")),
             // Punctuation of any script parts a name from its line.
             ("\u{201c}ValueError\u{201d} was raised", Some("ValueError")),
             (
