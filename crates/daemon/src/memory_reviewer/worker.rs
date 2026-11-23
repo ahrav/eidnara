@@ -39,6 +39,12 @@ use crate::HistorySummarizerProducerFactory;
 use crate::claim_sources::ClaimProgress;
 use crate::config::ReviewApply;
 
+/// The pause between two classifier attempts of one run after one ended without answers.
+#[cfg(not(test))]
+const CLASSIFY_RETRY_PAUSE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const CLASSIFY_RETRY_PAUSE: Duration = Duration::from_millis(20);
+
 /// Idle interval between passes when no job was run.
 pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
 /// Runs per project per pass. Ready jobs the pass skips (no bound root owns the subject, another worker holds it, already settled) do not count, so a deadline-ordered prefix of them cannot starve the jobs behind it.
@@ -363,6 +369,7 @@ impl Worker {
                 classifier: classifier.clone(),
                 project: root.project_digest.clone(),
                 wait: CLASSIFY_WAIT,
+                retry_pause: CLASSIFY_RETRY_PAUSE,
             })
     }
 
@@ -440,6 +447,17 @@ impl Worker {
             else {
                 continue;
             };
+            // A classifier that failed a moment ago is given time: the project's jobs stay Ready for a later pass.
+            let classifier_failing = || {
+                switch.classifier.as_ref().is_some_and(|classifier| {
+                    self.switched
+                        .classifiers
+                        .failing(&root.project_digest, classifier)
+                })
+            };
+            if classifier_failing() {
+                continue;
+            }
             let Ok(host) = HostExecution::new(
                 Arc::clone(&producers),
                 root.project_root.clone(),
@@ -541,7 +559,7 @@ impl Worker {
             ready.sort_by_key(|job| (job.queue_deadline_ms, job.producer.ordinal));
             let mut runs = 0;
             for job in ready {
-                if cancel.is_cancelled() || runs == JOBS_PER_PASS {
+                if cancel.is_cancelled() || runs == JOBS_PER_PASS || classifier_failing() {
                     break;
                 }
                 let job = Arc::new(job);

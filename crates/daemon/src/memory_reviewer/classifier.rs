@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 pub const CLASSIFY_WAIT: Duration = Duration::from_secs(20);
 /// [`PRESENCE_WINDOW`] spans six maximum-length long polls, so a harness can remain present between pulls.
 pub const PRESENCE_WINDOW: Duration = Duration::from_secs(120);
+/// How long a project's reviews pause after its classifier fails, so one outage spends one job's attempts.
+pub const FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 /// Lease expiry makes an unanswered request available for another pull.
 pub const LEASE_DURATION: Duration = Duration::from_secs(30);
 pub const MAX_NEXT_WAIT_MS: u64 = 20_000;
@@ -320,6 +322,8 @@ pub struct ClassifierRoute {
     /// The Kernel project digest the harness's routes are bound under.
     pub project: String,
     pub wait: Duration,
+    /// The pause between two attempts of one run after an attempt ended without answers.
+    pub retry_pause: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -362,6 +366,7 @@ struct Inner {
     next_id: u64,
     parked: VecDeque<Parked>,
     pulls: HashMap<(String, String), Instant>,
+    failures: HashMap<(String, String), Instant>,
     records: BTreeMap<String, Stage1Record>,
     record_order: VecDeque<String>,
 }
@@ -384,6 +389,22 @@ impl ClassifierExchange {
             .pulls
             .get(&(project.to_string(), classifier.to_string()))
             .is_some_and(|at| at.elapsed() <= PRESENCE_WINDOW)
+    }
+
+    /// Records that a classifier request of `project` ended without answers.
+    pub fn note_failure(&self, project: &str, classifier: &str) {
+        self.lock().failures.insert(
+            (project.to_string(), classifier.to_string()),
+            Instant::now(),
+        );
+    }
+
+    /// Whether a classifier request of `project` failed within [`FAILURE_COOLDOWN`].
+    pub fn failing(&self, project: &str, classifier: &str) -> bool {
+        self.lock()
+            .failures
+            .get(&(project.to_string(), classifier.to_string()))
+            .is_some_and(|at| at.elapsed() <= FAILURE_COOLDOWN)
     }
 
     pub async fn classify(
@@ -767,6 +788,16 @@ mod tests {
                 .await,
             None
         );
+    }
+
+    #[test]
+    fn a_failure_marks_the_project_as_failing() {
+        let exchange = ClassifierExchange::default();
+        assert!(!exchange.failing("project", "c/m"));
+        exchange.note_failure("project", "c/m");
+        assert!(exchange.failing("project", "c/m"));
+        assert!(!exchange.failing("other", "c/m"));
+        assert!(!exchange.failing("project", "other/m"));
     }
 
     #[test]

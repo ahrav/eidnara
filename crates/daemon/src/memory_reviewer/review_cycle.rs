@@ -16,7 +16,7 @@ use kernel::{
     ProviderEgress, SourceClass, Surface, TaintClass,
 };
 use memory_store::memory_reviewer_jobs::{
-    MAX_IDENTITY_BYTES, MAX_MEMORY_REVIEWER_STARTING_REFERENCES,
+    CausalInputs, MAX_IDENTITY_BYTES, MAX_MEMORY_REVIEWER_STARTING_REFERENCES,
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MemoryReviewerJobError, MemoryReviewerJobInput,
     MemoryReviewerJobRefusal, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
@@ -174,18 +174,20 @@ pub struct SelectionMemory {
     pending: HashMap<String, PendingProposals>,
 }
 
-/// The descriptor a job reads a source through and who wrote the source. Both are fixed for an evidence row once its descriptor is published.
+/// The descriptor a job reads a source through and who wrote the source. The writer is fixed for an evidence row. The descriptor is live until the store retires it: a captured message is retained for a bounded time, and a memory outlives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceFacts {
     object_id: String,
     writer: Writer,
+    /// Set once a later read finds the descriptor retired. A retired source still counts as evidence a memory was reviewed on, and no job reads it.
+    retired: bool,
 }
 
 /// Sources remembered at once; the map starts over past this.
 const MAX_REMEMBERED_SOURCES: usize = 65_536;
 
 impl SelectionMemory {
-    /// The descriptor and writer of `evidence_id`, read once and remembered. `None` while no live descriptor cites the evidence, which is looked up again on the next pass.
+    /// The descriptor and writer of `evidence_id`, read once and remembered, with whether a later read found the descriptor retired. `None` while no live descriptor has cited the evidence, which is looked up again on the next pass.
     fn source(
         &mut self,
         kernel: &KernelStore,
@@ -214,9 +216,37 @@ impl SelectionMemory {
         if self.sources.len() >= MAX_REMEMBERED_SOURCES {
             self.sources.clear();
         }
-        let facts = SourceFacts { object_id, writer };
+        let facts = SourceFacts {
+            object_id,
+            writer,
+            retired: false,
+        };
         self.sources.insert(evidence_id.to_string(), facts.clone());
         Ok(Some(facts))
+    }
+
+    /// The descriptor a job may read `evidence_id` through now, read from the Kernel at this call, or `None` once the store has retired it. A remembered source found retired is marked, so later passes skip the read.
+    fn readable(
+        &mut self,
+        kernel: &KernelStore,
+        evidence_id: &str,
+        tip: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<String>, CycleError> {
+        if self
+            .sources
+            .get(evidence_id)
+            .is_some_and(|facts| facts.retired)
+        {
+            return Ok(None);
+        }
+        let live = source_descriptor(kernel, evidence_id, tip, budget)?;
+        if live.is_none()
+            && let Some(facts) = self.sources.get_mut(evidence_id)
+        {
+            facts.retired = true;
+        }
+        Ok(live)
     }
 
     /// Records that the memory `target` waits for the change proposal of the job `causal_identity`.
@@ -342,7 +372,7 @@ struct Candidate<'a> {
     /// The newest later source's recency, so the newest evidence is reviewed first.
     recency: i64,
     cited: Vec<String>,
-    later: Vec<SourceFacts>,
+    /// The later sources' evidence ids, newest first.
     signals: Vec<String>,
 }
 
@@ -597,26 +627,24 @@ pub fn select_and_enqueue(
         });
         evidence.dedup_by(|a, b| a.evidence_id == b.evidence_id);
         let own_words = said_by(&decision.payload.summary) == Writer::User && !work_in_progress;
-        let mut later = Vec::new();
         let mut signals = Vec::new();
         let mut trigger = None;
         let mut recency = decision.created_commit_seq;
         for item in evidence {
-            if later.len() == MAX_LATER_SOURCES {
+            if signals.len() == MAX_LATER_SOURCES {
                 break;
             }
             let Some(source) = memory.source(kernel, &item.evidence_id, tip, &budget)? else {
                 continue;
             };
-            if own_words && source.writer != Writer::User {
+            if source.retired || (own_words && source.writer != Writer::User) {
                 continue;
             }
-            if later.is_empty() {
+            if signals.is_empty() {
                 recency = item.recency;
             }
             trigger = Some(trigger.map_or(item.trigger, |seen: Trigger| seen.min(item.trigger)));
             signals.push(item.evidence_id);
-            later.push(source);
         }
         let Some(trigger) = trigger else {
             continue;
@@ -631,7 +659,6 @@ pub fn select_and_enqueue(
             },
             recency,
             cited,
-            later,
             signals,
         });
     }
@@ -651,17 +678,20 @@ pub fn select_and_enqueue(
         else {
             continue;
         };
-        let mut signals = candidate.signals.clone();
-        signals.sort();
-        inputs.signals = signals;
         inputs.question_template = QuestionTemplate::MemoryStatement.id().to_string();
-        let Ok(causal_identity) = inputs.causal_identity() else {
-            continue;
+        let reviewed = |inputs: &mut CausalInputs, signals: &[String]| {
+            let mut signals = signals.to_vec();
+            signals.sort();
+            inputs.signals = signals;
+            let Ok(causal_identity) = inputs.causal_identity() else {
+                return Ok(true);
+            };
+            ledger
+                .memory_reviewer_jobs_exist(scope.ledger_project, &[causal_identity.as_str()])
+                .map(|exists| exists.first().copied().unwrap_or(true))
+                .map_err(|error| CycleError::Ledger(error.to_string()))
         };
-        let exists = ledger
-            .memory_reviewer_jobs_exist(scope.ledger_project, &[causal_identity.as_str()])
-            .map_err(|error| CycleError::Ledger(error.to_string()))?;
-        if exists.first().copied().unwrap_or(true) {
+        if reviewed(&mut inputs, &candidate.signals)? {
             continue;
         }
         if memory
@@ -673,20 +703,30 @@ pub fn select_and_enqueue(
             selected.waiting += 1;
             continue;
         }
-        // The source comes first, so every review that can read it carries it; the later sources follow, newest first.
+        // A job reads what the store still retains, checked now: the source comes first, so every review that can read it carries it, and the later sources follow, newest first. A memory whose later sources have all been retired has nothing to be shown and is passed.
         let mut starting = Vec::new();
         for evidence in candidate.cited.iter().take(MAX_CITED_SOURCES) {
-            if let Some(source) = memory.source(kernel, evidence, tip, &budget)?
-                && !starting.contains(&source.object_id)
+            if let Some(object_id) = memory.readable(kernel, evidence, tip, &budget)?
+                && !starting.contains(&object_id)
             {
-                starting.push(source.object_id);
+                starting.push(object_id);
             }
         }
         let cited_sources = starting.len();
-        for source in &candidate.later {
-            if !starting.contains(&source.object_id) {
-                starting.push(source.object_id.clone());
+        let mut signals = Vec::new();
+        for evidence in &candidate.signals {
+            if let Some(object_id) = memory.readable(kernel, evidence, tip, &budget)? {
+                signals.push(evidence.clone());
+                if !starting.contains(&object_id) {
+                    starting.push(object_id);
+                }
             }
+        }
+        // The job is named by the evidence it is shown, so a memory reviewed on these sources before is passed.
+        if signals.is_empty()
+            || (signals.len() < candidate.signals.len() && reviewed(&mut inputs, &signals)?)
+        {
+            continue;
         }
         let producer = ProducerBinding {
             producer: SELECTION_PRODUCER.to_string(),
@@ -725,7 +765,7 @@ pub fn select_and_enqueue(
                     "daemon: memory_reviewer enqueued job={} trigger={} later={} source={}",
                     &reserved.causal_identity[..16.min(reserved.causal_identity.len())],
                     candidate.trigger.as_str(),
-                    candidate.later.len(),
+                    signals.len(),
                     cited_sources,
                 );
             }

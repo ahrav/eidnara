@@ -439,6 +439,44 @@ async fn a_kept_memory_is_reviewed_again_only_when_new_evidence_arrives() {
     assert!(!rig.block().await.contains(THURSDAY));
 }
 
+/// A memory outlives the messages the store retains. Once the store has retired the memory's source and an earlier later message, new evidence still reviews the memory: the request shows the new message alone and says the source is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_memory_older_than_its_retained_messages_is_reviewed_on_new_evidence() {
+    let rig = Rig::open(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later(
+        "later-1",
+        1_700_000_000_000,
+        "The release branches are still cut from main every Thursday.",
+    )
+    .await;
+    rig.answers(&[RETAIN]);
+    assert_eq!(rig.drain().await, 1);
+    let forty_days_on = crate::now_ms() + 40 * 24 * 60 * 60 * 1_000;
+    let expired = rig
+        .handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .expire_harness_captures(forty_days_on)
+        .unwrap();
+    assert!(expired.retired >= 1, "{expired:?}");
+    rig.user_says_later("later-2", 1_700_000_100_000, TUESDAY)
+        .await;
+    rig.answers(&[RETAIN]);
+    assert_eq!(rig.drain().await, 1);
+    let attempts = rig.attempts();
+    assert_eq!(attempts.len(), 2, "the review reached the chat model");
+    assert!(attempts[1].prompt.contains(TUESDAY));
+    assert!(attempts[1].prompt.contains("no longer retains the message"));
+    assert!(
+        !attempts[1]
+            .prompt
+            .contains("still cut from main every Thursday")
+    );
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+}
+
 /// Where the project names a classifier and its harness answers classifier work, the classifier decides first. A keep settles the review with no chat request: the request the harness received holds the statement and the later message with its writer and time, the proposal is settled, and the statement stays delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_classifier_keeps_a_memory_without_a_chat_request() {
@@ -582,6 +620,57 @@ async fn a_response_the_provider_stopped_settles_the_review_on_one_request() {
     );
     assert!(rig.block().await.contains(&stated(THURSDAY)));
     assert_eq!(rig.drain().await, 0);
+}
+
+/// A classifier that fails spends the attempts of one job. The project's other reviews stay queued for a later pass, and no chat request is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_classifier_spends_one_job_and_the_rest_wait() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the formatter instead of the linter before every commit.",
+    )
+    .await;
+    let idle = rig
+        .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+        .await;
+    assert_eq!(idle, json!({"state": "ready"}));
+    let drain = {
+        let worker = Arc::clone(&rig.worker);
+        tokio::spawn(async move { worker.drain(&CancellationToken::new()).await })
+    };
+    let mut failed = 0;
+    while !drain.is_finished() {
+        let work = rig
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 50}))
+            .await;
+        if work["state"] != "work" {
+            continue;
+        }
+        let submitted = rig
+            .call(json!({
+                "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+                "lease": work["lease"], "error": "model_failed",
+            }))
+            .await;
+        assert_eq!(submitted, json!({"state": "processed"}));
+        failed += 1;
+    }
+    assert_eq!(drain.await.unwrap(), 1, "one job ended");
+    assert!((1..=4).contains(&failed), "{failed} classifier requests");
+    assert!(rig.attempts().is_empty(), "the chat model was not asked");
+    let ready = rig
+        .store
+        .ready_memory_reviewer_jobs(&rig.project.to_string_lossy(), 16, crate::now_ms())
+        .unwrap();
+    assert_eq!(ready.len(), 1, "the other review waits");
+    for statement in [THURSDAY, LINTER] {
+        assert!(rig.block().await.contains(&stated(statement)));
+    }
 }
 
 /// The classifier methods answer only a project whose user tier names the classifier the harness asks for, and refuse a body outside their fields.

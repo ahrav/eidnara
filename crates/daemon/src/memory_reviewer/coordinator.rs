@@ -871,8 +871,18 @@ impl Run<'_> {
                 error: SendError::RequestTooLarge,
                 ..
             }) => return Ok(Classified::Ended(RunResult::Exhausted)),
-            // The attempt was charged and ended without answers; the remaining attempts decide whether another is made.
-            Err(_) => return Ok(Classified::Spent),
+            // The attempt was charged and ended without answers. The project's other reviews wait out the failure, and this run pauses before its next attempt, so an outage of the classifier spends this job's attempts alone.
+            Err(_) => {
+                route
+                    .exchange
+                    .note_failure(&route.project, &route.classifier);
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Err(InvestigationError::Cancelled),
+                    () = tokio::time::sleep(route.retry_pause) => {}
+                }
+                return Ok(Classified::Spent);
+            }
         };
         let decision = decide(review, &answers);
         eprintln!(
