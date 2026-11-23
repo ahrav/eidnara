@@ -2620,7 +2620,7 @@ mod credential_form_tests {
         assert!(left_to_second >= lines.len() && kept_by_first >= lines.len());
     }
 
-    /// The `-p` of a `login` client follows the subcommand within 256 bytes of one command.
+    /// The `-p` of a `login` client follows the subcommand within 256 characters of one command.
     #[test]
     fn a_client_option_is_read_within_the_gap_its_rule_bounds() {
         let chosen = chosen();
@@ -2670,9 +2670,19 @@ mod credential_form_tests {
             "keycloak.url = https://sso.internal/auth?client_secret={chosen}"
         ));
         // A value that is the next key is reported, and so is the value that key holds.
+        assert_eq!(
+            redact_durable_text(&format!("API_TOKEN=\nclientSecret=\n{chosen}\n")).text,
+            "API_TOKEN=\n<REDACTED:api_token>\n<REDACTED:client_secret>\n"
+        );
         for input in [
             format!("API_TOKEN=\nself.token = api_token = {chosen}"),
             format!("API_TOKEN=\nclientSecret=\n{chosen}\n"),
+            format!(
+                "db.password =\n#keycloak.url = https://sso.internal/auth?client_secret={chosen}"
+            ),
+            format!(
+                "db.password =\n\u{a0}keycloak.url = https://sso.internal/auth?client_secret={chosen}"
+            ),
         ] {
             let redaction = redact_durable_text(&input);
             assert!(!redaction.text.contains(&chosen), "{input:?}");
@@ -2699,6 +2709,8 @@ mod credential_form_tests {
             format!("password: {head}\\{rest}"),
             format!("password: {head}'{rest}"),
             format!("db_password: {head}\"{rest}"),
+            format!("password: {head}'.{rest}"),
+            format!("password: {head}\"),{rest}"),
         ] {
             let redaction = redact_durable_text(&input);
             assert!(
@@ -2727,6 +2739,12 @@ mod credential_form_tests {
     /// that opens with `$` is a reference.
     #[test]
     fn a_dollar_sign_inside_a_bare_option_value_is_part_of_the_value() {
+        let doubled = ["Q7r9", "$$v9"].concat();
+        assert_redacts(
+            &format!("deploy --password {doubled} --verbose"),
+            &doubled,
+            "<REDACTED:password>",
+        );
         let value = ["Q7r9", "$%v9"].concat();
         for (before, after) in [
             ("deploy --password ", " --verbose"),
@@ -2754,6 +2772,7 @@ mod credential_form_tests {
             "docker login registry\\nssh -p 2222 host",
             "docker login registry\\r\\nssh -p 2222 host",
             "docker login registry\rssh -p 2222 host",
+            "mysql app\\u000assh -p2222 host",
         ] {
             assert_exact(input);
         }

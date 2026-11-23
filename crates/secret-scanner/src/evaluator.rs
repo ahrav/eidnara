@@ -96,7 +96,7 @@ pub(crate) fn evaluate(
                             Ok(finding) => {
                                 if rule.resumes_at_value {
                                     cursor =
-                                        resume_after(rule, bytes, spans, finding.as_ref(), cursor);
+                                        resume_after(rule, input, spans, finding.as_ref(), cursor);
                                 }
                                 findings.extend(finding);
                             }
@@ -134,7 +134,7 @@ pub(crate) fn evaluate(
                     let Some(spans) = spans else { return Ok(None) };
                     let finding =
                         evaluate_candidate_spans(rules, rule, spans, input, &mut work, limits)?;
-                    resume = resume_after(rule, bytes, spans, finding.as_ref(), match_end);
+                    resume = resume_after(rule, input, spans, finding.as_ref(), match_end);
                     Ok(finding)
                 });
                 let charged = add_work(
@@ -221,14 +221,15 @@ pub(crate) fn evaluate(
 /// the value may hold the assignment that carries the credential.
 fn resume_after(
     rule: &Rule,
-    bytes: &[u8],
+    input: &str,
     spans: CandidateSpans,
     finding: Option<&Finding>,
     match_end: usize,
 ) -> usize {
+    let bytes = input.as_bytes();
     if rule.line_tail.is_none() {
         let key_start = spans.key.map_or(spans.full.start(), |key| key.start());
-        return if follows_an_empty_assignment(bytes, key_start) {
+        return if follows_an_empty_assignment(input, key_start) {
             spans.value.start()
         } else {
             match_end
@@ -248,28 +249,46 @@ fn resume_after(
     }
 }
 
-/// Whether the word at `word_start` stands where the value of an assignment would: after a
-/// secret-shaped key, one `=`, and a gap that detaches a value (blanks after an `=` that
-/// follows its key directly, or a line break). The walk back reads at most
-/// `MAX_CONTINUATION_BYTES` of separators.
-fn follows_an_empty_assignment(bytes: &[u8], word_start: usize) -> bool {
-    let gap_len = bytes[..word_start]
-        .iter()
-        .rev()
-        .take(MAX_CONTINUATION_BYTES)
-        .take_while(|byte| is_rule_space_byte(**byte))
-        .count();
-    let gap_start = word_start - gap_len;
-    let Some(equals) = gap_start.checked_sub(1).filter(|at| bytes[*at] == b'=') else {
+/// Whether the key at `key_start` lies in the run that stands where the value of an
+/// assignment would: after a secret-shaped key, one `=`, and a gap that detaches a value
+/// (blanks after an `=` that follows its key directly, or a line break). The run may open
+/// with a few bytes before the key (`#key`, `+key`, `13:key`).
+fn follows_an_empty_assignment(input: &str, key_start: usize) -> bool {
+    let bytes = input.as_bytes();
+    let floor = key_start.saturating_sub(MAX_ESCAPE_RUN_BYTES);
+    let mut run_start = key_start;
+    while run_start > floor
+        && bytes[run_start - 1].is_ascii()
+        && !is_rule_space_byte(bytes[run_start - 1])
+        && !is_value_terminator(bytes[run_start - 1])
+    {
+        run_start -= 1;
+    }
+    let Some(before) = input.get(..run_start) else {
         return false;
     };
-    let Some(&before) = equals.checked_sub(1).and_then(|at| bytes.get(at)) else {
+    let assignment = before.trim_end_matches(is_rule_space);
+    let gap = &before[assignment.len()..];
+    let Some(equals) = assignment
+        .len()
+        .checked_sub(1)
+        .filter(|at| bytes[*at] == b'=')
+    else {
         return false;
     };
-    let gap = &bytes[gap_start..word_start];
-    let detached = gap.iter().any(|byte| matches!(byte, b'\n' | b'\r'))
-        || (!gap.is_empty() && is_key_byte(before));
-    before != b'=' && detached && assignment_key(bytes, equals, 0).is_some()
+    let Some(&key_end) = equals.checked_sub(1).and_then(|at| bytes.get(at)) else {
+        return false;
+    };
+    let detached = gap.contains(['\n', '\r']) || (!gap.is_empty() && is_key_byte(key_end));
+    key_end != b'=' && detached && assignment_key(bytes, equals, 0).is_some()
+}
+
+/// The bytes that end an unquoted value run.
+fn is_value_terminator(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'\'' | b'"' | b'`' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' | b'$' | b'\\'
+    )
 }
 
 /// `MAX_MATCH_BYTES` skips only the candidate's window; scanning continues and
@@ -943,7 +962,8 @@ fn continued_past_semicolons(
         }
         closed = segment_end;
     }
-    if closed == window_end && window_end < input.len() {
+    let cut_escape = closed + 1 == window_end && bytes[closed] == b'\\';
+    if (closed == window_end || cut_escape) && window_end < input.len() {
         // The tail is still open at the bound, so the value's extent is unknown and the scan fails closed.
         return Err(Abort::Match);
     }
@@ -996,36 +1016,58 @@ fn value_ends_its_line(
     let after_blanks = rest.trim_start_matches(is_inline_rule_space);
     let attached = after_blanks.len() == rest.len();
     let delimited = tail == LineTail::Delimiter;
+    if after_blanks.starts_with(is_line_break) {
+        return Ok(true);
+    }
     Ok(match after_blanks.as_bytes() {
-        [] | [b'\n' | b'\r', ..] => true,
+        [] => true,
         [b'\\', after @ ..] => match after {
             // A shell line continues, or serialized text writes its line break.
             [] | [b'\n' | b'\r' | b'n' | b'r', ..] => true,
             [b'u', b'0', b'0', b'0', b'a' | b'd', ..] => true,
+            // Serialized text writes the backslash of a continued shell line as a pair.
+            [b'\\', b'\\', b'n' | b'r', ..] => true,
             // Serialized text escapes the quote that closes the string.
-            [b'"' | b'\'', after @ ..] => closes_a_string(after),
+            [b'"' | b'\'', ..] => closes_a_string(&after_blanks[2..]),
             _ => false,
         },
         [b'#', ..] => !attached,
-        [b'"' | b'\'', after @ ..] => {
-            (attached && delimited) || ((attached || delimited) && closes_a_string(after))
+        [b'"' | b'\'', ..] => {
+            (attached && delimited)
+                || ((attached || delimited) && closes_a_string(&after_blanks[1..]))
         }
-        [b'`' | b')' | b']' | b'}' | b'>' | b';' | b'|' | b'&', ..] => delimited,
+        [
+            b'`' | b')' | b']' | b'}' | b'<' | b'>' | b';' | b'|' | b'&',
+            ..,
+        ] => delimited,
         _ => attached && delimited,
     })
 }
 
-/// Whether the text after a quote lets the quote close a string: a letter or a digit after
-/// it puts the quote inside a word (`Pa55'word9`).
-fn closes_a_string(after_quote: &[u8]) -> bool {
-    after_quote
-        .first()
-        .is_none_or(|byte| !(is_word_byte(*byte) || !byte.is_ascii()))
+/// Whether a quote closes the string around a value: up to the next blank, backslash, or
+/// end, the text after it is closing punctuation (`"`, `")`, `"},`). A letter or a digit
+/// there puts the quote inside a word (`Pa55'word9`, `ab'.cd9`).
+fn closes_a_string(after_quote: &str) -> bool {
+    let word_end = after_quote
+        .find(|character: char| is_rule_space(character) || character == '\\')
+        .unwrap_or(after_quote.len());
+    after_quote.as_bytes()[..word_end]
+        .iter()
+        .all(u8::is_ascii_punctuation)
+}
+
+/// A break between lines: the line feed and carriage return, the vertical tab and form feed,
+/// and the Unicode line and paragraph separators.
+fn is_line_break(character: char) -> bool {
+    matches!(
+        character,
+        '\n' | '\r' | '\x0B' | '\x0C' | '\u{2028}' | '\u{2029}'
+    )
 }
 
 /// The separator class less the line feed and the carriage return, for text of any encoding.
 fn is_inline_rule_space(character: char) -> bool {
-    is_rule_space(character) && !matches!(character, '\n' | '\r')
+    is_rule_space(character) && !is_line_break(character)
 }
 
 /// Ends a detached value at the first line break its run writes as an escape.
@@ -3694,6 +3736,14 @@ mod tests {
             (" )", true, false),
             (" ;", true, false),
             (" | cat", true, false),
+            (" <", true, false),
+            ("\u{2028}next", true, true),
+            ("\x0Cnext", true, true),
+            (" \\\\\\n  --flag", true, true),
+            ("\"}", true, true),
+            ("'.cd9", true, false),
+            ("\"),next", true, false),
+            (" \"\u{a0}next", true, false),
             // Blanks, then another word.
             (" next", false, false),
             ("\t--flag", false, false),
@@ -3887,8 +3937,9 @@ mod tests {
         }
     }
 
-    /// A resumed search reads the value of one candidate again and resumes once per empty
-    /// assignment, so a long run of `name=` pairs below one costs two candidates.
+    /// A resumed search reads the value of one candidate again, and only a key near the start
+    /// of the run after an empty assignment resumes, so a long run of `name=` pairs below one
+    /// costs a bounded number of candidates.
     #[test]
     fn a_resumed_search_reads_one_value_again() {
         let rules = RuleSet::from_embedded().unwrap();
@@ -3905,7 +3956,8 @@ mod tests {
             .unwrap();
             assert!(report.is_complete());
             assert!(report.findings.is_empty());
-            assert!(report.candidates_evaluated <= 12 * 4);
+            // A key within the first 64 bytes of the run resumes; the others pass in one read.
+            assert!(report.candidates_evaluated <= 12 * 16);
             assert!(report.work_bytes <= 32 * input.len());
         }
     }

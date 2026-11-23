@@ -5,8 +5,11 @@
 //! Each row holds one input, the values `main`'s build reported for it, and the exemption
 //! the row demonstrates when the embedded overlay leaves that span as written.
 
-use super::{Abort, evaluate, evaluate_candidate};
-use crate::rules::{RuleSet, UPSTREAM_BYTES};
+use super::{
+    Abort, escaped_line_break, evaluate, evaluate_candidate, is_inline_rule_space, is_line_break,
+    is_scalar, is_structural_line, names_code,
+};
+use crate::rules::{CodeReferenceGate, RuleSet, UPSTREAM_BYTES};
 use crate::{ScanLimits, ScanProfile, TextSpan, UPSTREAM_CORPUS_SHA256};
 
 /// `conservative_overlay.yaml` at the merge base with `main`, byte for byte.
@@ -32,7 +35,7 @@ enum Exemption {
     /// ran on through the escape into the first word of the next line.
     EscapedLineBreak,
     /// The text before that escaped line break is judged as at a real line break, where a
-    /// number or a member path is left as written.
+    /// scalar (a number, a boolean, a null) or a member path is left as written.
     HeadBeforeEscapedLineBreak,
     /// A key that follows an escaped line break carries the public-key marker.
     PublicKeyAfterEscape,
@@ -128,6 +131,20 @@ fn rows() -> Vec<Row> {
             "API_TOKEN=\nDB_PASSWORD=\ndb.password=\n{c}",
             &[(11, 23, Some(Exemption::StructuralWord)), (37, 47, None)],
         ),
+        row(
+            "db.password =\n#keycloak.url = https://sso.example.org/auth?client_secret={c}",
+            &[
+                (14, 27, Some(Exemption::AnotherWordFollows)),
+                (73, 83, None),
+            ],
+        ),
+        row(
+            "db.password =\n\u{a0}keycloak.url = https://sso.example.org/auth?client_secret={c}",
+            &[(74, 84, None)],
+        ),
+        row("password= {c} <", &[(10, 20, None)]),
+        row("password= {c}\u{2028}next line", &[(10, 20, None)]),
+        row("token= {c} \\\\\\n  --flag", &[(7, 17, None)]),
         row("x\\tpublic_key={i}", &[(14, 38, None)]),
         row("C:\\\\npublic_key={i}", &[(16, 40, None)]),
         row("API_TOKEN=\n{m};tail9", &[(11, 23, None)]),
@@ -185,6 +202,14 @@ fn rows() -> Vec<Row> {
         row(
             "api_token= 4096\\nnext",
             &[(11, 21, Some(Exemption::HeadBeforeEscapedLineBreak))],
+        ),
+        row(
+            "api_token= true\\nnext",
+            &[(11, 21, Some(Exemption::HeadBeforeEscapedLineBreak))],
+        ),
+        row(
+            "password= null\\nnext",
+            &[(10, 20, Some(Exemption::HeadBeforeEscapedLineBreak))],
         ),
         row(
             "password= cfg.value\\nnext",
@@ -250,6 +275,26 @@ fn first_uncovered(spans: &[TextSpan], start: usize, end: usize) -> Option<usize
     (at < end).then_some(at)
 }
 
+/// Whether the recorded range `start..end` has the syntax of the exemption its row names.
+fn shows(exemption: Exemption, input: &str, start: usize, end: usize) -> bool {
+    let value = &input.as_bytes()[start..end];
+    let head = escaped_line_break(value).filter(|at| *at > 0);
+    match exemption {
+        Exemption::Comparison => value.starts_with(b"=") || input[..start].ends_with('='),
+        Exemption::AnotherWordFollows => {
+            let rest = &input[end..];
+            let word = rest.trim_start_matches(is_inline_rule_space);
+            word.len() < rest.len() && !word.is_empty() && !word.starts_with(is_line_break)
+        }
+        Exemption::StructuralWord => is_structural_line(value),
+        Exemption::EscapedLineBreak => head.is_some(),
+        Exemption::HeadBeforeEscapedLineBreak => head.is_some_and(|at| {
+            is_scalar(&value[..at]) || names_code(CodeReferenceGate::Assignment, &value[..at])
+        }),
+        Exemption::PublicKeyAfterEscape => input[..start].contains("\\npublic"),
+    }
+}
+
 /// Whether a span of `spans` shares a byte with `start..end`.
 fn overlaps(spans: &[TextSpan], start: usize, end: usize) -> bool {
     spans
@@ -293,6 +338,11 @@ fn the_embedded_overlay_reports_every_span_the_base_overlay_reports_apart_from_n
                 );
                 continue;
             };
+            assert!(
+                shows(exemption, &input, start, end),
+                "{:?} in {input:?} has another syntax than {exemption:?}",
+                &input[start..end]
+            );
             exemptions_shown.push(exemption);
             let exempt_from = if exemption == Exemption::EscapedLineBreak {
                 // The embedded span covers the value and stops at the escape.
