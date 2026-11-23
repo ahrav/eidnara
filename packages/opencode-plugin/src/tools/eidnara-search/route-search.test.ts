@@ -1055,17 +1055,18 @@ describe("eidnara_search through the fused route", () => {
     it("serves a failed command's record with its category, label, and text on the route and on the fallback", async () => {
         const bytes = (text: string) => new TextEncoder().encode(text).length;
         const outcome =
-            "Tool failure recorded from the result of bash at 2026-03-02T10:15:00.000Z: the command exited with code 101.";
+            "Tool failure recorded from the result of bash at 2026-03-02T10:15:00.000Z: the harness marked the result as an error and its last line states exit code 101.";
         const resolved = " Resolved: a later run of this command reported no failure.";
         const closing = "test result: FAILED. 1 passed; 1 failed";
         const summary = [
             `${outcome}${resolved}`,
             "Command: cargo test [arguments left out]",
-            "Failing path: src/render.rs:9:5",
+            "Path named: src/render.rs:9:5",
             "Output lines:",
-            ...[0, 1, 2, 3].map((index) => `> error: e${index} ${"x".repeat(126)}`),
-            "> width is zero",
+            "> thread 'renders' panicked at src/render.rs:9:5:",
+            ...[0, 1, 2].map((index) => `> error: e${index} ${"x".repeat(144)}`),
             `> ${closing}`,
+            "> Command exited with code 101",
         ].join("\n");
         const rationale = JSON.stringify({
             at: "2026-03-02T10:15:00.000Z",
@@ -1114,8 +1115,10 @@ describe("eidnara_search through the fused route", () => {
             // The first line states the outcome and the resolution, and the last kept line is whole.
             expect(lines[header + 1]).toBe(`${outcome}${resolved}`);
             expect(lines[header + 2]).toBe("Command: cargo test [arguments left out]");
-            expect(lines.slice(header + 1).join("\n")).toStartWith(
-                `${summary}\n{"at":"2026-03-02T10:15:00.000Z"`,
+            // The tool renders the first 1,024 bytes of the summary, a line break, and the
+            // rationale together. The fixture is ASCII, so a character is a byte.
+            expect(lines.slice(header + 1).join("\n")).toBe(
+                `${summary}\n${rationale}`.slice(0, 1024),
             );
         }
     });

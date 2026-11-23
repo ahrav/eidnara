@@ -287,8 +287,9 @@ export interface EidnaraConfig {
      * source descriptors. The daemon reads this key itself; capture also requires
      * `memory.enabled`, and subagent sessions never capture. With `memory.auto_promote` and
      * `memory.auto_capture` it is also the consent under which the daemon writes failed-command
-     * facts from Pi tool results, which later sessions find through `eidnara_search`. Defaults
-     * to off.
+     * facts from Pi tool results, which later sessions find through `eidnara_search`. Such a
+     * fact is a project memory fact: session deletion leaves it in place and it has no
+     * retention deadline. Defaults to off.
      */
     source_capture?: { enabled: boolean };
     /**
@@ -588,7 +589,7 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(false)
                     .describe(
-                        "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. With memory.auto_promote and memory.auto_capture it also lets the daemon write failed-command facts from Pi tool results, which later sessions find through eidnara_search. Project values are ignored with a warning.",
+                        "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. With memory.auto_promote and memory.auto_capture it also lets the daemon write failed-command facts from Pi tool results, which later sessions find through eidnara_search; such a fact is a project memory fact, which session deletion leaves in place and which has no retention deadline. Project values are ignored with a warning.",
                     ),
             })
             .default({ enabled: false })
