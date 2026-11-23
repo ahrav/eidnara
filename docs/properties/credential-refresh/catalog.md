@@ -96,8 +96,8 @@ Confidence: high - [evidence](evidence/credential-lifetime-covers-dispatch.md).
 The predicate and its three checks were read at the #872 branch.
 Existing check: `crates/host-runtime/src/model_execution/aws_refresh.rs:1105`
 `lifetime_must_exceed_the_deadline_plus_skew_strictly`;
-`crates/host-runtime/tests/model_execution_subprocess.rs:4183`
-`profile_rows_without_lifetime_start_no_child`; `:4250`
+`crates/host-runtime/tests/model_execution_subprocess.rs:4198`
+`profile_rows_without_lifetime_start_no_child`; `:4265`
 `a_wall_jump_after_acquisition_refuses_the_spawn`.
 Impact: a child could run on credentials that expire mid-run.
 Open questions: None.
@@ -173,7 +173,7 @@ The five tests and the bound their wait helpers enforce were read at the #872
 branch.
 Existing check: `crates/daemon/src/source_recovery_tests.rs:68`, `:93`, `:124`,
 `:157` (normal, emergency, wrapup, reattach);
-`crates/host-runtime/tests/model_execution_subprocess.rs:4376`
+`crates/host-runtime/tests/model_execution_subprocess.rs:4391`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner`.
 Impact: folding stalls after a credential outage until the daemon restarts.
 Open questions: None.

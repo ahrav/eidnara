@@ -62,20 +62,20 @@ Existing checks, verified:
   over the same row does not produce it (`:1673-1679`). It runs under
   `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`).
 - `provider_rows_exclude_ambient_credentials_and_enforce_caps`
-  (`tests/model_execution_subprocess.rs:2950-3003`) asserts that ambient `AWS_*`,
+  (`tests/model_execution_subprocess.rs:2965-3018`) asserts that ambient `AWS_*`,
   proxy, `PATH`, and `LD_PRELOAD` variables are excluded from the row
-  (`:2851-2856`), that the Pi alias selects the canonical row (`:2857-2862`),
-  that a custom provider is `provider_unsupported` (`:2863-2869`), that a
-  value one byte over 16 KiB is `credential_value_too_large` (`:2871-2882`),
-  and that the committed vector holds (`:2884-2892`). The binary is
+  (`:2976-2981`), that the Pi alias selects the canonical row (`:2982-2987`),
+  that a custom provider is `provider_unsupported` (`:2988-2994`), that a
+  value one byte over 16 KiB is `credential_value_too_large` (`:2996-3007`),
+  and that the committed vector holds (`:3009-3017`). The binary is
   `harness = false` (`Cargo.toml:36-38`); its runner registers the function
   by name at `:194-195`.
 - `credential_snapshot_must_match_before_backend_spawn`
   (`tests/model_execution_protocol.rs:462-523`) drives a real host built with
   `new_with_credentials`, sends with a wrong fingerprint and asserts
-  `harness_unavailable` with zero backend starts (`:455-457`), then computes
+  `harness_unavailable` with zero backend starts (`:482-484`), then computes
   the correct fingerprint from the host's key and asserts the send is
-  accepted and the backend starts once (`:459-493`). The record does not
+  accepted and the backend starts once (`:486-520`). The record does not
   list this test.
 
 ## Failure scenario
@@ -145,7 +145,7 @@ The remaining gaps:
 ### Q: Was the committed vector produced independently of the crate?
 
 - Sources examined: `model_execution/subprocess.rs:167-201`, `:1660-1683`;
-  `tests/model_execution_subprocess.rs:2994-3002`; a Python HMAC over the layout
+  `tests/model_execution_subprocess.rs:3009-3017`; a Python HMAC over the layout
   described above.
 - Findings: the evidence summary at U3 states the vector came from a Python
   implementation of the documented derivation. The audit re-derived it from

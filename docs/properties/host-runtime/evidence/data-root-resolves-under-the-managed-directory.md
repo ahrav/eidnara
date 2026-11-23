@@ -115,7 +115,7 @@ either behaviour.
 - Missing evidence: a test of `data_dir_path(None)` itself. Such a test
   would need the process environment and is the case the split removed.
 - Conclusion: resolved. The resolver's branches are covered without
-  environment mutation; the two-line glue at `:139-140` is covered only by
+  environment mutation; the two-line glue at `:140-141` is covered only by
   reading.
 
 ### Q: Does the record's signature match the code?

@@ -219,7 +219,7 @@ a check in the tree. `production_closures_from_environment_materialize`
 | Check | Site | Status |
 | --- | --- | --- |
 | Named `credential_fingerprint_matches_the_committed_vector` | `src/model_execution/subprocess.rs:1660` | unaudited |
-| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/model_execution_subprocess.rs:2950` | unaudited |
+| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/model_execution_subprocess.rs:2965` | unaudited |
 | Also bears `credential_snapshot_must_match_before_backend_spawn` | `tests/model_execution_protocol.rs:462` | unaudited |
 
 The named inline test asserts the committed hex at `:1671` and a different key
@@ -293,14 +293,14 @@ session-owned")` at `src/model_execution/supervisor.rs:641`.
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `cancel_reaps_group_with_sigterm_first` | `tests/model_execution_subprocess.rs:2629` | unaudited |
-| Named `sigkill_escalation_when_term_ignored` | `tests/model_execution_subprocess.rs:2663` | unaudited |
-| Named `supervisor_shutdown_reaps_group` | `tests/model_execution_subprocess.rs:2747` | unaudited |
-| Named `group_registry_sweep_kills_only_dead_owner_groups` | `tests/model_execution_subprocess.rs:3155` | unaudited |
-| Also bears `supervisor_delete_reaps_group` | `tests/model_execution_subprocess.rs:2718` | unaudited |
-| Also bears `timeout_reaps_leader_and_grandchild` | `tests/model_execution_subprocess.rs:2241` | unaudited |
-| Also bears `crash_orphaned_run_dirs_swept_only_for_dead_owners` | `tests/model_execution_subprocess.rs:3113` | unaudited |
-| Also bears `pi_lingering_child_drained_after_terminal` | `tests/model_execution_subprocess.rs:2268` | unaudited |
+| Named `cancel_reaps_group_with_sigterm_first` | `tests/model_execution_subprocess.rs:2644` | unaudited |
+| Named `sigkill_escalation_when_term_ignored` | `tests/model_execution_subprocess.rs:2678` | unaudited |
+| Named `supervisor_shutdown_reaps_group` | `tests/model_execution_subprocess.rs:2762` | unaudited |
+| Named `group_registry_sweep_kills_only_dead_owner_groups` | `tests/model_execution_subprocess.rs:3170` | unaudited |
+| Also bears `supervisor_delete_reaps_group` | `tests/model_execution_subprocess.rs:2733` | unaudited |
+| Also bears `timeout_reaps_leader_and_grandchild` | `tests/model_execution_subprocess.rs:2256` | unaudited |
+| Also bears `crash_orphaned_run_dirs_swept_only_for_dead_owners` | `tests/model_execution_subprocess.rs:3128` | unaudited |
+| Also bears `pi_lingering_child_drained_after_terminal` | `tests/model_execution_subprocess.rs:2283` | unaudited |
 
 These run real processes. The fixture child is the test binary re-executed
 with `EIDNARA_MODEL_EXECUTION_FIXTURE_MODE` (`:45`); `grandchild_hang` (`:654-656`)
@@ -315,15 +315,15 @@ SIGTERM through a marker file (`:2547-2550`) and that both pids are gone
 
 | Check | Site | Status |
 | --- | --- | --- |
-| Named `env_snapshot_strips_launch_identity` | `tests/model_execution_subprocess.rs:2910` | unaudited |
-| Named `env_snapshot_admission_charges_per_entry_overhead` | `tests/model_execution_subprocess.rs:2925` | unaudited |
-| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/model_execution_subprocess.rs:2950` | unaudited |
+| Named `env_snapshot_strips_launch_identity` | `tests/model_execution_subprocess.rs:2925` | unaudited |
+| Named `env_snapshot_admission_charges_per_entry_overhead` | `tests/model_execution_subprocess.rs:2940` | unaudited |
+| Named `provider_rows_exclude_ambient_credentials_and_enforce_caps` | `tests/model_execution_subprocess.rs:2965` | unaudited |
 | Named `credential_snapshot_must_match_before_backend_spawn` | `tests/model_execution_protocol.rs:462` | unaudited |
 | Also bears `opencode_argv_env_stdin_contract` | `tests/model_execution_subprocess.rs:1173` | unaudited |
 | Also bears `pi_argv_privacy_contract` | `tests/model_execution_subprocess.rs:1369` | unaudited |
 | Also bears `closed_dispatch_sink_prevents_spawn` | `tests/model_execution_subprocess.rs:1279` | unaudited |
 | Also bears `opencode_oversized_inline_config_rejected_before_spawn` | `tests/model_execution_subprocess.rs:1927` | unaudited |
-| Also bears `output_flood_stopped_and_redacted` | `tests/model_execution_subprocess.rs:2196` | unaudited |
+| Also bears `output_flood_stopped_and_redacted` | `tests/model_execution_subprocess.rs:2211` | unaudited |
 
 ### model_execution-protocol-shapes-are-closed
 
@@ -449,7 +449,7 @@ earlier inventory or is out of this catalog's subject.
 | `tests/harness_closure.rs:158`, `:185`, `:258`, `:360`, `:386`, `:499`, `:549`, `:592`, `:633`, `:685` | 10 | runtime-config's closure-store record; not the digest record |
 | `tests/harness_closure.rs:443` | 1 | `#[ignore]`, release qualification only |
 | `tests/model_execution_subprocess.rs`: the Pi and OpenCode transcript, alias, retry, flood, private-dir, and cleanup contracts at `:1292`, `:1506`, `:1545`, `:1599`, `:1675`, `:1781`, `:1885`, `:1960`, `:2203`, `:2242`, `:2278`, `:2337`, `:2365`, `:2405`, `:2452`, `:2491`, `:2669`, `:2702`, `:2724`, `:2898`, `:2940`, `:2978`, `:3029` | 23 | no record. Harness-behaviour contracts the U3 records do not state |
-| `tests/model_execution_supervisor.rs:206`, `:338`, `:584`, `:613`, `:673`, `:714`, `:754`, `:868`, `:839`, `:868` | 10 | no record. Status, replay, cancel, delete, and teardown-proof contracts |
+| `tests/model_execution_supervisor.rs:206`, `:338`, `:584`, `:613`, `:673`, `:714`, `:754`, `:799`, `:839`, `:868` | 10 | no record. Status, replay, cancel, delete, and teardown-proof contracts |
 | `tests/local_embeddings_bundle.rs:151`, `:639`, `:757`, `:818` | 4 | no record. `:757` and `:818` are activation-drop contracts; `:639` is doubly env-gated |
 | `tests/local_embeddings_jobs.rs:92`, `:278`, `:317`, `:370`, `:417`, `:480`, `:540` | 7 | no record. Retry delay, route loss, cancel, deadline, error, shutdown, shape |
 | `tests/local_embeddings_protocol.rs:186`, `:236`, `:312`, `:471`, `:512`, `:545`, `:737`, `:999`, `:1112`, `:1192` | 10 | no record. Waiter fairness, shutdown drain, pages, reservations |
@@ -597,7 +597,7 @@ proves.
    and a fault during inference itself
    ([local_embeddings-degrades-to-disabled-and-keeps-the-context-routable](../catalog.md#local_embeddings-degrades-to-disabled-and-keeps-the-context-routable)).
    The fixtures for the first two exist (`tests/model_execution_supervisor.rs:926`,
-   `tests/model_execution_subprocess.rs:2663`); the third has `DeterministicEngine::
+   `tests/model_execution_subprocess.rs:2678`); the third has `DeterministicEngine::
    fail_next` (`tests/support/local_embeddings.rs:67`) and no test that fails an
    inference and then asserts context routability.
 

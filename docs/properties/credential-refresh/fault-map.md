@@ -12,11 +12,11 @@ need the fault-free interval after it.
 | Class | Injection seam | Available in |
 | --- | --- | --- |
 | Row lifetime at, below, or above the bound | `scripted_dispatch` outcomes `Ok(lifetime)`; the owner harness `h.ok(lifetime)` | `crates/host-runtime/tests/model_execution_subprocess.rs`, `crates/host-runtime/src/model_execution/aws_refresh.rs` tests |
-| Wall-clock jump or rollback | `ShiftedClock` with `jump: Some((read, seconds))` and `shift`; the owner harness clock | `model_execution_subprocess.rs:3980`, `aws_refresh.rs` tests |
+| Wall-clock jump or rollback | `ShiftedClock` with `jump: Some((read, seconds))` and `shift`; the owner harness clock | `model_execution_subprocess.rs:3995`, `aws_refresh.rs` tests |
 | Typed source failure with cooldown | `HistorySummarizerProducerError::RunFailed` with `ErrorScope::CredentialSource` and `retry_after_secs` | `crates/daemon/src/source_recovery_tests.rs:7`, `crates/daemon/src/history_summarizer.rs` tests |
 | Unproven model effect | scripted start failure, `with_cancel_result(Err(TimedOut))`, cross-incarnation unknown | `history_summarizer.rs` tests |
 | Backoff expiry | `expire_history_summarizer_backoff`, `fire_and_settle` | `crates/daemon/src/lib.rs:40657`, `:41654` |
-| External login during rotation | `TransactionFailure::Withdrawn` in the scripted outcome list | `model_execution_subprocess.rs:4376` |
+| External login during rotation | `TransactionFailure::Withdrawn` in the scripted outcome list | `model_execution_subprocess.rs:4391` |
 | Malformed or canary-bearing health block | the shared vector fixture | `crates/host-runtime/tests/fixtures/source-health-vectors.json` |
 | 120-second source outage under load | the campaign runner's fixed schedule | `crates/daemon/examples/eval_runner/qualification.rs`; needs the dedicated runner |
 | Retained-history tiers to one million messages | the campaign catalog | same runner; needs the dedicated runner |

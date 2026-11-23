@@ -209,7 +209,7 @@ producer here.
 **[model_execution-child-environment-carries-only-the-provider-row](../catalog.md#model_execution-child-environment-carries-only-the-provider-row)
 says "every harness child receives the snapshot environment".** `EnvSnapshot`'s
 only public constructor is `capture_from` (`subprocess.rs:97`), and its callers
-are `tests/model_execution_subprocess.rs:2937`, `:2946`, `:2951`, `:2981`, `:2995`,
+are `tests/model_execution_subprocess.rs:2952`, `:2961`, `:2966`, `:2996`, `:3010`,
 `tests/model_execution_protocol.rs:463`, and the inline test at `subprocess.rs:1662`.
 Nothing in `src/` builds one. Every consumer takes it as an argument
 (`OpenCodeBackend::new` `opencode.rs:39`, `PiBackend::new` `pi.rs:63`,
@@ -247,7 +247,7 @@ confirmed stopped. The grace is `termination_grace`, 5 seconds by default
 `:684`, `:689`, `:691`), so the reaping ceiling is four graces and not one. An
 oracle written to the record's `Check:` fails on a correct build as soon as a
 child outlives the grace, which is what `hang_ignore_term` exists to produce
-(`tests/model_execution_subprocess.rs:2663`).
+(`tests/model_execution_subprocess.rs:2678`).
 
 **[model_execution-permits-and-charges-return-to-baseline](../catalog.md#model_execution-permits-and-charges-return-to-baseline)**
 asserts "after shutdown the state is empty". That clause is true and the code

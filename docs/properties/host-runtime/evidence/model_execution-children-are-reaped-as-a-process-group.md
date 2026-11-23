@@ -63,27 +63,27 @@ Existing checks, verified, all in the `harness = false` binary
 (`.github/workflows/ci.yml:118`):
 
 - `cancel_reaps_group_with_sigterm_first`
-  (`tests/model_execution_subprocess.rs:2629-2661`). The `grandchild_hang` fixture forks
+  (`tests/model_execution_subprocess.rs:2644-2676`). The `grandchild_hang` fixture forks
   a grandchild (`:603-627`), which writes `grandchild-ready` and then
-  `grandchild-sigterm` on `SIGTERM` (`:661-672`). The test cancels after
-  readiness, asserts `Failed` (`:2543`), asserts the leader is already gone
-  with a zero-retry probe (`:2544`, helper at `:1093-1101`), polls up to four
-  seconds for the grandchild (`:2545`, helper at `:1079-1090`), and requires
-  the `grandchild-sigterm` marker (`:2547-2550`), which proves group-wide
+  `grandchild-sigterm` on `SIGTERM` (`:670-681`). The test cancels after
+  readiness, asserts `Failed` (`:2668`), asserts the leader is already gone
+  with a zero-retry probe (`:2669`, helper at `:1102-1110`), polls up to four
+  seconds for the grandchild (`:2670`, helper at `:1088-1099`), and requires
+  the `grandchild-sigterm` marker (`:2672-2675`), which proves group-wide
   `SIGTERM` rather than leader-only delivery.
-- `sigkill_escalation_when_term_ignored` (`:2553-2592`). The `hang_ignore_term`
-  fixture installs a `SIGTERM` handler and never exits (`:574-591`). With
-  `termination_grace: 500 ms` (`:2557`), the test asserts a bounded elapsed
-  time (`:2585-2588`), the `got-sigterm` marker (`:2590`), and a reaped
-  leader (`:2591`).
-- `supervisor_delete_reaps_group` (`:2608-2635`) and
-  `supervisor_shutdown_reaps_group` (`:2637-2663`) drive the same fixture
+- `sigkill_escalation_when_term_ignored` (`:2678-2717`). The `hang_ignore_term`
+  fixture installs a `SIGTERM` handler and never exits (`:583-600`). With
+  `termination_grace: 500 ms` (`:2682`), the test asserts a bounded elapsed
+  time (`:2710-2713`), the `got-sigterm` marker (`:2715`), and a reaped
+  leader (`:2716`).
+- `supervisor_delete_reaps_group` (`:2733-2760`) and
+  `supervisor_shutdown_reaps_group` (`:2762-2788`) drive the same fixture
   through a real `Supervisor` and assert leader reaped and grandchild gone.
-- `group_registry_sweep_kills_only_dead_owner_groups` (`:3045-3176`) covers a
-  dead owner (`:3070-3086`), a live owner whose group must survive
-  (`:3078-3091`), a zombie owner (`:3100-3128`), and a leaderless group whose
-  grandchild must die (`:3131-3175`).
-- `timeout_reaps_leader_and_grandchild` (`:2131-2156`) covers the same
+- `group_registry_sweep_kills_only_dead_owner_groups` (`:3170-3301`) covers a
+  dead owner (`:3195-3211`), a live owner whose group must survive
+  (`:3203-3216`), a zombie owner (`:3225-3253`), and a leaderless group whose
+  grandchild must die (`:3256-3300`).
+- `timeout_reaps_leader_and_grandchild` (`:2256-2281`) covers the same
   teardown on the timeout path; the record does not list it.
 
 ## Failure scenario
@@ -117,13 +117,13 @@ group orphaned by a host crash survives until the next host starts.
 ## What a test must construct
 
 The gap is in the shutdown test. `supervisor_shutdown_reaps_group` discards
-the `usize` that `shutdown` returns (`tests/model_execution_subprocess.rs:2769`), and
+the `usize` that `shutdown` returns (`tests/model_execution_subprocess.rs:2784`), and
 `assert_process_gone` polls for up to four seconds (`:1092-1099`). If teardown
 were unconfirmed and the grandchild died late, the test would still pass. A
 strengthened version asserts `shutdown().await == 0` and probes the grandchild
 with the zero-retry `assert_leader_already_reaped` helper. The cancel and
-delete variants already discriminate: `Failed` at `:2543` is not
-`FailedUnresolved`, and `expect("delete succeeds")` at `:2631` would fail on
+delete variants already discriminate: `Failed` at `:2668` is not
+`FailedUnresolved`, and `expect("delete succeeds")` at `:2756` would fail on
 `teardown_unconfirmed`.
 
 ## Investigation log
@@ -131,7 +131,7 @@ delete variants already discriminate: `Failed` at `:2543` is not
 ### Q: Does the sweep ever signal a group whose owner is alive?
 
 - Sources examined: `subprocess.rs:1274-1282`, `:1505-1507`, `:1508-1518`;
-  `tests/model_execution_subprocess.rs:3188-3205`.
+  `tests/model_execution_subprocess.rs:3203-3220`.
 - Findings: the owner check compares the live start time from
   `/proc/<pid>/stat` with the recorded value and `continue`s on a match. A
   recycled owner PID with a different start time is treated as dead, which is
@@ -144,7 +144,7 @@ delete variants already discriminate: `Failed` at `:2543` is not
 
 ### Q: Does the shutdown test prove the grandchild died before the terminal?
 
-- Sources examined: `tests/model_execution_subprocess.rs:2747-2773`, `:1088-1110`;
+- Sources examined: `tests/model_execution_subprocess.rs:2762-2788`, `:1088-1110`;
   `supervisor.rs:616-644`.
 - Findings: no. The returned unresolved count is discarded and the grandchild
   probe tolerates four seconds of lag. The cancel and delete tests do
