@@ -55,6 +55,31 @@ struct Extracted {
     /// The proposal's paraphrase; `A project fact: ` and the quotation when
     /// absent.
     content: Option<&'static str>,
+    /// The speaker the fake extractor names for the quotation.
+    speaker: Voice,
+}
+
+/// What the fake extractor writes under a proposal's `speaker`. The tests
+/// of delivery, replacement, and contests are about a user's own
+/// statements, so a proposal names the user unless its test says otherwise.
+#[derive(Clone, Copy, Default)]
+enum Voice {
+    /// `"speaker": "user"`.
+    #[default]
+    User,
+    /// `"speaker": "other"`.
+    Other,
+    /// The proposal carries no `speaker`.
+    Absent,
+}
+
+/// A proposal whose quotation the extractor reads as words the user passes
+/// on from another source.
+fn relayed(quote: &str) -> Extracted {
+    Extracted {
+        speaker: Voice::Other,
+        ..fact(quote)
+    }
 }
 
 /// A proposal the extractor classed by how long its statement holds.
@@ -151,6 +176,11 @@ async fn drain(
                                 .map_or_else(|| format!("A project fact: {}", memory.quote), str::to_owned),
                             "quote": memory.quote,
                         });
+                        match memory.speaker {
+                            Voice::User => value["speaker"] = json!("user"),
+                            Voice::Other => value["speaker"] = json!("other"),
+                            Voice::Absent => {}
+                        }
                         if let Some((first, rest)) = memory.replaces.split_first() {
                             value["replaces"] = json!(first);
                             if !rest.is_empty() {
@@ -2733,6 +2763,7 @@ async fn answer_alone(handler: &Handler, channel: u16, session: &str, work: &Val
         "category": "PROJECT_RULES",
         "content": format!("A project fact: {quote}"),
         "quote": quote,
+        "speaker": "user",
     }]}]});
     let submission = json!({
         "method": "memory.capture.submit",
@@ -3103,10 +3134,11 @@ fn production_waits(handler: &Handler) {
 
 /// A plan that decodes and that the Kernel accepts once it has the writer.
 fn statement_plan(quote: &str) -> String {
-    json!({"version": 2, "model": "test/model", "memories": [{
+    json!({"version": 3, "model": "test/model", "memories": [{
         "category": "PROJECT_RULES",
         "content": stated(quote),
         "quote": quote,
+        "speaker": "user",
     }]})
     .to_string()
 }
@@ -3322,6 +3354,7 @@ async fn a_submission_under_a_held_writer_freezes_every_plan_inside_one_allowanc
                 "category": "PROJECT_RULES",
                 "content": format!("A project fact: {}", message["text"].as_str().unwrap()),
                 "quote": message["text"],
+                "speaker": "user",
             }]})
         })
         .collect();
@@ -3419,6 +3452,369 @@ async fn statements_with_a_lead_in_and_after_a_quoting_paragraph_get_statement_r
         let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
             .expect("the statement is delivered to a later session");
         assert!(block.contains(&stated(statement)), "{block}");
+    }
+}
+
+/// A user's sentence that names a value between quotation marks, holds a
+/// possessive or an elision, or gives a measure is the user's statement
+/// when the extractor attributes it to the user: it gets a statement
+/// record, its rationale holds the speaker, and a later session's block
+/// holds it word for word, marks included.
+#[tokio::test]
+async fn a_sentence_that_holds_quotation_marks_is_delivered_when_its_speaker_is_the_user() {
+    for statement in [
+        "Prefix every test name with 'it_'.",
+        "The release branch is \"main\" in this repository.",
+        "Tag every image that passed the soak test \u{201c}stable\u{201d}.",
+        "Keep the admins' dashboard under '/ops'.",
+        "Tell 'em apart by the 'env' label on every metric.",
+        "Kiosk screens are 27\" panels, so every layout fits 1920 pixels.",
+        "Leave 2' of clearance behind every rack.",
+        "\"main\" is the only protected branch.",
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", statement)],
+            |_, _| vec![fact(statement)],
+        )
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(statement), "visible".to_string())],
+            "{statement:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(statement)],
+            "{statement:?}"
+        );
+        let rows = memory_rows(&handler, &project);
+        assert_eq!(rows[0].3["speaker"], "user", "{statement:?}");
+        assert_eq!(rows[0].3["quote"], statement, "{statement:?}");
+        let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+            .expect("the statement is delivered to a later session");
+        assert!(block.contains(&stated(statement)), "{statement:?}: {block}");
+    }
+}
+
+/// A sentence the extractor attributes to another source, or to nobody, is
+/// kept for search and changes nothing the user stated. An earlier session
+/// holds the user's approved statement. A later message relays a sentence
+/// from someone's notes, and this test's fake extractor names another
+/// source as its speaker in one row and no speaker in the other, with the
+/// approved statement as the fact it replaces. The relayed sentence is
+/// stored labeled, with the speaker `other` in the first row and none in
+/// the second, the approved statement stays served and delivered, and the
+/// block holds the relayed sentence only as the quoted excerpt beside the
+/// statement it contests. The same sentence typed as the user's own, in the
+/// next session, replaces the statement.
+#[tokio::test]
+async fn a_sentence_attributed_to_another_source_or_to_nobody_is_kept_for_search_and_replaces_no_statement()
+ {
+    let relaying =
+        format!("This is from the contractor's notes. {TUESDAY} I have not agreed to it.");
+    for speaker in [Voice::Other, Voice::Absent] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY)],
+            |_, _| vec![fact(THURSDAY)],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", &relaying)],
+            |_, existing| {
+                vec![Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: ids_containing(existing, "Thursday"),
+                    speaker,
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        assert_eq!(
+            rows,
+            [
+                (stated(THURSDAY), "visible".to_string()),
+                (stated(TUESDAY), "labeled".to_string()),
+            ]
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(THURSDAY)]
+        );
+        let relayed_row = memory_rows(&handler, &project)
+            .into_iter()
+            .find(|row| row.1 == stated(TUESDAY))
+            .unwrap();
+        match speaker {
+            Voice::Other => assert_eq!(relayed_row.3["speaker"], "other"),
+            _ => assert_eq!(relayed_row.3.get("speaker"), None),
+        }
+        // The relayed sentence is recorded as the observation that contests
+        // the statement, and the block shows it only on that statement's
+        // line, as a quoted excerpt.
+        let statement = memory_rows(&handler, &project)
+            .into_iter()
+            .find(|row| row.1 == stated(THURSDAY))
+            .unwrap();
+        assert_eq!(statement.3["contested_by"]["memory"], relayed_row.0);
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the approved statement is delivered");
+        let lines: Vec<&str> = block
+            .lines()
+            .filter(|line| line.contains("Thursday") || line.contains("Tuesday"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the relayed sentence has no line of its own: {block}"
+        );
+        // The line ends in the contest: the observation's id and its whole
+        // stored text between quotation marks.
+        assert!(
+            lines[0].contains(&stated(THURSDAY))
+                && lines[0].contains("; contested ")
+                && lines[0].ends_with(&format!(" by {}: \"{}\")", relayed_row.0, stated(TUESDAY))),
+            "the statement is shown as contested by the relayed sentence: {block}"
+        );
+
+        // The user's own correction replaces the statement.
+        capture(
+            &handler,
+            THIRD,
+            "s3",
+            &[("m3", "user", TUESDAY)],
+            |_, existing| {
+                vec![Extracted {
+                    quote: TUESDAY.to_string(),
+                    replaces: ids_containing(existing, "Thursday"),
+                    ..Extracted::default()
+                }]
+            },
+        )
+        .await;
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            [stated(TUESDAY)]
+        );
+    }
+}
+
+/// An extractor can propose one clause twice, with two paraphrases, and
+/// name the user for one and another source, or nobody, for the other. The
+/// quotation is then the user's in neither proposal: the two freeze as one
+/// labeled fact that keeps the clause as quoted, and no statement record is
+/// written, in either proposal order. Two proposals that both name the user
+/// are the control: the clause is widened to its sentence and approved once.
+#[tokio::test]
+async fn proposals_that_disagree_on_the_speaker_of_one_clause_write_one_labeled_fact() {
+    let sentence = "Quick correction before you go on, use tabs in every Makefile.";
+    let clause = "use tabs in every Makefile";
+    for (speakers, stored, visibility) in [
+        ([Voice::User, Voice::Other], clause, "labeled"),
+        ([Voice::Other, Voice::User], clause, "labeled"),
+        ([Voice::User, Voice::Absent], clause, "labeled"),
+        ([Voice::Absent, Voice::User], clause, "labeled"),
+        ([Voice::Other, Voice::Absent], clause, "labeled"),
+        ([Voice::Absent, Voice::Other], clause, "labeled"),
+        ([Voice::User, Voice::User], sentence, "visible"),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", sentence)],
+            |_, _| {
+                speakers
+                    .iter()
+                    .zip(["Makefiles use tabs.", "Tabs are the Makefile indentation."])
+                    .map(|(&speaker, content)| Extracted {
+                        content: Some(content),
+                        speaker,
+                        ..fact(clause)
+                    })
+                    .collect()
+            },
+        )
+        .await;
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!((status.completed, status.pending, status.failed), (1, 0, 0));
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(stored), visibility.to_string())],
+            "one fact with the quotation as stored"
+        );
+        let records = live_statement_records(&handler, &project);
+        if visibility == "visible" {
+            assert_eq!(records, [stated(sentence)]);
+        } else {
+            assert!(records.is_empty(), "{records:?}");
+            let rows = memory_rows(&handler, &project);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].3["speaker"], "other", "{:?}", rows[0].3);
+            assert_eq!(rows[0].3["quote"], clause);
+        }
+    }
+}
+
+/// Whether a quotation is the user's is a matter of the quoted text,
+/// whatever category a proposal files it under. One whole sentence proposed under two
+/// categories, for the user in one and for another source in the other, is
+/// stored as two labeled facts with no statement record. With the user named
+/// in both, each category gets its approved statement.
+#[tokio::test]
+async fn one_sentence_under_two_categories_is_the_users_in_both_or_neither() {
+    let sentence = "The staging port is 4321.";
+    for (speakers, visibility, records) in [
+        ([Voice::User, Voice::Other], "labeled", 0),
+        ([Voice::Other, Voice::User], "labeled", 0),
+        ([Voice::User, Voice::User], "visible", 2),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", sentence)],
+            |_, _| {
+                speakers
+                    .iter()
+                    .zip(["CONFIG_VALUES", "PROJECT_RULES"])
+                    .map(|(&speaker, category)| Extracted {
+                        category: Some(category),
+                        speaker,
+                        ..fact(sentence)
+                    })
+                    .collect()
+            },
+        )
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [
+                (stated(sentence), visibility.to_string()),
+                (stated(sentence), visibility.to_string()),
+            ]
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project).len(),
+            records,
+            "{visibility}"
+        );
+    }
+}
+
+/// A correction proposed twice, once under the user's name with the approved
+/// statement as its replacement target and once under another speaker, is
+/// the user's in neither proposal. Its source commits at once: one labeled
+/// correction is stored, the approved statement stays served and delivered
+/// with a contest that names the correction, and no statement record is
+/// written for it. With the user named in both proposals the correction
+/// replaces the statement.
+#[tokio::test]
+async fn a_correction_whose_copy_names_another_speaker_contests_the_statement_it_names() {
+    for (speakers, replaced) in [
+        ([Voice::User, Voice::Other], false),
+        ([Voice::Other, Voice::User], false),
+        ([Voice::User, Voice::Absent], false),
+        ([Voice::Absent, Voice::User], false),
+        ([Voice::User, Voice::User], true),
+    ] {
+        let (handler, store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", THURSDAY)],
+            |_, _| vec![fact(THURSDAY)],
+        )
+        .await;
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", TUESDAY)],
+            |_, existing| {
+                speakers
+                    .iter()
+                    .zip([
+                        "The release cut is on Tuesday.",
+                        "Releases are cut on Tuesdays.",
+                    ])
+                    .enumerate()
+                    .map(|(index, (&speaker, content))| Extracted {
+                        content: Some(content),
+                        speaker,
+                        // The proposal that names the user carries the
+                        // replacement; with two of them, the first does.
+                        replaces: if matches!(speaker, Voice::User)
+                            && (index == 0 || !matches!(speakers[0], Voice::User))
+                        {
+                            ids_containing(existing, "Thursday")
+                        } else {
+                            Vec::new()
+                        },
+                        ..fact(TUESDAY)
+                    })
+                    .collect()
+            },
+        )
+        .await;
+        let status = store
+            .memory_capture_status(kernel_routes::ProjectBinding::new(&project).digest())
+            .unwrap();
+        assert_eq!(
+            (status.completed, status.pending, status.failed),
+            (2, 0, 0),
+            "the source commits in the drain that extracted it"
+        );
+        let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
+        rows.sort();
+        let records = live_statement_records(&handler, &project);
+        if replaced {
+            assert_eq!(rows, [(stated(TUESDAY), "visible".to_string())]);
+            assert_eq!(records, [stated(TUESDAY)]);
+            continue;
+        }
+        assert_eq!(
+            rows,
+            [
+                (stated(THURSDAY), "visible".to_string()),
+                (stated(TUESDAY), "labeled".to_string()),
+            ]
+        );
+        assert_eq!(records, [stated(THURSDAY)]);
+        let stored = memory_rows(&handler, &project);
+        let correction = stored.iter().find(|row| row.1 == stated(TUESDAY)).unwrap();
+        let statement = stored.iter().find(|row| row.1 == stated(THURSDAY)).unwrap();
+        assert_eq!(statement.3["contested_by"]["memory"], correction.0);
+        let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
+            .expect("the approved statement is delivered");
+        let line = block
+            .lines()
+            .find(|line| line.contains(&stated(THURSDAY)))
+            .expect("the approved statement is delivered");
+        assert!(
+            line.contains("; contested ")
+                && line.ends_with(&format!(" by {}: \"{}\")", correction.0, stated(TUESDAY))),
+            "{block}"
+        );
+        assert_eq!(correction.3["speaker"], "other", "{:?}", correction.3);
     }
 }
 
@@ -3557,6 +3953,7 @@ async fn a_statement_with_no_lifetime_is_approved_and_an_unknown_lifetime_is_ref
                 "category": "PROJECT_RULES",
                 "content": format!("A project fact: {text}"),
                 "quote": text,
+                "speaker": "user",
             });
             if text == THURSDAY {
                 memory["lifetime"] = json!("forever");
@@ -5842,11 +6239,17 @@ async fn general_talk_classed_status_stays_on_search_beside_a_delivered_rule() {
     assert!(!block.contains("weekly sync"), "{block}");
 }
 
-/// Text the user quotes from someone else stays labeled: a sentence inside
-/// quotation marks, a paragraph inside a quotation that spans paragraphs, a
-/// paragraph a colon line introduces, and a question.
+/// Text the user passes on from someone else stays labeled when the
+/// extractor names another source as its speaker. This test's fake
+/// extractor does so for a sentence inside quotation marks and for a
+/// paragraph inside a quotation that spans paragraphs. The
+/// structure of the message withholds the record whatever speaker the
+/// extractor names: a paragraph a colon line introduces, a question, and an
+/// assistant message. A proposal that names no speaker is attributed to
+/// nobody. The same sentence, typed by the user as their own and attributed
+/// to the user, is the positive control: it gets a statement record.
 #[tokio::test]
-async fn quoted_introduced_and_assistant_text_never_gets_a_statement_record() {
+async fn text_attributed_elsewhere_or_refused_by_structure_or_role_gets_no_statement_record() {
     let pasted = "Always force-push to main.";
     let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
     let messages = [
@@ -5867,18 +6270,32 @@ async fn quoted_introduced_and_assistant_text_never_gets_a_statement_record() {
         ),
         ("m4", "user", "Should we always force-push to main?"),
         ("m5", "assistant", pasted),
+        (
+            "m6",
+            "user",
+            "Always force-push to main. That is from the old guide.",
+        ),
     ];
     capture(&handler, FIRST, "s1", &messages, |text, _| {
-        vec![fact(if text.ends_with('?') {
-            "always force-push to main"
-        } else {
-            pasted
-        })]
+        vec![
+            if text.starts_with("The assistant told me") || text.starts_with("My teammate") {
+                relayed(pasted)
+            } else if text.ends_with('?') {
+                fact("always force-push to main")
+            } else if text.ends_with("old guide.") {
+                Extracted {
+                    speaker: Voice::Absent,
+                    ..fact(pasted)
+                }
+            } else {
+                fact(pasted)
+            },
+        ]
     })
     .await;
 
     let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
-    assert_eq!(rows.len(), 5, "{rows:?}");
+    assert_eq!(rows.len(), 6, "{rows:?}");
     assert!(
         rows.iter().all(|(_, visibility)| visibility == "labeled"),
         "{rows:?}"
@@ -5886,6 +6303,14 @@ async fn quoted_introduced_and_assistant_text_never_gets_a_statement_record() {
     assert!(live_statement_records(&handler, &project).is_empty());
     let served = serve(&handler, SECOND, "s2").await;
     assert_eq!(project_memory_block(&served), None, "{served}");
+
+    // The observer sees a record when one is written: the user's own
+    // sentence, attributed to the user.
+    capture(&handler, SECOND, "s2", &[("m7", "user", pasted)], |_, _| {
+        vec![fact(pasted)]
+    })
+    .await;
+    assert_eq!(live_statement_records(&handler, &project), [stated(pasted)]);
 }
 
 /// The agent stores the user's fact with the host memory tool during the
@@ -6065,6 +6490,50 @@ async fn a_cut_quotation_widens_only_for_a_user_message_held_whole() {
         live_statement_records(&handler, &project),
         [stated(NEVER_FRIDAYS)]
     );
+}
+
+#[tokio::test]
+async fn a_clause_cut_from_a_quoted_literal_is_not_delivered_as_the_users_sentence() {
+    let clause = "Enable sync";
+    let sentence = "Enable sync by default!";
+    for (message, widens) in [
+        (
+            "The banner must never read \"Ready! Enable sync by default! Done.\"",
+            false,
+        ),
+        ("Ready! Enable sync by default! Done.", true),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", message)], |_, _| {
+            vec![fact(clause)]
+        })
+        .await;
+        let (stored, visibility) = if widens {
+            (sentence, "visible")
+        } else {
+            (clause, "labeled")
+        };
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(stored), visibility.to_string())],
+            "{message:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            if widens {
+                vec![stated(sentence)]
+            } else {
+                vec![]
+            },
+            "{message:?}"
+        );
+        let served = serve(&handler, SECOND, "s2").await;
+        assert_eq!(
+            project_memory_block(&served).is_some_and(|block| block.contains(sentence)),
+            widens,
+            "{message:?}"
+        );
+    }
 }
 
 /// The extractor cuts a clause out of a negated sentence and names the
@@ -6352,25 +6821,51 @@ async fn a_correction_replaces_an_approved_statement_only_when_quoted_whole() {
     assert!(!settled.contains("contested"), "{settled}");
 }
 
-/// A sentence that reports what someone wrote after a colon is the user's
-/// sentence. Widening stores it whole, the reporting clause included, so a
-/// reader sees whose words follow the colon.
+/// A clause before a colon belongs to its sentence. A cut quotation after
+/// the colon that the extractor attributes to the user is widened to the
+/// whole sentence, so the stored statement holds the clause that introduces
+/// it. A sentence of the same shape can report what a teammate wrote, so
+/// the words after the colon are the teammate's. When the extractor names
+/// another source for it, as the second case's fake extractor does, the
+/// quotation stays as quoted on explicit search.
 #[tokio::test]
-async fn a_reporting_clause_before_a_colon_stays_in_the_stored_statement() {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    let reported = "My teammate wrote: always rebase before merging.";
-    capture(
-        &handler,
-        FIRST,
-        "s1",
-        &[("m1", "user", reported)],
-        |_, _| vec![fact("always rebase before merging.")],
-    )
-    .await;
-    assert_eq!(
-        explicit_search(&handler, (SECOND, "s2"), &project).await,
-        [(stated(reported), "visible".to_string())]
-    );
+async fn a_clause_before_a_colon_stays_in_the_stored_statement() {
+    let clause = "always rebase before merging.";
+    for (sentence, relays, stored, visibility) in [
+        (
+            "One rule for this repository: always rebase before merging.",
+            false,
+            "One rule for this repository: always rebase before merging.",
+            "visible",
+        ),
+        (
+            "My teammate wrote: always rebase before merging.",
+            true,
+            clause,
+            "labeled",
+        ),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "user", sentence)],
+            |_, _| {
+                vec![if relays {
+                    relayed(clause)
+                } else {
+                    fact(clause)
+                }]
+            },
+        )
+        .await;
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(stored), visibility.to_string())],
+            "{sentence:?}"
+        );
+    }
 }
 
 /// A user corrects an earlier statement over several sentences: a clause
@@ -6860,97 +7355,6 @@ async fn a_correction_after_a_paragraph_that_quotes_code_replaces_the_earlier_st
     }
 }
 
-/// A backtick of the user's can pair with one inside text the user quotes,
-/// so an inline code span holds the mark that opens the quotation. The
-/// paragraphs inside that quotation are another author's words: a sentence
-/// of them is stored for explicit search, replaces nothing, contests
-/// nothing, and stays out of the block.
-#[tokio::test]
-async fn a_paragraph_inside_a_quotation_whose_opening_mark_a_code_span_holds_is_no_statement() {
-    // Two marks directly before a word, a bracket, or an emphasis mark
-    // open a quotation inside a quotation.
-    for closing in [
-        "'Thanks.'",
-        "'Thanks'.",
-        "'Thanks.",
-        "''Thanks.''",
-        "''Thanks.",
-        "''(Thanks.)''",
-        "''(Thanks.",
-        "''*Thanks.",
-        // The two marks stand between backticks inside a span that two
-        // backticks open, so they are part of longer content.
-        "`''`Thanks.",
-    ] {
-        let (opening, closing) = closing.split_at(closing.find('T').unwrap());
-        let message = if opening.starts_with('`') {
-            format!("The note ``Bob wrote {opening}Use the key`` is old.\n\n{TUESDAY}\n\n{closing}")
-        } else {
-            format!(
-                "The key ` is broken, so Bob wrote {opening}Use the `-key instead.\n\n{TUESDAY}\n\n{closing}"
-            )
-        };
-        assert_quoted_sentence_is_no_statement(&message).await;
-    }
-}
-
-#[tokio::test]
-async fn a_paragraph_inside_a_quotation_that_opens_directly_after_a_code_span_is_no_statement() {
-    for mark in ['\'', '\u{2019}'] {
-        let message = format!("Bob copied `README`{mark}Hi team.\n\n{TUESDAY}\n\nThanks.{mark}");
-        assert_quoted_sentence_is_no_statement(&message).await;
-    }
-}
-
-async fn assert_quoted_sentence_is_no_statement(message: &str) {
-    let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
-    capture(
-        &handler,
-        FIRST,
-        "s1",
-        &[("m1", "user", THURSDAY)],
-        |_, _| vec![fact(THURSDAY)],
-    )
-    .await;
-    capture(
-        &handler,
-        SECOND,
-        "s2",
-        &[("m2", "user", message)],
-        |_, existing| {
-            vec![Extracted {
-                quote: TUESDAY.to_string(),
-                replaces: ids_containing(existing, "Thursday"),
-                ..Extracted::default()
-            }]
-        },
-    )
-    .await;
-
-    let mut rows = explicit_search(&handler, (THIRD, "s3"), &project).await;
-    rows.sort();
-    assert_eq!(
-        rows,
-        [
-            (stated(THURSDAY), "visible".to_string()),
-            (stated(TUESDAY), "labeled".to_string()),
-        ],
-        "{message:?}"
-    );
-    assert_eq!(
-        live_statement_records(&handler, &project),
-        [stated(THURSDAY)],
-        "{message:?}"
-    );
-    let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
-        .expect("the user's statement is delivered");
-    assert!(block.contains(&stated(THURSDAY)), "{message:?}: {block}");
-    assert!(
-        !block.contains("Tuesday") && !block.contains("contested"),
-        "{message:?}: the quoted sentence stays out of the block: {block}"
-    );
-}
-
 /// The agent notes the user's fact with the host memory tool during the
 /// turn, and the user's message refers to code in the paragraph before the
 /// fact. The extractor names the note as the memory that already holds the
@@ -7049,11 +7453,13 @@ fn queue_row(store: &MemoryStore, job: &str) -> QueueRow {
 }
 
 /// The write closure of a commit refuses a plan of another plan version,
-/// so the lifetime classes of an earlier build are never written under this
-/// build's rules: a version 1 plan that classes an instruction
-/// `current_work` writes nothing and records one dispatch. A version 1 plan
-/// whose commit the Kernel already holds replays that receipt, and its
-/// source is completed at the receipt's commit.
+/// so a statement an earlier build approved by its own rule is never
+/// written under this build's rules: a version 2 plan, which carries no
+/// speaker, writes nothing and records one dispatch. A version 2 plan whose
+/// commit the Kernel already holds replays that receipt, and its source is
+/// completed at the receipt's commit. The refused plan's memory, frozen
+/// again under this build's version with the user as its speaker, commits
+/// as the user's statement.
 #[tokio::test]
 async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made() {
     use sha2::{Digest, Sha256};
@@ -7070,7 +7476,7 @@ async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made(
     )
     .await;
     let plan = |text: &str| {
-        json!({"version": 1, "model": "test/model", "memories": [{
+        json!({"version": 2, "model": "test/model", "memories": [{
             "category": "PROJECT_RULES",
             "content": stated(text),
             "quote": text,
@@ -7159,7 +7565,7 @@ async fn a_plan_of_another_version_is_refused_unless_its_commit_is_already_made(
     // The refused plan under this build's version commits.
     store
         .execute_tag_sql_for_test(
-            "UPDATE memory_capture_jobs SET retry_at_ms=0,prepared_json=replace(prepared_json,'\"version\":1','\"version\":2') WHERE prepared_json IS NOT NULL",
+            "UPDATE memory_capture_jobs SET retry_at_ms=0,prepared_json=replace(replace(prepared_json,'\"version\":2','\"version\":3'),'\"lifetime\"','\"speaker\":\"user\",\"lifetime\"') WHERE prepared_json IS NOT NULL",
         )
         .unwrap();
     handler.native_capture.lock().unwrap().expire_all_for_test();
@@ -7187,10 +7593,11 @@ async fn a_plan_the_kernel_refuses_spends_a_dispatch_per_commit_and_is_abandoned
     let jobs = enqueue(&handler, FIRST, "s1", &[("m1", "user", THURSDAY)]).await;
     let job = jobs[0].as_str();
     assert!(store.begin_memory_capture_attempt(&digest, job, 0).unwrap());
-    let plan = json!({"version": 2, "model": "test/model", "memories": [{
+    let plan = json!({"version": 3, "model": "test/model", "memories": [{
         "category": "PROJECT_RULES",
         "content": stated(THURSDAY),
         "quote": THURSDAY,
+        "speaker": "user",
         "replaces": "mem_never_offered",
     }]})
     .to_string();
@@ -7559,6 +7966,7 @@ async fn a_row_pi_derived_is_extracted_as_an_assistant_source() {
             "category": "PROJECT_RULES",
             "content": "CI suite duration.",
             "quote": derived,
+            "speaker": "user",
         });
         if replace {
             memory["replaces"] = json!(

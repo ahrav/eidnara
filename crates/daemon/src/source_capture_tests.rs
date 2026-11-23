@@ -3339,7 +3339,7 @@ fn submission_for(work: &Value, session: &str, quotes: &[&str]) -> Value {
             let memories: Vec<Value> = quotes
                 .iter()
                 .find(|quote| text.contains(*quote))
-                .map(|quote| json!({"category":"CONFIG_VALUES","content":quote,"quote":quote}))
+                .map(|quote| json!({"category":"CONFIG_VALUES","content":quote,"quote":quote,"speaker":"user"}))
                 .into_iter()
                 .collect();
             json!({"message_id":message["id"],"memories":memories})
@@ -3805,7 +3805,7 @@ async fn an_invented_source_id_is_refused_before_any_citation_lookup() {
     );
     assert_eq!(work["state"], "work", "{work}");
     // The prompt names its sources `source_1` and on; the native id is not one of them.
-    let output = json!({"version":1,"decisions":[{"message_id":"pi-one","memories":[{"category":"CONFIG_VALUES","content":"x","quote":"Use port"}]}]});
+    let output = json!({"version":1,"decisions":[{"message_id":"pi-one","memories":[{"category":"CONFIG_VALUES","content":"x","quote":"Use port","speaker":"user"}]}]});
     let submission = json!({"method":"memory.capture.submit","session_id":SESSION,"lease":work["lease"],"model":work["model"],"output":output.to_string()});
     assert_eq!(
         tool_body(
