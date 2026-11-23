@@ -6,19 +6,19 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1817`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9334`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:7068`). The failed-command recorder's detached task reads each command result ahead of the gate and holds the gate once per result, for the session-epoch check, the Kernel reads, the commit, and the memo update (`crates/daemon/src/memory_capture/failures.rs:1367`); `a_result_is_judged_under_the_capture_publication_gate` (`crates/daemon/src/memory_auto_delivery_tests.rs:6381`) pauses a judgment at a hook under the gate, ahead of its Kernel reads and its commit, and observes that the gate is held and that a `session.delete` of the session has not finished while the hook blocks, and `a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writes_nothing` (`crates/daemon/src/memory_auto_delivery_tests.rs:5573`) hands a task off, runs a `session.delete` that stops between its two stores, observes that the handed-off task writes nothing, completes the delete on a retry, and then observes that a fresh pass writes. Every holder runs on a blocking thread, so the gate is never held across an await.
+`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1817`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9334`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:7068`). The failed-command recorder's detached task reads each command result ahead of the gate and holds the gate once per result, for the session-epoch check, the Kernel reads, the commit, and the memo update (`crates/daemon/src/memory_capture/failures.rs:1571`); `a_result_is_judged_under_the_capture_publication_gate` (`crates/daemon/src/memory_auto_delivery_tests.rs:6767`) pauses a judgment at a hook under the gate, ahead of its Kernel reads and its commit, and observes that the gate is held and that a `session.delete` of the session has not finished while the hook blocks, then observes at a second hook between the judgment's reads and its commit that the gate is still held and the delete still unfinished, and `a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writes_nothing` (`crates/daemon/src/memory_auto_delivery_tests.rs:5592`) hands a task off, runs a `session.delete` that stops between its two stores, observes that the handed-off task writes nothing, completes the delete on a retry, and then observes that a fresh pass writes. The delete's fence (`DeleteFence`, `crates/daemon/src/memory_capture/failures.rs:317`) retires the session's memo entry when it is raised and again as it releases the gate, and `a_delete_fence_retires_the_session_s_entry_at_both_ends` (`crates/daemon/src/memory_capture/failures.rs:3692`) observes both retirements over a memo and a gate of its own. Every holder runs on a blocking thread, so the gate is never held across an await.
 
 ## Failure scenario
 
-A publish that committed after the delete sweep would leave a deleted session's memory live.
+A publish that committed after the delete sweep would leave a deleted session's memory live. A failed-command task that committed after the delete of its session, having been handed off before it or while it held the gate, would write a fact from a result the session no longer holds.
 
 ## Timing windows and dependencies
 
-A checkpoint or publish admitted before a delete that runs after it.
+A checkpoint, a publish, or a failed-command task admitted before a delete that runs after it; a failed-command task handed off while the delete holds the gate; a delete that stops between its Kernel step and its memory-store delete, and its retry.
 
 ## What a test must construct
 
-Hold the gate from a test thread, issue the competing operation, assert it has not committed, and release. The outcome follows the order of the gate's holders: a capture or source publish handed off before a completed delete commits nothing for the deleted session once it takes the gate, and a pass handed off after the delete publishes as before; a failed-command judgment that holds the gate first commits its fact ahead of the delete, and a failed-command task handed off before the delete, or while it holds the gate, commits nothing once it takes the gate. A delete that ends between its two stores fences the failed-command task alone: a source publish handed off before it may still commit, and the retry of the delete retires what it published.
+Hold the gate from a test thread, issue the competing operation, assert it has not committed, and release. The outcome follows the order of the gate's holders: a capture publish handed off before a completed delete commits nothing for the deleted session once it takes the gate, and a pass handed off after the delete publishes as before; a source publish commits only while the delete epoch its pass sampled is current, and the epoch is one counter for the daemon, so a pass that sampled before a completed delete of any session publishes nothing, also when it hands off after the delete, and a pass that samples after it publishes as before; a failed-command judgment that holds the gate first commits its fact ahead of the delete, and a failed-command task handed off before the delete, or while it holds the gate, commits nothing once it takes the gate. A delete that ends between its two stores fences the failed-command task alone: a source publish handed off before it may still commit, and the retry of the delete retires what it published.
 
 ## Investigation log
 
@@ -27,6 +27,13 @@ Hold the gate from a test thread, issue the competing operation, assert it has n
 - Sources examined: `crates/daemon/src/lib.rs:25554`, `:25892`, `:26104`, `:26757`, `:25279`; `crates/daemon/src/source_capture_tests.rs:1062`, cited at their current lines and first read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
+- Conclusion: resolved with answer.
+
+### Q: Which checks cover the failed-command recorder as a holder of the gate?
+
+- Sources examined: `crates/daemon/src/memory_capture/failures.rs:1571`, `:316`, `:1587`, `:3697`; `crates/daemon/src/memory_auto_delivery_tests.rs:6767`, `:5592`.
+- Findings: The gate test pauses a judgment at a hook under the gate and observes the gate held and a `session.delete` of the session unfinished, there and again at the judgment's commit. The delete test hands a task off, stops a delete between its two stores, and observes that the task writes nothing and that a fresh pass writes after the retry. The fence test observes both retirements of the session's memo entry over a memo and a gate of its own.
+- Missing evidence: a test of a task that starts its gate wait while the delete holds the gate, and a test that observes the fence's last retirement and its gate release as one step.
 - Conclusion: resolved with answer.
 
 ### Q: Which spec lines moved?
