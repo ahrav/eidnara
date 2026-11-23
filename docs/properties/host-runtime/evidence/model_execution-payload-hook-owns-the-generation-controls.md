@@ -7,7 +7,7 @@ into the runtime with `include_bytes!`, and the hook's own header
 (`pi-model_execution-extension.mjs:1-32`) states the contract: loaded last, it replaces the
 provider-native output-token and temperature fields with the values ModelExecution
 admitted, sends no temperature to a model Pi's registry marks as refusing it, and
-rejects payload shapes it does not recognize. The hook is the
+throws on payload shapes it does not recognize. At Pi 0.80.2 the runner logs a handler's throw and sends the payload it had. The hook is the
 only place where the admitted generation controls become provider bytes, and
 it is JavaScript inside a Rust crate, so the Rust catalog records did not
 reach it. The audit traced the controls from the admitted request to the
@@ -159,9 +159,9 @@ run.
 
 - Sources examined: `pi-model_execution-extension.mjs:38-45`; `pi.rs:523-532`;
   `model_execution/protocol.rs:265-280`.
-- Findings: the values are formatted from the admitted request. The hook fails
-  the request rather than defaulting when the bound is absent or either value is
-  present but not finite. An absent temperature variable is the revision 2
+- Findings: the values are formatted from the admitted request. The hook throws
+  rather than defaulting when the bound is absent or either value is
+  present but not finite; at Pi 0.80.2 that throw is logged and the request goes out as it stood. An absent temperature variable is the revision 2
   contract, not a fault: the hook then leaves temperature to the provider.
 - Missing evidence: no test drives the absent-bound or non-numeric path.
 - Conclusion: resolved as a mechanism; the negative paths are unexercised.

@@ -34,7 +34,7 @@ only adapter-owned variables. OpenCode (`opencode.rs:116-121`, `:164-179`)
 adds `OPENCODE_DB`, `OPENCODE_CONFIG_CONTENT`,
 `OPENCODE_DISABLE_PROJECT_CONFIG`, `EIDNARA_MODEL_EXECUTION_CHILD`, and `HOME`. Pi
 (`pi.rs:218-223`, `:316-325`) adds `EIDNARA_PI_SUBAGENT`,
-`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS`, `EIDNARA_MODEL_EXECUTION_TEMPERATURE`, `HOME`, and, for a request that asks for its system text as written, `EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM`.
+`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS`, `EIDNARA_MODEL_EXECUTION_TEMPERATURE`, `HOME`, and, for a request that asks for its system text as written, `EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM` (`crates/host-runtime/src/model_execution/pi.rs:533-538`, at the commit that adds the variable).
 The `OPENCODE_CONFIG_CONTENT` value is bounded before spawn by
 `MAX_OPENCODE_CONFIG_BYTES` (`opencode.rs:124-135`).
 
