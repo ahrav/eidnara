@@ -23,8 +23,10 @@ use crate::{MemoriesAuthority, RouteBindings, SessionBinding, memories_authority
 
 use super::activation::{self, Activation, Closed, LiveIdentity};
 use super::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
+use super::classifier::{CLASSIFY_WAIT, ClassifierExchange, ClassifierRoute};
 use super::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, Rejection, StageOne,
+    StageOneDecider,
 };
 use super::disclosure::{DisclosureApproval, ModelProfile};
 use super::host_execution::{HOST_CREDENTIAL_ID, HostExecution};
@@ -34,7 +36,7 @@ use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use super::review_cycle::{self, Applied, ApplyScope, SelectionScope};
 use super::settlement::Settled;
 use super::settlement::TaskClaim;
-use super::stage_one::StageOneBook;
+use super::stage_one::{Decider, StageOneBook};
 use crate::HistorySummarizerProducerFactory;
 use crate::claim_sources::ClaimProgress;
 use crate::config::{ReviewApply, Stage1Model};
@@ -101,6 +103,8 @@ pub struct ReviewSwitch {
     /// The chat model that decides stage 1 of each review.
     pub stage1_model: Stage1Model,
     pub apply: ReviewApply,
+    /// The `provider/model` of the typed classifier that decides stage 1 in the chat model's place, when the user tier names one.
+    pub classifier: Option<String>,
     pub harness: String,
     pub credential_fingerprints: BTreeMap<String, String>,
 }
@@ -115,6 +119,8 @@ pub struct SwitchedReview {
     claims: Mutex<ClaimProgress>,
     /// One pass runs at a time, whether the loop or a caller of [`Worker::drain`] started it.
     serial: tokio::sync::Mutex<()>,
+    /// Where typed-classifier requests wait for the harness; the daemon's `memory.review.classify` handlers hold the same exchange.
+    pub classifiers: Arc<ClassifierExchange>,
     /// Each review's stage-1 record until its proposal is applied, and each project's last stage-1 failure.
     stage_one: Arc<StageOneBook>,
     derived_defaults: Mutex<DerivedDefaults>,
@@ -132,14 +138,16 @@ impl SwitchedReview {
             .walk_within(walk);
     }
 
-    /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer.
+    /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer, and `classifiers` is the exchange the host's `memory.review.classify` handlers answer.
     pub fn through(
         producers: Arc<dyn HistorySummarizerProducerFactory>,
         claims_published: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        classifiers: Arc<ClassifierExchange>,
     ) -> Self {
         Self {
             producers: Some(producers),
             claims_published,
+            classifiers,
             ..Self::default()
         }
     }
@@ -264,6 +272,7 @@ pub(crate) fn module_projects(
                 model_ref: model.to_string(),
                 stage1_model,
                 apply: config.memory_reviewer.apply,
+                classifier: config.memory_reviewer_classifier().map(str::to_string),
                 harness: binding.harness.clone(),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
@@ -457,7 +466,21 @@ impl Worker {
         }
     }
 
-    /// Stage 1 of a switched project's reviews: a small chat model decides through the host's model execution. `None` when the stage-1 model reference names no host route.
+    /// The classifier route of a switched project: its configured classifier, while a harness of the project answers classifier work.
+    fn classifier_route(&self, switch: &ReviewSwitch, root: &RootScope) -> Option<ClassifierRoute> {
+        let classifier = switch.classifier.as_ref()?;
+        self.switched
+            .classifiers
+            .present(&root.project_digest, classifier)
+            .then(|| ClassifierRoute {
+                exchange: Arc::clone(&self.switched.classifiers),
+                classifier: classifier.clone(),
+                project: root.project_digest.clone(),
+                wait: CLASSIFY_WAIT,
+            })
+    }
+
+    /// Stage 1 of a switched project's reviews. The typed classifier decides while the project names one and a harness answers its work; otherwise a small chat model decides through the host's model execution. `None` when the stage-1 model reference names no host route.
     fn stage_one(
         &self,
         producers: &Arc<dyn HistorySummarizerProducerFactory>,
@@ -465,39 +488,47 @@ impl Worker {
         root: &RootScope,
         (kernel_incarnation, memstore_incarnation): (&str, &str),
     ) -> Option<StageOne> {
-        let (model, unproven_default) = {
-            let defaults = self
-                .switched
-                .derived_defaults
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                defaults.model(switch).to_string(),
-                defaults.unproven(switch),
-            )
+        let decider = match self.classifier_route(switch, root) {
+            Some(route) => StageOneDecider::Classifier(route),
+            None => {
+                let (model, unproven_default) = {
+                    let defaults = self
+                        .switched
+                        .derived_defaults
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (
+                        defaults.model(switch).to_string(),
+                        defaults.unproven(switch),
+                    )
+                };
+                let host = HostExecution::new(
+                    Arc::clone(producers),
+                    root.project_root.clone(),
+                    switch.harness.clone(),
+                    switch.credential_fingerprints.clone(),
+                    model.clone(),
+                )
+                .ok()?;
+                let sender = Arc::new(Sender::through_host(Arc::new(host)));
+                StageOneDecider::Chat {
+                    approval: DisclosureApproval {
+                        provider: sender.provider_identity(),
+                        model,
+                        credential_id: HOST_CREDENTIAL_ID.to_string(),
+                        kernel_incarnation: kernel_incarnation.to_string(),
+                        memstore_incarnation: memstore_incarnation.to_string(),
+                    },
+                    sender,
+                    unproven_default,
+                }
+            }
         };
-        let host = HostExecution::new(
-            Arc::clone(producers),
-            root.project_root.clone(),
-            switch.harness.clone(),
-            switch.credential_fingerprints.clone(),
-            model.clone(),
-        )
-        .ok()?;
-        let sender = Arc::new(Sender::through_host(Arc::new(host)));
         Some(StageOne {
-            approval: DisclosureApproval {
-                provider: sender.provider_identity(),
-                model,
-                credential_id: HOST_CREDENTIAL_ID.to_string(),
-                kernel_incarnation: kernel_incarnation.to_string(),
-                memstore_incarnation: memstore_incarnation.to_string(),
-            },
-            sender,
+            decider,
             book: Arc::clone(&self.switched.stage_one),
             project: root.project_digest.clone(),
             retry_pause: STAGE_ONE_RETRY_PAUSE,
-            unproven_default,
         })
     }
 
@@ -729,9 +760,9 @@ impl Worker {
                 }
                 // The run's stage-1 record is taken here whether or not the run published a proposal, so the book holds none of a job that ended.
                 let stage_one = self.switched.stage_one.take_record(&job.causal_identity);
-                let answered = stage_one
-                    .as_ref()
-                    .is_some_and(|record| record.model == switch.stage1_model.reference);
+                let answered = stage_one.as_ref().is_some_and(|record| {
+                    record.decider == Decider::ChatModel(switch.stage1_model.reference.clone())
+                });
                 // The run reports a default that failed before any answer; the worker then sends the project's stage 1 to the review model, for the reviews left in this pass too.
                 let failed = self
                     .switched
@@ -1233,6 +1264,7 @@ mod tests {
                 derived,
             },
             apply: ReviewApply::Contest,
+            classifier: None,
             harness: "pi".to_string(),
             credential_fingerprints: BTreeMap::new(),
         }

@@ -1,13 +1,16 @@
 //! Tests for memory review under the user's switch. A captured statement is
-//! reviewed when later evidence bears on it: a small chat model decides keep
-//! or change at stage 1, the review model writes the proposal through the
-//! host's model execution, and the proposal is treated as the apply mode and
-//! the action rule say. The producer state scripts both models' answers.
+//! reviewed when later evidence bears on it: stage 1 decides keep or change,
+//! by a small chat model or, where the project names one and its harness
+//! answers, by a typed classifier; the review model writes the proposal
+//! through the host's model execution; and the proposal is treated as the
+//! apply mode and the action rule say. The producer state scripts both chat
+//! models' answers and a harness task scripts the classifier's.
 
 use host_runtime::model_execution::supervisor::Supervisor;
 
 use super::*;
 use crate::config::{MemoryReviewerConfig, ReviewApply};
+use crate::memory_reviewer::classifier_wire::{NEXT, SUBMIT};
 use crate::memory_reviewer::coordinator::InvestigationPermits;
 use crate::memory_reviewer::host_execution::CHILD_SESSION_PREFIX;
 use crate::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
@@ -28,6 +31,7 @@ const TWO_RULES: &str =
 const TEST_SUFFIX: &str = "From now on name test files with the suffix _test.";
 const MODEL: &str = "test/reviewer";
 const SMALL: &str = "test/small";
+const CLASSIFIER: &str = "test/classifier";
 /// The model id a child that ran [`MODEL`] reports for its answer.
 const ANSWERING_MODEL: &str = "reviewer";
 /// The model id a child that ran [`SMALL`] reports for its answer.
@@ -43,6 +47,10 @@ const KEEP: &str =
 const STATED_AT_MS: u64 = 1_600_000_000_000;
 
 fn switch_config(apply: ReviewApply) -> DaemonConfig {
+    classified_config(apply, None)
+}
+
+fn classified_config(apply: ReviewApply, classifier: Option<&str>) -> DaemonConfig {
     DaemonConfig {
         memory_auto_capture: true,
         source_capture_enabled: true,
@@ -52,6 +60,7 @@ fn switch_config(apply: ReviewApply) -> DaemonConfig {
             model: Some(MODEL.to_string()),
             stage1_model: Some(SMALL.to_string()),
             apply,
+            classifier: classifier.map(str::to_string),
         },
         ..default_test_config()
     }
@@ -84,6 +93,11 @@ struct Rig {
 impl Rig {
     async fn open(apply: ReviewApply) -> Self {
         Self::open_with(switch_config(apply)).await
+    }
+
+    /// A project whose user tier names [`CLASSIFIER`] beside the switch.
+    async fn classified(apply: ReviewApply) -> Self {
+        Self::open_with(classified_config(apply, Some(CLASSIFIER))).await
     }
 
     async fn open_with(config: DaemonConfig) -> Self {
@@ -279,6 +293,58 @@ impl Rig {
         );
     }
 
+    /// One routed request of session `s1`, as a harness sends it.
+    async fn call(&self, request: Value) -> Value {
+        memory_auto_delivery_tests::body(
+            self.handler
+                .dispatch_value_for_test(test_route(FIRST), request)
+                .await,
+        )
+    }
+
+    /// Runs a drain while a harness answers each classifier request with `changes` as the probability of a change, and returns the runs settled with the requests the harness received.
+    async fn drain_classified(&self, changes: f64) -> (usize, Vec<Value>) {
+        // A harness pulls before work exists, which is what tells the worker the project has a classifier.
+        let idle = self
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await;
+        assert_eq!(idle, json!({"state": "ready"}));
+        let cancel = CancellationToken::new();
+        let drain = {
+            let worker = Arc::clone(&self.worker);
+            let cancel = cancel.clone();
+            tokio::spawn(async move { worker.drain(&cancel).await })
+        };
+        let mut requests = Vec::new();
+        while !drain.is_finished() {
+            let work = self
+                .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 50}))
+                .await;
+            if work["state"] != "work" {
+                continue;
+            }
+            assert_eq!(work["classifier"], CLASSIFIER);
+            // The request travels as JSON text so its members keep their order.
+            let request: Value = serde_json::from_str(work["request"].as_str().unwrap()).unwrap();
+            let strongest = request["state"]["later"][0]["id"].clone();
+            let submitted = self
+                .call(json!({
+                    "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+                    "lease": work["lease"],
+                    "answers": {
+                        "changes": { "type": "bool", "probability": changes },
+                        "relation": { "type": "choice", "choice": "replaces", "probabilities": {}, "confidence": 1.0 },
+                        "work_ended": { "type": "bool", "probability": 0.0 },
+                        "strongest": { "type": "choice", "choice": strongest, "probabilities": {}, "confidence": 1.0 },
+                    },
+                }))
+                .await;
+            assert_eq!(submitted, json!({"state": "processed"}));
+            requests.push(request);
+        }
+        (drain.await.unwrap(), requests)
+    }
+
     fn active_review_holds(&self) -> usize {
         self.handler
             .kernel
@@ -364,6 +430,7 @@ fn new_worker(
                 state: Arc::clone(state),
             }),
             None,
+            Arc::clone(&handler.review_classifiers),
         ),
     })
 }
@@ -682,9 +749,77 @@ async fn capture_replaces_a_memory_whose_proposal_waits_for_a_reader() {
     }
 }
 
+/// Where the project names a classifier and its harness answers classifier work, the classifier decides stage 1 in the small chat model's place. A keep settles the review with no chat request: the request the harness received holds the statement and the later message with its writer and time, the proposal is settled, and the statement stays delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_classifier_keeps_a_memory_without_a_chat_request() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    let (settled, requests) = rig.drain_classified(0.02).await;
+    assert_eq!(settled, 1);
+    assert!(rig.attempts().is_empty(), "no chat model was asked");
+    assert_eq!(requests.len(), 1);
+    let state = &requests[0]["state"];
+    assert_eq!(state["memory"]["text"], stated(THURSDAY));
+    assert_eq!(state["memory"]["said_by"], "user");
+    assert_eq!(state["memory"]["work_in_progress"], false);
+    assert_eq!(state["later"][0]["text"], TUESDAY);
+    assert_eq!(state["later"][0]["writer"], "user");
+    assert_eq!(state["later"][0]["time"], "2023-11-14T22:13:20Z");
+    assert_eq!(
+        requests[0]["questions"]["changes"]["type"], "bool",
+        "{}",
+        requests[0]["questions"]
+    );
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+    assert_eq!(outcomes.outcomes.len(), 1);
+    assert!(outcomes.outcomes[0].selected, "a host-built keep proposal");
+    assert_eq!(rig.active_review_holds(), 0);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+}
+
+/// A review the classifier flags goes to the chat model, and a `low`-uncertainty `retire` that cites the later message is applied: the statement leaves the block and search.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flagged_review_is_written_by_the_chat_model_and_applied() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.answers(&[RETIRE_CITING_LATER]);
+    let (settled, requests) = rig.drain_classified(0.93).await;
+    assert_eq!((settled, requests.len()), (1, 1));
+    assert_eq!(
+        rig.attempts().len(),
+        1,
+        "one chat request for the flagged review"
+    );
+    let block = rig.block().await;
+    assert!(!block.contains(THURSDAY), "{block}");
+    assert!(block.contains(&stated(LINTER)), "{block}");
+    assert_eq!(
+        rig.search().await,
+        [(stated(LINTER), "visible".to_string())]
+    );
+    assert_eq!(rig.active_review_holds(), 0);
+}
+
 /// A change outside the action rule is dropped in `apply` and `contest`: the memory stays as it was and the proposal's hold ends. The rule needs the review model's `low` uncertainty beside the flag of stage 1, and a contradiction that cites a later reference: a `retire` that cites only the memory's own source, or the memory itself, changes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_change_outside_the_action_rule_is_dropped() {
+    // The classifier flags and the model is unsure.
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.answers(&[RETIRE_UNSURE]);
+    assert_eq!(rig.drain_classified(0.9).await.0, 1);
+    assert_eq!(rig.attempts().len(), 1);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert_eq!(rig.active_review_holds(), 0);
+
+    // The small chat model flags and the review model is unsure.
     for mode in [ReviewApply::Apply, ReviewApply::Contest] {
         for step in [RETIRE_UNSURE, RETIRE_CITING_SOURCE, RETIRE_CITING_MEMORY] {
             let rig = Rig::open(mode).await;
@@ -887,6 +1022,7 @@ async fn a_default_stage_one_model_the_host_refuses_hands_the_review_to_the_revi
             model: Some(REVIEWER.to_string()),
             stage1_model: None,
             apply: ReviewApply::Contest,
+            classifier: None,
         },
         ..switch_config(ReviewApply::Contest)
     })
@@ -943,6 +1079,7 @@ async fn a_default_that_answered_and_then_fails_pauses_the_projects_reviews() {
             model: Some("test/claude-opus-9".to_string()),
             stage1_model: None,
             apply: ReviewApply::Contest,
+            classifier: None,
         },
         ..switch_config(ReviewApply::Contest)
     })
@@ -1085,6 +1222,22 @@ async fn a_switch_turned_off_in_the_user_tier_ends_review_at_the_next_pass() {
     assert_eq!(listed(&off), [None]);
 }
 
+/// A project that names a classifier whose harness asks for no classifier work has its stage 1 decided by the small chat model, as a project that names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_a_harness_that_answers_classifier_work_the_small_chat_model_decides() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    let attempts = rig.attempts();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].model, SMALL);
+    assert_eq!(attempts[1].model, MODEL);
+    assert!(!rig.block().await.contains(THURSDAY));
+}
+
 /// A sentence that gives two rules stays delivered when a later statement replaces one of them. The review model proposes `revise`; in `contest` and in `apply` alike the sentence keeps its place in the next session's block, its line names the later memory as contesting it, and the later statement is delivered beside it. So the rule that still stands, here the prefix of helper modules, reaches the session, and the replaced suffix reads as replaced. The marked statement is reviewed once on that evidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_statement_replaced_in_part_stays_delivered_and_is_marked_contested() {
@@ -1216,6 +1369,57 @@ async fn a_response_the_provider_stopped_settles_the_review_on_one_request() {
     assert_eq!(rig.status.activation_state(), ActivationState::Open);
 }
 
+/// A classifier that fails spends the attempts of one job. The project's other reviews stay queued for a later pass, and no chat request is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_classifier_spends_one_job_and_the_rest_wait() {
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the formatter instead of the linter before every commit.",
+    )
+    .await;
+    let idle = rig
+        .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+        .await;
+    assert_eq!(idle, json!({"state": "ready"}));
+    let drain = {
+        let worker = Arc::clone(&rig.worker);
+        tokio::spawn(async move { worker.drain(&CancellationToken::new()).await })
+    };
+    let mut failed = 0;
+    while !drain.is_finished() {
+        let work = rig
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 50}))
+            .await;
+        if work["state"] != "work" {
+            continue;
+        }
+        let submitted = rig
+            .call(json!({
+                "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+                "lease": work["lease"], "error": "model_failed",
+            }))
+            .await;
+        assert_eq!(submitted, json!({"state": "processed"}));
+        failed += 1;
+    }
+    assert_eq!(drain.await.unwrap(), 1, "one job ended");
+    assert!((1..=4).contains(&failed), "{failed} classifier requests");
+    assert!(rig.attempts().is_empty(), "no chat model was asked");
+    let ready = rig
+        .store
+        .ready_memory_reviewer_jobs(&rig.project.to_string_lossy(), 16, crate::now_ms())
+        .unwrap();
+    assert_eq!(ready.len(), 1, "the other review waits");
+    for statement in [THURSDAY, LINTER] {
+        assert!(rig.block().await.contains(&stated(statement)));
+    }
+}
+
 /// A stage-1 request of the small chat model that ends without an answer spends one attempt of its job. The project's other reviews stay queued for a later pass, the review model is asked nothing, and both statements stay delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failing_small_chat_model_spends_one_job_and_the_rest_wait() {
@@ -1254,6 +1458,54 @@ async fn a_failing_small_chat_model_spends_one_job_and_the_rest_wait() {
     assert_eq!(ready.len(), 1, "the other review waits");
     for statement in [THURSDAY, LINTER] {
         assert!(rig.block().await.contains(&stated(statement)));
+    }
+}
+
+/// The classifier methods answer only a project whose user tier names the classifier the harness asks for, and refuse a body outside their fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn classifier_work_is_offered_only_for_the_configured_classifier() {
+    let unclassified = Rig::open(ReviewApply::Apply).await;
+    assert_eq!(
+        unclassified
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await,
+        json!({"state": "disabled"})
+    );
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    assert_eq!(
+        rig.call(json!({"method": NEXT, "session_id": "s1", "classifier": "other/classifier"}))
+            .await,
+        json!({"state": "disabled"})
+    );
+    assert_eq!(
+        rig.call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await,
+        json!({"state": "ready"})
+    );
+    assert_eq!(
+        rig.call(json!({
+            "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+            "lease": "00000000000000000000000000000000", "error": "provider_unavailable",
+        }))
+        .await,
+        json!({"state": "stale"})
+    );
+    for refused in [
+        json!({"method": NEXT, "session_id": "s1"}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 60_000}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "extra": 1}),
+        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0"}),
+        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0", "error": "boom"}),
+        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0", "answers": {}, "error": "cancelled"}),
+    ] {
+        let outcome = rig
+            .handler
+            .dispatch_value_for_test(test_route(FIRST), refused.clone())
+            .await;
+        assert!(
+            matches!(outcome, PreparedOutcome::Error { .. }),
+            "{refused} must be refused"
+        );
     }
 }
 

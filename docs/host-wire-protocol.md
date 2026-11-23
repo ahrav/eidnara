@@ -1827,6 +1827,91 @@ The `timings` diagnostics of the `ok` response of a pass the daemon transformed 
 
 The recipe is an ordered array of operations whose results, concatenated, are the output array: `{"op": "keep", "source": "input" | "previous", "start": integer, "count": integer}` copies `count` whole values starting at `start`, and `{"op": "insert", "values": [value, ...]}` inserts complete values. Omission deletes. For `pi`, every output value is an `{id, message}` row; a kept input row is the row as submitted, and a row the daemon inserts carries no `type` or `parentId`; a row the daemon builds or re-renders may carry an `eidnara:` id on any role, so a consumer submits only rows it built from its host as `native_messages`. The `input` source is the request's `native_messages` for `pi` and `opencode-aisdk`, otherwise the CK values of `messages` (the daemon keeps only from `previous` for CK); the `previous` source is the output the consumer applied under `previous_output_revision`. Every `keep(source: input)` is in the coordinates of the submitted window: position `i` is the `i`-th submitted message, whatever the daemon sliced before processing. A consumer applies the recipe to its captured window, the host index of window position `i` being the window's start plus `i`, validates it whole against both sources and the reconstructed-size cap before building anything, and publishes the result as the whole new array.
 
+### 7.11 Memory review classifier work
+
+`memory.review.classify.next` and `memory.review.classify.submit` use the Context
+route. These are harness lifecycle calls, not model tools. The route supplies
+project, harness, and session identity. Unknown fields, including a field named
+`v`, are refused with `invalid_params`, as is a `project_root` the route does
+not accept.
+
+A project whose user tier sets `memory_reviewer.enabled` and names a classifier
+in `memory_reviewer.classifier` (a `provider/model` reference of at most 256
+bytes) has stage 1 of each memory review, the decision whether later messages
+may have changed the memory, made by that classifier in place of the small chat
+model the daemon reaches through the host's model execution. The classifier is
+a typed model behind the harness's own model registry and credential, so the
+daemon asks the harness: it parks one request per review, and a harness that can
+call the classifier pulls the request, calls the classifier, and returns the
+answers. Neither the classifier's credential nor its provider text is a field of
+either method.
+
+A connected harness asks for work with the common envelope,
+`method: "memory.review.classify.next"`, and `classifier`, the reference it can
+call. Optional `wait_ms`, an unsigned integer of at most 20000, holds the
+request open until work arrives or the wait ends; absent, the answer is
+immediate.
+
+```json
+{"method":"memory.review.classify.next","session_id":"session-1","project_root":"/workspace/project","classifier":"typesafe/jev-latest","wait_ms":20000}
+```
+
+The response `state` is one of:
+
+- `work`: `lease` (32 lowercase hexadecimal characters), `classifier` (the
+  configured reference), `request` (a string of at most 128 KiB holding one
+  JSON object with the members `state` and `questions`), and
+  `max_duration_ms: 10000`.
+- `ready`: no request of this project waits.
+- `disabled`: the project's user tier leaves the review switch off, names no
+  classifier, or names another one than `classifier`.
+
+`request` is JSON text, and the order of the members in that text is part of
+the request: a classifier's answers depend on the order it reads them in. The
+harness parses the text with a parser that keeps member order and passes
+`state` and `questions` to the classifier in that order. `state` holds, in
+order, `memory` (`text`, `said_by`, `category`, `work_in_progress`), `source`
+(the references the memory cites), and `later` (the references written after
+them); each reference has `id`, `writer`, `time` (RFC 3339 or `null`), and
+`text`. `questions` holds, in order, `changes` (type `bool`), `relation` (type
+`choice` over `replaces`, `adds`, `restates`, `unrelated`), `work_ended` (type
+`bool`), and `strongest` (type `choice` over the `id` of each `later` reference
+and then `none`); each question carries `type`, `instructions`, and `criteria`. Every text in the state is redacted source or memory text the
+configured model destination admits, and the daemon runs its render check over
+the assembled request before it parks it.
+
+The lease lasts 30 seconds from the `work` response and belongs to the project.
+A request whose lease lapsed is offered to the next `next` call while its review
+still waits; the review waits at most 20 seconds for its answers. Requests and
+leases are process-local.
+
+The harness submits the classifier's answers, or one content-free `error`
+(`cancelled`, `provider_unavailable`, or `model_failed`), with `lease` and the
+same `classifier`:
+
+```json
+{"method":"memory.review.classify.submit","session_id":"session-1","classifier":"typesafe/jev-latest","lease":"0123456789abcdef0123456789abcdef","answers":{"changes":{"type":"bool","probability":0.04},"relation":{"type":"choice","choice":"restates","probabilities":{"replaces":0.01,"adds":0.02,"restates":0.95,"unrelated":0.02},"confidence":0.95},"work_ended":{"type":"bool","probability":0.01},"strongest":{"type":"choice","choice":"ref-3","probabilities":{"ref-3":0.98,"none":0.02},"confidence":0.98}}}
+```
+
+`answers` is an object of at most 16 KiB by question id: a `bool` answer carries
+`type` and `probability` in 0 to 1, and a `choice` answer carries `type` and
+`choice`; other members are ignored. The response `state` is `processed` when
+the waiting review took the submission, `stale` when the lease had lapsed, was
+replaced, or its review had ended, and `disabled` as for `next`. A body that
+carries both `answers` and `error`, neither, an `error` outside the three codes,
+or an empty `lease` is `invalid_params`. Answers the daemon cannot read as the
+four typed answers end that review attempt as failed.
+
+Each `next` call marks the project as having a classifier for 120 seconds. A
+review of a project with no such mark has its stage 1 decided by the small chat
+model, as it is for a project that names no classifier, so a harness that
+cannot call a classifier makes no `next` call. A harness that answers these
+methods sends the memory and the messages under review to the classifier's
+provider; the `request` text holds no `Secret`-class content. The Pi harness answers these methods when its model
+registry can call the named classifier (Pi 0.99.0 or later) and keeps one
+long-polling `next` call open per project while a session is open; an earlier Pi
+and the OpenCode harness make no call.
+
 ## 8. Host and handler lifecycle
 
 ### 8.1 Startup and readiness

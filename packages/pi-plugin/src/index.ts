@@ -43,6 +43,10 @@ import {
     piCaptureMessages,
 } from "@eidnara/opencode/shared/memory-capture";
 import {
+    createReviewClassifierPump,
+    type ReviewClassifierPump,
+} from "@eidnara/opencode/shared/memory-review-classifier";
+import {
     createPromptSurfaceGuidanceEpochCache,
     createPromptSurfaceRuntime,
 } from "@eidnara/opencode/shared/prompt-surface-runtime";
@@ -60,6 +64,7 @@ import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
 import { piMemoryCaptureExecutor } from "./memory-capture-native";
+import { piHasReviewClassifier, piReviewClassifierExecutor } from "./memory-review-classifier";
 import { resolvePiWindowGeometry } from "./pi-context-limit";
 import { createPiRustToolBackends } from "./rust-tool-backends";
 import { registerStatusLine } from "./status-line";
@@ -715,6 +720,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // leaf: entries its last checkpoint could not store must stay available for retry, and
     // the daemon replays the rest as no-ops.
     pi.on("session_start", async (event, ctx) => {
+        // A session that is open answers classifier work from its start, before its first prompt.
+        answerReviewClassifierFor(ctx);
         if (event.reason !== "fork") return;
         const sessionId = ctx.sessionManager.getSessionId();
         const leaf = ctx.sessionManager.getLeafId();
@@ -796,6 +803,29 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             if (scope) scheduleMemoryDrain(ctx, scope);
         } catch (error) {
             warn("memory capture drain not scheduled:", error);
+        }
+        answerReviewClassifierFor(ctx);
+    }
+    // The daemon's memory review asks a typed classifier first when the user tier names one.
+    // The classifier lives behind this harness's registry and credential, so the plugin answers
+    // the daemon's classifier work while a session is open. A Pi without the classifier surface
+    // starts no loop, and the daemon's chat model decides.
+    const reviewClassifier: { latest?: ExtensionContext; pump?: ReviewClassifierPump } = {};
+    function answerReviewClassifierFor(ctx: ExtensionContext): void {
+        try {
+            const sessionId = ctx.sessionManager.getSessionId();
+            const deps = resolveCurrentProjectDeps(ctx);
+            const reviewer = deps.config.memory_reviewer;
+            const classifier = reviewer?.enabled ? reviewer.classifier?.trim() : undefined;
+            if (!sessionId || !deps.projectIdentity || !classifier) return;
+            if (!piHasReviewClassifier(ctx, classifier)) return;
+            reviewClassifier.latest = ctx;
+            reviewClassifier.pump ??= createReviewClassifierPump(moduleClient, (work, signal) =>
+                piReviewClassifierExecutor(reviewClassifier.latest ?? ctx)(work, signal),
+            );
+            reviewClassifier.pump.start({ sessionId, projectRoot: deps.projectDir, classifier });
+        } catch (error) {
+            warn("memory review classifier not started:", error);
         }
     }
     /** Resolves after bounded daemon calls. Returns the scope whenever capture applies, even when
@@ -1069,6 +1099,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         // Closing cancels the batch in flight and releases its lease on the still-connected
         // transport; the disconnect below waits for that, so nothing redials afterwards.
         await Promise.all([...captureByProject.values()].map((capture) => capture.drain.close()));
+        await reviewClassifier.pump?.close();
         // Long-lived Pi processes can reinitialize the extension after `session_shutdown`, so the handler clears per-session state.
         try {
             const sessionId = sessionIdFromContext(ctx);
