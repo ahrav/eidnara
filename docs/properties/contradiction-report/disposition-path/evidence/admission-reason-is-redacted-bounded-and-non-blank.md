@@ -99,10 +99,10 @@ question below records the read at the PR A tip and its conclusion.
 - Sources examined: `crates/kernel/src/redaction.rs:41-42`
   (`redact_lossy` calls `context_core::redaction::redact_durable_text`);
   `crates/context-core/src/redaction.rs:462-464`;
-  `crates/daemon/src/kernel_routes/dispute.rs:373-380`, `:362-375`;
+  `crates/daemon/src/kernel_routes/dispute.rs:373-380`, `:385-398`;
   `crates/secret-scanner/conservative_overlay.yaml:5-7`;
   `crates/secret-scanner/default_rules.yaml:410-411`;
-  `crates/secret-scanner/src/rules.rs:31`, `:299-306`.
+  `crates/secret-scanner/src/rules.rs:31`, `:321-328`.
 - Findings: `a_path_the_secret_scanner_detects_is_invalid_input` asserts
   that `redact_durable_text` detects
   `sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678`.
@@ -112,7 +112,7 @@ question below records the read at the PR A tip and its conclusion.
   regexes, the token matches the conservative overlay rule
   `magic-anthropic-api-key` and not the default `anthropic-api-key` rule,
   which requires 93 characters and a trailing `AA`; the overlay is
-  embedded with the default rules (`rules.rs:31`, `:299-306`).
+  embedded with the default rules (`rules.rs:31`, `:321-328`).
 - Missing evidence: the detector id reported for the token was not
   observed; the rule attribution is inferred.
 - Conclusion: resolved with answer for detection (the token) and for
