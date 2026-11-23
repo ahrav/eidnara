@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "973181a0af049fb4c0ae06160cd022b1beae3660b87ac9fa4d498864912b3487";
+    "7e62965771b8bb8fe3e5d38e567ec40a98e3d39b6bf2bb5a6550345699be3503";
 
 const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -112,6 +112,14 @@ pub(crate) struct RuleDeclaration {
     pub value_group: Option<String>,
     #[serde(default)]
     pub reject_scalars: bool,
+    /// Rejects a value that reads as a stand-in for a credential: a plain word, a `$`
+    /// reference, or a bracketed template.
+    ///
+    /// The forms that separate a name from its value with whitespace or `:` also occur in
+    /// help text (`--password PASSWORD`), prose (`the --token option`), and scripts
+    /// (`--password "$DB_PASSWORD"`), where the value position holds one of these shapes.
+    #[serde(default)]
+    pub reject_placeholder_shapes: bool,
     /// Runs the engine's context and value safelists for overlay rules that mirror corpus rules, producing one verdict when both match a credential.
     #[serde(default)]
     pub upstream_parity: bool,
@@ -189,6 +197,7 @@ pub(crate) enum OfflineValidationKind {
     SentryOrgToken,
     PypiToken,
     SlackToken,
+    BasicCredentials,
 }
 
 /// Compiled declaration and its prepared candidate filters.
@@ -208,6 +217,19 @@ pub(crate) struct Rule {
     pub confidence_bonus: i8,
     /// Which source-code value shapes the evaluator rejects for this rule.
     pub code_reference_gate: Option<CodeReferenceGate>,
+    /// The reported span of an unquoted value runs through each `;` that joins further
+    /// value text, so the tail of a credential holding `;` is replaced with its head.
+    pub continues_past_semicolons: bool,
+    /// The rule's value is a password by the program's own definition, so a PIN is a finding.
+    pub password_valued: bool,
+    /// An option whose name begins with `no` is a switch, and the next word is another argument.
+    pub negated_switch_gate: bool,
+    /// A detached value that is a line of structure (`}`, `[section]`, `# comment`) is left alone.
+    pub structural_value_gate: bool,
+    /// `-p` followed by a port mapping belongs to another program on the line.
+    pub port_mapping_gate: bool,
+    /// A bare field value that spells a built-in non-null type is a schema declaration.
+    pub type_annotation_gate: bool,
     pub encoded_declaration: Vec<u8>,
 }
 
@@ -639,10 +661,22 @@ pub(crate) fn compile_rule(
         0
     };
     let code_reference_gate = match declaration.name.as_str() {
-        "magic-keyed-assignment" => Some(CodeReferenceGate::Assignment),
+        "magic-keyed-assignment"
+        | "magic-detached-assignment"
+        | "magic-option-value"
+        | "magic-field-value" => Some(CodeReferenceGate::Assignment),
         "generic-api-key" => Some(CodeReferenceGate::GenericApiKey),
         _ => None,
     };
+    let continues_past_semicolons = declaration.name == "magic-keyed-assignment";
+    let password_valued = matches!(
+        declaration.name.as_str(),
+        "magic-client-password-attached" | "magic-client-password-option"
+    );
+    let negated_switch_gate = declaration.name == "magic-option-value";
+    let structural_value_gate = declaration.name == "magic-detached-assignment";
+    let port_mapping_gate = password_valued;
+    let type_annotation_gate = declaration.name == "magic-field-value";
     let encoded_declaration =
         serde_json::to_vec(&declaration).map_err(|_| ConstructionError::InvalidRulePolicy)?;
     Ok(Rule {
@@ -656,6 +690,12 @@ pub(crate) fn compile_rule(
         quoted_capture,
         confidence_bonus,
         code_reference_gate,
+        continues_past_semicolons,
+        password_valued,
+        negated_switch_gate,
+        structural_value_gate,
+        port_mapping_gate,
+        type_annotation_gate,
         encoded_declaration,
     })
 }
@@ -816,6 +856,60 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Each credential-form rule of the overlay is preselected on an input it matches, in
+    /// either case of its anchor.
+    #[test]
+    fn preselection_selects_each_credential_form_rule_on_its_form() {
+        let rules = RuleSet::from_embedded().unwrap();
+        // Joined at compile time, so each line of this file stays clear of the credential shapes the repository's secret scanners reject.
+        for (input, name) in [
+            (
+                concat!("deploy --password ", "hunter2"),
+                "magic-option-value",
+            ),
+            (concat!("password: ", "hunter2"), "magic-field-value"),
+            (
+                concat!("Authorization: Basic ", "YWxpY2U6", "aHVudGVyMg=="),
+                "magic-basic-authorization",
+            ),
+            (
+                concat!("x://alice", ":hunter2", "@example.org/"),
+                "magic-url-userinfo",
+            ),
+            (
+                concat!("mysql -uroot -p", "hunter2", " app"),
+                "magic-client-password-attached",
+            ),
+            (
+                concat!("sshpass -p ", "hunter2", " ssh host"),
+                "magic-client-password-option",
+            ),
+            (
+                concat!("docker login -u bob -p ", "hunter2", " registry"),
+                "magic-client-password-option",
+            ),
+            (
+                concat!(
+                    "-----begin private key-----\n",
+                    "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo\n"
+                ),
+                "magic-private-key-body",
+            ),
+        ] {
+            let rule = rules
+                .active(ScanProfile::Conservative)
+                .find(|rule| rule.declaration.name == name)
+                .unwrap_or_else(|| panic!("no overlay rule named {name}"));
+            assert!(rule.regex.is_match(input.as_bytes()), "{name} on {input:?}");
+            assert!(
+                rules
+                    .preselect(ScanProfile::Conservative, input.as_bytes())
+                    .any(|selected| selected.declaration.name == name),
+                "{name} matches {input:?} but was not preselected"
+            );
         }
     }
 
@@ -1036,11 +1130,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "69235bd55d45ad0e6e80caf378cce8a3ee27087a13190c26776864264503bf22",
+                "01ba785aa4277f83bd722ae99d05965633000bd7ce0159a291c5b4efcc06136f",
             ),
             (
                 ScanProfile::Comprehensive,
-                "c19adcf9d5dc7aa972f008fdb12a0cf8ceeb520b1ed4a73b5211d0c0a629dadb",
+                "9e51af4c98ba3b71da46cc0aa5ccb9bb20f325c600b3d1ab3756654e1139cca1",
             ),
         ] {
             let digest = rules
@@ -1176,9 +1270,16 @@ mod tests {
             }
             let named = rule.regex.capture_names().flatten().count();
             let unnamed = rule.regex.captures_len() - 1 - named;
+            // A declared key group names the key; the reported span comes from the other groups.
+            let undeclared = rule
+                .regex
+                .capture_names()
+                .flatten()
+                .filter(|name| rule.declaration.key_group.as_deref() != Some(*name))
+                .count();
             assert!(
-                named == 0 || unnamed == 0,
-                "{} declares {named} named and {unnamed} unnamed groups without a secret_group",
+                undeclared == 0 || unnamed == 0,
+                "{} declares {undeclared} undeclared named and {unnamed} unnamed groups without a secret_group",
                 rule.declaration.name
             );
         }

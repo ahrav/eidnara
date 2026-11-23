@@ -90,6 +90,14 @@ fn empty_keyed_values_and_secret_substrings_are_not_findings() {
         "'api_token': ''",
         "'api_token': '  '",
         "password=",
+        // An empty assignment above another assignment or before several words.
+        "api_token= hunter-two now",
+        "api_token=\nhunter-two now",
+        "API_TOKEN=\r\nDATABASE_URL=",
+        "API_TOKEN=        # hunter-two",
+        // `==` compares.
+        "token == hunter-two",
+        "e.key === hunter-two",
         "author=hunter-two",
         "keywords=hunter-two",
         "tokenizer=hunter-two",
@@ -126,6 +134,17 @@ fn empty_keyed_values_and_secret_substrings_are_not_findings() {
     }
     for input in [
         "auth_token=hunter-two",
+        "auth_token = hunter-two",
+        "auth_token\t=\thunter-two",
+        "auth_token =hunter-two",
+        "auth_token= \"hunter-two\"",
+        "auth_token=\n\"hunter-two\"",
+        "auth_token\n=hunter-two now",
+        // A value detached from its `=` is the last word of its line.
+        "auth_token= hunter-two",
+        "auth_token=\nhunter-two\nnext line",
+        "auth_token\n=\r\nhunter-two\r\n",
+        "PGPASSWORD=hunter-two",
         "api-key=hunter-two",
         "private_key=hunter-two",
         "republic_key=hunter-two",
@@ -427,13 +446,17 @@ fn non_ascii_neighbours_do_not_change_findings() {
     for ascii in cases {
         let baseline = scanner.scan(ascii).unwrap().findings;
         assert!(!baseline.is_empty(), "{ascii} produced no baseline finding");
-        let expected = rule_ids_and_values(ascii, &baseline);
-        for (prefix, suffix) in [
-            ("é\n", ""),
-            ("😀\n", ""),
-            ("", " é"),
-            ("日本語\n", "\n日本語"),
+        // Each non-ASCII neighbour is compared with an ASCII neighbour in the same place,
+        // because a rule that reads a value to the end of its line sees trailing text of either kind.
+        for ((prefix, suffix), (ascii_prefix, ascii_suffix)) in [
+            (("é\n", ""), ("e\n", "")),
+            (("😀\n", ""), ("x\n", "")),
+            (("", " é"), ("", " e")),
+            (("日本語\n", "\n日本語"), ("abc\n", "\nabc")),
         ] {
+            let twin = format!("{ascii_prefix}{ascii}{ascii_suffix}");
+            let expected = rule_ids_and_values(&twin, &scanner.scan(&twin).unwrap().findings);
+            assert!(!expected.is_empty(), "{twin:?} produced no finding");
             let decorated = format!("{prefix}{ascii}{suffix}");
             let findings = scanner.scan(&decorated).unwrap().findings;
             assert_eq!(
@@ -1155,4 +1178,167 @@ fn secret_literals_resembling_code_references_are_findings() {
         "{github}: {:?}",
         rules(&github)
     );
+}
+
+fn overlay_rule_ids_and_values(input: &str) -> Vec<(String, String)> {
+    let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
+    let report = scanner.scan(input).unwrap();
+    assert!(report.is_complete(), "{input:?}");
+    rule_ids_and_values(input, &report.findings)
+}
+
+/// Values are joined at run time, so each line of this file stays clear of the credential
+/// shapes the repository's secret scanners reject.
+fn url_with_userinfo(password: &str) -> String {
+    format!(
+        "{}://{}:{password}@{}",
+        "https", "alice", "example.org/r.git"
+    )
+}
+
+#[test]
+fn each_credential_form_reports_its_rule_and_value_span() {
+    let password = ["hunter", "2"].concat();
+    let header = format!("-----BEGIN {} KEY-----", ["RSA ", "PRIVATE"].concat());
+    let body = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo";
+    // The Base64 of `alice:` and that password.
+    let basic = ["YWxpY2U6", "aHVudGVyMg=="].concat();
+    for (input, rule_id, value) in [
+        (
+            format!("DB_PASSWORD=\n{password}\nnext line"),
+            "magic-detached-assignment",
+            password.clone(),
+        ),
+        (
+            format!("DB_PASSWORD= {password}\r\n"),
+            "magic-detached-assignment",
+            password.clone(),
+        ),
+        (
+            format!("deploy --password {password} --verbose"),
+            "magic-option-value",
+            password.clone(),
+        ),
+        (
+            format!("deploy -token \"{password} two\""),
+            "magic-option-value",
+            format!("{password} two"),
+        ),
+        (
+            format!("  password: {password}  # note"),
+            "magic-field-value",
+            password.clone(),
+        ),
+        (
+            format!("{{ apiKey: '{password}' }}"),
+            "magic-field-value",
+            password.clone(),
+        ),
+        (
+            format!("-H \"X-Api-Key: {password}\""),
+            "magic-field-value",
+            password.clone(),
+        ),
+        (
+            format!("Authorization: Basic {basic}"),
+            "magic-basic-authorization",
+            basic.clone(),
+        ),
+        (
+            url_with_userinfo(&password),
+            "magic-url-userinfo",
+            password.clone(),
+        ),
+        (
+            format!("mysql -uroot -p{password} app"),
+            "magic-client-password-attached",
+            password.clone(),
+        ),
+        (
+            format!("mariadb-dump -p'{password}' app"),
+            "magic-client-password-attached",
+            password.clone(),
+        ),
+        (
+            format!("sshpass -p {password} ssh host"),
+            "magic-client-password-option",
+            password.clone(),
+        ),
+        (
+            format!("podman login -u bob -p \"{password}\" registry"),
+            "magic-client-password-option",
+            password.clone(),
+        ),
+        (
+            format!("{header}\n{body}\n{body}\ntail"),
+            "magic-private-key-body",
+            format!("{body}\n{body}"),
+        ),
+    ] {
+        assert_eq!(
+            overlay_rule_ids_and_values(&input),
+            [(rule_id.to_owned(), value)],
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn stand_ins_and_other_programs_options_are_not_findings() {
+    for input in [
+        "usage: tool [--password PASSWORD] [--token TOKEN]",
+        "  -p, --password string   Password for the registry",
+        "tool --password <password> --token \"$TOKEN\"",
+        "tool --max-tokens 4096 --key ./server7.key --token-file ./t7.txt",
+        "tool --secret id=npm7,src=.npmrc",
+        "interface A { password: string; token: string }",
+        "  token: u64,\n  secret: Optional[str]",
+        "  api_key: os.environ/OPENAI_API_KEY",
+        "  Token: gho_************************************",
+        "Authorization: Basic authentication",
+        "ssh -p 2222 host; mkdir -p a1/b2; cargo test -p crate-9",
+        "docker run -u 1000:1000 -p 8080:80 image",
+        "pytest tests/login -p no:cacheprovider",
+        "mysql -u root -p",
+        "mysql app | patch -p1x",
+        "ssh://git@host:22/repo7.git",
+        "http://localhost:8080/x?mail=a@b7.example",
+        "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----",
+    ] {
+        assert_eq!(overlay_rule_ids_and_values(input), [], "{input:?}");
+    }
+    assert_eq!(
+        overlay_rule_ids_and_values(&url_with_userinfo("password")),
+        []
+    );
+    assert_eq!(overlay_rule_ids_and_values(&url_with_userinfo("$PASS")), []);
+}
+
+#[test]
+fn digits_are_a_finding_only_under_a_key_that_ends_in_password_or_secret() {
+    let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
+    for input in [
+        "password=12345678",
+        r#"{"password":"1234"}"#,
+        "db_password = 123456",
+        "client_secret=000000",
+        "PGPASSWORD=1234",
+    ] {
+        assert_eq!(scanner.scan(input).unwrap().findings.len(), 1, "{input}");
+    }
+    for input in [
+        "password=123",
+        "token=123456",
+        "api_key=12345678",
+        "max_tokens=4096",
+        "password_length=1234",
+        "secret_version=2024",
+        "passwords=1234",
+        "password=1234.5",
+    ] {
+        assert!(scanner.scan(input).unwrap().findings.is_empty(), "{input}");
+    }
+    // A grouped number, joined at run time as the other shapes in this file are.
+    let grouped = format!("password={}", ["1_", "234"].concat());
+    assert!(scanner.scan(&grouped).unwrap().findings.is_empty());
 }

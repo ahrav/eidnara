@@ -65,12 +65,28 @@ function isLabelWord(segment: string): boolean {
     return SECRET_SEGMENT_PATTERN.test(segment);
 }
 
+/** A whole segment that ends in `password` names one whatever precedes it (`pgpassword`), as the Rust key gate reads it. */
+function endsWithPassword(segment: string): boolean {
+    return segment.endsWith("password");
+}
+
+function namesASecretSegment(segment: string): boolean {
+    return isLabelWord(segment) || endsWithPassword(segment);
+}
+
 function isLabelSegment(segment: string): boolean {
     return isLabelWord(segment) || SECRET_QUALIFIERS.has(segment);
 }
 
+/** A label holds vocabulary words only: a segment that is a password by its ending alone contributes the word `password`, so text of the key stays out of the marker. */
 function redactionTypeForKey(key: string): string {
-    return keySegments(key).filter(isLabelSegment).join("_") || "secret";
+    return (
+        keySegments(key)
+            .flatMap((segment) =>
+                isLabelSegment(segment) ? [segment] : endsWithPassword(segment) ? ["password"] : [],
+            )
+            .join("_") || "secret"
+    );
 }
 
 // Do not redact numeric, boolean, null, or undefined values solely because their key contains a secret word.
@@ -89,7 +105,9 @@ export function keepsScalarValue(key: string, value: string): boolean {
     if (!isNonSecretScalarValue(value)) return false;
     const v = value.trim();
     if (v === "true" || v === "false" || v === "null" || v === "undefined") return true;
-    return !keySegments(key).some((segment) => PIN_BEARING_SEGMENT_PATTERN.test(segment));
+    return !keySegments(key).some(
+        (segment) => PIN_BEARING_SEGMENT_PATTERN.test(segment) || endsWithPassword(segment),
+    );
 }
 
 export const SECRET_QUALIFIERS = new Set([
@@ -221,7 +239,7 @@ export function isSecretKey(key: string): boolean {
     const segments = keySegments(key);
     if (segments.length === 0) return false;
     if (segments.some((segment) => NON_SECRET_KEY_MARKERS.has(segment))) return false;
-    if (segments.some(isLabelWord)) {
+    if (segments.some(namesASecretSegment)) {
         return !isBareKeyLabel(redactionTypeForKey(key));
     }
     return undelimitedNamesACredential(segments.join(""));
@@ -231,7 +249,7 @@ export function isSecretKey(key: string): boolean {
 function textKeyNamesASecret(key: string): boolean {
     const segments = keySegments(key);
     if (segments.some((segment) => NON_SECRET_KEY_MARKERS.has(segment))) return false;
-    return segments.some(isLabelWord) || undelimitedNamesACredential(segments.join(""));
+    return segments.some(namesASecretSegment) || undelimitedNamesACredential(segments.join(""));
 }
 
 /**

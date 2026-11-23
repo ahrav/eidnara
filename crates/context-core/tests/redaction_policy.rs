@@ -178,11 +178,14 @@ fn a_structural_delimiter_ends_an_unquoted_value_and_quoting_covers_the_rest() {
     // that trailing text discards the whole finding, leaving the credential in place.
     // A credential holding a delimiter has to be quoted, and the quoted rules take it
     // whole, so this is where the two shapes divide rather than a gap in coverage.
+    // `;` is the one delimiter an environment file writes inside a bare value, so the
+    // replaced span runs through it to the end of the line while the gates still read `alpha`.
     for delimiter in ['$', ';', '&', '|', '<', '>', '(', ')'] {
         let bare = format!("password=alpha{delimiter}bravo");
         let redaction = redact_durable_text(&bare);
         assert!(!redaction.detections.is_empty(), "{bare}");
         assert!(!redaction.text.contains("alpha"), "{bare}");
+        assert_eq!(redaction.text.contains("bravo"), delimiter != ';', "{bare}");
 
         let quoted = format!("password=\"alpha{delimiter}bravo\"");
         let redaction = redact_durable_text(&quoted);
@@ -643,15 +646,47 @@ fn a_match_past_the_scanner_bound_that_straddles_a_window_edge_is_still_refused(
 
 #[test]
 fn a_match_longer_than_the_overlap_that_straddles_a_window_edge_is_not_seen() {
-    // No window contains the full match: the header and footer fall in different windows.
+    // The opening and closing quotes of a quoted value that spans many lines fall in
+    // different windows, so each window holds only a part of the match.
+    let mut quoted = String::from("token=\"\n");
+    while quoted.len() < WINDOW_OVERLAP_BYTES + 4 * 1024 {
+        quoted.push_str("plain filler line without any credential words 0123\n");
+    }
+    quoted.push('"');
+    // Scanned whole, the value is one match past the match bound.
+    assert_eq!(
+        redactor().redact(&quoted).unwrap_err().kind(),
+        RedactionErrorKind::MatchLimit
+    );
+    let window = secret_scanner::MAX_INPUT_BYTES;
+    let second_window_start = window - WINDOW_OVERLAP_BYTES;
+    let (text, offset) = text_with_line_at(second_window_start - 2 * 1024, &quoted, 3 * window);
+    assert!(offset + 64 < second_window_start && offset + quoted.len() > window);
+    let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+    assert!(windowed.detections.is_empty());
+    assert_eq!(windowed.text, text);
+}
+
+#[test]
+fn a_private_key_longer_than_the_overlap_that_straddles_a_window_edge_is_refused() {
+    // The header and footer fall in different windows, so the whole-block rule reads each
+    // window's part as an open block. The body lines under the header are a match of their own,
+    // longer than the match bound in the window that holds the header, and the scan fails closed.
     let pem = pem_private_key(WINDOW_OVERLAP_BYTES + 4 * 1024);
     let window = secret_scanner::MAX_INPUT_BYTES;
     let second_window_start = window - WINDOW_OVERLAP_BYTES;
     let (text, offset) = text_with_line_at(second_window_start - 2 * 1024, &pem, 3 * window);
     assert!(offset + 64 < second_window_start && offset + pem.len() > window);
-    let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
-    assert!(windowed.detections.is_empty());
-    assert_eq!(windowed.text, text);
+    assert_eq!(
+        redact_windowed_durable_text(&text, usize::MAX)
+            .unwrap_err()
+            .kind(),
+        RedactionErrorKind::MatchLimit
+    );
+    assert_eq!(
+        detect_windowed_durable_text(&text).unwrap_err().kind(),
+        RedactionErrorKind::MatchLimit
+    );
 }
 
 #[test]

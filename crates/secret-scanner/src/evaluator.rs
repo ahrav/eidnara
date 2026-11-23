@@ -9,8 +9,8 @@ use crate::rules::{
     Rule, RuleSet,
 };
 use crate::{
-    Finding, LimitExhausted, MAX_MATCH_BYTES, RuleSource, ScanError, ScanLimits, ScanProfile,
-    ScanReport, TextSpan,
+    Finding, LimitExhausted, MAX_LOCAL_CONTEXT_BYTES, MAX_MATCH_BYTES, RuleSource, ScanError,
+    ScanLimits, ScanProfile, ScanReport, TextSpan,
 };
 
 #[derive(Debug)]
@@ -256,11 +256,43 @@ fn evaluate_candidate_spans(
     work: &mut usize,
     limits: ScanLimits,
 ) -> Result<Option<Finding>, Abort> {
+    if spans.full.len() > MAX_MATCH_BYTES {
+        return Err(Abort::Match);
+    }
+    let mut key_span = spans.key;
+    let mut key_names_a_memorized_secret = rule.password_valued;
+    if let Some(key) = spans.key {
+        let key_bytes = input
+            .as_bytes()
+            .get(key.start()..key.end())
+            .ok_or(ScanError::InvalidSpan)?;
+        // `has_secret_key_token` reads every key byte, so charge its cost before rejecting the key.
+        add_work(work, key_bytes.len(), limits.max_work_bytes)?;
+        // Serialized text writes a line break as `\n`, whose letter the key pattern reads as the key's first character.
+        let key = match key_after_escape(input, key)? {
+            EscapedKey::Secret(after_escape) => after_escape,
+            EscapedKey::Public => return Ok(None),
+            EscapedKey::Absent if has_secret_key_token(key_bytes) => key,
+            EscapedKey::Absent => return Ok(None),
+        };
+        let key_bytes = &input.as_bytes()[key.start()..key.end()];
+        if rule.negated_switch_gate && is_negated_switch(key_bytes) {
+            return Ok(None);
+        }
+        key_names_a_memorized_secret = ends_in_memorized_secret_word(key_bytes);
+        key_span = Some(key);
+    }
+    // The continuation follows the key gate, so text after a key of another kind is left unread.
+    let spans = if rule.continues_past_semicolons {
+        continued_past_semicolons(input, spans, work, limits)?
+    } else {
+        spans
+    };
     let CandidateSpans {
         full: full_span,
         value: value_span,
         reported,
-        key: key_span,
+        key: _,
     } = spans;
     if full_span.len() > MAX_MATCH_BYTES {
         return Err(Abort::Match);
@@ -269,24 +301,35 @@ fn evaluate_candidate_spans(
         .as_bytes()
         .get(value_span.start()..value_span.end())
         .ok_or(ScanError::InvalidSpan)?;
-    if let Some(key) = key_span {
-        let key = input
-            .as_bytes()
-            .get(key.start()..key.end())
-            .ok_or(ScanError::InvalidSpan)?;
-        // `has_secret_key_token` reads every key byte, so charge its cost before rejecting the key.
-        add_work(work, key.len(), limits.max_work_bytes)?;
-        if !has_secret_key_token(key) {
-            return Ok(None);
-        }
-    }
-    if rule.declaration.reject_scalars && is_scalar(value) {
+    // The shape gates read the whole value, continuation included: `12;a7B` is a password whose head is a number. The suppressors below read the text before the first `;`.
+    let shaped = input
+        .as_bytes()
+        .get(value_span.start()..reported.end().max(value_span.end()))
+        .ok_or(ScanError::InvalidSpan)?;
+    if rule.declaration.reject_scalars
+        && is_scalar(shaped)
+        && !(key_names_a_memorized_secret && is_pin(shaped))
+    {
         return Ok(None);
     }
-    if rule
-        .code_reference_gate
-        .is_some_and(|gate| names_code(gate, value))
-    {
+    if rule.declaration.reject_placeholder_shapes && is_placeholder_shape(shaped) {
+        return Ok(None);
+    }
+    if rule.structural_value_gate && is_structural_line(shaped) {
+        return Ok(None);
+    }
+    if rule.port_mapping_gate && is_port_mapping(shaped) {
+        return Ok(None);
+    }
+    // Under the overlay's option and field rules a quoted value is a literal, so only a bare
+    // one reads as a member path or a type. The corpus gate reads quoted values as before.
+    let quoted = is_quoted(input.as_bytes(), value_span);
+    if rule.type_annotation_gate && !quoted && is_non_null_scalar_type(shaped) {
+        return Ok(None);
+    }
+    if rule.code_reference_gate.is_some_and(|gate| {
+        !(quoted && gate == CodeReferenceGate::Assignment) && names_code(gate, shaped)
+    }) {
         return Ok(None);
     }
 
@@ -339,9 +382,15 @@ fn evaluate_candidate_spans(
     {
         return Ok(None);
     }
+    // The stand-in words read the text before the first `;`, so a word in the tail leaves the finding standing.
+    let head = if rule.structural_value_gate {
+        &value[..memchr::memchr(b';', value).unwrap_or(value.len())]
+    } else {
+        value
+    };
     if let Some(values) = &rule.declaration.value_suppressors_any
         && contains_any_charged_ignore_case(
-            value,
+            head,
             values,
             rule.suppressor_matcher.as_ref(),
             work,
@@ -510,7 +559,16 @@ impl KeyedForm {
                 let Some((key_start, key_end)) = assignment_key(bytes, at, floor) else {
                     return Ok(Probe::Skip(at + 1));
                 };
-                let value_start = skip_rule_spaces(bytes, at + 1);
+                // Spaces follow `=` on its line only when a separator precedes it (`key = value`); a value detached from `=` any other way belongs to `magic-detached-assignment`.
+                let value_start = if key_end < at {
+                    skip_inline_spaces(bytes, at + 1)
+                } else {
+                    at + 1
+                };
+                // A second `=` makes the operator a comparison.
+                if bytes.get(value_start) == Some(&b'=') {
+                    return Ok(Probe::Skip(at + 1));
+                }
                 let value_end = unquoted_value_end(bytes, value_start);
                 if value_start == value_end {
                     return Ok(Probe::Skip(at + 1));
@@ -620,6 +678,13 @@ fn skip_rule_spaces(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
+fn skip_inline_spaces(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).copied().is_some_and(is_inline_space_byte) {
+        index += 1;
+    }
+    index
+}
+
 /// Extends `(?:[^SEP'"`;&|<>()$\\]|\\.)+` from `start` and returns where it stops.
 fn unquoted_value_end(bytes: &[u8], start: usize) -> usize {
     let mut end = start;
@@ -667,6 +732,215 @@ fn quoted_end(bytes: &[u8], start: usize, quote: u8) -> Result<usize, usize> {
 // These helpers run only for ASCII input, so the non-ASCII spellings in that class are unreachable here.
 fn is_rule_space_byte(byte: u8) -> bool {
     matches!(byte, b'\t' | b'\n' | 0x0B | b'\x0C' | b'\r' | b' ')
+}
+
+// The unquoted assignment rule reads the separator class less the line feed and the carriage return between `=` and a value on the line of the `=`.
+fn is_inline_space_byte(byte: u8) -> bool {
+    matches!(byte, b'\t' | 0x0B | b'\x0C' | b' ')
+}
+
+/// The separator class the keyed overlay rules spell out, for text of any encoding.
+fn is_rule_space(character: char) -> bool {
+    matches!(
+        character,
+        '\t' | '\n' | '\x0B' | '\x0C' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
+}
+
+/// Extends `(?:[^SEP'"`;&|<>()$\\]|\\.)*` from `start` over text of any encoding and returns where it stops.
+fn unquoted_run_end(input: &str, start: usize) -> usize {
+    let mut characters = input[start..].char_indices().peekable();
+    while let Some((offset, character)) = characters.next() {
+        match character {
+            '\\' => match characters.peek() {
+                None | Some((_, '\n')) => return start + offset,
+                Some(_) => {
+                    characters.next();
+                }
+            },
+            '\'' | '"' | '`' | ';' | '&' | '|' | '<' | '>' | '(' | ')' | '$' => {
+                return start + offset;
+            }
+            _ if is_rule_space(character) => return start + offset,
+            _ => {}
+        }
+    }
+    input.len()
+}
+
+/// Longest text after a value that the `;` continuation reads.
+///
+/// The bound is far below the margin a scan window keeps around a finding, so the walk reads
+/// the same bytes whichever window holds the value, and a tail still open at the bound leaves
+/// the value as the pattern matched it.
+const MAX_CONTINUATION_BYTES: usize = MAX_LOCAL_CONTEXT_BYTES;
+
+/// Extends the reported span of an unquoted assignment value through `;` to the end of its line.
+///
+/// `;` ends a shell statement and separates connection-string fields, and it also occurs inside
+/// an unquoted credential (`PASSWORD=ab;cd` in an environment file). The value continues when
+/// the text joined by `;` runs to the end of the line, apart from trailing blanks, and is free
+/// of `=`: a `name=value` pair after `;` is the next field, and a word followed by more text is
+/// the next statement. A line ends at a line break, at the end of the input, or at a line
+/// break written as the escape `\n` or `\r`, as serialized text carries it.
+fn continued_past_semicolons(
+    input: &str,
+    spans: CandidateSpans,
+    work: &mut usize,
+    limits: ScanLimits,
+) -> Result<CandidateSpans, Abort> {
+    let bytes = input.as_bytes();
+    let start = spans.reported.end();
+    if start != spans.full.end() || bytes.get(start) != Some(&b';') {
+        return Ok(spans);
+    }
+    let window_end = input.ceil_char_boundary(start.saturating_add(MAX_CONTINUATION_BYTES));
+    add_work(work, window_end - start, limits.max_work_bytes)?;
+    let window = &input[..window_end];
+    let mut end = start;
+    while bytes.get(end) == Some(&b';') && end < window_end {
+        let run_end = unquoted_run_end(window, end + 1);
+        let segment_end =
+            escaped_line_break(&bytes[end + 1..run_end]).map_or(run_end, |at| end + 1 + at);
+        let segment = &bytes[end + 1..segment_end];
+        // A tail of closing punctuation (`;}`) ends a statement, and a pair is the next field.
+        if is_punctuation(segment) || segment.contains(&b'=') {
+            return Ok(spans);
+        }
+        end = segment_end;
+    }
+    if end == window_end && window_end < input.len() {
+        // The tail is still open at the bound, so the value's extent is unknown and the scan fails closed.
+        return Err(Abort::Match);
+    }
+    let blanks_end = end
+        + bytes[end..window_end]
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+    let line_ends = match &bytes[blanks_end..window_end] {
+        [] => window_end == input.len(),
+        [b'\n' | b'\r', ..] | [b'\\', b'n' | b'r' | b'u', ..] => true,
+        [b'#', ..] => blanks_end > end,
+        _ => false,
+    };
+    if !line_ends {
+        return Ok(spans);
+    }
+    Ok(CandidateSpans {
+        full: TextSpan::snapped(input, spans.full.start(), end)?,
+        value: spans.value,
+        reported: TextSpan::snapped(input, spans.reported.start(), end)?,
+        key: spans.key,
+    })
+}
+
+/// Where a run of value text first writes a line break as the escape `\n` or `\r`.
+fn escaped_line_break(run: &[u8]) -> Option<usize> {
+    let mut index = 0;
+    while index < run.len() {
+        if run[index] != b'\\' {
+            index += 1;
+        } else if matches!(run.get(index + 1), Some(b'n' | b'r'))
+            || run[index + 1..].starts_with(b"u000a")
+            || run[index + 1..].starts_with(b"u000d")
+        {
+            return Some(index);
+        } else {
+            index += 2;
+        }
+    }
+    None
+}
+
+/// What follows the escape that a key pattern read as the start of its key.
+enum EscapedKey {
+    /// The name after the escape passes the key gate.
+    Secret(TextSpan),
+    /// The name after the escape carries a public marker, as `\npublic_key` does.
+    Public,
+    /// The key follows no escape, or the name after it is of another kind.
+    Absent,
+}
+
+/// Reads the key that begins after an escaped line break or tab: the letter of `\n`, `\r`,
+/// or `\t`, or the `u000a`, `u000d`, or `u0009` of the form canonical JSON writes.
+fn key_after_escape(input: &str, key: TextSpan) -> Result<EscapedKey, ScanError> {
+    let bytes = input.as_bytes();
+    if key.start() == 0 || bytes[key.start() - 1] != b'\\' {
+        return Ok(EscapedKey::Absent);
+    }
+    let name = &bytes[key.start()..key.end()];
+    let escape_len = match name {
+        [b'u', b'0', b'0', b'0', b'a' | b'A' | b'd' | b'D' | b'9', ..] => 5,
+        [b'n' | b'r' | b't', ..] => 1,
+        _ => return Ok(EscapedKey::Absent),
+    };
+    let after = &name[escape_len..];
+    if key_tokens(after).any(|token| {
+        NON_SECRET_KEY_MARKERS
+            .iter()
+            .any(|marker| token.eq_ignore_ascii_case(marker))
+    }) {
+        return Ok(EscapedKey::Public);
+    }
+    if !has_secret_key_token(after) {
+        return Ok(EscapedKey::Absent);
+    }
+    TextSpan::new(input, key.start() + escape_len, key.end()).map(EscapedKey::Secret)
+}
+
+/// `--no-password` switches the prompt off and takes no value, so the word after it is the
+/// next argument.
+fn is_negated_switch(key: &[u8]) -> bool {
+    key_tokens(key)
+        .next()
+        .is_some_and(|token| token.eq_ignore_ascii_case(b"no"))
+}
+
+/// A line of structure where a detached value would stand: a closing bracket or a rule of
+/// punctuation, a bracketed section header, a comment, or the next empty assignment. `URL=`
+/// is also how Base64 spells a padded value; a name in one letter case with one `=` reads as
+/// the assignment.
+fn is_structural_line(value: &[u8]) -> bool {
+    let value = value.trim_ascii();
+    let (Some(&first), Some(&last)) = (value.first(), value.last()) else {
+        return true;
+    };
+    is_punctuation(value)
+        || first == b'#'
+        || matches!((first, last), (b'<', b'>') | (b'{', b'}') | (b'[', b']'))
+        || value
+            .strip_suffix(b"=")
+            .is_some_and(|name| !name.ends_with(b"=") && is_single_case_name(name))
+}
+
+fn is_punctuation(value: &[u8]) -> bool {
+    !value
+        .iter()
+        .any(|byte| byte.is_ascii_alphanumeric() || !byte.is_ascii())
+}
+
+/// `URL`, `api_key`, `NEXT_URL`: letters of one case, digits, and `_`, starting with a letter.
+fn is_single_case_name(name: &[u8]) -> bool {
+    name.first().is_some_and(u8::is_ascii_alphabetic)
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        && !(name.iter().any(u8::is_ascii_uppercase) && name.iter().any(u8::is_ascii_lowercase))
+}
+
+/// Whether the same quote character stands directly before and after the value.
+fn is_quoted(bytes: &[u8], value: TextSpan) -> bool {
+    let before = value.start().checked_sub(1).and_then(|at| bytes.get(at));
+    matches!(before, Some(b'"' | b'\'')) && before == bytes.get(value.end())
 }
 
 fn is_key_byte(byte: u8) -> bool {
@@ -952,7 +1226,206 @@ fn has_secret_key_token(key: &[u8]) -> bool {
     }) {
         return false;
     }
-    key_tokens(key).any(|token| token_matches_any_key_name(token, SECRET_KEY_WORDS))
+    key_tokens(key).any(|token| {
+        token_matches_any_key_name(token, SECRET_KEY_WORDS) || ends_with_password(token)
+    })
+}
+
+/// A token that ends in `password` names one whatever precedes it: `PGPASSWORD`,
+/// `keystorepassword`. The other key words need a qualifier chain in front, because they end
+/// ordinary words (`monkey`, `turkey`).
+const PASSWORD_SUFFIX: &[u8] = b"password";
+
+fn ends_with_password(token: &[u8]) -> bool {
+    token
+        .len()
+        .checked_sub(PASSWORD_SUFFIX.len())
+        .is_some_and(|start| token[start..].eq_ignore_ascii_case(PASSWORD_SUFFIX))
+}
+
+/// Key words whose value a person chooses or memorizes, so it can be all digits.
+/// A number under `token` or `key` is a count or an index, as in `max_tokens=4096`.
+const MEMORIZED_SECRET_WORDS: &[&[u8]] = &[b"secret"];
+
+/// Whether the last word of `key` is `secret` or ends in `password`.
+/// `password_length` and `secret_version` end in a word that names a number.
+fn ends_in_memorized_secret_word(key: &[u8]) -> bool {
+    key_tokens(key).last().is_some_and(|token| {
+        ends_with_password(token)
+            || MEMORIZED_SECRET_WORDS
+                .iter()
+                .any(|word| token.eq_ignore_ascii_case(word))
+    })
+}
+
+/// The shortest personal identification number in common use has four digits (ISO 9564-1).
+/// Shorter numbers under a password key are lengths, counts, and flags.
+const MIN_PIN_DIGITS: usize = 4;
+
+fn is_pin(value: &[u8]) -> bool {
+    let value = value.trim_ascii();
+    value.len() >= MIN_PIN_DIGITS && value.iter().all(u8::is_ascii_digit)
+}
+
+/// Whether `value` has the shape of text that stands where a credential would go.
+///
+/// - A plain word, which a metavariable (`PASSWORD`), a type name (`string`), and a word of
+///   prose all are; a generated credential carries an ASCII digit or symbol.
+/// - A mask: a run of `***`, or punctuation alone (`...`).
+/// - A reference: a leading `$`, or a trailing upper-case name that itself names a secret
+///   (`os.environ/DB_PASSWORD`).
+/// - A template: wrapped in `<>`, `{}`, or `[]`, `%` and one letter, or `%NAME%`.
+/// - A port followed by a property list (`1433;database=sales`).
+/// - A file path or a URL, which names where the credential is kept or issued.
+/// - An attribute list (`id=npm,src=.npmrc`), which describes the secret an option names.
+fn is_placeholder_shape(value: &[u8]) -> bool {
+    let value = value.trim_ascii();
+    let (Some(&first), Some(&last)) = (value.first(), value.last()) else {
+        return true;
+    };
+    is_plain_word(value)
+        || is_mask(value)
+        || first == b'$'
+        || names_a_secret_variable(value)
+        || matches!((first, last), (b'<', b'>') | (b'{', b'}') | (b'[', b']'))
+        || matches!(value, [b'%', verb] if verb.is_ascii_alphabetic())
+        || is_environment_reference(value)
+        || is_file_path(value)
+        || is_url(value)
+        || is_attribute(value)
+        || is_port_and_properties(value)
+}
+
+/// `%DB_PASSWORD%`: a variable name between two `%`, as the Windows shell writes a reference.
+fn is_environment_reference(value: &[u8]) -> bool {
+    value
+        .strip_prefix(b"%")
+        .and_then(|rest| rest.strip_suffix(b"%"))
+        .is_some_and(|name| {
+            name.first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+                && name
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        })
+}
+
+/// `1433;database=sales`: a port and the property list a JDBC URL writes after it.
+fn is_port_and_properties(value: &[u8]) -> bool {
+    let digits = value
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    digits > 0 && value.get(digits) == Some(&b';')
+}
+
+/// `8080:80`, `127.0.0.1:5432:5432`: numbers joined by `:` are a port mapping, which `-p`
+/// takes under `docker run` and `ssh`.
+fn is_port_mapping(value: &[u8]) -> bool {
+    value.contains(&b':')
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b':' | b'.' | b'/'))
+}
+
+/// The built-in scalar types of the GraphQL specification in their non-null spelling.
+const NON_NULL_SCALAR_TYPES: &[&str] = &["String!", "ID!", "Int!", "Float!", "Boolean!"];
+
+/// `password: String!` in a schema declares a field of a built-in scalar type.
+fn is_non_null_scalar_type(value: &[u8]) -> bool {
+    NON_NULL_SCALAR_TYPES
+        .iter()
+        .any(|name| value == name.as_bytes())
+}
+
+/// `token: https://example.org/settings/tokens` names where a credential is issued.
+/// A URL that carries a password in its userinfo is a finding of its own rule.
+fn is_url(value: &[u8]) -> bool {
+    let scheme_end = value
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-')))
+        .unwrap_or(value.len());
+    value.first().is_some_and(u8::is_ascii_alphabetic) && value[scheme_end..].starts_with(b"://")
+}
+
+/// `id=npm,src=.npmrc`: a lower-case name, `=`, and more text is an attribute of the thing the
+/// option names, as in `docker build --secret id=npm`. Base64 padding ends its value or doubles
+/// the `=`, and its body mixes case.
+fn is_attribute(value: &[u8]) -> bool {
+    let name_end = value
+        .iter()
+        .position(|byte| !(byte.is_ascii_lowercase() || *byte == b'_'))
+        .unwrap_or(value.len());
+    name_end > 0
+        && value.get(name_end) == Some(&b'=')
+        && value.get(name_end + 1).is_some_and(|byte| *byte != b'=')
+}
+
+/// Letters of any script, `_`, `-`, and whitespace, before the closing punctuation a synopsis
+/// or a sentence adds (`[--password PASSWORD]`, `the --token value.`). A line break or tab
+/// written as an escape (`\n`) is whitespace.
+fn is_plain_word(value: &[u8]) -> bool {
+    let word_end = value
+        .iter()
+        .rposition(|byte| !matches!(byte, b']' | b')' | b'}' | b',' | b'.' | b':'))
+        .map_or(0, |index| index + 1);
+    let word = &value[..word_end];
+    let mut index = 0;
+    while let Some(&byte) = word.get(index) {
+        let escaped_space =
+            byte == b'\\' && matches!(word.get(index + 1), Some(b'n' | b'r' | b't'));
+        if escaped_space {
+            index += 2;
+            continue;
+        }
+        let plain = byte.is_ascii_alphabetic()
+            || matches!(byte, b'_' | b'-')
+            || byte.is_ascii_whitespace()
+            || !byte.is_ascii();
+        if !plain {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn is_mask(value: &[u8]) -> bool {
+    value.windows(3).any(|window| window == b"***") || is_punctuation(value)
+}
+
+/// `os.environ/DB_PASSWORD`, `env:API_TOKEN`: the value ends in an upper-case name, set off
+/// from what precedes it, that the key gate reads as naming a secret.
+fn names_a_secret_variable(value: &[u8]) -> bool {
+    let start = value
+        .iter()
+        .rposition(|byte| !(byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_'))
+        .map_or(0, |index| index + 1);
+    let name = &value[start..];
+    let set_off = start == 0 || matches!(value[start - 1], b'/' | b':' | b'.');
+    set_off && name.first().is_some_and(u8::is_ascii_uppercase) && has_secret_key_token(name)
+}
+
+/// A path relative to the home or working directory, or an absolute path whose last segment
+/// carries a file extension. Base64 text can begin with `/`, so an absolute path needs the
+/// extension.
+fn is_file_path(value: &[u8]) -> bool {
+    if value.starts_with(b"~/") || value.starts_with(b"./") || value.starts_with(b"../") {
+        return true;
+    }
+    if value.first() != Some(&b'/') {
+        return false;
+    }
+    let name = value.rsplit(|byte| *byte == b'/').next().unwrap_or(value);
+    name.iter()
+        .rposition(|byte| *byte == b'.')
+        .is_some_and(|dot| {
+            let extension = &name[dot + 1..];
+            (1..=5).contains(&extension.len())
+                && extension
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
 }
 
 // Both qualifier walks run once per token rather than once per candidate split, so cost stays linear in the token length instead of quadratic.
@@ -1501,7 +1974,61 @@ fn offline_verdict(spec: &OfflineValidationSpec, value: &[u8]) -> OfflineVerdict
         OfflineValidationKind::SentryOrgToken => validate_sentry(value),
         OfflineValidationKind::PypiToken => validate_pypi(value),
         OfflineValidationKind::SlackToken => validate_slack(value),
+        OfflineValidationKind::BasicCredentials => validate_basic_credentials(value),
     }
+}
+
+/// RFC 7617 credentials are the Base64 of `user-id ":" password` in the charset the server
+/// expects, so the value has to decode to bytes that hold a `:` and are free of ASCII control
+/// characters. A word after `Basic` in prose (`Authorization: Basic authentication`) decodes
+/// to bytes that fail one of the two.
+fn validate_basic_credentials(value: &[u8]) -> OfflineVerdict {
+    // `echo user:password | base64` encodes the line break `echo` adds.
+    let credentials = decode_base64(value).filter(|decoded| {
+        let text = decoded
+            .strip_suffix(b"\r\n")
+            .or_else(|| decoded.strip_suffix(b"\n"))
+            .unwrap_or(decoded);
+        text.contains(&b':') && !text.iter().any(u8::is_ascii_control)
+    });
+    match credentials {
+        Some(_) => OfflineVerdict::Valid,
+        None => OfflineVerdict::Invalid,
+    }
+}
+
+/// Decodes the standard or the URL-safe alphabet, padded or bare.
+/// `None` when a byte is outside both alphabets or the length leaves a lone sextet.
+fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+    let body_len = input
+        .iter()
+        .rposition(|byte| *byte != b'=')
+        .map_or(0, |index| index + 1);
+    let body = &input[..body_len];
+    if body.len() % 4 == 1 {
+        return None;
+    }
+    let mut output = Vec::with_capacity(body.len() / 4 * 3 + 2);
+    let mut bits = 0u32;
+    let mut bit_count = 0u8;
+    for byte in body {
+        let value = match byte {
+            b'A'..=b'Z' => u32::from(byte - b'A'),
+            b'a'..=b'z' => u32::from(byte - b'a' + 26),
+            b'0'..=b'9' => u32::from(byte - b'0' + 52),
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | value;
+        bit_count += 6;
+        if bit_count >= 8 {
+            bit_count -= 8;
+            output.push((bits >> bit_count) as u8);
+            bits &= (1u32 << bit_count) - 1;
+        }
+    }
+    Some(output)
 }
 
 fn validate_crc32_base62(
@@ -1881,6 +2408,11 @@ mod tests {
         push_table(&mut encoded, SCALAR_KEYWORDS);
         push_table(&mut encoded, DURATION_UNITS);
         push_table(&mut encoded, &KEYED_KEYWORDS);
+        push_table(&mut encoded, MEMORIZED_SECRET_WORDS);
+        push_table(&mut encoded, &[PASSWORD_SUFFIX]);
+        encoded.extend_from_slice(&(MIN_PIN_DIGITS as u64).to_le_bytes());
+        encoded.extend_from_slice(&(MAX_CONTINUATION_BYTES as u64).to_le_bytes());
+        push_table(&mut encoded, NON_NULL_SCALAR_TYPES);
         encoded.extend_from_slice(&(MAX_MATCH_BYTES as u64).to_le_bytes());
         encoded.extend_from_slice(&(MAX_RADIX_SCALAR_DIGITS as u64).to_le_bytes());
         encoded.extend_from_slice(&(MAX_CODE_SEGMENT_BYTES as u64).to_le_bytes());
@@ -1889,7 +2421,7 @@ mod tests {
         encoded.extend_from_slice(&DEFAULT_CHAR_CLASS.min_window_len.to_le_bytes());
         assert_eq!(
             crate::rules::digest_hex(&encoded),
-            "2ed72f2b8587f32df348793829c9594bdd251f700ef805bc3c8c75d0c8e0587e",
+            "1ac5730ab5736193fd3f38fe6d09e48066e7bc39a5f7ade94b1afc9d1c73ed02",
             "evaluator constants changed: bump REVISION.semantic_digest_version and re-pin"
         );
     }
@@ -1910,6 +2442,8 @@ mod tests {
     ];
 
     const RULE_SPACE_BYTES: [u8; 6] = [b'\t', b'\n', 0x0B, b'\x0C', b'\r', b' '];
+
+    const INLINE_SPACE_BYTES: [u8; 4] = [b'\t', 0x0B, b'\x0C', b' '];
 
     const UNQUOTED_VALUE_TERMINATORS: [u8; 11] = *b"'\"`;&|<>()$";
 
@@ -2005,7 +2539,7 @@ mod tests {
         for (name, regex) in [
             (
                 "magic-keyed-assignment",
-                r#"(?i)(?-u:\b)(?P<key>[A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]*=[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}'"`;&|<>()$\\]|\\.)+)"#,
+                r#"(?i)(?-u:\b)(?P<key>[A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)(?:=|[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+=[\t\x0B\f \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]*)(?P<value>(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}'"`;&|<>()$\\=]|\\.)(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}'"`;&|<>()$\\]|\\.)*)"#,
             ),
             (
                 "magic-keyed-assignment-double-quoted",
@@ -2107,14 +2641,18 @@ mod tests {
         for keyword in KEYED_KEYWORDS {
             for separator in RULE_SPACE_BYTES {
                 let gap = char::from(separator);
+                let inline = INLINE_SPACE_BYTES.contains(&separator);
+                // A line feed or a carriage return after `=` detaches an unquoted value, which leaves it to `magic-detached-assignment`.
+                let detached = format!("{keyword}{gap}={gap}x{secret}");
+                if !inline {
+                    let rule = embedded_rule(&rules, "magic-keyed-assignment");
+                    assert_eq!(regex_candidates(rule, &detached), [], "{detached:?}");
+                    assert_fast_path_replays_embedded_regex(&rules, &detached);
+                }
                 for (form, input) in [
                     (
                         "magic-keyed-assignment",
                         format!("x_{keyword}{gap}=x{secret}"),
-                    ),
-                    (
-                        "magic-keyed-assignment",
-                        format!("{keyword}={gap}x{secret}"),
                     ),
                     (
                         "magic-keyed-assignment-double-quoted",
@@ -2122,8 +2660,12 @@ mod tests {
                     ),
                     (
                         "magic-keyed-assignment-single-quoted",
-                        format!("{keyword}={gap}'x{secret}'"),
+                        format!("{keyword}{gap}='x{secret}'"),
                     ),
+                ]
+                .into_iter()
+                .chain(inline.then(|| ("magic-keyed-assignment", detached.clone())))
+                .chain([
                     (
                         "magic-keyed-double-quoted",
                         format!("\"{keyword}\"{gap}:\"x{secret}\""),
@@ -2140,7 +2682,7 @@ mod tests {
                         "magic-keyed-single-double",
                         format!("'{keyword}':{gap}\"x{secret}\""),
                     ),
-                ] {
+                ]) {
                     let rule = embedded_rule(&rules, form);
                     let expected = regex_candidates(rule, &input);
                     assert_eq!(expected.len(), 1, "{form} does not match {input:?}");
@@ -2173,7 +2715,8 @@ mod tests {
             .into_iter()
             .chain(RULE_SPACE_BYTES)
         {
-            let input = format!("password=hunter2AbCdEf{}tail", char::from(terminator));
+            // A space keeps the tail out of the `;` continuation, which belongs to this rule's findings and is absent from its candidates.
+            let input = format!("password=hunter2AbCdEf{} tail", char::from(terminator));
             let expected = regex_candidates(rule, &input);
             assert_eq!(expected.len(), 1, "{input:?}");
             assert_eq!(
@@ -2237,9 +2780,9 @@ mod tests {
     }
 
     // Pieces that exercise every keyword, separator, quote, escape, and terminator the keyed rules distinguish.
-    const KEYED_INPUT_PIECES: [&str; 18] = [
-        "key", "TOKEN", "Password", "=", ":", "\"", "'", "\\", "\n", "\x0B", " ", ";", "$", ".",
-        "-", "_", "a", "Z9",
+    const KEYED_INPUT_PIECES: [&str; 19] = [
+        "key", "TOKEN", "Password", "=", ":", "\"", "'", "\\", "\n", "\x0B", " ", "\t", ";", "$",
+        ".", "-", "_", "a", "Z9",
     ];
 
     proptest::proptest! {
@@ -2487,6 +3030,418 @@ mod tests {
             only_candidate(&rule, &too_long),
             Err(Abort::Match)
         ));
+    }
+
+    #[test]
+    fn placeholder_shapes_are_closed() {
+        for value in [
+            // A plain word, with the closing punctuation a synopsis or a sentence adds.
+            "PASSWORD",
+            "string",
+            "value",
+            "my-password",
+            "API_KEY]",
+            "value.",
+            "two words",
+            "value\\n",
+            "\u{2581}our",
+            "\u{9700}\u{8981}\u{5bc6}\u{7801}",
+            // A mask.
+            "****",
+            "gho_************",
+            "...",
+            // A reference.
+            "$DB_PASSWORD",
+            "os.environ/OPENAI_API_KEY",
+            "env:DB_PASSWORD",
+            "GITHUB_TOKEN",
+            // A template.
+            "<password>",
+            "{password}",
+            "[REDACTED]",
+            "%s",
+            // A file path or a URL.
+            "~/secrets/token7.txt",
+            "./token7",
+            "../token7",
+            "/path/to/secrets7.txt",
+            "https://example.org/settings/tokens7",
+            "%DB_PASSWORD%",
+            "%AppData%",
+            // A port and a property list.
+            "1433;database=sales",
+            // An attribute list.
+            "id=npm7,src=.npmrc",
+            "",
+            "  ",
+        ] {
+            assert!(is_placeholder_shape(value.as_bytes()), "{value:?}");
+        }
+        for value in [
+            "hunter2",
+            "Summer!",
+            "Strings!",
+            "String!",
+            "12345678",
+            "12.05.1987",
+            "8080:80",
+            "%40abc",
+            "%7qW9%",
+            "%40ab9%",
+            "p@ss",
+            "S3cret",
+            "a.b9",
+            "x*y*z9",
+            "ab**c1",
+            "a$b1",
+            "%Tgb5",
+            "%7",
+            "Zq7Lm2Xv9Rt4Kp8Wn3Bc6Yd1",
+            // Base64 that begins with `/` or ends in padding, and an upper-case name outside the secret vocabulary.
+            "/aB3dEf/Gh1jKl+mN",
+            "QxWvErTy4=",
+            "dXNlcg==",
+            "os.environ/BUILD_ID7",
+            "abcDEF_TOKEN7",
+            "x9GITHUB_TOKEN",
+            "/run/secrets/db7",
+            "ID=npm7",
+            "\u{43f}\u{430}\u{440}\u{43e}\u{43b}\u{44c}7",
+        ] {
+            assert!(!is_placeholder_shape(value.as_bytes()), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_pin_needs_four_digits_under_a_key_that_ends_in_a_memorized_secret_word() {
+        for (value, expected) in [
+            ("1234", true),
+            (" 123456 ", true),
+            ("123", false),
+            ("1234.5", false),
+            ("12_34", false),
+            ("0x1234", false),
+            ("-1234", false),
+            ("1234s", false),
+        ] {
+            assert_eq!(is_pin(value.as_bytes()), expected, "{value:?}");
+        }
+        for (key, expected) in [
+            ("password", true),
+            ("db_password", true),
+            ("dbPassword", true),
+            ("PGPASSWORD", true),
+            ("client_secret", true),
+            ("SECRET", true),
+            ("password_length", false),
+            ("secret_version", false),
+            ("passwords", false),
+            ("secrets", false),
+            ("token", false),
+            ("api_key", false),
+            ("secret_key", false),
+        ] {
+            assert_eq!(
+                ends_in_memorized_secret_word(key.as_bytes()),
+                expected,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_token_that_ends_in_password_is_a_secret_key_token() {
+        for key in [
+            "PGPASSWORD",
+            "pgpassword",
+            "keystorepassword",
+            "MyDbPassword",
+        ] {
+            assert!(has_secret_key_token(key.as_bytes()), "{key}");
+        }
+        for key in [
+            "passwordless",
+            "pgpasswords",
+            "password_less_mode_x",
+            "PGPASS",
+        ] {
+            assert_eq!(
+                has_secret_key_token(key.as_bytes()),
+                key.contains('_'),
+                "{key}"
+            );
+        }
+        // A public marker still excludes the key.
+        assert!(!has_secret_key_token(b"public_pgpassword"));
+    }
+
+    #[test]
+    fn basic_credentials_decode_to_user_and_password() {
+        for (encoded, decoded) in [
+            ("dTpw", Some(&b"u:p"[..])),
+            ("dXNlcjpwYXNz", Some(b"user:pass")),
+            ("dXNlcg==", Some(b"user")),
+            ("dXNlcg", Some(b"user")),
+            ("-_-_", Some(&[0xfb, 0xff, 0xbf][..])),
+            ("+/+/", Some(&[0xfb, 0xff, 0xbf][..])),
+            ("dXNlc", None),
+            ("dX Nl", None),
+            ("", Some(b"")),
+        ] {
+            assert_eq!(
+                decode_base64(encoded.as_bytes()).as_deref(),
+                decoded,
+                "{encoded:?}"
+            );
+        }
+        for (encoded, valid) in [
+            ("dTpw", true),
+            (concat!("YWxpY2U6", "aHVudGVyMg=="), true),
+            // `user` lacks the `:`.
+            ("dXNlcg==", false),
+            // A word of prose decodes to bytes outside UTF-8 text.
+            ("authentication", false),
+            ("credentials", false),
+            // `u:caf` and the Latin-1 byte 0xE9.
+            ("dTpjYWbp", true),
+            // `alice:hunter2` and the line break `echo` adds, as LF and as CRLF.
+            (concat!("YWxpY2U6", "aHVudGVyMgo="), true),
+            (concat!("YWxpY2U6", "aHVudGVyMg0K"), true),
+            // `user` and a line break.
+            ("dXNlcgo=", false),
+            // `a:` and a control character.
+            ("YToB", false),
+            ("dXNlc", false),
+        ] {
+            let verdict = validate_basic_credentials(encoded.as_bytes());
+            assert_eq!(
+                matches!(verdict, OfflineVerdict::Valid),
+                valid,
+                "{encoded:?}"
+            );
+            assert_eq!(
+                matches!(verdict, OfflineVerdict::Invalid),
+                !valid,
+                "{encoded:?}"
+            );
+        }
+    }
+
+    fn assignment_spans(input: &str) -> CandidateSpans {
+        let (candidates, _) = fast_path_candidates(KeyedForm::Assignment, input);
+        assert_eq!(candidates.len(), 1, "{input:?}");
+        candidates[0]
+    }
+
+    /// The reported span runs through `;` to the end of the line, the suppressor value stays
+    /// the text before the first `;`, and the walk charges its whole bounded window up front.
+    #[test]
+    fn a_semicolon_continuation_runs_to_the_end_of_its_line_and_is_charged() {
+        for (input, reported) in [
+            ("password=ab;cd", "ab;cd"),
+            ("password=ab;cd;ef\nnext", "ab;cd;ef"),
+            ("password=ab;cd\r\n", "ab;cd"),
+            ("password=ab;cd \t\nnext", "ab;cd"),
+            ("password=ab;cd\\nnext", "ab;cd"),
+            ("password=ab;cd  \\r\\nnext", "ab;cd"),
+            ("password=ab;c\u{e9}", "ab;c\u{e9}"),
+            ("password=ab;c\\ d", "ab;c\\ d"),
+            // A pair, a following word, a separator of any script, or a bare `;` at the line's end.
+            ("password=ab;cd=ef", "ab"),
+            ("password=ab;cd;ef=gh", "ab"),
+            ("password=ab;cd ef", "ab"),
+            ("password=ab;cd\u{a0}ef", "ab"),
+            ("password=ab;cd\"", "ab"),
+            ("password=ab;", "ab"),
+            ("password=ab;\\n", "ab"),
+            ("password=ab; cd", "ab"),
+            ("password=ab;;cd", "ab"),
+        ] {
+            let spans = assignment_spans(input);
+            let mut work = 0usize;
+            let continued =
+                continued_past_semicolons(input, spans, &mut work, ScanLimits::default()).unwrap();
+            assert_eq!(
+                &input[continued.reported.start()..continued.reported.end()],
+                reported,
+                "{input:?}"
+            );
+            assert_eq!(continued.full.end(), continued.reported.end(), "{input:?}");
+            assert_eq!(continued.value, spans.value, "{input:?}");
+            assert_eq!(continued.key, spans.key, "{input:?}");
+        }
+
+        // The window is charged before the walk reads it, and a budget short of it stops the walk.
+        let input = format!(
+            "password=ab;{}\n{}",
+            "x".repeat(64),
+            "y".repeat(4 * MAX_CONTINUATION_BYTES)
+        );
+        let spans = assignment_spans(&input);
+        let mut work = 0usize;
+        continued_past_semicolons(&input, spans, &mut work, ScanLimits::default()).unwrap();
+        assert_eq!(work, MAX_CONTINUATION_BYTES);
+        let mut work = 0usize;
+        let tight = ScanLimits {
+            max_work_bytes: MAX_CONTINUATION_BYTES - 1,
+            ..ScanLimits::default()
+        };
+        assert!(matches!(
+            continued_past_semicolons(&input, spans, &mut work, tight),
+            Err(Abort::Work)
+        ));
+        // A value with nothing joined to it charges nothing.
+        let spans = assignment_spans("password=ab cd");
+        let mut work = 0usize;
+        continued_past_semicolons("password=ab cd", spans, &mut work, ScanLimits::default())
+            .unwrap();
+        assert_eq!(work, 0);
+        // A closing bracket after `;`, a `#` comment after blanks, and a canonical escape.
+        for (input, reported) in [
+            ("useAuth=false;}", "false"),
+            ("password=ab;cd # note", "ab;cd"),
+            ("password=ab;cd#note", "ab;cd#note"),
+            ("password=ab;cd\\u000anext", "ab;cd"),
+        ] {
+            let spans = assignment_spans(input);
+            let mut work = 0usize;
+            let continued =
+                continued_past_semicolons(input, spans, &mut work, ScanLimits::default()).unwrap();
+            assert_eq!(
+                &input[continued.reported.start()..continued.reported.end()],
+                reported,
+                "{input:?}"
+            );
+        }
+    }
+
+    /// The walk reads a fixed span past the value, so its verdict is the same wherever the
+    /// text is cut beyond that span. A tail that ends inside the span is joined, a tail that a
+    /// following word disproves inside it leaves the value as matched, and a tail still open
+    /// at the bound fails the scan closed.
+    #[test]
+    fn a_semicolon_continuation_reads_a_bounded_span_past_the_value() {
+        let rules = RuleSet::from_embedded().unwrap();
+        let scan = |input: &str| {
+            let report = evaluate(
+                &rules,
+                ScanProfile::Conservative,
+                ScanLimits::default(),
+                [0u8; 32],
+                input,
+            )
+            .unwrap();
+            let lengths = report
+                .findings
+                .iter()
+                .map(|finding| finding.value_span.len())
+                .collect::<Vec<_>>();
+            (lengths, report.limits_hit)
+        };
+        let inside = "x".repeat(MAX_CONTINUATION_BYTES - 2);
+        assert_eq!(
+            scan(&format!("password=ab7;{inside}\nnext")),
+            (vec!["ab7;".len() + inside.len()], None)
+        );
+        assert_eq!(
+            scan(&format!("password=ab7;tail word {inside}{inside}")),
+            (vec!["ab7".len()], None)
+        );
+        for tail in [MAX_CONTINUATION_BYTES, 2 * MAX_MATCH_BYTES] {
+            let open = "x".repeat(tail);
+            for input in [
+                format!("password=ab7;{open}"),
+                format!("password=ab7;{open} next"),
+                format!("password=12;{open}\n"),
+            ] {
+                assert_eq!(scan(&input), (vec![], Some(LimitExhausted::Match)));
+            }
+            // A key the gate rejects leaves its tail unread.
+            assert_eq!(scan(&format!("monkey=ab7;{open}")), (vec![], None));
+        }
+    }
+
+    /// The scalar and code-reference gates read the joined value, and the suppressors read
+    /// its head.
+    #[test]
+    fn the_shape_gates_read_a_continued_value_whole() {
+        let rules = RuleSet::from_embedded().unwrap();
+        let values = |input: &'static str| {
+            let report = evaluate(
+                &rules,
+                ScanProfile::Conservative,
+                ScanLimits::default(),
+                [0u8; 32],
+                input,
+            )
+            .unwrap();
+            rule_values(input, &report.findings)
+        };
+        assert_eq!(values("PASSWORD=12;a7B"), ["12;a7B"]);
+        // A member-path head, joined at run time as the other credential shapes are.
+        let dotted: &'static str = ["password=", "my.", "pass;w0rd"].concat().leak();
+        assert_eq!(values(dotted), [&dotted["password=".len()..]]);
+        assert_eq!(
+            values("password=hunter2;placeholder"),
+            ["hunter2;placeholder"]
+        );
+        // Without a continuation the gates read the value alone.
+        assert_eq!(values("PASSWORD=12; echo done"), Vec::<&str>::new());
+        let statement: &'static str = ["password=", "my.", "pass; echo"].concat().leak();
+        assert_eq!(values(statement), Vec::<&str>::new());
+        assert_eq!(values("password=placeholder;x9"), Vec::<&str>::new());
+    }
+
+    fn rule_values<'a>(input: &'a str, findings: &[Finding]) -> Vec<&'a str> {
+        findings
+            .iter()
+            .map(|finding| &input[finding.value_span.start()..finding.value_span.end()])
+            .collect()
+    }
+
+    /// Serialized text writes a line break as `\n`, and the key pattern reads the letter as
+    /// the key's first character. The key gate reads the name after it.
+    #[test]
+    fn a_key_after_an_escaped_line_break_is_read_without_the_escape_letter() {
+        let rules = RuleSet::from_embedded().unwrap();
+        for (input, key, value) in [
+            ("first line\\ntoken=hunter2", "token", "hunter2"),
+            ("a\\r\\napi_key = hunter2 b", "api_key", "hunter2"),
+            ("x\\tsecret=hunter2", "secret", "hunter2"),
+            ("x\\u000atoken=hunter2", "token", "hunter2"),
+            // A name that is a key as written keeps its first letter.
+            ("C:\\token=hunter2", "token", "hunter2"),
+            ("\\npassword=hunter2", "password", "hunter2"),
+        ] {
+            let report = evaluate(
+                &rules,
+                ScanProfile::Conservative,
+                ScanLimits::default(),
+                [0u8; 32],
+                input,
+            )
+            .unwrap();
+            assert_eq!(rule_values(input, &report.findings), [value], "{input:?}");
+            let key_span = report.findings[0].key_span.unwrap();
+            assert_eq!(&input[key_span.start()..key_span.end()], key, "{input:?}");
+        }
+        for input in [
+            "a\\nmonkey=hunter2",
+            "a\\xtoken=hunter2",
+            "ntoken=hunter2",
+            "a\\npublic_key=hunter2",
+            "a\\tpubkey=hunter2",
+        ] {
+            let report = evaluate(
+                &rules,
+                ScanProfile::Conservative,
+                ScanLimits::default(),
+                [0u8; 32],
+                input,
+            )
+            .unwrap();
+            assert_eq!(report.findings, [], "{input:?}");
+        }
     }
 
     /// The key gate walks every byte of the key, so the key is charged to
