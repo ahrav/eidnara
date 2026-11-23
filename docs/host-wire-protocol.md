@@ -1511,21 +1511,23 @@ after the message and of exactly one
 result, which follows the call, is text, JSON, or content that carries
 no error, and whose Pi row states the outcome: its `isError` is the boolean
 `false` and its `content` is an array. A result whose row holds no
-`isError`, or one of another type, shows no use, while the window still
-renders it, since the Pi codec decodes such a result as text. An id here is the one the row
+`isError`, or one of another type, shows no use. The Pi codec decodes such
+a row as a result that carries no error, as text or as content by what its
+`content` holds, so the window holds it as it holds any result. An id here is the one the row
 itself holds, item suffix included: a call part's string `id`, else its
 string `callId`, and a result row's string `toolCallId`. A call or a result
-whose row holds no such string shows no use, although the window renders
-it under an id the codec makes. The `bash` match is one of spelling: a
+whose row holds no such string shows no use; the window holds it under an
+id the codec makes, subject to the tool pairing rule of Section 7.10. The `bash` match is one of spelling: a
 path the command line names in a comment, or after a `cd`, matches as the
 same path elsewhere in the line does. A file the
 turn also edits is used the same way. When the pass's transform has
 succeeded, the first eight observed paths that the session has not
 recorded, that are regular files beneath
 the project root, reached through no symbolic link or mount point, and that
-the Kernel's durable-text redaction leaves as written, are handed to a
-tracked background write that the reply does not wait for; a pass whose
-transform the daemon refuses hands over nothing. Each path is recorded once for the
+the Kernel's durable-text redaction leaves as written, are offered to a
+tracked background write that the reply does not wait for, which takes
+them except in the cases named below; a pass whose
+transform the daemon refuses offers nothing. Each path is recorded once for the
 session: one labeled decision of kind `named_file_use` in the Kernel domain
 `named-files`, scoped to the project, with source kind
 `named_file_recorder`, whose summary is the path and whose rationale holds
@@ -1534,14 +1536,17 @@ Its id derives from the project, the session, and the path, so a second
 write replays the first and leaves its time. A session records 64 distinct
 paths at most while the daemon holds its recorded paths, which it does for
 the 256 sessions that recorded a path last. At most four passes' records
-are written at once. The paths of one pass share a five-second wait for
-the Kernel's writer and are committed one by one: a path whose commit that
-wait or the Kernel refuses is left out, and the paths committed before it
-stay recorded. A pass that finds four being written, a pass observed
-before a `session.delete` that its write follows, a session id the
-redaction would rewrite, a project root that cannot be opened, a Kernel
-that is unavailable, a daemon that is shutting down, and a write the Kernel
-refuses record nothing; a
+are written at once, a write that waits for its turn among them. A write
+first takes the gate that capture's publications and `session.delete`
+take. Once it holds the gate, the paths of the pass share one five-second
+deadline for the Kernel's writer and are committed one by one: a path
+whose commit that deadline ends or the Kernel refuses stays unrecorded,
+the paths committed before it stay recorded, and the paths after it are
+tried under the same deadline. A pass that finds four being written, a
+pass observed before a `session.delete` that its write follows, a session
+id the redaction would rewrite, a project root that cannot be opened, a
+Kernel that is unavailable, and a daemon that is shutting down record
+nothing; a
 later pass that shows the same use is observed and written under the same
 rules. The records hold no text of a file. The domain's own row takes the
 id `domain:named-files`. In a store where another row holds that id, which
@@ -1576,43 +1581,60 @@ the date being the UTC day of `used_ms`; it carries no id, and the record's
 id is no handle of `eidnara_memory`. The clause after `; last changed` says
 when the file last changed, as the composing pass reads it. The pass reads
 the file through one descriptor: its status, its bytes when it holds at
-most 256 KiB, and its status again; a reading that a write crossed is
-taken once more, and a file that then still changes, or that left since it
-was selected, has no line. When the project root opens as the work tree of
-a SHA-1 Git repository, HEAD names a commit, and the tree of that commit
+most 256 KiB, with one byte more that shows a file that grew, and its
+status again; a reading that a write crossed is taken once more. A file
+whose bytes no reading holds whole, one that does not open for reading or
+that a write crossed twice, keeps its line with the modification time of
+one status taken then, and a path that then names no regular file has no
+line. When the project root is the work tree of the SHA-1 Git repository
+that opens there, HEAD names a commit, and the tree of that commit
 holds a regular or executable blob at the path that the file's bytes hash
 to, the clause is the committer time of the commit that gave the file
 those bytes, as a UTC minute (`2026-03-01T09:30Z`): the walk goes from HEAD
 to the first parent that holds the same blob, as `git log` simplifies the
 history of one file, and ends at the commit none of whose parents holds
-it. A walk reads at most 256 parents; one that reaches that bound, a
-commit or tree it cannot read whole, as a shallow clone has, or its time
-budget gives no time, and the clause reads `at a time the read history
-does not show`. Any other file reads `<time> on disk`, the modification
+it. A walk reads at most 256 parents. A walk that would read a 257th, and
+one that meets a tree of HEAD's commit, a parent commit, or a parent's
+tree that it cannot read whole, as a shallow clone has, gives no time, and
+the clause reads `at a time the read history does not show`; a commit
+whose committer line states no time that parses is one the walk cannot
+read. Any other file reads `<time> on disk`, the modification
 time its reading took: a file HEAD holds no blob for, a file edited since
-its commit, a larger file, a file whose checkout filters change its bytes,
-and a file of a project whose root opens as no work tree (a directory
-beneath a repository's root among them) or whose HEAD names no readable
-commit. The commit time is chosen over the modification time because a
+its commit, a larger file, a file whose bytes no reading held whole, a
+file whose checkout filters change its bytes,
+and a file of a project whose root is the work tree of no repository that
+opens there (a directory beneath a repository's root, and the root of a
+repository whose configuration names another work tree, among them) or
+whose HEAD names no commit the read takes. The commit time is chosen over the modification time because a
 clone or a checkout writes the file anew and leaves the commit time as it
 is; both times are shown as their sources hold them, a time ahead of the
-daemon's clock included. No pass reads the repository. One thread of the
+daemon's clock included, and a time outside the years 0000 to 9999 reads
+`at an unknown time`. No pass reads the repository. One thread of the
 daemon reads it for every pass: HEAD as capture's head observation reads
 it, and each commit and tree through the attestation verifier's object
-reader, which bounds an object at the document read cap, bounds the delta
-chains of the repository's own packs, and takes an object only when its
-bytes hash to its id; an object the repository holds only through an
-alternate is read by the Git library's store under the allocation bound
-alone. The thread works on one pass's files for at most two seconds and
-checks that budget before each object. A pass waits at most one second
-for its answer and then shows the files' modification times; at most four
-passes wait at once, and a further pass asks nothing. A repository that
-blocks a read, such as one whose `HEAD` is a pipe, therefore costs the
-passes of the daemon that second each until four wait, and holds the one
-thread until the daemon stops. An answer is kept for the path and the
-blob, for the 64 project roots asked about last and 64 paths of each, so a
-pass at unchanged bytes asks nothing, and a history rewritten to give the
-same bytes another commit keeps the first answer while it is held. The
+reader, which takes an object only when its bytes hash to its id. The
+thread reads the repository's own files (HEAD, references, configuration,
+and object and pack files) as those two readers read them for capture and
+for verification, with the bounds and the file mappings they have there:
+a file of the repository that is truncated while it is mapped raises
+`SIGBUS` in the daemon, as it does during capture's read. What this reader
+bounds is the parents of a walk, the time it works for a pass, and the
+answers it keeps. A pass waits at most one second
+for its answer and then shows the files' modification times. The thread
+works for a pass while the pass waits: it takes up no job whose pass has
+stopped waiting, and it checks the time before each object it reads, so a
+walk the wait ends dates nothing. Four jobs wait in a queue beside the one
+the thread works on, and a pass that finds the queue full asks nothing. A
+repository that blocks or spins a read, such as one whose `HEAD` is a
+pipe, therefore costs the passes of the daemon that second each until the
+queue is full, and holds the one thread until the daemon stops. The thread
+keeps the answers that a HEAD settles, which are a commit time, a path
+HEAD holds other bytes or nothing for, and a walk the parent bound ended,
+for the path and the blob, for the 64 project roots asked about last and
+64 paths of each, while the root is the same directory at the same HEAD
+commit; an answer an unreadable object gave is read again. A pass at an
+unchanged HEAD therefore costs the thread its read of HEAD and no walk,
+and a HEAD that moved is read anew. The
 block's revision reads a line up to `; last changed`, and the budget
 charges every line up to there and then for one fixed clause, the form of
 the most tokens, so an edit or a commit of a listed file changes neither
@@ -1621,7 +1643,7 @@ session holds is the one its last composition read. When the read lists a
 file, each fact that capture stored as the user's statement ends with
 ` (recorded <time>)`, the UTC minute of the commit that first recorded the
 statement, read from the commit log in one statement for the pass.
-Capture commits a statement after the turn it was made in has ended, so
+Capture records a statement after the user made it, so
 the statement was made at that minute or before it, and a statement the
 user repeats later keeps the time of its first record. A
 statement shown with its contest already carries the day it was first
@@ -1631,7 +1653,8 @@ mark also when the budget then admits no line of the element, and
 `eidnara_search` shows no such mark. A summarizer
 that fires on a pass whose read serves it holds the facts as that read
 rendered them, the times and the contest marks included; a summarizer read
-that no pass read serves lists no file and so shows the stored text. The
+that no pass read serves lists no file and so carries no such time, and
+shows a contested statement with its contest, as every read does. The
 daemon's clock dates a record and a committer's clock dates a commit, so
 two machines whose clocks disagree can order a record and a commit made
 within that disagreement the other way. The element is charged first, to an
@@ -1642,8 +1665,9 @@ line fits. Its `note` says that a message of the user named the files, that
 the agent read them or named them in a command it ran, that the paths are relative
 to the project root, that each file existed when the block was composed,
 that memory holds none of their content, that a line ends with the file's
-last change as of that moment, that a `User stated` line that ends with a
-time was recorded then, when the turn it was made in had ended, and what
+last change, which is its last commit's time or, marked on disk, its
+modification time, that a `User stated` line that ends with a
+time was recorded then, at or after the user made it, and what
 the two times order: a statement made after a file's last change is newer
 than the file, and a file changed after a statement was recorded is newer
 than the statement in the lines changed since then, which the

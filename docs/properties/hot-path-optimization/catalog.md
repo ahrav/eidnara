@@ -230,16 +230,26 @@ equal, vary valid other-domain, non-decision, hidden, and out-of-project rows;
 selected IDs, order, content, revision, and truncation must remain equal.
 Rows of the `named-files` domain are selected by the pass and are no noise:
 they enter the selected rows, the served ids, and the revision, and their
-charge of up to an eighth of the budget can displace lasting facts. For each
-of the up to eight listed files the pass also reads the file: its status
-twice and at most 256 KiB of its bytes, which it hashes. For bytes the
-daemon's history reader holds no answer for, the pass waits up to one
-second for that thread, which opens the repository, reads HEAD, and walks
-up to 256 parents of each file within two seconds; an answer is kept for
-the path and the blob. That reading fills the last-change clause of the
-file's line, which the revision and the budget's charge leave out, and a
-block that lists a file reads the commit times of its user statements in
-one statement.
+charge of up to an eighth of the budget can displace lasting facts. The
+pass's work on them runs in this order. It looks for a regular file at the
+paths of the first 32 recorded files. It samples up to eight of those that
+exist, the candidates: each one's status, at most 256 KiB and one byte of
+it, and its status again, a second time when a write crossed the first, of
+which it hashes at most 256 KiB. When a sample holds a blob it waits up to
+one second for the daemon's history reader, the one thread that reads the
+repository's HEAD for each such pass and walks up to 256 parents of a file
+whose answer it does not keep for that HEAD. When a candidate exists and
+the read serves a statement of the user, it reads the commit times of
+those statements in one statement. The budget then trims the candidates:
+it charges a line up to its last-change clause and then one fixed clause,
+and admits the longest leading run that fits the element's share. The
+sampling, the wait, and the time query therefore run on the candidates
+before the trim. The readings fill the last-change clause of a line and
+the `recorded` mark of a statement, which the revision and the charge
+leave out, so a paired-store comparison that holds named-file rows also
+holds equal the listed files' bytes and modification times, the
+repository's HEAD and history, and the commit log's times, or compares
+the lines up to those two decorations.
 Compare snapshot metadata to each store's own pinned tip, not across tips.
 Fault/timing angle: An early SQL limit or changed predicate admits noise into
 the bounded set or removes candidates the baseline keeps.
@@ -798,7 +808,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8786
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L228-L506
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L507
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522

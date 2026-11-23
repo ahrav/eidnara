@@ -486,9 +486,10 @@ async fn a_call_uses_a_file_the_last_typed_message_names() {
     );
 }
 
-/// A session records files while its working directory is the project root, where a
-/// relative path names the file of that path. A request that carries no working directory,
-/// or the directory of a package, records nothing.
+/// A session records files while its working directory is the project root, where the
+/// relative path a `read` call opens names the file of that path and a `bash` command line
+/// is matched by its spelling from the project root. A request that carries no working
+/// directory, or the directory of a package, records nothing.
 #[tokio::test]
 async fn a_session_records_files_at_the_project_root() {
     let (handler, _dir, project) = project_with(&[
@@ -1264,7 +1265,8 @@ async fn serve_pi_from(
 /// Over the routes: a Pi session's passes show the user naming a file and the agent reading
 /// it, the pass that shows the read records the file with the pass's time once its transform
 /// has succeeded, and another session's served block lists the file. A pass the daemon
-/// refuses records nothing.
+/// refuses records nothing: one refused before it is read, one refused when its window is
+/// resolved, and one whose transform fails.
 #[tokio::test]
 async fn a_pi_turn_served_over_the_routes_is_recorded_and_delivered() {
     let (handler, _dir, project) =
@@ -1279,7 +1281,7 @@ async fn a_pi_turn_served_over_the_routes_is_recorded_and_delivered() {
     settle(&handler).await;
     assert!(stored_records(&handler, &project).is_empty());
 
-    // A window that holds one row id twice is refused, and shows the read as the next does.
+    // A window that holds one row id twice is refused before any of it is read.
     let mut repeated = pi_turn(true);
     repeated.push(repeated[2].clone());
     let refused = serve_pi(&handler, WRITER, "writer", &repeated).await;
@@ -1294,6 +1296,18 @@ async fn a_pi_turn_served_over_the_routes_is_recorded_and_delivered() {
         .await
         .unwrap();
     assert_eq!(refused["status"], "boundary_unknown", "{refused}");
+    settle(&handler).await;
+    assert!(stored_records(&handler, &project).is_empty());
+
+    // A window that shows the read and resolves, and whose transform then refuses a result
+    // no call of the window asked for, hands off nothing.
+    let mut orphaned = pi_turn(true);
+    orphaned.push(json!({ "id": "5e6f7081", "message": {
+        "role": "toolResult", "toolCallId": "call-9", "toolName": "read",
+        "content": [{ "type": "text", "text": "x" }], "isError": false, "timestamp": 5
+    } }));
+    let refused = serve_pi(&handler, WRITER, "writer", &orphaned).await;
+    assert_eq!(refused, Err("transform_failed".to_string()));
     settle(&handler).await;
     assert!(stored_records(&handler, &project).is_empty());
 
@@ -1336,8 +1350,37 @@ fn store_statement(
     (id, session, text): (&str, &str, &str),
     captured: bool,
 ) -> i64 {
+    let rationale =
+        captured.then(|| json!({"source": "memory_capture", "session": session, "quote": text}));
+    store_row(handler, project, (id, text), rationale)
+}
+
+/// Stores a statement as capture writes one again once a contest of it has settled: its
+/// record names `stated_seq`, the commit that first recorded the statement. Returns the
+/// commit that wrote the row.
+fn store_settled_statement(
+    handler: &Handler,
+    project: &Path,
+    (id, session, text): (&str, &str, &str),
+    stated_seq: i64,
+) -> i64 {
+    let rationale = json!({
+        "source": "memory_capture", "session": session, "quote": text, "stated_seq": stated_seq
+    });
+    store_row(handler, project, (id, text), Some(rationale))
+}
+
+/// Stores `text` as a statement of the user under `id`: with `rationale` a row of capture
+/// that holds it, approved as capture approves one, and with none another writer's row.
+/// Returns the commit that recorded it.
+fn store_row(
+    handler: &Handler,
+    project: &Path,
+    (id, text): (&str, &str),
+    rationale: Option<Value>,
+) -> i64 {
     let store = handler.kernel.kernel_store().unwrap();
-    let bound = session_binding(project, session).kernel_project;
+    let bound = session_binding(project, "writer").kernel_project;
     let scope = bound.scope_id();
     store
         .commit(kernel_route_fixtures::intent(id), |envelope| {
@@ -1353,15 +1396,14 @@ fn store_statement(
             let summary = format!("{}: {text}", memory_capture::USER_STATED);
             let mut spec =
                 kernel_route_fixtures::memory_decision_spec(id, &scope, "PROJECT_RULES", &summary);
-            if !captured {
+            let Some(rationale) = &rationale else {
                 envelope.insert_decision(spec)?;
                 kernel_route_fixtures::verify_decision(envelope, id)?;
                 return Ok(String::new());
-            }
+            };
             spec.source_id = memory_capture::CAPTURE_SOURCE_ID.to_string();
             spec.source_kind = "assistant".to_string();
-            spec.payload.rationale =
-                json!({"source": "memory_capture", "session": session, "quote": text}).to_string();
+            spec.payload.rationale = rationale.to_string();
             envelope.insert_decision(spec)?;
             // The memory is approved as capture approves one: on a statement record
             // admitted as explicit user text.
@@ -1499,9 +1541,9 @@ async fn an_edit_of_a_listed_file_changes_its_line_and_leaves_the_revision() {
 }
 
 /// A block that lists a file gives the minute each statement of the user was first recorded,
-/// from the commit log. A line another mark rewrote, a row of another writer whose text
-/// opens the same way, and the facts of a block that lists no file stay as stored, and so do
-/// the facts of the read that serves a summarizer no pass read serves.
+/// from the commit log. A row of another writer whose text opens the same way, and the facts
+/// of a block that lists no file, stay as stored. The read that serves a summarizer no pass
+/// read serves holds every statement as stored.
 #[tokio::test]
 async fn a_block_that_lists_a_file_dates_the_users_statements() {
     let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
@@ -1509,18 +1551,6 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
     let tabs = "Indent with tabs.";
     let width = "Wrap lines at 100 columns.";
     let tabs_seq = store_statement(&handler, &project, ("mem-tabs", "s1", tabs), true);
-    // The second statement is recorded two hours after the first, so each line's minute
-    // names its own commit.
-    struct Stepped(i64);
-    impl Drop for Stepped {
-        fn drop(&mut self) {
-            kernel::test_clock::step(-self.0);
-        }
-    }
-    let _stepped = {
-        kernel::test_clock::step(7_200_000);
-        Stepped(7_200_000)
-    };
     let width_seq = store_statement(&handler, &project, ("mem-width", "s2", width), true);
     store_statement(
         &handler,
@@ -1546,7 +1576,6 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
             .format("%Y-%m-%dT%H:%MZ")
             .to_string()
     };
-    assert_ne!(minute(tabs_seq), minute(width_seq));
     assert_eq!(
         delivered_facts(&handler, &project, "reader"),
         [
@@ -1570,22 +1599,52 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
         ["mem-other", "mem-tabs"]
     );
     let binding = session_binding(&project, "reader");
-    let facts_alone = canonical_memory::read_project_facts(
+    let mut facts_alone: Vec<(String, String)> = canonical_memory::read_project_facts(
         &handler.kernel,
         &binding.kernel_project,
         "reader",
         binding.config.memory_budget_tokens,
-    );
-    assert!(
-        facts_alone
-            .rows()
-            .iter()
-            .all(|row| !row.content.contains("(stated ")),
-        "{:?}",
-        facts_alone.rows()
-    );
+    )
+    .rows()
+    .iter()
+    .map(|row| (row.object_id.clone(), row.content.clone()))
+    .collect();
+    facts_alone.sort();
+    assert_eq!(facts_alone, stored);
+}
 
-    // A line a mark rewrote after the statements were taken keeps the mark's text.
+/// Each statement's line takes the minute of the commit that first recorded it: its own
+/// commit, or the commit its settled record names, whenever its row was written. A line
+/// another mark rewrote, a statement whose commit has no time, and a row of another writer
+/// stay as they are.
+#[tokio::test]
+async fn a_statement_is_dated_by_the_commit_that_first_recorded_it() {
+    let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    let store = handler.kernel.kernel_store().unwrap();
+    let tabs = "Indent with tabs.";
+    let width = "Wrap lines at 100 columns.";
+    let tabs_seq = store_statement(&handler, &project, ("mem-tabs", "s1", tabs), true);
+    let width_seq = store_statement(&handler, &project, ("mem-width", "s2", width), true);
+    let other = ("mem-other", "s1", "Tag every release.");
+    store_statement(&handler, &project, other, false);
+    store_statement(
+        &handler,
+        &project,
+        ("mem-late", "s3", "Pin versions."),
+        true,
+    );
+    store_statement(&handler, &project, ("mem-marked", "s3", "Sign tags."), true);
+    // A row written again after a contest settled names the commit that first recorded
+    // its statement.
+    let settled_seq = store_settled_statement(
+        &handler,
+        &project,
+        ("mem-settled", "s4", "Squash merges."),
+        tabs_seq,
+    );
+    assert!(settled_seq > width_seq && width_seq > tabs_seq);
+
+    let binding = session_binding(&project, "reader");
     let mut response = canonical_memory::read_other_sessions(
         &store,
         &binding.kernel_project,
@@ -1595,23 +1654,49 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
     )
     .unwrap();
     let statements = named_files::user_statements(&response);
-    let marked =
-        format!("User stated: {tabs} (stated 2026-01-05; contested 2026-02-01 by m: \"x\")");
+    let marked = "User stated: Sign tags. (stated 2026-01-05; contested 2026-02-01 by m: \"x\")";
     response
         .decisions
-        .get_mut("mem-tabs")
+        .get_mut("mem-marked")
         .unwrap()
         .payload
-        .summary = marked.clone();
-    named_files::date_statements(&store, &mut response, &statements).unwrap();
-    assert_eq!(response.decisions["mem-tabs"].payload.summary, marked);
+        .summary = marked.to_owned();
+    // 2026-03-01T09:30Z, two hours later, and four hours later. No time is held for the
+    // commits of the statement `mem-late` and of the marked one.
+    let first_ms = 1_772_357_400_000;
+    let times = HashMap::from([
+        (tabs_seq, first_ms),
+        (width_seq, first_ms + 7_200_000),
+        (settled_seq, first_ms + 14_400_000),
+    ]);
+    named_files::mark_recorded(&mut response, &statements, &times);
+    let line = |response: &kernel_routes::read::ReadResponse, id: &str| {
+        response.decisions[id].payload.summary.clone()
+    };
+    let line_of = |id: &str| line(&response, id);
     assert_eq!(
-        response.decisions["mem-width"].payload.summary,
-        format!("User stated: {width} (recorded {})", minute(width_seq))
+        line_of("mem-tabs"),
+        format!("User stated: {tabs} (recorded 2026-03-01T09:30Z)")
     );
     assert_eq!(
-        response.decisions["mem-other"].payload.summary,
-        "User stated: Tag every release."
+        line_of("mem-width"),
+        format!("User stated: {width} (recorded 2026-03-01T11:30Z)")
+    );
+    assert_eq!(
+        line_of("mem-settled"),
+        "User stated: Squash merges. (recorded 2026-03-01T09:30Z)"
+    );
+    assert_eq!(line_of("mem-late"), "User stated: Pin versions.");
+    assert_eq!(line_of("mem-marked"), marked);
+    assert_eq!(line_of("mem-other"), "User stated: Tag every release.");
+
+    // With a time for every commit the marked line stays as its mark wrote it.
+    let every = HashMap::from_iter((1..=store.tip().unwrap()).map(|seq| (seq, first_ms)));
+    named_files::mark_recorded(&mut response, &statements, &every);
+    assert_eq!(line(&response, "mem-marked"), marked);
+    assert_eq!(
+        line(&response, "mem-late"),
+        "User stated: Pin versions. (recorded 2026-03-01T09:30Z)"
     );
 }
 

@@ -517,7 +517,11 @@ impl NamedFileRecord {
     /// holds, when no session was deleted since the pass was observed. The
     /// gate orders the writers, so each path is written while the session
     /// has a place for it and holds none for it, and is then held as
-    /// recorded. Returns how many it wrote.
+    /// recorded. A store that does not open writes nothing. Once the gate
+    /// is held, one deadline of [`COMMIT_WAIT`] bounds the wait for the
+    /// Kernel's writer over all the paths: a path whose commit the Kernel
+    /// refuses or that deadline ends stays unrecorded, and the paths after
+    /// it are tried under the same deadline. Returns how many it wrote.
     pub(crate) fn write(
         self,
         kernel: &KernelOpenCoordinator,
@@ -613,15 +617,7 @@ fn ensure_own_domain(envelope: &mut kernel::Envelope<'_>) -> Result<(), kernel::
             }
         }
         let object_id = free.ok_or(kernel::KernelError::Conflict)?;
-        envelope.insert_domain(kernel::DomainSpec {
-            domain_id: DOMAIN_ID.into(),
-            object_id: object_id.clone(),
-            name: DOMAIN_ID.into(),
-            source_kind: kernel_routes::commit::DOMAIN_SOURCE_KIND.into(),
-            source_id: object_id,
-            source_revision: 1,
-            sensitivity: kernel::Sensitivity::Normal,
-        })?;
+        envelope.insert_domain(kernel_routes::commit::domain_spec(DOMAIN_ID, object_id))?;
     }
     Ok(())
 }
@@ -738,9 +734,10 @@ impl NamedFiles {
     /// [`MAX_PASS_FILES`] observed paths, within the places the session has
     /// left, that name regular files of the project now and that the Kernel
     /// stores as written. `None` when it holds no path, when the Kernel
-    /// would rewrite the record's rationale, when every write slot is taken, and
-    /// when a session was deleted since the pass was observed. The caller
-    /// runs on the blocking pool: the files are looked for.
+    /// would rewrite the record's rationale, when the project root does not
+    /// open, when every write slot is taken, and when a session was deleted
+    /// since the pass was observed. The caller runs on the blocking pool:
+    /// the files are looked for.
     pub(crate) fn keep(
         &self,
         project: &ProjectBinding,
@@ -1006,19 +1003,26 @@ pub(crate) fn revised_part(line: &str) -> &str {
         .map_or(line, |(revised, _)| revised)
 }
 
-/// The UTC minute of `at_ms`, as `2026-03-01T09:30Z`.
+/// The UTC minute of `at_ms`, as `2026-03-01T09:30Z`, for a time in the
+/// years 0000 to 9999, which that form writes with four digits. Any other
+/// time is [`UNDATED`].
 fn minute(at_ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(at_ms).map_or_else(
-        || "an unknown time".to_owned(),
-        |at| at.format("%Y-%m-%dT%H:%MZ").to_string(),
-    )
+    use chrono::Datelike as _;
+    chrono::DateTime::from_timestamp_millis(at_ms)
+        .filter(|at| (0..=9999).contains(&at.year()))
+        .map_or_else(
+            || UNDATED.to_owned(),
+            |at| at.format("%Y-%m-%dT%H:%MZ").to_string(),
+        )
 }
+
+/// What stands for a time no four-digit year holds.
+const UNDATED: &str = "at an unknown time";
 
 /// The words of a line's last-change clause after [`LAST_CHANGE_CLAUSE`]:
 /// the minute of the commit that gave the file its bytes; no time for a
 /// history the read did not follow to that commit; the minute of the
-/// file's modification time and `on disk` for a file whose bytes HEAD does
-/// not hold.
+/// file's modification time and `on disk` for every other file.
 fn last_change(change: changes::LastChange) -> String {
     use changes::LastChange;
     match change {
@@ -1035,8 +1039,9 @@ const HISTORY_UNREAD: &str = "at a time the read history does not show";
 /// The clause the packer charges for every `NAMED_FILES` line, whatever
 /// the line's own clause holds: the form of the most tokens. The block's
 /// selection, and so its revision, then stays as it is when a file's last
-/// change does. `a_clause_costs_at_most_its_charge` pins that no clause
-/// costs more.
+/// change moves. `a_clause_costs_at_most_its_charge` pins that no clause
+/// [`last_change`] writes costs more, over the minutes of the years 0000
+/// to 9999 and the forms without a minute.
 pub(crate) const CHARGED_CLAUSE: &str = "; last changed 2888-08-28T18:58Z on disk)";
 
 /// A statement of the user that a read serves: its id, the commit that
@@ -1078,14 +1083,11 @@ pub(crate) fn user_statements(response: &kernel_routes::read::ReadResponse) -> V
 /// Appends ` (recorded <minute>)` to the line of each of `statements` in
 /// `response`: the UTC minute of the commit that first recorded the
 /// statement, read from the store in one statement for the pass. Capture
-/// commits a statement when the turn it was made in has ended, so the
-/// statement was made at that minute or before it. A line
-/// another mark already rewrote, which is longer than the stored text, is
-/// left as that mark wrote it: a contest mark dates its statement itself.
-/// A statement whose commit the log holds no time for keeps its stored
-/// text. A failed read fails the pass. The rewritten lines are the pass's
-/// facts wherever the pass's read serves them: the block, and the
-/// summarizer prompt of a firing that read serves, as a contest mark is.
+/// records a statement after the user made it, so the statement was made at
+/// that minute or before it. A failed read fails the pass. The rewritten
+/// lines are the pass's facts wherever the pass's read serves them: the
+/// block, and the summarizer prompt of a firing that read serves, as a
+/// contest mark is.
 pub(crate) fn date_statements(
     store: &kernel::KernelStore,
     response: &mut kernel_routes::read::ReadResponse,
@@ -1101,10 +1103,24 @@ pub(crate) fn date_statements(
     sequences.sort_unstable();
     sequences.dedup();
     let times = store.commits_recorded_at(&sequences)?;
+    mark_recorded(response, statements, &times);
+    Ok(())
+}
+
+/// Appends to the line of each of `statements` the minute `recorded_ms`
+/// holds for the commit that first recorded it. A line another mark
+/// already rewrote, which is longer than the stored text, is left as that
+/// mark wrote it: a contest mark dates its statement itself. A statement
+/// whose commit `recorded_ms` holds no time for keeps its stored text.
+pub(crate) fn mark_recorded(
+    response: &mut kernel_routes::read::ReadResponse,
+    statements: &[UserStatement],
+    recorded_ms: &HashMap<i64, i64>,
+) {
     for statement in statements {
         let (Some(decision), Some(at_ms)) = (
             response.decisions.get_mut(&statement.id),
-            times.get(&statement.stated_seq),
+            recorded_ms.get(&statement.stated_seq),
         ) else {
             continue;
         };
@@ -1115,7 +1131,6 @@ pub(crate) fn date_statements(
                 .push_str(&format!(" (recorded {})", minute(*at_ms)));
         }
     }
-    Ok(())
 }
 #[cfg(test)]
 mod bounds_tests {
@@ -1922,32 +1937,55 @@ mod bounds_tests {
     /// The packer charges every `NAMED_FILES` line for one fixed clause.
     /// Under the estimator the budget uses, a line with any clause the
     /// renderer writes costs at most the same line with the charged clause:
-    /// a commit time, the same time on disk, for minutes spread over three
-    /// centuries, and the clause of a history the read did not follow.
+    /// a commit time and the same time on disk, for minutes spread over the
+    /// years 0000 to 9999, a time outside those years in both forms, and
+    /// the clause of a history the read did not follow.
     #[test]
     fn a_clause_costs_at_most_its_charge() {
+        use changes::LastChange;
         let tokens = |line: &str| crate::token_cache::cached_estimate_tokens(&format!("{line}\n"));
-        for prefix in [
-            "docs/guide.md (the agent used it in 1 earlier session, last on 2026-03-01",
-            "tools/lint/check_style.sh (the agent used it in 12 earlier sessions, last on 1999-12-31",
+        // The first minute of the year 0000 and the minute after the last
+        // of the year 9999.
+        let (first_ms, end_ms) = (-62_167_219_200_000, 253_402_300_800_000);
+        assert_eq!(minute(first_ms), "0000-01-01T00:00Z");
+        assert_eq!(minute(end_ms - 1), "9999-12-31T23:59Z");
+        // A prime number of minutes between samples walks every minute,
+        // hour, day, and month digit: 100,003 minutes over the years 0000
+        // to 9999, and 20,011 over the three centuries from 1970.
+        for (prefix, years, step_minutes) in [
+            (
+                "docs/guide.md (the agent used it in 1 earlier session, last on 2026-03-01",
+                first_ms..end_ms,
+                100_003,
+            ),
+            (
+                "tools/lint/check_style.sh (the agent used it in 12 earlier sessions, last on 1999-12-31",
+                0..9_500_000_000_000,
+                20_011,
+            ),
         ] {
             let charge = tokens(&format!("{prefix}{CHARGED_CLAUSE}"));
-            let costs = |change: changes::LastChange| {
+            let costs = |change: LastChange| {
                 tokens(&format!(
                     "{prefix}{LAST_CHANGE_CLAUSE}{})",
                     last_change(change)
                 ))
             };
-            assert!(costs(changes::LastChange::HistoryUnread) <= charge);
-            // 20,011 minutes apart is a prime number of minutes, so the
-            // samples walk every minute, hour, day, and month digit.
-            let step = 20_011 * 60_000;
-            let mut at_ms = 0;
-            while at_ms < 9_500_000_000_000 {
-                for change in [
-                    changes::LastChange::Committed(at_ms),
-                    changes::LastChange::OnDisk(at_ms),
-                ] {
+            for undated in [
+                LastChange::HistoryUnread,
+                LastChange::Committed(first_ms - 1),
+                LastChange::OnDisk(first_ms - 1),
+                LastChange::Committed(end_ms),
+                LastChange::OnDisk(end_ms),
+                LastChange::OnDisk(i64::MIN),
+                LastChange::OnDisk(i64::MAX),
+            ] {
+                assert!(costs(undated) <= charge, "{undated:?}");
+            }
+            let step = step_minutes * 60_000;
+            let mut at_ms = years.start;
+            while at_ms < years.end {
+                for change in [LastChange::Committed(at_ms), LastChange::OnDisk(at_ms)] {
                     assert!(
                         costs(change) <= charge,
                         "{change:?}: {} tokens against a charge of {charge}",
@@ -1966,7 +2004,8 @@ mod bounds_tests {
     /// A line's last-change clause is the UTC minute of the commit that
     /// gave the file its bytes, the same form with `on disk` for a time the
     /// file system holds, and words with no time for a history the read
-    /// did not follow to that commit.
+    /// did not follow to that commit and for a time outside the years 0000
+    /// to 9999.
     #[test]
     fn a_last_change_clause_has_three_forms() {
         use changes::LastChange;
@@ -1984,9 +2023,14 @@ mod bounds_tests {
             last_change(LastChange::HistoryUnread),
             "at a time the read history does not show"
         );
+        // The minute after 9999-12-31T23:59Z, and a time no calendar holds.
         assert_eq!(
-            last_change(LastChange::Committed(i64::MAX)),
-            "an unknown time"
+            last_change(LastChange::Committed(253_402_300_800_000)),
+            "at an unknown time"
+        );
+        assert_eq!(
+            last_change(LastChange::OnDisk(i64::MAX)),
+            "at an unknown time on disk"
         );
     }
 }

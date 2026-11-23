@@ -32,7 +32,7 @@ pub struct CanonicalMemory {
 
 /// The rows one kernel snapshot's block renders: the named files, most used
 /// first, the lasting rows newest first, and then the work in progress
-/// newest first, with the digest of the block they render computed once at
+/// newest first, with the revision of those rows computed once at
 /// construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalMemorySnapshot {
@@ -47,9 +47,10 @@ pub struct CanonicalMemorySnapshot {
 impl CanonicalMemorySnapshot {
     /// Builds the snapshot and digests the rows the block renders from.
     ///
-    /// Each rendered row contributes its category and the exact line
-    /// `render_memory_line` emits. Edits past the renderer's content cap and
-    /// changes to `truncated` preserve the rendered bytes and the digest.
+    /// Each rendered row contributes its category and the line
+    /// `render_memory_line` emits, a `NAMED_FILES` line up to its
+    /// last-change clause. Edits past the renderer's content cap, changes
+    /// to `truncated`, and a file's last change preserve the digest.
     pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
         let rendered = rendered_rows(&rows);
         let mut hasher = DefaultHasher::new();
