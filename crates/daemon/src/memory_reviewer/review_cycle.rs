@@ -216,7 +216,7 @@ impl Walk {
     };
 }
 
-/// What a selection remembers of one source: who wrote it and the commit that published it. Both are fixed for a source. A captured message is retained for a bounded time and a memory outlives it, so a source can be found retired.
+/// What a selection remembers of one source: who wrote it and the commit that published it. The commit is that of the first live descriptor the store returns for the evidence, which a message repeated byte for byte shares with its first copy. A captured message is retained for a bounded time and a memory outlives it, so a source can be found retired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceFacts {
     writer: Writer,

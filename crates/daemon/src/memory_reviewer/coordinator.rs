@@ -1442,7 +1442,7 @@ enum Relation {
 enum Unread {
     /// The store failed the read: the run ends unsettled and a later pass reads again.
     Unsettled,
-    /// The reference is past what one run may read: the run ends as a spent budget, as it does when the memory itself is.
+    /// The reference is past what one run may read: the run ends before any request, and the settlement records the partial disclosure the refused read left, as it does when the memory itself is past that bound.
     OverBound,
     /// The store has retired the reference: the evidence is gone, and the review goes on with the rest.
     Gone,
