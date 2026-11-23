@@ -176,9 +176,9 @@ Existing check: `revision_changes_only_when_the_rendered_inputs_change`
 (`crates/daemon/src/canonical_memory.rs:1591`);
 `the_revision_reads_the_named_files_in_the_supplied_order`
 (`crates/daemon/src/canonical_memory.rs:1530`). Status: unaudited.
-Impact: A revision that moved without a byte change would request a HARD fold
-over unchanged bytes. The serve of an equal served set replays its receipt
-whatever the revision.
+Impact: A spurious revision change can request an unnecessary HARD fold. If
+the project, session, harness, role, and served IDs are unchanged, the serve
+replays its existing receipt instead of inserting another record.
 Open questions:
 - The `DefaultHasher` output is unspecified across toolchain releases; #1154
   resolves OQ3-12 by keying the record on `served_set_digest` and storing the
