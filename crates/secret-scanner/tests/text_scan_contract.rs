@@ -427,13 +427,16 @@ fn non_ascii_neighbours_do_not_change_findings() {
     for ascii in cases {
         let baseline = scanner.scan(ascii).unwrap().findings;
         assert!(!baseline.is_empty(), "{ascii} produced no baseline finding");
-        let expected = rule_ids_and_values(ascii, &baseline);
-        for (prefix, suffix) in [
-            ("é\n", ""),
-            ("😀\n", ""),
-            ("", " é"),
-            ("日本語\n", "\n日本語"),
+        // Surrounding text can change whether `magic-field-value` reports the Netlify token.
+        for (prefix, suffix, ascii_prefix, ascii_suffix) in [
+            ("é\n", "", "e\n", ""),
+            ("😀\n", "", "x\n", ""),
+            ("", " é", "", " e"),
+            ("日本語\n", "\n日本語", "abc\n", "\nabc"),
         ] {
+            let twin = format!("{ascii_prefix}{ascii}{ascii_suffix}");
+            let expected = rule_ids_and_values(&twin, &scanner.scan(&twin).unwrap().findings);
+            assert!(!expected.is_empty(), "{twin} produced no finding");
             let decorated = format!("{prefix}{ascii}{suffix}");
             let findings = scanner.scan(&decorated).unwrap().findings;
             assert_eq!(
@@ -1155,4 +1158,96 @@ fn secret_literals_resembling_code_references_are_findings() {
         "{github}: {:?}",
         rules(&github)
     );
+}
+
+#[test]
+fn each_credential_form_rule_reports_its_value_under_its_rule_id() {
+    let scanner = Scanner::new(ScanProfile::Conservative).unwrap();
+    let password = ["Zx9", "!kq7"].concat();
+    let digits = ["1234", "5678"].concat();
+    let basic = ["dXNlcjpaeDlr", "cTc="].concat();
+    let header = ["-----BEGIN RSA PRIVATE", " KEY-----"].concat();
+    let body = ["MIIEvQIBADANBgkq", "hkiG9w0BAQEFAASC"].concat();
+    for (input, rule, value) in [
+        (
+            format!("deploy --password {password} --verbose"),
+            "magic-option-value",
+            password.clone(),
+        ),
+        (
+            format!("password: {password}"),
+            "magic-field-value",
+            password.clone(),
+        ),
+        (
+            format!("out\\npassword: {password}\\nuser: bob"),
+            "magic-field-value-serialized",
+            format!("{password}\\nuser:"),
+        ),
+        (
+            format!("PGPASSWORD={password} psql"),
+            "magic-password-suffix-assignment",
+            password.clone(),
+        ),
+        (
+            format!("max_tokens=4096 password={digits}"),
+            "magic-secret-digits",
+            digits.clone(),
+        ),
+        (
+            format!("https://user:{password}@host.internal/r.git"),
+            "magic-url-userinfo",
+            password.clone(),
+        ),
+        (
+            format!("Authorization: Basic {basic}"),
+            "magic-basic-authorization",
+            basic.clone(),
+        ),
+        (
+            format!("mysql -uroot -p{password} app"),
+            "magic-client-password-attached",
+            password.clone(),
+        ),
+        (
+            format!("sshpass -p {password} ssh host"),
+            "magic-client-password-option",
+            password.clone(),
+        ),
+        (
+            format!("{header}\n{body}\n{body}\nabcd12==\n"),
+            "magic-private-key-body",
+            format!("{body}\n{body}\nabcd12=="),
+        ),
+    ] {
+        let report = scanner.scan(&input).unwrap();
+        assert_eq!(report.limits_hit, None, "{input:?}");
+        assert_eq!(
+            rule_ids_and_values(&input, &report.findings),
+            [(rule.to_owned(), value)],
+            "{input:?}"
+        );
+        assert_eq!(
+            report.findings[0].rule_source,
+            RuleSource::ConservativeOverlay
+        );
+    }
+    for input in [
+        "deploy --password PASSWORD".to_owned(),
+        "password: string".to_owned(),
+        "PGPASSWORD=$PGPASS psql".to_owned(),
+        "password=123".to_owned(),
+        ["https://user:", "password@host.internal/"].concat(),
+        "Authorization: Basic authentication".to_owned(),
+        "mysql -u root -p -h db".to_owned(),
+        "ssh -p 2222 host".to_owned(),
+    ] {
+        let report = scanner.scan(&input).unwrap();
+        assert_eq!(report.limits_hit, None, "{input:?}");
+        assert_eq!(
+            rule_ids_and_values(&input, &report.findings),
+            [],
+            "{input:?}"
+        );
+    }
 }

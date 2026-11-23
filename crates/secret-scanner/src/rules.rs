@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "973181a0af049fb4c0ae06160cd022b1beae3660b87ac9fa4d498864912b3487";
+    "219f0d299c80e6a32124e80ed63ecdc53e444162ea89a023ac9222ebe73646bb";
 
 const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -124,6 +124,34 @@ pub(crate) struct RuleDeclaration {
     /// class treats the same code point as content makes the value run past it.
     #[serde(default)]
     pub unicode: bool,
+    /// Names the reading the evaluator applies to the value of a rule for a credential form
+    /// whose syntax is weaker than `key=value`: the text the gates read and the stand-in
+    /// shapes that are left as written.
+    ///
+    /// A rule without the field is evaluated by its other fields alone. The field is left
+    /// out of the encoded declaration when it is absent, so such a rule encodes to the same
+    /// bytes whether or not this field exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_form: Option<CredentialForm>,
+}
+
+/// The value reading of a credential-form rule. `conservative_overlay.yaml` states the
+/// grammar of each form; `evaluator::CredentialForm::admitted_text` implements the gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CredentialForm {
+    /// The word after a secret-named option: `--password WORD`.
+    OptionValue,
+    /// The word that ends a `name: WORD` line.
+    FieldValue,
+    /// The word assigned to a name that ends in `password`: `PGPASSWORD=WORD`.
+    PasswordAssignment,
+    /// A word of digits under a key that names a password or a secret.
+    Digits,
+    /// The password of URL userinfo.
+    UrlPassword,
+    /// The word a named client reads as its password option: `-pWORD`, `-p WORD`.
+    ClientPassword,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -189,6 +217,7 @@ pub(crate) enum OfflineValidationKind {
     SentryOrgToken,
     PypiToken,
     SlackToken,
+    BasicCredentials,
 }
 
 /// Compiled declaration and its prepared candidate filters.
@@ -770,11 +799,77 @@ fn encode_rule(hash: &mut Sha256, rule: &Rule) {
 }
 
 #[cfg(test)]
+mod monotonicity;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// Pattern count above which `AhoCorasickKind::Auto` stops building a DFA and falls back to a contiguous NFA.
     const AUTO_DFA_PATTERN_LIMIT: usize = 100;
+
+    #[test]
+    fn preselection_selects_each_credential_form_rule_on_its_form() {
+        let rules = RuleSet::from_embedded().unwrap();
+        let word = ["Zx9", "kq7"].concat();
+        let basic = ["dXNlcjpaeDlr", "cTc="].concat();
+        for (input, name) in [
+            (format!("deploy --PASSWORD {word}"), "magic-option-value"),
+            (format!("Password: {word}"), "magic-field-value"),
+            (
+                format!("PASSWORD: {word}\\nuser: bob"),
+                "magic-field-value-serialized",
+            ),
+            (
+                format!("PGPASSWORD={word}"),
+                "magic-password-suffix-assignment",
+            ),
+            (
+                format!("pgpassword={word}"),
+                "magic-password-suffix-assignment",
+            ),
+            (format!("Password={}", 12_345_678), "magic-secret-digits"),
+            (
+                format!("AUTHORIZATION: basic {basic}"),
+                "magic-basic-authorization",
+            ),
+            (
+                format!("x://alice:{word}@host.internal/"),
+                "magic-url-userinfo",
+            ),
+            (
+                format!("mysql -uroot -p{word} app"),
+                "magic-client-password-attached",
+            ),
+            (
+                format!("sshpass -p {word} ssh host"),
+                "magic-client-password-option",
+            ),
+            (
+                format!("docker login -u bob -p {word} registry"),
+                "magic-client-password-option",
+            ),
+            (
+                format!(
+                    "-----begin private key-----\n{}\n",
+                    ["QUJDREVGR0hJSktM", "TU5PUFFSU1RVVldYWVo"].concat()
+                ),
+                "magic-private-key-body",
+            ),
+        ] {
+            let rule = rules
+                .active(ScanProfile::Conservative)
+                .find(|rule| rule.declaration.name == name)
+                .unwrap_or_else(|| panic!("no overlay rule named {name}"));
+            assert!(rule.regex.is_match(input.as_bytes()), "{name} on {input:?}");
+            assert!(
+                rules
+                    .preselect(ScanProfile::Conservative, input.as_bytes())
+                    .any(|selected| selected.declaration.name == name),
+                "{name} matches {input:?} but was not preselected"
+            );
+        }
+    }
 
     /// A matching rule must be preselected because unselected rules are not
     /// evaluated.
@@ -1036,11 +1131,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "69235bd55d45ad0e6e80caf378cce8a3ee27087a13190c26776864264503bf22",
+                "642b117d11734203e78303074f527309d3a508207535a1716d05c7c941257689",
             ),
             (
                 ScanProfile::Comprehensive,
-                "c19adcf9d5dc7aa972f008fdb12a0cf8ceeb520b1ed4a73b5211d0c0a629dadb",
+                "4cef31a5453e2287c5c1fad079ca87655b9c431965b6342ed2d5d1c054a90de5",
             ),
         ] {
             let digest = rules

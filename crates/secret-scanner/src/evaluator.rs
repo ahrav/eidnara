@@ -4,6 +4,7 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder, AhoCorasickKind, MatchKind};
 use regex::bytes::Captures;
 
 use crate::api::REVISION;
+use crate::rules::CredentialForm;
 use crate::rules::{
     CodeReferenceGate, EntropySpec, LocalContextSpec, OfflineValidationKind, OfflineValidationSpec,
     Rule, RuleSet,
@@ -280,6 +281,18 @@ fn evaluate_candidate_spans(
             return Ok(None);
         }
     }
+    let value = match rule.declaration.credential_form {
+        Some(form) => {
+            // The work budget charges `value.len()` because `admitted_text` makes a bounded number of reads per byte.
+            add_work(work, value.len(), limits.max_work_bytes)?;
+            let key = key_span.and_then(|key| input.as_bytes().get(key.start()..key.end()));
+            match form.admitted_text(key, value) {
+                Some(text) => text,
+                None => return Ok(None),
+            }
+        }
+        None => value,
+    };
     if rule.declaration.reject_scalars && is_scalar(value) {
         return Ok(None);
     }
@@ -1498,6 +1511,7 @@ fn offline_verdict(spec: &OfflineValidationSpec, value: &[u8]) -> OfflineVerdict
             }
         }
         OfflineValidationKind::AwsAccessKey => validate_aws(value),
+        OfflineValidationKind::BasicCredentials => validate_basic_credentials(value),
         OfflineValidationKind::SentryOrgToken => validate_sentry(value),
         OfflineValidationKind::PypiToken => validate_pypi(value),
         OfflineValidationKind::SlackToken => validate_slack(value),
@@ -1738,8 +1752,456 @@ fn decode_prefix(input: &[u8], prefix: &[u8], url: bool) -> bool {
     false
 }
 
+impl CredentialForm {
+    /// Returns the text of `word` that the rule's later gates read, or `None` when the
+    /// text stands in for a credential.
+    ///
+    /// `word` is the reported span of the candidate. The returned text is a slice of
+    /// `word`, so each later gate reads bytes within the reported span.
+    fn admitted_text<'a>(self, key: Option<&[u8]>, word: &'a [u8]) -> Option<&'a [u8]> {
+        if self == Self::Digits {
+            return word.iter().all(u8::is_ascii_digit).then_some(word);
+        }
+        let ValueText {
+            text,
+            quote,
+            closed_by_punctuation,
+        } = value_text(word);
+        if text.is_empty() || quote == Quote::Command {
+            return None;
+        }
+        let bare = quote == Quote::Bare;
+        let rejected = match self {
+            Self::Digits => false,
+            Self::OptionValue => {
+                key.is_some_and(is_negated_switch)
+                    || is_count(text, key.is_some_and(ends_in_memorized_secret_word))
+                    || is_placeholder_shape(text)
+                    || (bare && is_code_reference(text))
+            }
+            Self::FieldValue => {
+                is_count(text, key.is_some_and(ends_in_memorized_secret_word))
+                    || is_placeholder_shape(text)
+                    || (bare
+                        && (closed_by_punctuation
+                            || is_code_reference(text)
+                            || is_program_text(text)
+                            || is_non_null_scalar_type(text)))
+            }
+            Self::PasswordAssignment => {
+                is_count(text, true)
+                    || is_reference_shape(text)
+                    || (bare && is_code_reference(text))
+            }
+            Self::ClientPassword => {
+                is_count(text, true) || is_port_mapping(text) || is_placeholder_shape(text)
+            }
+            Self::UrlPassword => is_placeholder_shape(text),
+        };
+        (!rejected).then_some(text)
+    }
+}
+
+/// How the text of a value word was quoted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Quote {
+    /// A bare word.
+    Bare,
+    /// One pair of double or single quotes, plain or as serialized text writes them, so the text is a literal.
+    Literal,
+    /// One pair of backquotes, which the shell runs as a command.
+    Command,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ValueText<'a> {
+    text: &'a [u8],
+    quote: Quote,
+    /// A bare text stood directly before `,`, `;`, `)`, `]`, or `}`.
+    closed_by_punctuation: bool,
+}
+
+/// The text of a value word that the gates of a credential form read.
+///
+/// A word runs to the next blank, so it carries what surrounds the value on its line: the
+/// quotes around it, the punctuation that closes a call or a serialized string after it
+/// (`--password "$DB_PASSWORD")`, `Zx9kq"}`), and in serialized text the escaped line break
+/// and the first word of the next line. The text is the word up to its first serialized
+/// line break, with that closing punctuation and one pair of enclosing quotes taken off.
+fn value_text(word: &[u8]) -> ValueText<'_> {
+    if let Some(literal) = unquoted_text(word) {
+        return ValueText {
+            text: before_serialized_line_break(literal.text),
+            ..literal
+        };
+    }
+    let head = before_serialized_line_break(word);
+    let closed = before_closing_punctuation(head);
+    if let Some(literal) = unquoted_text(closed) {
+        return literal;
+    }
+    // A quote before the closing punctuation ends a string that holds the value, as in
+    // `{"command":"deploy --password Zx9kq"}`, so the punctuation belongs to that string.
+    let unclosed = trim_end(closed, |byte| matches!(byte, b'"' | b'\'' | b'`' | b'\\'));
+    let text = [&b"\\\""[..], b"\"", b"'"]
+        .iter()
+        .find_map(|quote| unclosed.strip_prefix(*quote))
+        .unwrap_or(unclosed);
+    ValueText {
+        text,
+        quote: Quote::Bare,
+        closed_by_punctuation: unclosed.len() == closed.len() && closed.len() != head.len(),
+    }
+}
+
+fn trim_end(bytes: &[u8], closes: fn(u8) -> bool) -> &[u8] {
+    let end = bytes
+        .iter()
+        .rposition(|byte| !closes(*byte))
+        .map_or(0, |index| index + 1);
+    &bytes[..end]
+}
+
+/// `before_closing_punctuation` treats trailing `,` and `;` and surplus trailing closing
+/// brackets as surrounding syntax. A bracket is surplus when `head` holds more of it than of
+/// its opening bracket, so `{name}` keeps its brace and `"$NAME")` loses its parenthesis.
+fn before_closing_punctuation(head: &[u8]) -> &[u8] {
+    let surplus = |open: u8, close: u8| {
+        let count = |wanted: u8| head.iter().filter(|byte| **byte == wanted).count();
+        count(close).saturating_sub(count(open))
+    };
+    let mut surplus = [
+        (b')', surplus(b'(', b')')),
+        (b']', surplus(b'[', b']')),
+        (b'}', surplus(b'{', b'}')),
+    ];
+    let mut end = head.len();
+    while let Some(&last) = end.checked_sub(1).and_then(|index| head.get(index)) {
+        let closes = matches!(last, b',' | b';')
+            || surplus.iter_mut().any(|(close, left)| {
+                let closes = *close == last && *left > 0;
+                *left -= usize::from(closes);
+                closes
+            });
+        if !closes {
+            break;
+        }
+        end -= 1;
+    }
+    &head[..end]
+}
+
+fn before_serialized_line_break(word: &[u8]) -> &[u8] {
+    let end = (0..word.len())
+        .find(|&at| {
+            matches!(
+                &word[at..],
+                [b'\\', b'n' | b'r', ..]
+                    | [b'\\', b'u', b'0', b'0', b'0', b'a' | b'A' | b'd' | b'D', ..]
+            )
+        })
+        .unwrap_or(word.len());
+    &word[..end]
+}
+
+/// The text between one pair of quotes that encloses all of `word`.
+fn unquoted_text(word: &[u8]) -> Option<ValueText<'_>> {
+    let enclosed = |open: &[u8], quote| {
+        (word.len() >= 2 * open.len() && word.starts_with(open) && word.ends_with(open)).then(
+            || ValueText {
+                text: &word[open.len()..word.len() - open.len()],
+                quote,
+                closed_by_punctuation: false,
+            },
+        )
+    };
+    enclosed(b"\\\"", Quote::Literal)
+        .or_else(|| enclosed(b"\"", Quote::Literal))
+        .or_else(|| enclosed(b"'", Quote::Literal))
+        .or_else(|| enclosed(b"`", Quote::Command))
+}
+
+/// A scalar where the key names a count, a flag, or a length. Under a key that names a
+/// password or a secret, or after a client's password option, a PIN is the value itself.
+fn is_count(text: &[u8], memorized: bool) -> bool {
+    is_scalar(text) && !(memorized && is_pin(text))
+}
+
+/// Key words whose value a person chooses or memorizes, so it can be all digits.
+/// A number under `token` or `key` is a count or an index, as in `max_tokens=4096`.
+const MEMORIZED_SECRET_WORDS: &[&[u8]] = &[b"password", b"secret"];
+
+/// Whether the last word of `key` is `password` or `secret`, alone or joined to the letters
+/// before it (`PGPASSWORD`). `password_length` and `secret_version` end in a word that names
+/// a number.
+fn ends_in_memorized_secret_word(key: &[u8]) -> bool {
+    key_tokens(key).last().is_some_and(|token| {
+        MEMORIZED_SECRET_WORDS.iter().any(|word| {
+            token
+                .len()
+                .checked_sub(word.len())
+                .is_some_and(|start| token[start..].eq_ignore_ascii_case(word))
+        })
+    })
+}
+
+/// The shortest personal identification number in common use has four digits (ISO 9564-1).
+/// Shorter numbers under a password key are lengths, counts, and flags.
+const MIN_PIN_DIGITS: usize = 4;
+
+fn is_pin(text: &[u8]) -> bool {
+    text.len() >= MIN_PIN_DIGITS && text.iter().all(u8::is_ascii_digit)
+}
+
+/// `--no-password` switches the prompt off and takes no value, so the word after it is the
+/// next argument.
+fn is_negated_switch(key: &[u8]) -> bool {
+    key_tokens(key)
+        .next()
+        .is_some_and(|token| token.eq_ignore_ascii_case(b"no"))
+}
+
+/// Whether `text` has the shape of text that stands where a credential would go.
+///
+/// - A plain word, which a metavariable (`PASSWORD`), a type name (`string`), and a word of
+///   prose all are; a generated credential carries an ASCII digit or symbol.
+/// - A reference, a template, or a mask ([`is_reference_shape`]).
+/// - A port followed by a property list (`1433;database=sales`).
+/// - A file path or a URL, which names where the credential is kept or issued.
+/// - An attribute list (`id=npm,src=.npmrc`), which describes the secret an option names.
+fn is_placeholder_shape(text: &[u8]) -> bool {
+    is_plain_word(text)
+        || is_reference_shape(text)
+        || is_file_path(text)
+        || is_url(text)
+        || is_attribute(text)
+        || is_port_and_properties(text)
+}
+
+/// Text that names a credential kept elsewhere or hides one.
+///
+/// - A mask: a run of `***`, or punctuation alone (`...`).
+/// - A reference: a leading `$`, a leading backquote (the command-substitution marker),
+///   `%NAME%`, or a trailing upper-case name that itself names a secret
+///   (`os.environ/DB_PASSWORD`).
+/// - A template: text that opens with `<`, `{`, or `[` and holds the closing bracket, or `%`
+///   and one letter.
+fn is_reference_shape(text: &[u8]) -> bool {
+    let Some(&first) = text.first() else {
+        return true;
+    };
+    is_mask(text)
+        || matches!(first, b'$' | b'`')
+        || names_a_secret_variable(text)
+        || opens_a_template(text)
+        || matches!(text, [b'%', verb] if verb.is_ascii_alphabetic())
+        || is_environment_reference(text)
+}
+
+/// `<password>`, `<file>|<text>`, `{name}`, `[options]`: text that opens with a bracket and
+/// holds the bracket that closes it names a slot for the value.
+fn opens_a_template(text: &[u8]) -> bool {
+    let close = match text.first() {
+        Some(b'<') => b'>',
+        Some(b'{') => b'}',
+        Some(b'[') => b']',
+        _ => return false,
+    };
+    text.contains(&close)
+}
+
+/// `%DB_PASSWORD%`: a variable name between two `%`, as the Windows shell writes a reference.
+fn is_environment_reference(text: &[u8]) -> bool {
+    text.strip_prefix(b"%")
+        .and_then(|rest| rest.strip_suffix(b"%"))
+        .is_some_and(|name| {
+            name.first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+                && name
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        })
+}
+
+/// `1433;database=sales`: a port and the property list a JDBC URL writes after it.
+fn is_port_and_properties(text: &[u8]) -> bool {
+    let digits = text.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    digits > 0 && text.get(digits) == Some(&b';')
+}
+
+/// `8080:80`, `127.0.0.1:5432:5432`: numbers joined by `:` are a port mapping, which `-p`
+/// takes under `docker run` and `ssh`.
+fn is_port_mapping(text: &[u8]) -> bool {
+    text.contains(&b':')
+        && text
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b':' | b'.' | b'/'))
+}
+
+/// The built-in scalar types of the GraphQL specification in their non-null spelling.
+const NON_NULL_SCALAR_TYPES: &[&str] = &["String!", "ID!", "Int!", "Float!", "Boolean!"];
+
+/// `password: String!` in a schema declares a field of a built-in scalar type.
+fn is_non_null_scalar_type(text: &[u8]) -> bool {
+    NON_NULL_SCALAR_TYPES
+        .iter()
+        .any(|name| text == name.as_bytes())
+}
+
+/// A bare field value that a YAML plain scalar cannot be, or that holds the punctuation of
+/// a type or a call: `token: &str`, `secret: Option<String>`, `password: getpass()`.
+///
+/// A YAML plain scalar begins with none of the indicators `& * ! | > % @ #` and a
+/// backquote, and holds no flow indicator (`[`, `]`, `{`, `}`, `,`). Angle brackets,
+/// parentheses, and `;` are the punctuation of the program text that writes `name: type`.
+/// A quoted value is a literal and is read by the other gates alone.
+fn is_program_text(text: &[u8]) -> bool {
+    text.first()
+        .is_some_and(|first| matches!(first, b'&' | b'*' | b'!' | b'|' | b'>' | b'%' | b'@' | b'#'))
+        || text.iter().any(|byte| {
+            matches!(
+                byte,
+                b'[' | b']' | b'{' | b'}' | b',' | b'<' | b'>' | b'(' | b')' | b';' | b'`'
+            )
+        })
+}
+
+/// `token: https://example.org/settings/tokens` names where a credential is issued.
+/// A URL that carries a password in its userinfo is a finding of its own rule.
+fn is_url(text: &[u8]) -> bool {
+    let scheme_end = text
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-')))
+        .unwrap_or(text.len());
+    text.first().is_some_and(u8::is_ascii_alphabetic) && text[scheme_end..].starts_with(b"://")
+}
+
+/// `id=npm,src=.npmrc`: a lower-case name, `=`, and more text is an attribute of the thing the
+/// option names, as in `docker build --secret id=npm`. Base64 padding ends its value or doubles
+/// the `=`, and its body mixes case.
+fn is_attribute(text: &[u8]) -> bool {
+    let name_end = text
+        .iter()
+        .position(|byte| !(byte.is_ascii_lowercase() || *byte == b'_'))
+        .unwrap_or(text.len());
+    name_end > 0
+        && text.get(name_end) == Some(&b'=')
+        && text.get(name_end + 1).is_some_and(|byte| *byte != b'=')
+}
+
+/// Letters of any script, `_`, `-`, and whitespace, before the closing punctuation a synopsis
+/// or a sentence adds (`[--password PASSWORD]`, `the --token value.`).
+fn is_plain_word(text: &[u8]) -> bool {
+    let word = trim_end(text, |byte| {
+        matches!(byte, b']' | b')' | b'}' | b',' | b'.' | b':')
+    });
+    word.iter().all(|byte| {
+        byte.is_ascii_alphabetic()
+            || matches!(byte, b'_' | b'-')
+            || byte.is_ascii_whitespace()
+            || !byte.is_ascii()
+    })
+}
+
+fn is_mask(text: &[u8]) -> bool {
+    text.windows(3).any(|window| window == b"***")
+        || !text
+            .iter()
+            .any(|byte| byte.is_ascii_alphanumeric() || !byte.is_ascii())
+}
+
+/// `os.environ/DB_PASSWORD`, `env:API_TOKEN`: the text ends in an upper-case name, set off
+/// from what precedes it, that the key gate reads as naming a secret.
+fn names_a_secret_variable(text: &[u8]) -> bool {
+    let start = text
+        .iter()
+        .rposition(|byte| !(byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_'))
+        .map_or(0, |index| index + 1);
+    let name = &text[start..];
+    let set_off = start == 0 || matches!(text[start - 1], b'/' | b':' | b'.');
+    set_off && name.first().is_some_and(u8::is_ascii_uppercase) && has_secret_key_token(name)
+}
+
+/// A path relative to the home or working directory, or an absolute path whose last segment
+/// carries a file extension. Base64 text can begin with `/`, so an absolute path needs the
+/// extension.
+fn is_file_path(text: &[u8]) -> bool {
+    if text.starts_with(b"~/") || text.starts_with(b"./") || text.starts_with(b"../") {
+        return true;
+    }
+    if text.first() != Some(&b'/') {
+        return false;
+    }
+    let name = text.rsplit(|byte| *byte == b'/').next().unwrap_or(text);
+    name.iter()
+        .rposition(|byte| *byte == b'.')
+        .is_some_and(|dot| {
+            let extension = &name[dot + 1..];
+            (1..=5).contains(&extension.len())
+                && extension
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+/// RFC 7617 credentials are the Base64 of `user-id ":" password` in the charset the server
+/// expects, so the value has to decode to bytes that hold a `:` and are free of ASCII control
+/// characters. A word after `Basic` in prose (`Authorization: Basic authentication`) decodes
+/// to bytes that fail one of the two.
+fn validate_basic_credentials(value: &[u8]) -> OfflineVerdict {
+    // `echo user:password | base64` encodes the line break `echo` adds.
+    let credentials = decode_base64(value).filter(|decoded| {
+        let text = decoded
+            .strip_suffix(b"\r\n")
+            .or_else(|| decoded.strip_suffix(b"\n"))
+            .unwrap_or(decoded);
+        text.contains(&b':') && !text.iter().any(u8::is_ascii_control)
+    });
+    match credentials {
+        Some(_) => OfflineVerdict::Valid,
+        None => OfflineVerdict::Invalid,
+    }
+}
+
+/// Decodes the standard or the URL-safe alphabet, padded or bare.
+/// `None` when a byte is outside both alphabets or the length leaves a lone sextet.
+fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+    let body_len = input
+        .iter()
+        .rposition(|byte| *byte != b'=')
+        .map_or(0, |index| index + 1);
+    let body = &input[..body_len];
+    if body.len() % 4 == 1 {
+        return None;
+    }
+    let mut output = Vec::with_capacity(body.len() / 4 * 3 + 2);
+    let mut bits = 0u32;
+    let mut bit_count = 0u8;
+    for byte in body {
+        let value = match byte {
+            b'A'..=b'Z' => u32::from(byte - b'A'),
+            b'a'..=b'z' => u32::from(byte - b'a' + 26),
+            b'0'..=b'9' => u32::from(byte - b'0' + 52),
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | value;
+        bit_count += 6;
+        if bit_count >= 8 {
+            bit_count -= 8;
+            output.push((bits >> bit_count) as u8);
+            bits &= (1u32 << bit_count) - 1;
+        }
+    }
+    Some(output)
+}
+
 #[cfg(test)]
 mod kernels;
+
+#[cfg(test)]
+mod credential_forms;
 
 #[cfg(test)]
 mod tests {
