@@ -1615,9 +1615,11 @@ it, and each commit and tree through the attestation verifier's object
 reader, which takes an object only when its bytes hash to its id. The
 thread reads the repository's own files (HEAD, references, configuration,
 and object and pack files) as those two readers read them for capture and
-for verification, with the bounds and the file mappings they have there;
-what this reader bounds is the parents of a walk, the time it works for a
-pass, and the answers it keeps. A pass waits at most one second
+for verification, with the bounds and the file mappings they have there:
+a file of the repository that is truncated while it is mapped raises
+`SIGBUS` in the daemon, as it does during capture's read. What this reader
+bounds is the parents of a walk, the time it works for a pass, and the
+answers it keeps. A pass waits at most one second
 for its answer and then shows the files' modification times. The thread
 works for a pass while the pass waits: it takes up no job whose pass has
 stopped waiting, and it checks the time before each object it reads, so a

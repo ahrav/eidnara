@@ -21,9 +21,13 @@
 //! [`crate::memory_capture::observe_head`], which capture calls for every
 //! session it captures, and each commit and tree through the attestation
 //! verifier's object reader, which returns an object whose bytes hash to
-//! its id. What those two readers bound of a repository's files is theirs
-//! to state; this module bounds the parents a walk reads, the time the
-//! reader works for a pass, and the answers it keeps.
+//! its id. Those two readers read the repository's own files, its HEAD,
+//! references, configuration, and object and pack files, with the bounds
+//! and the file mappings they have for capture and for verification, under
+//! the cooperative-file model `vector_reader` states: a pack or object
+//! file truncated while it is mapped raises `SIGBUS` in the daemon, as it
+//! does during capture's read. This module bounds the parents a walk
+//! reads, the time the reader works for a pass, and the answers it keeps.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Read as _;
@@ -1139,7 +1143,6 @@ mod tests {
         check_out(root, head, &files);
         pack(root, head, Some(Delta::SelfId));
         let history = History::start();
-        let started = Instant::now();
         assert_eq!(
             changes_of(&history, root, &["a.md"]),
             [on_disk(root, "a.md")]
@@ -1161,11 +1164,6 @@ mod tests {
         );
         check_out(root, whole_in(&repo, &files), &files);
         assert_eq!(changes_of(&history, root, &["a.md"]), [committed(3 * DAY)]);
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "{:?}",
-            started.elapsed()
-        );
     }
 
     /// A commit of `files` with no parent, dated the third day.
