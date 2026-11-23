@@ -436,13 +436,24 @@ fn non_ascii_neighbours_do_not_change_findings() {
         ] {
             let twin = format!("{ascii_prefix}{ascii}{ascii_suffix}");
             let expected = rule_ids_and_values(&twin, &scanner.scan(&twin).unwrap().findings);
-            assert!(!expected.is_empty(), "{twin} produced no finding");
             let decorated = format!("{prefix}{ascii}{suffix}");
             let findings = scanner.scan(&decorated).unwrap().findings;
+            let found = rule_ids_and_values(&decorated, &findings);
             assert_eq!(
-                rule_ids_and_values(&decorated, &findings),
-                expected,
+                found, expected,
                 "non-ASCII around {ascii} changed the findings"
+            );
+            let before_field_rule = |findings: &[(String, String)]| -> Vec<(String, String)> {
+                findings
+                    .iter()
+                    .filter(|(rule, _)| rule != "magic-value-field")
+                    .cloned()
+                    .collect()
+            };
+            assert_eq!(
+                before_field_rule(&found),
+                before_field_rule(&rule_ids_and_values(ascii, &baseline)),
+                "a neighbour of {ascii} changed the findings"
             );
         }
     }

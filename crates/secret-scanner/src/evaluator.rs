@@ -2058,12 +2058,14 @@ struct ValueText<'a> {
 /// line break, with that closing punctuation and one pair of enclosing quotes taken off.
 fn value_text(word: &[u8]) -> ValueText<'_> {
     let head = before_serialized_line_break(word);
-    let closed = before_closing_punctuation(head);
-    if let Some(literal) = unquoted_text(closed) {
-        return literal;
+    if let Some(section) = leading_section(head) {
+        return section;
     }
-    // A quote before the closing punctuation ends a string that holds the value, as in
-    // `{"command":"deploy --password Zx9kq"}`, so the punctuation belongs to that string.
+    let (body, in_a_string) = match string_closing_quote(head) {
+        Some(quote) => (&head[..quote], true),
+        None => (head, false),
+    };
+    let closed = before_closing_punctuation(body);
     let unclosed = trim_end(closed, |byte| matches!(byte, b'"' | b'\'' | b'`' | b'\\'));
     let text = [&b"\\\""[..], b"\"", b"'"]
         .iter()
@@ -2072,8 +2074,54 @@ fn value_text(word: &[u8]) -> ValueText<'_> {
     ValueText {
         text,
         quote: Quote::Bare,
-        closed_by_punctuation: unclosed.len() == closed.len() && closed.len() != head.len(),
+        closed_by_punctuation: !in_a_string
+            && unclosed.len() == closed.len()
+            && closed.len() != body.len(),
     }
+}
+
+fn leading_section(head: &[u8]) -> Option<ValueText<'_>> {
+    let (open, quote, kind) = match head {
+        [b'\\', b'"', ..] => (2, b'"', Quote::Literal),
+        [b'"', ..] => (1, b'"', Quote::Literal),
+        [b'\'', ..] => (1, b'\'', Quote::Literal),
+        [b'`', ..] => (1, b'`', Quote::Command),
+        _ => return None,
+    };
+    let mut backslashes = 0usize;
+    for (offset, byte) in head[open..].iter().enumerate() {
+        if *byte == b'\\' {
+            backslashes += 1;
+            continue;
+        }
+        let run = std::mem::take(&mut backslashes);
+        let closes = if open == 2 {
+            run % 4 == 1
+        } else {
+            run.is_multiple_of(2)
+        };
+        if *byte == quote && closes {
+            return Some(ValueText {
+                text: &head[open..open + offset - usize::from(open == 2)],
+                quote: kind,
+                closed_by_punctuation: false,
+            });
+        }
+    }
+    None
+}
+
+fn string_closing_quote(head: &[u8]) -> Option<usize> {
+    (0..head.len()).find(|&at| {
+        let after = match &head[at..] {
+            [b'\\', b'"', after @ ..] | [b'"' | b'\'', after @ ..] => after,
+            _ => return false,
+        };
+        matches!(
+            after.first(),
+            None | Some(b',' | b';' | b':' | b')' | b']' | b'}')
+        )
+    })
 }
 
 fn trim_end(bytes: &[u8], closes: fn(u8) -> bool) -> &[u8] {
@@ -2137,23 +2185,6 @@ fn serialized_line_break(word: &[u8]) -> Option<usize> {
         at += 2;
     }
     None
-}
-
-/// The text between one pair of quotes that encloses all of `word`.
-fn unquoted_text(word: &[u8]) -> Option<ValueText<'_>> {
-    let enclosed = |open: &[u8], quote| {
-        (word.len() >= 2 * open.len() && word.starts_with(open) && word.ends_with(open)).then(
-            || ValueText {
-                text: &word[open.len()..word.len() - open.len()],
-                quote,
-                closed_by_punctuation: false,
-            },
-        )
-    };
-    enclosed(b"\\\"", Quote::Literal)
-        .or_else(|| enclosed(b"\"", Quote::Literal))
-        .or_else(|| enclosed(b"'", Quote::Literal))
-        .or_else(|| enclosed(b"`", Quote::Command))
 }
 
 /// A scalar where the key names a count, a flag, or a length. Under a key that names a

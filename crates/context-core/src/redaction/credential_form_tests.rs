@@ -144,6 +144,16 @@ fn an_option_followed_by_its_value_is_redacted() {
             format!("{chosen}\"}}"),
             PASSWORD,
         ),
+        (
+            format!("{{\"command\":\"deploy --password {chosen}\",\"example\":true}}"),
+            format!("{chosen}\",\"example\":true}}"),
+            PASSWORD,
+        ),
+        (
+            format!("{{\"cmd\":\"deploy --password {chosen}\",\"cwd\":\"${{workspaceFolder}}\"}}"),
+            format!("{chosen}\",\"cwd\":\"${{workspaceFolder}}\"}}"),
+            PASSWORD,
+        ),
     ] {
         assert_redacts(&input, &value, placeholder);
     }
@@ -251,6 +261,43 @@ fn a_field_line_is_redacted() {
         ),
     ] {
         assert_redacts(&input, &value, placeholder);
+    }
+}
+
+#[test]
+fn each_of_two_adjacent_credentials_is_replaced() {
+    let (first, second) = (chosen(), issued());
+    for (input, expected) in [
+        (
+            format!("username: bob\\ntoken: {first}\\npassword: {second}\\nhost: db"),
+            "username: bob\\ntoken: <REDACTED:token> <REDACTED:password> db".to_owned(),
+        ),
+        (
+            format!("token: $TOKEN\\npassword: {second}\\nhost: db"),
+            "token: $TOKEN\\npassword: <REDACTED:password> db".to_owned(),
+        ),
+        (
+            format!("run\\n--token {first}\\n--password {second}\\n--verbose"),
+            "run\\n--token <REDACTED:token> <REDACTED:password>".to_owned(),
+        ),
+        (
+            format!("mysql -uroot -p{first}\\nmysql -uroot -p{second} app"),
+            "mysql -uroot -p<REDACTED:password> -uroot -p<REDACTED:password> app".to_owned(),
+        ),
+        (
+            format!("Use `mysql -p{first} app` or `mysqldump -p{second} app > dump.sql`"),
+            format!("Use `mysql -p{PASSWORD} app` or `mysqldump -p{PASSWORD} app > dump.sql`"),
+        ),
+        (
+            format!("mysql -p{first} app < a.sql  # then: mysql -p{second} app < b.sql"),
+            format!("mysql -p{PASSWORD} app < a.sql  # then: mysql -p{PASSWORD} app < b.sql"),
+        ),
+        (
+            format!("password: {first}\ntoken: {second}\n"),
+            "password: <REDACTED:password>\ntoken: <REDACTED:token>\n".to_owned(),
+        ),
+    ] {
+        assert_eq!(redact_durable_text(&input).text, expected, "{input:?}");
     }
 }
 
@@ -377,6 +424,7 @@ fn digits_under_a_password_or_secret_key_are_redacted() {
         ("{\\\"password\\\":\\\"{}\\\"}", PASSWORD),
         ("POSTGRES_PASSWORD: {}  # change me", PASSWORD),
         ("login?user=bob&password={}&next=1", PASSWORD),
+        ("user=bob\\npassword={} host=db", PASSWORD),
     ] {
         assert_redacts(&template.replace("{}", &digits), &digits, placeholder);
     }
@@ -480,6 +528,22 @@ fn a_password_option_of_a_named_client_is_redacted() {
             chosen.clone(),
         ),
         (
+            format!("{{\"cmd\":\"mysql -uroot -p{chosen}\",\"mask\":\"***\"}}"),
+            format!("{chosen}\",\"mask\":\"***\"}}"),
+        ),
+        (
+            format!("cd /srv\\nmysql -uroot -p{chosen} app"),
+            chosen.clone(),
+        ),
+        (
+            format!("mysql {} -p{chosen} app", "x".repeat(200)),
+            chosen.clone(),
+        ),
+        (
+            format!("docker exec db mysql -p{chosen} app -e 'show tables' -prefix"),
+            chosen.clone(),
+        ),
+        (
             "docker login -u bob -p 9234 registry".to_owned(),
             "9234".to_owned(),
         ),
@@ -531,6 +595,12 @@ fn a_client_option_is_read_within_the_bounds_of_its_rule() {
     assert_exact(&blanks(9, 1));
     assert_exact(&blanks(1, 9));
     assert_exact(&format!("docker login{}-p {chosen}", " ".repeat(300)));
+    let attached = |units: usize| format!("mysql {} -p{chosen}", "x".repeat(units));
+    assert_redacts(&attached(255), &chosen, PASSWORD);
+    assert_exact(&attached(256));
+    let pairs = |units: usize| format!("docker login {} -p {chosen}", "\\x".repeat(units - 1));
+    assert_redacts(&pairs(256), &chosen, PASSWORD);
+    assert_exact(&pairs(257));
 }
 
 #[test]
@@ -571,6 +641,18 @@ fn private_key_body_lines_are_redacted_under_a_header_without_a_footer() {
     ] {
         assert_redacts(&input, &body, "<REDACTED:private_key>");
     }
+    let lines = |count: usize| {
+        format!(
+            "{header}\n{}{line}\n{line}\n",
+            "Comment: armor\n".repeat(count)
+        )
+    };
+    assert_redacts(
+        &lines(4),
+        &format!("{line}\n{line}"),
+        "<REDACTED:private_key>",
+    );
+    assert_exact(&lines(5));
     assert_exact(&format!("{header}\n...\n"));
     assert_exact(&format!("{header}\nthe key body goes here\n"));
     let followed = format!("{header}\n{line}\nplain text follows\n");

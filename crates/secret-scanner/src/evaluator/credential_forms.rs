@@ -45,6 +45,11 @@ fn the_text_of_a_word_is_the_word_without_what_surrounds_the_value() {
         ("\"$DB_PASSWORD\")", literal("$DB_PASSWORD")),
         ("\\\"Zx9kq7\\\"}", literal("Zx9kq7")),
         ("Zx9kq7\"}", bare("Zx9kq7")),
+        ("Zx9!kq7\",\"example\":true}", bare("Zx9!kq7")),
+        ("Zx9!kq7','x':1}", bare("Zx9!kq7")),
+        ("Zx9!kq7\\\",\\\"cwd\\\":\\\"${x}\\\"}", bare("Zx9!kq7")),
+        ("\"Zx9 kq7\",\"example\":true}", literal("Zx9 kq7")),
+        ("'it\\'s 9','x':1}", literal("it\\'s 9")),
         ("Zx9kq7\\\"", bare("Zx9kq7")),
         ("Zx9kq7'", bare("Zx9kq7")),
         (
