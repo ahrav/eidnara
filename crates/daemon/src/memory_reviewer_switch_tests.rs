@@ -120,9 +120,10 @@ impl Rig {
             .map(|(index, text)| (format!("m{index}"), "user", *text))
             .collect();
         for (index, (id, role, text)) in messages.iter().enumerate() {
-            self.publish("s1", id, role, STATED_AT_MS + index as u64, text);
+            self.publish("s1", id, role, STATED_AT_MS + index as u64, text)
+                .await;
         }
-        self.settle_candidates().await;
+        self.settle_capture().await;
         let messages: Vec<(&str, &str, &str)> = messages
             .iter()
             .map(|(id, role, text)| (id.as_str(), *role, *text))
@@ -134,26 +135,29 @@ impl Rig {
     }
 
     /// Publishes one user message of session `s2` as source capture does after a pass.
-    fn publish_later(&self, id: &str, at_ms: u64, text: &str) {
-        self.publish("s2", id, "user", at_ms, text);
+    async fn publish_later(&self, id: &str, at_ms: u64, text: &str) {
+        self.publish("s2", id, "user", at_ms, text).await;
     }
 
-    /// Waits until the candidate pass of the last published message has ended.
-    async fn settle_candidates(&self) {
-        for _ in 0..1_000 {
-            if self.handler.contradiction_candidates.is_idle() {
+    /// Waits until the last published message is stored and its candidate pass has ended. Source capture publishes one window at a time, so the next window is offered once this one has settled.
+    async fn settle_capture(&self) {
+        for _ in 0..3_000 {
+            if self.handler.source_capture.is_idle()
+                && self.handler.contradiction_candidates.is_idle()
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!(
-            "the candidate pass did not end: {}",
+            "source capture did not settle: {}",
             self.handler.contradiction_candidates.report()
         );
     }
 
     /// Publishes one message `role` wrote in `session` as source capture does after a pass.
-    fn publish(&self, session: &str, id: &str, role: &str, at_ms: u64, text: &str) {
+    async fn publish(&self, session: &str, id: &str, role: &str, at_ms: u64, text: &str) {
+        self.settle_capture().await;
         let row = json!({
             "type": "message", "id": id, "parentId": null,
             "message": { "role": role, "content": text, "timestamp": at_ms },
@@ -197,8 +201,8 @@ impl Rig {
 
     /// Publishes one user message of session `s2` and captures it as that session's lasting statement, which cites the published message. The message shares too few words with any stored statement for a candidate row, so only its captured statement brings an earlier one to review.
     async fn user_states_later(&self, id: &str, at_ms: u64, text: &str) {
-        self.publish_later(id, at_ms, text);
-        self.settle_candidates().await;
+        self.publish_later(id, at_ms, text).await;
+        self.settle_capture().await;
         memory_auto_delivery_tests::capture(
             &self.handler,
             SECOND,
@@ -244,9 +248,10 @@ impl Rig {
             .map(|(index, text)| (format!("a{index}"), *text))
             .collect();
         for (index, (id, text)) in messages.iter().enumerate() {
-            self.publish("s1", id, "assistant", STATED_AT_MS + index as u64, text);
+            self.publish("s1", id, "assistant", STATED_AT_MS + index as u64, text)
+                .await;
         }
-        self.settle_candidates().await;
+        self.settle_capture().await;
         let messages: Vec<(&str, &str, &str)> = messages
             .iter()
             .map(|(id, text)| (id.as_str(), "assistant", *text))
@@ -261,7 +266,7 @@ impl Rig {
     async fn says_later(&self, role: &str, id: &str, at_ms: u64, text: &str) {
         let rows = || self.store.candidate_sweep_page(0, 1_000).unwrap().len();
         let before = rows();
-        self.publish("s2", id, role, at_ms, text);
+        self.publish("s2", id, role, at_ms, text).await;
         for _ in 0..1_000 {
             if rows() > before && self.handler.contradiction_candidates.is_idle() {
                 return;
@@ -552,13 +557,9 @@ async fn a_later_message_with_a_credential_reaches_neither_model() {
         "later-1",
         1_700_000_000_000,
         &format!("{TUESDAY} The release bot authenticates with {credential} from now on."),
-    );
-    for _ in 0..100 {
-        if rig.handler.contradiction_candidates.is_idle() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    )
+    .await;
+    rig.settle_capture().await;
     assert_eq!(rig.drain().await, 0, "a refused message is no evidence");
     assert!(rig.attempts().is_empty());
 
@@ -752,6 +753,28 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
         "{memories:?}"
     );
     assert_eq!(rig.active_review_holds(), 0);
+
+    // A `revise` that keeps the fact's own attribution is accepted: its text replaces the reported fact.
+    rig.says_later(
+        "assistant",
+        "later-3",
+        1_700_000_200_000,
+        "To confirm: the integration suite needs its local Redis on port 6390.",
+    )
+    .await;
+    let as_the_assistant = r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"Assistant reported: The integration suite needs a local Redis on port 6390.","support":[],"contradictions":[{"alias":"ref-3"}],"limitations":[],"uncertainty":"low"}}"#;
+    rig.flagged(&[as_the_assistant]);
+    assert_eq!(rig.drain().await, 1);
+    let memories = rig.search().await;
+    assert!(
+        memories.iter().any(|(text, _)| text
+            == "Assistant reported: The integration suite needs a local Redis on port 6390."),
+        "{memories:?}"
+    );
+    assert!(
+        memories.iter().all(|(text, _)| *text != reported),
+        "{memories:?}"
+    );
 }
 
 /// A memory review reads stored memory and conversation text. A step that asks for a file of the project's working tree is refused as unavailable, the model is told so, and no file text reaches a request.
@@ -832,7 +855,7 @@ async fn a_stage_one_answer_from_another_model_closes_review() {
     assert_eq!(rig.attempts().len(), 1);
 }
 
-/// With no stage-1 model named, stage 1 goes to the default derived from the review model's name. That default is a guess at the host's catalog. When its first request fails, the review model answers the review's stage 1 in the same run, so the review is decided, and then writes the proposal.
+/// With no stage-1 model named, stage 1 goes to the default derived from the review model's name. That default is a guess at the host's catalog. When its first request fails, the review model answers the review's stage 1 in the same run, so the review is decided, and then writes the proposal. The project's next review goes to the review model at once: the refused default is asked once per process.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_default_stage_one_model_the_host_refuses_hands_the_review_to_the_review_model() {
     const REVIEWER: &str = "test/claude-opus-9";
@@ -846,9 +869,15 @@ async fn a_default_stage_one_model_the_host_refuses_hands_the_review_to_the_revi
         ..switch_config(ReviewApply::Contest)
     })
     .await;
-    rig.state_rules(&[THURSDAY]).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
     rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
         .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the formatter instead of the linter before every commit.",
+    )
+    .await;
     rig.state.await_results.lock().unwrap().push_back(Err(
         HistorySummarizerProducerError::RunFailed {
             run_id: "run".to_string(),
@@ -857,22 +886,29 @@ async fn a_default_stage_one_model_the_host_refuses_hands_the_review_to_the_revi
             class_field_present: false,
         },
     ));
-    rig.answers_from(Some("claude-opus-9"), &[FLAG, RETIRE_CITING_LATER]);
-    assert_eq!(rig.drain().await, 1);
+    // The newest evidence is reviewed first: the linter statement is flagged and retired, and the release statement is kept.
+    rig.answers_from(Some("claude-opus-9"), &[FLAG, RETIRE_CITING_LATER, KEEP]);
+    assert_eq!(rig.drain().await, 2);
     let attempts = rig.attempts();
     let models: Vec<&str> = attempts
         .iter()
         .map(|attempt| attempt.model.as_str())
         .collect();
-    assert_eq!(models, ["test/claude-haiku-9", REVIEWER, REVIEWER]);
-    assert!(
-        attempts[1]
-            .system
-            .ends_with(&crate::memory_reviewer::stage_one::system_text()),
-        "the review model answers stage 1 on the stage-1 instructions"
+    assert_eq!(
+        models,
+        ["test/claude-haiku-9", REVIEWER, REVIEWER, REVIEWER]
     );
+    let stage_one = crate::memory_reviewer::stage_one::system_text();
+    for index in [1, 3] {
+        assert!(
+            attempts[index].system.ends_with(&stage_one),
+            "the review model answers stage 1 on the stage-1 instructions"
+        );
+    }
     assert_eq!(attempts[1].prompt, attempts[0].prompt);
-    assert!(!rig.block().await.contains(THURSDAY));
+    let block = rig.block().await;
+    assert!(!block.contains(LINTER), "{block}");
+    assert!(block.contains(&stated(THURSDAY)), "{block}");
 }
 
 /// A memory whose change proposal waits for a reader keeps waiting across a restart: a new worker over the same stores finds the pending proposal behind the project's review hold, and new evidence starts no second review.
@@ -1013,6 +1049,13 @@ async fn a_statement_replaced_in_part_stays_delivered_and_is_marked_contested() 
             0,
             "{apply:?}: the marked statement was reviewed on this evidence"
         );
+        // A second review would have asked a model, and an answer the rig did not queue closes review.
+        assert_eq!(rig.attempts().len(), 2, "{apply:?}");
+        assert_eq!(
+            rig.status.activation_state(),
+            ActivationState::Open,
+            "{apply:?}"
+        );
         // A row's id and the dates of its contest belong to the rig, so the two modes are compared by the statements they deliver.
         let mut statements: Vec<String> = block
             .lines()
@@ -1090,6 +1133,8 @@ async fn a_response_the_provider_stopped_settles_the_review_on_one_request() {
     );
     assert!(rig.block().await.contains(&stated(THURSDAY)));
     assert_eq!(rig.drain().await, 0);
+    assert_eq!(rig.attempts().len(), 2);
+    assert_eq!(rig.status.activation_state(), ActivationState::Open);
 }
 
 /// A stage-1 request of the small chat model that ends without an answer spends one attempt of its job. The project's other reviews stay queued for a later pass, the review model is asked nothing, and both statements stay delivered.
@@ -1275,5 +1320,246 @@ async fn a_project_without_the_switch_is_left_unreviewed() {
             .module_authority_for_route(&root, "memories")
             .unwrap()
             .is_none()
+    );
+}
+
+/// A job is named by the newest later source it was shown. When an older source ages out of the store's candidate rows, the memory's evidence is a part of what it was reviewed on, and neither the worker nor one started afterwards reviews it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn evidence_that_ages_out_starts_no_second_review() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later(
+        "later-1",
+        1_700_000_000_000,
+        "The release branches are still cut from main every Thursday.",
+    )
+    .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Reminder: release branches are cut from main every Thursday.",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.drain().await, 1, "one review on both later messages");
+    let state: Value =
+        serde_json::from_str(&rig.attempts()[0].prompt).expect("the state is JSON text");
+    assert_eq!(state["later"].as_array().map(Vec::len), Some(2));
+    // The candidate sweep deletes a row once it is thirty days old; the older message's row goes first.
+    rig.store
+        .execute_tag_sql_for_test(
+            "DELETE FROM contradiction_candidates
+              WHERE publish_tip = (SELECT MIN(publish_tip) FROM contradiction_candidates)",
+        )
+        .unwrap();
+    assert_eq!(rig.store.candidate_sweep_page(0, 1_000).unwrap().len(), 1);
+    assert_eq!(rig.drain().await, 0);
+    assert_eq!(
+        rig.restarted().drain(&CancellationToken::new()).await,
+        0,
+        "a new worker reads the same job name"
+    );
+    assert_eq!(rig.attempts().len(), 1);
+    assert_eq!(rig.status.activation_state(), ActivationState::Open);
+}
+
+/// A statement a review marked contested was reviewed on everything recorded up to that mark. Two later statements about its two rules bring it to one review, the mark names one of them, and the other starts no further review: the statement's line stays as that review left it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_contested_statement_is_not_reviewed_again_on_the_evidence_of_its_review() {
+    const HELPER_PREFIX: &str = "From now on name helper modules with the prefix lib_.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[TWO_RULES]).await;
+    rig.user_states_later("later-1", 1_700_000_000_000, TEST_SUFFIX)
+        .await;
+    rig.user_states_later("later-2", 1_700_000_100_000, HELPER_PREFIX)
+        .await;
+    // Answers for more reviews than the one the evidence warrants: a repeat would consume them.
+    rig.flagged(&[
+        REVISE_CITING_LATER,
+        REVISE_CITING_LATER,
+        REVISE_CITING_LATER,
+    ]);
+    let settled = rig.drain().await;
+    let attempts = rig.attempts();
+    let reviews_of_the_statement = attempts
+        .iter()
+        .filter(|attempt| attempt.model == SMALL && attempt.prompt.contains(TWO_RULES))
+        .count();
+    assert_eq!(
+        reviews_of_the_statement,
+        1,
+        "{settled} runs settled over {} requests",
+        attempts.len()
+    );
+    let block = rig.block().await;
+    let line = block
+        .lines()
+        .find(|line| line.contains(TWO_RULES))
+        .unwrap_or_else(|| panic!("the two-rule sentence left the block: {block}"));
+    assert!(line.contains("; contested "), "{line}");
+    assert_eq!(rig.drain().await, 0);
+    assert_eq!(rig.attempts().len(), attempts.len());
+}
+
+/// The switched pass runs reviews of stored memories and nothing else. A fact-set job in the project's queue stays Ready for the owner's record, and the only requests are the memory review's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
+    use memory_store::memory_reviewer_jobs::{
+        CausalInputs, MemoryReviewerJobInput, ProducerBinding, ReserveOutcome, ReviewTarget,
+    };
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    // The first pass gives the root its authority; the fact-set job is then queued under the same project.
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.drain().await, 1);
+    let root = rig.project.to_string_lossy().to_string();
+    let producer = ProducerBinding {
+        producer: "history_summarizer".to_string(),
+        firing_id: "ses#1".to_string(),
+        ordinal: 0,
+    };
+    let target = ReviewTarget::StagedSubject {
+        kernel_incarnation: "0".repeat(32),
+        candidate_id: "subject-1".to_string(),
+        payload_digest: "0".repeat(64),
+    };
+    let ReserveOutcome::Reserved(job) = rig
+        .store
+        .reserve_memory_reviewer_job(
+            &root,
+            &producer,
+            &CausalInputs {
+                target: target.clone(),
+                question_template: "extracted_facts".to_string(),
+                signals: Vec::new(),
+                required_evidence: Vec::new(),
+                policy_versions: Default::default(),
+            },
+            crate::now_ms(),
+        )
+        .unwrap()
+    else {
+        panic!("fresh inputs reserve a job")
+    };
+    rig.store
+        .activate_memory_reviewer_job(
+            &root,
+            &job.causal_identity,
+            &producer,
+            &MemoryReviewerJobInput {
+                subject: target,
+                starting_references: Vec::new(),
+                question_template: "extracted_facts".to_string(),
+            },
+            crate::now_ms(),
+        )
+        .unwrap();
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Reminder: release branches are cut from main every Tuesday.",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.drain().await, 1, "the memory review ran");
+    let attempts = rig.attempts();
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts.iter().all(|attempt| attempt.model == SMALL));
+    let ready = rig
+        .store
+        .ready_memory_reviewer_jobs(&root, 16, crate::now_ms())
+        .unwrap();
+    assert_eq!(
+        ready.len(),
+        1,
+        "the fact-set job waits for the owner's record"
+    );
+    assert_eq!(ready[0].causal_identity, job.causal_identity);
+}
+
+/// A review the worker's owner cancels while its request is with the model leaves no session behind: the request's child session is deleted although the request never returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_request_still_deletes_its_session() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.state.block_output.store(true, Ordering::SeqCst);
+    let cancel = CancellationToken::new();
+    let drain = {
+        let worker = Arc::clone(&rig.worker);
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.drain(&cancel).await })
+    };
+    for _ in 0..1_000 {
+        if !rig.attempts().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let session = rig.attempts()[0].session_id.clone();
+    assert!(rig.state.purges.lock().unwrap().is_empty());
+    cancel.cancel();
+    assert_eq!(drain.await.unwrap(), 0);
+    for _ in 0..1_000 {
+        if !rig.state.purges.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(rig.state.purges.lock().unwrap().as_slice(), [session]);
+}
+
+/// With the switch turned off, the status reads the owner's record as the worker evaluates it on every pass: the state of a deployment with no record, and never a stale or unevaluated one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_switch_turned_off_leaves_the_status_at_the_owners_record() {
+    let rig = reviewed(ReviewApply::Contest).await;
+    assert_eq!(rig.status.activation_state(), ActivationState::Open);
+    let off = DaemonConfig {
+        memory_reviewer: MemoryReviewerConfig::default(),
+        ..switch_config(ReviewApply::Contest)
+    };
+    for (channel, session) in [(FIRST, "s1"), (SECOND, "s2"), (THIRD, "s3")] {
+        rig.handler.bind_route(
+            test_route(channel),
+            SessionBinding {
+                config: off.clone(),
+                ..binding_with_harness(rig.project.to_str().unwrap(), "pi", session)
+            },
+        );
+    }
+    assert_eq!(rig.drain().await, 0);
+    assert_eq!(
+        rig.status.activation_state(),
+        ActivationState::Closed("missing")
+    );
+}
+
+/// A root whose own configuration file the load refused is listed for no review, whatever the user tier says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_root_with_a_refused_configuration_is_not_reviewed() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    let refused = DaemonConfig {
+        admission: crate::config::ConfigAdmission::Unresolved {
+            reason: "the project's file is malformed".to_string(),
+        },
+        ..switch_config(ReviewApply::Contest)
+    };
+    for (channel, session) in [(FIRST, "s1"), (SECOND, "s2"), (THIRD, "s3")] {
+        rig.handler.bind_route(
+            test_route(channel),
+            SessionBinding {
+                config: refused.clone(),
+                ..binding_with_harness(rig.project.to_str().unwrap(), "pi", session)
+            },
+        );
+    }
+    let user_tier = switch_config(ReviewApply::Contest);
+    assert!(
+        module_projects(&rig.store, &rig.handler.bindings, Some(&user_tier))
+            .iter()
+            .all(|route| route.review.is_none())
     );
 }

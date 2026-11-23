@@ -40,6 +40,18 @@ impl Writer {
         }
     }
 
+    /// Whether a line of `text` opens with a writer's label other than this writer's own, whatever its case and leading space. A text the reviewer writes for a memory carries the memory's own attribution and no other.
+    pub fn claims_another(self, text: &str) -> bool {
+        let [user, assistant] = crate::memory_capture::STATEMENT_WRITERS;
+        text.lines().map(str::trim_start).any(|line| {
+            let opens = |label: &str| {
+                line.get(..label.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(label))
+            };
+            (self != Self::User && opens(user)) || (self != Self::Assistant && opens(assistant))
+        })
+    }
+
     /// The writer of a source the Kernel admitted under `class`.
     pub fn of_source(class: kernel::SourceClass) -> Self {
         match class {
@@ -80,23 +92,18 @@ pub struct ReviewState {
 }
 
 impl ReviewState {
-    /// Only a later user message can qualify as evidence to revise a user statement, except that work in progress accepts evidence from any writer. Memories attributed to other writers also accept evidence from any writer.
+    /// Whether a later reference `writer` wrote is evidence a decider can flag the review on and a change proposal can cite. A user's statement takes evidence from the user alone, except that work in progress takes it from any writer. A memory attributed to another writer takes it from any writer.
+    pub fn takes(&self, writer: Writer) -> bool {
+        self.said_by != Writer::User || self.work_in_progress || writer == Writer::User
+    }
+
     pub fn eligible(&self, reference: &StateReference) -> bool {
-        self.said_by != Writer::User || self.work_in_progress || reference.writer == Writer::User
-    }
-
-    pub fn has_eligible_later(&self) -> bool {
-        self.later.iter().any(|reference| self.eligible(reference))
-    }
-
-    /// Whether `reference` is evidence a decider can flag the review on and a change proposal can cite: an eligible later reference, or any later reference of a memory of work in progress.
-    pub fn counts(&self, reference: &StateReference) -> bool {
-        self.work_in_progress || self.eligible(reference)
+        self.takes(reference.writer)
     }
 
     /// Whether the state holds a later reference a decider could flag the review on. A review with none is a keep by the flag rule, settled before any request.
-    pub fn has_evidence(&self) -> bool {
-        self.later.iter().any(|reference| self.counts(reference))
+    pub fn has_eligible_later(&self) -> bool {
+        self.later.iter().any(|reference| self.eligible(reference))
     }
 
     /// The state as compact JSON text with its members in one fixed order: the memory (text, who said it, category, work in progress), its source references, the later references, each reference as id, writer, time and text.
@@ -333,15 +340,15 @@ pub struct Stage1Record {
     pub decision: Stage1,
     /// The `provider/model` of the chat model that answered; empty when the host decided without a request.
     pub model: String,
-    /// Whether the decision rests on an answer in the decider's closed form; `false` for a flag raised on a malformed or missing answer.
-    pub answered: bool,
-    /// The evidence ids of the later references the review was shown that count as evidence against the memory ([`ReviewState::counts`]). A change proposal acts only when it cites one of them.
+    /// The evidence ids of the later references the review was shown that count as evidence against the memory ([`ReviewState::eligible`]). A change proposal acts only when it cites one of them.
     pub later: Vec<String>,
 }
 
 #[derive(Default)]
 struct Inner {
     failures: HashMap<String, Instant>,
+    /// The projects whose unproven default stage-1 model failed a request since the worker last asked.
+    refused_defaults: std::collections::BTreeSet<String>,
     records: BTreeMap<String, Stage1Record>,
     record_order: VecDeque<String>,
 }
@@ -376,6 +383,16 @@ impl StageOneBook {
             .failures
             .get(project)
             .is_some_and(|at| now.saturating_duration_since(*at) <= FAILURE_COOLDOWN)
+    }
+
+    /// Records that a request of `project` to a default stage-1 model no answer has proven ended without an answer.
+    pub fn note_default_refused(&self, project: &str) {
+        self.lock().refused_defaults.insert(project.to_string());
+    }
+
+    /// Whether a default stage-1 model of `project` failed since the last call.
+    pub fn take_default_refused(&self, project: &str) -> bool {
+        self.lock().refused_defaults.remove(project)
     }
 
     pub fn record(&self, causal_identity: &str, record: Stage1Record) {
@@ -510,8 +527,7 @@ pub(super) mod tests {
             Writer::Assistant,
             "Understood, deploying from main.",
         )]);
-        assert!(!by_assistant.has_evidence());
-        assert!(!by_assistant.counts(&by_assistant.later[0]));
+        assert!(!by_assistant.has_eligible_later());
         assert_eq!(
             decided(&by_assistant, &answer("yes", "no")),
             Stage1::Keep,
@@ -527,8 +543,7 @@ pub(super) mod tests {
             work_in_progress: true,
             ..by_assistant.clone()
         };
-        assert!(work.has_evidence());
-        assert!(work.counts(&work.later[0]));
+        assert!(work.has_eligible_later());
         assert_eq!(decided(&work, &answer("no", "unsure")), Stage1::Flagged);
         assert_eq!(decided(&work, &answer("no", "no")), Stage1::Keep);
     }
@@ -581,6 +596,35 @@ pub(super) mod tests {
         assert!(!book.failing_at("project", now + FAILURE_COOLDOWN + Duration::from_secs(1)));
     }
 
+    /// A text carries another writer's label when any of its lines opens with one, whatever the case or the leading space.
+    #[test]
+    fn a_text_that_opens_a_line_with_another_writers_label_claims_that_writer() {
+        let reported = "Assistant reported: the suite needs Redis on port 6390.";
+        assert!(!Writer::Assistant.claims_another(reported));
+        assert!(Writer::Unrecorded.claims_another(reported));
+        for claimed in [
+            "User stated: use port 6390.",
+            " user stated: use port 6390.",
+            "Assistant reported: the port is 6390.\nUser stated: use it.",
+            "Assistant reported: the port is 6390.\n\tUSER STATED: use it.",
+        ] {
+            assert!(Writer::Assistant.claims_another(claimed), "{claimed}");
+            assert!(Writer::Unrecorded.claims_another(claimed), "{claimed}");
+        }
+        assert!(!Writer::User.claims_another("User stated: use port 6390."));
+        assert!(!Writer::Unrecorded.claims_another("The suite needs Redis on port 6390."));
+    }
+
+    #[test]
+    fn a_default_refusal_is_read_once() {
+        let book = StageOneBook::default();
+        assert!(!book.take_default_refused("project"));
+        book.note_default_refused("project");
+        assert!(!book.take_default_refused("other"));
+        assert!(book.take_default_refused("project"));
+        assert!(!book.take_default_refused("project"));
+    }
+
     #[test]
     fn a_statement_names_its_writer() {
         assert_eq!(
@@ -603,7 +647,6 @@ pub(super) mod tests {
         let record = Stage1Record {
             decision: Stage1::Flagged,
             model: "prov/small".to_string(),
-            answered: true,
             later: vec!["evidence".to_string()],
         };
         book.record("job", record.clone());

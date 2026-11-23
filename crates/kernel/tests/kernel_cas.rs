@@ -649,7 +649,6 @@ fn the_configured_model_reads_every_class_short_of_secret() {
     let store = KernelStore::open(root.path()).unwrap();
     seed_domain(&store);
     let destination = ArtifactDestination::ConfiguredModel;
-    assert!(!destination.is_remote());
     assert!(!ArtifactDestination::ALL.contains(&destination));
     for (index, &sensitivity) in Sensitivity::ALL.iter().enumerate() {
         assert_eq!(

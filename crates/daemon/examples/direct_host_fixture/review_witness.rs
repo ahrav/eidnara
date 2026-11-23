@@ -140,7 +140,7 @@ pub async fn run(core: &daemon::HandlerCore, project_root: &str) -> Result<Value
     let served = peer.serve_script(vec![retain.clone(), retain]);
     let route = ProjectRoute {
         review: None,
-        recorded_authority: true,
+        recorded: true,
         project: project.to_string(),
         authority_generation: authority.generation,
         roots: vec![RootScope {

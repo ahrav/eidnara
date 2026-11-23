@@ -191,7 +191,7 @@ impl Rig {
             host,
             vec![ProjectRoute {
                 review: None,
-                recorded_authority: true,
+                recorded: true,
                 project: PROJECT.to_string(),
                 authority_generation: self.generation,
                 roots,

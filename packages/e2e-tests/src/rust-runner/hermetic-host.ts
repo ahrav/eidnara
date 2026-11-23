@@ -1256,7 +1256,7 @@ export class HermeticHostStack {
         return this.requireControl().reviewWitness(projectRoot);
     }
 
-    /** Runs the daemon's MemoryReviewer until no review is pending, as a harness does between sessions. */
+    /** Runs the daemon's MemoryReviewer passes until one settles nothing, as a harness does between sessions, and resolves to the runs settled. */
     reviewDrain(timeoutMs = 600_000): Promise<number> {
         return this.requireControl().reviewDrain(timeoutMs);
     }

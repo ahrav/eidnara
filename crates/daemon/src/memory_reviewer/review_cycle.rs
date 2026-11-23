@@ -192,8 +192,10 @@ pub struct SelectionMemory {
     pending: HashMap<String, PendingProposals>,
     /// Where each project's next selection resumes its walk of the claim descriptors, by project digest. A store with more descriptors than one selection examines is covered over successive passes.
     resume: HashMap<String, String>,
-    /// The projects whose review holds were at the project bound at their last selection, so the wait is logged once.
+    /// The projects whose review holds were at a bound at their last selection, so the wait is logged once.
     held: BTreeSet<String>,
+    /// The projects whose store was found larger than one selection examines, so that is logged once.
+    large: BTreeSet<String>,
     /// The bounds of one selection's walk; `None` is [`Walk::PRODUCTION`].
     walk: Option<Walk>,
 }
@@ -219,7 +221,7 @@ impl Walk {
 struct SourceFacts {
     object_id: String,
     writer: Writer,
-    /// Set once a read finds the descriptor retired. A retired source still counts as evidence a memory was reviewed on, and no job reads it. A source found retired at its first lookup has no writer on record.
+    /// Set once a later read finds the descriptor retired; no job reads a retired source.
     retired: bool,
 }
 
@@ -233,7 +235,7 @@ impl SelectionMemory {
         self.walk = Some(walk);
     }
 
-    /// The descriptor and writer of `evidence_id`, read once and remembered, with whether a read found the descriptor retired. `None` while no descriptor has cited the evidence, which is looked up again on the next pass. A read the store fails is an error and is remembered as nothing.
+    /// The descriptor and writer of `evidence_id`, read once and remembered, with whether a later read found the descriptor retired. `None` while no live descriptor cites the evidence, which is looked up again on the next pass. A read the store fails is an error and is remembered as nothing.
     fn source(
         &mut self,
         kernel: &KernelStore,
@@ -244,27 +246,20 @@ impl SelectionMemory {
         if let Some(facts) = self.sources.get(evidence_id) {
             return Ok(Some(facts.clone()));
         }
-        let facts = match source_descriptor(kernel, evidence_id, tip, budget)? {
-            Source::Uncited => return Ok(None),
-            Source::Retired => SourceFacts {
-                object_id: String::new(),
-                writer: Writer::Unrecorded,
-                retired: true,
-            },
-            Source::Live(object_id) => {
-                let (_, admission) = kernel
-                    .preview(Instant::now() + Duration::from_secs(5), |preview| {
-                        preview.subject_admission(&object_id)
-                    })
-                    .map_err(CycleError::Kernel)?;
-                SourceFacts {
-                    writer: admission.map_or(Writer::Unrecorded, |(prior, _)| {
-                        Writer::of_source(prior.source_class)
-                    }),
-                    object_id,
-                    retired: false,
-                }
-            }
+        let Some(object_id) = source_descriptor(kernel, evidence_id, tip, budget)? else {
+            return Ok(None);
+        };
+        let (_, admission) = kernel
+            .preview(Instant::now() + Duration::from_secs(5), |preview| {
+                preview.subject_admission(&object_id)
+            })
+            .map_err(CycleError::Kernel)?;
+        let facts = SourceFacts {
+            writer: admission.map_or(Writer::Unrecorded, |(prior, _)| {
+                Writer::of_source(prior.source_class)
+            }),
+            object_id,
+            retired: false,
         };
         if self.sources.len() >= MAX_REMEMBERED_SOURCES {
             self.sources.clear();
@@ -288,15 +283,13 @@ impl SelectionMemory {
         {
             return Ok(None);
         }
-        match source_descriptor(kernel, evidence_id, tip, budget)? {
-            Source::Live(object_id) => Ok(Some(object_id)),
-            Source::Retired | Source::Uncited => {
-                if let Some(facts) = self.sources.get_mut(evidence_id) {
-                    facts.retired = true;
-                }
-                Ok(None)
-            }
+        let live = source_descriptor(kernel, evidence_id, tip, budget)?;
+        if live.is_none()
+            && let Some(facts) = self.sources.get_mut(evidence_id)
+        {
+            facts.retired = true;
         }
+        Ok(live)
     }
 
     /// Records that the memory `target` waits for the change proposal of the job `causal_identity`.
@@ -598,22 +591,11 @@ pub fn select_and_enqueue(
         memory.resume.get(scope.project_digest).map(String::as_str),
         walk,
     )?;
-    match next {
-        Some(next) => {
-            if memory
-                .resume
-                .insert(scope.project_digest.to_string(), next)
-                .is_none()
-            {
-                eprintln!(
-                    "daemon: memory_reviewer selection examines {} claim descriptors a pass and the store holds more; each pass continues where the last one ended",
-                    walk.bound
-                );
-            }
-        }
-        None => {
-            memory.resume.remove(scope.project_digest);
-        }
+    if next.is_some() && memory.large.insert(scope.project_digest.to_string()) {
+        eprintln!(
+            "daemon: memory_reviewer selection examines {} claim descriptors a pass and the store holds more; each pass continues where the last one ended",
+            walk.bound
+        );
     }
     let ids: Vec<String> = descriptors
         .iter()
@@ -686,25 +668,24 @@ pub fn select_and_enqueue(
             let statement = rows[later];
             evidence.extend(cited_by(statement).into_iter().take(1).map(|evidence_id| {
                 LaterEvidence {
-                    recency: statement.created_commit_seq,
+                    recency: crate::memory_capture::stated_commit(statement),
                     evidence_id,
                     trigger: Trigger::LaterStatement,
                 }
             }));
         }
         let work_in_progress = crate::memory_capture::states_current_work(decision);
-        // The memory that contests a statement names its own source, which is what the review is shown. A contest without a recording session is one a review wrote: that review read the contesting memory's source, so the source is evidence the statement was already reviewed on.
-        let mut reviewed_on = Vec::new();
+        // The memory that contests a statement names its own source, which is what the review is shown. A contest without a recording session is one a review wrote: that review rewrote the statement's row, so every source recorded up to the row's commit is evidence the statement was reviewed on, or evidence older than that.
+        let mut reviewed_through = None;
         if crate::memory_capture::is_contested(decision)
             && let Some(contest) = crate::memory_capture::capture_rationale(decision).contested_by
-            && let Some(contesting) = decisions.get(&contest.memory)
         {
             if contest.session.is_none() {
-                reviewed_on = cited_by(contesting);
-            } else {
+                reviewed_through = Some(decision.created_commit_seq);
+            } else if let Some(contesting) = decisions.get(&contest.memory) {
                 evidence.extend(cited_by(contesting).into_iter().take(1).map(|evidence_id| {
                     LaterEvidence {
-                        recency: contesting.created_commit_seq,
+                        recency: crate::memory_capture::stated_commit(contesting),
                         evidence_id,
                         trigger: Trigger::Contested,
                     }
@@ -712,7 +693,8 @@ pub fn select_and_enqueue(
             }
         }
         evidence.retain(|later| {
-            !cited.contains(&later.evidence_id) && !reviewed_on.contains(&later.evidence_id)
+            !cited.contains(&later.evidence_id)
+                && reviewed_through.is_none_or(|through| later.recency > through)
         });
         let evidence = newest_first(evidence);
         let own_words =
@@ -727,9 +709,7 @@ pub fn select_and_enqueue(
             let Some(source) = memory.source(kernel, &item.evidence_id, tip, &budget)? else {
                 continue;
             };
-            // A source the store retired before its first lookup has no writer on record. It stays in the set a review is named by, so evidence that ages out of the store starts no second review; no job reads it.
-            let unrecorded = source.retired && source.writer == Writer::Unrecorded;
-            if own_words && source.writer != Writer::User && !unrecorded {
+            if source.retired || (own_words && source.writer != Writer::User) {
                 continue;
             }
             if signals.is_empty() {
@@ -771,10 +751,9 @@ pub fn select_and_enqueue(
             continue;
         };
         inputs.question_template = QuestionTemplate::MemoryStatement.id().to_string();
-        let reviewed = |inputs: &mut CausalInputs, signals: &[String]| {
-            let mut signals = signals.to_vec();
-            signals.sort();
-            inputs.signals = signals;
+        // A job is named by the newest later source it is shown. Newer evidence names a new job and reviews the memory again; evidence that ages out of the store leaves the name of the last review standing and starts none.
+        let reviewed = |inputs: &mut CausalInputs, newest: &str| {
+            inputs.signals = vec![newest.to_string()];
             let Ok(causal_identity) = inputs.causal_identity() else {
                 return Ok(true);
             };
@@ -783,7 +762,10 @@ pub fn select_and_enqueue(
                 .map(|exists| exists.first().copied().unwrap_or(true))
                 .map_err(|error| CycleError::Ledger(error.to_string()))
         };
-        if reviewed(&mut inputs, &candidate.signals)? {
+        let Some(newest) = candidate.signals.first() else {
+            continue;
+        };
+        if reviewed(&mut inputs, newest)? {
             continue;
         }
         if memory
@@ -814,12 +796,14 @@ pub fn select_and_enqueue(
                 }
             }
         }
-        // The job is named by the evidence it is shown, so a memory reviewed on these sources before is passed.
-        if signals.is_empty()
-            || (signals.len() < candidate.signals.len() && reviewed(&mut inputs, &signals)?)
-        {
+        // The store can retire the newest source between the two reads; the job is then named by the newest source it still shows.
+        let Some(shown) = signals.first() else {
+            continue;
+        };
+        if shown != newest && reviewed(&mut inputs, shown)? {
             continue;
         }
+        inputs.signals = vec![shown.clone()];
         let producer = ProducerBinding {
             producer: SELECTION_PRODUCER.to_string(),
             firing_id: format!("selection@{now}"),
@@ -865,6 +849,15 @@ pub fn select_and_enqueue(
                 "daemon: memory_reviewer selection left a reserved job unactivated: {refusal}"
             ),
             Err(error) => return Err(CycleError::Ledger(error.to_string())),
+        }
+    }
+    // The walk moves on once its part of the store was examined to the end, so a selection the store fails covers the same part again.
+    match next {
+        Some(next) => {
+            memory.resume.insert(scope.project_digest.to_string(), next);
+        }
+        None => {
+            memory.resume.remove(scope.project_digest);
         }
     }
     Ok(selected)
@@ -960,60 +953,60 @@ fn newest_first(mut evidence: Vec<LaterEvidence>) -> Vec<LaterEvidence> {
     evidence
 }
 
-/// Whether the project's review holds are at the project bound. Every run a model answers ends in a proposal that takes one of them, so at the bound no run can settle: the worker selects and runs nothing for the project until a pending proposal is settled or its review window ends. The wait is logged once.
-pub fn holds_at_bound(
+/// The review runs the hold bounds still admit for the project: what is left of the project's bound and of the host's. Every run a model answers ends in a proposal that takes a review hold, so with none left no run can settle: the worker selects and runs nothing for the project until a pending proposal is settled or its review window ends. The wait is logged once.
+pub fn holds_left(
     kernel: &KernelStore,
     memory: &mut SelectionMemory,
     project_digest: &str,
     now: i64,
-) -> Result<bool, CycleError> {
-    let holds = active_review_holds(kernel, project_digest, now)?.len();
-    if holds < kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT {
+) -> Result<usize, CycleError> {
+    let holds = kernel
+        .list_active_review_holds(now, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+        .map_err(|error| CycleError::Ledger(error.to_string()))?;
+    let held = holds
+        .iter()
+        .filter(|hold| hold.binding.project_digest == project_digest)
+        .count();
+    let left = hold_room(held, holds.len());
+    if left > 0 {
         memory.held.remove(project_digest);
-        return Ok(false);
-    }
-    if memory.held.insert(project_digest.to_string()) {
+    } else if memory.held.insert(project_digest.to_string()) {
         eprintln!(
-            "daemon: memory_reviewer reviews of a project wait: its {holds} pending proposals hold every review hold the project has; reviews resume when one is settled or its review window ends"
+            "daemon: memory_reviewer reviews of a project wait: {held} of its pending proposals and {} on the host hold every review hold left; reviews resume when one is settled or its review window ends",
+            holds.len()
         );
     }
-    Ok(true)
+    Ok(left)
 }
 
-/// What the store holds for the source of one evidence row.
-enum Source {
-    /// The object id of a live descriptor citing the evidence.
-    Live(String),
-    /// Descriptors cited the evidence and the store retired each.
-    Retired,
-    Uncited,
+/// What is left of the project's hold bound and of the host's, given the active review holds of each.
+fn hold_room(project_holds: usize, host_holds: usize) -> usize {
+    kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT
+        .saturating_sub(project_holds)
+        .min(kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST.saturating_sub(host_holds))
 }
 
-/// The source descriptor citing `evidence_id`: a message block first, then a repository document, then a tool span.
+/// The object id of a live source descriptor citing `evidence_id`: a message block first, then a repository document, then a tool span.
 fn source_descriptor(
     kernel: &KernelStore,
     evidence_id: &str,
     tip: i64,
     budget: &EvalBudget,
-) -> Result<Source, CycleError> {
-    let mut found = Source::Uncited;
+) -> Result<Option<String>, CycleError> {
     for class in [
         OccurrenceClass::Messages,
         OccurrenceClass::RepositoryDocuments,
         OccurrenceClass::RawToolSpans,
     ] {
         match kernel.source_descriptor_citing_evidence(class, evidence_id, tip, budget) {
-            Ok(CitingDescriptor::Live(descriptor)) => {
-                return Ok(Source::Live(descriptor.object_id));
-            }
-            Ok(CitingDescriptor::Retired) => found = Source::Retired,
-            Ok(CitingDescriptor::Uncited) => {}
+            Ok(CitingDescriptor::Live(descriptor)) => return Ok(Some(descriptor.object_id)),
+            Ok(CitingDescriptor::Retired | CitingDescriptor::Uncited) => {}
             // A row of another class under the evidence fails this class's row check; the next class reads it.
             Err(KernelError::CorruptCanonicalRow) => {}
             Err(error) => return Err(CycleError::Kernel(error)),
         }
     }
-    Ok(found)
+    Ok(None)
 }
 
 /// What the worker did with one published proposal.
@@ -1287,8 +1280,12 @@ pub fn apply_proposal(
             &first.evidence_id,
         );
     }
+    // A successor the reviewer writes opens with the memory's own attribution and carries no other writer's label on any line.
     if proposal.action == ProposalAction::Revise
-        && proposal.new_text.as_deref().map(Writer::of_statement) != Some(writer)
+        && proposal
+            .new_text
+            .as_deref()
+            .is_none_or(|text| Writer::of_statement(text) != writer || writer.claims_another(text))
     {
         return release(Applied::Dropped);
     }
@@ -1597,6 +1594,7 @@ mod tests {
             later(5, "a", Trigger::LaterMessage),
             later(9, "b", Trigger::LaterMessage),
             later(7, "a", Trigger::LaterStatement),
+            later(6, "b", Trigger::LaterMessage),
             later(3, "a", Trigger::Contested),
         ]);
         assert_eq!(
@@ -1606,6 +1604,19 @@ mod tests {
                 later(7, "a", Trigger::Contested),
             ]
         );
+    }
+
+    /// The reviews the hold bounds still admit are what is left of the project's 64 and of the host's 256, whichever is less.
+    #[test]
+    fn the_hold_bounds_admit_what_the_project_and_the_host_have_left() {
+        let project = kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT;
+        let host = kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST;
+        assert_eq!(hold_room(0, 0), project);
+        assert_eq!(hold_room(project - 2, project - 2), 2);
+        assert_eq!(hold_room(project, project), 0);
+        assert_eq!(hold_room(project + 1, project + 1), 0);
+        assert_eq!(hold_room(3, host - 1), 1, "the host's bound is nearer");
+        assert_eq!(hold_room(0, host), 0);
     }
 
     fn citing(evidence: &[&str]) -> Vec<kernel::EvidenceReference> {

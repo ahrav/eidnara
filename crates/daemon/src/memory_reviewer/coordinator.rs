@@ -338,6 +338,7 @@ impl Coordinator {
             review: None,
             later_evidence: Vec::new(),
             stage_one_by_review_model: false,
+            withheld_later: None,
         };
         let settled = run
             .investigate(prepared.subject, prepared.starting, cancel)
@@ -502,6 +503,8 @@ struct Run<'a> {
     later_evidence: Vec<String>,
     /// Set once a request to an unproven default stage-1 model failed: the review model answers the run's remaining stage-1 attempts.
     stage_one_by_review_model: bool,
+    /// The refusal of a later reference that counts as evidence and that the policy withheld from the model.
+    withheld_later: Option<RefusalCode>,
 }
 
 /// Sixteen hex digits of OS entropy for the run's alias markers.
@@ -786,7 +789,7 @@ impl Run<'_> {
                         match fact.relation {
                             Relation::Source => review.source.push(reference),
                             Relation::Later => {
-                                if review.counts(&reference) {
+                                if review.eligible(&reference) {
                                     self.later_evidence.extend(evidence);
                                 }
                                 review.later.push(reference);
@@ -795,7 +798,19 @@ impl Run<'_> {
                         }
                         self.push_labeled(broker, read.buffer);
                     }
-                    Err(refusal) => refused(broker, &mut self.transcript, &refusal),
+                    Err(refusal) => {
+                        // A later reference the policy withholds from the model is evidence no decider read. A review left with none to read ends on that refusal, where a review whose evidence the store has retired is a keep.
+                        if fact.relation == Relation::Later
+                            && review.takes(fact.writer)
+                            && matches!(
+                                refusal.code,
+                                RefusalCode::PolicyBlocked | RefusalCode::RenderCheck
+                            )
+                        {
+                            self.withheld_later = Some(refusal.code);
+                        }
+                        refused(broker, &mut self.transcript, &refusal);
+                    }
                 }
             }
             // These reads are the host's opening disclosure, as the subject's is.
@@ -854,7 +869,6 @@ impl Run<'_> {
             Stage1Record {
                 decision,
                 model: String::new(),
-                answered: false,
                 later: self.later_evidence.clone(),
             },
         );
@@ -869,7 +883,10 @@ impl Run<'_> {
         let (Some(stage), Some(review)) = (&coordinator.stage_one, &self.review) else {
             return Ok(Classified::Flagged);
         };
-        if !review.has_evidence() {
+        if !review.has_eligible_later() {
+            if let Some(code) = self.withheld_later {
+                return Ok(Classified::Ended(RunResult::Refused(code)));
+            }
             self.decided_by_host(stage, Stage1::Keep);
             return Ok(Classified::Keep);
         }
@@ -901,13 +918,10 @@ impl Run<'_> {
         };
         let screened = disclosure.screen(review, cancel, deadline).await;
         // Only a request that left the host keeps its charge.
-        if !matches!(
-            &screened,
-            Ok(_)
-                | Err(DisclosureRefusal::Send { sent: true, .. }
-                    | DisclosureRefusal::ModelMismatch { .. }
-                    | DisclosureRefusal::TerminalNotRecorded { .. })
-        ) {
+        if !screened
+            .as_ref()
+            .map_or_else(DisclosureRefusal::left_host, |_| true)
+        {
             broker.accounting.refund_render(state_bytes);
         }
         drop(broker);
@@ -947,21 +961,32 @@ impl Run<'_> {
                 self.decided_by_host(stage, Stage1::Flagged);
                 return Ok(Classified::Flagged);
             }
+            // The request was refused before any marker: nothing was charged, and the same request would be refused again, so the run ends unsettled as a proposal request refused this way does.
+            Err(
+                DisclosureRefusal::DestinationNotRemote
+                | DisclosureRefusal::BrokerMismatch
+                | DisclosureRefusal::PolicyUnion,
+            ) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
             Err(refusal) => {
                 let moves = stage.unproven_default && !self.stage_one_by_review_model;
                 // A refused credential or an answer from another model ends review for the process, as on a proposal request. An unproven default is a guess at the host's catalog, so its failure of any kind moves the run to the review model instead.
                 if !moves && let Some(rejection) = Rejection::of(&refusal) {
                     return Err(InvestigationError::Rejected(rejection));
                 }
-                // The attempt was charged and ended without an answer. The project's other reviews wait out the failure, and this run pauses before its next attempt, so an outage of the stage-1 model spends this job's attempts alone.
                 eprintln!(
                     "daemon: memory_reviewer stage 1 request ended without an answer: job={} decider=chat_model model={} {refusal}",
                     &self.context.job.causal_identity
                         [..16.min(self.context.job.causal_identity.len())],
                     approval.model,
                 );
+                if moves {
+                    // The review model answers this run's next stage-1 attempt, and the worker sends the project's later reviews to it.
+                    stage.book.note_default_refused(&stage.project);
+                    self.stage_one_by_review_model = true;
+                    return Ok(Classified::Spent);
+                }
+                // The attempt was charged and ended without an answer. The project's other reviews wait out the failure, and this run pauses before its next attempt, so an outage of the stage-1 model spends this job's attempts alone.
                 stage.book.note_failure(&stage.project);
-                self.stage_one_by_review_model |= moves;
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => return Err(InvestigationError::Cancelled),
@@ -996,7 +1021,6 @@ impl Run<'_> {
             Stage1Record {
                 decision,
                 model: approval.model.clone(),
-                answered: answers.is_some(),
                 later: self.later_evidence.clone(),
             },
         );
@@ -1240,13 +1264,11 @@ impl Run<'_> {
             (settled, disclosed)
         };
         // Buffers count as sent once a request byte left the host; a refusal before the handoff returns the resend charge, so only sends that happened are charged.
-        let left_host = matches!(
-            &disclosed,
-            Some(Ok(_))
-                | Some(Err(DisclosureRefusal::Send { sent: true, .. }
-                    | DisclosureRefusal::ModelMismatch { .. }
-                    | DisclosureRefusal::TerminalNotRecorded { .. }))
-        );
+        let left_host = disclosed.as_ref().is_some_and(|disclosed| {
+            disclosed
+                .as_ref()
+                .map_or_else(DisclosureRefusal::left_host, |_| true)
+        });
         if left_host {
             self.sent = self.transcript.len();
         } else {
@@ -1402,6 +1424,17 @@ enum Relation {
     Earlier,
 }
 
+impl Relation {
+    /// Where a reference stands: `cited` by the memory, `written` at its own message time when it has one, beside the time of the newest message the memory cites.
+    fn of(cited: bool, written: Option<i64>, newest_cited: Option<i64>) -> Self {
+        match (cited, written, newest_cited) {
+            (true, _, _) => Self::Source,
+            (false, Some(written), Some(source)) if written < source => Self::Earlier,
+            (false, _, _) => Self::Later,
+        }
+    }
+}
+
 /// What the host knows about one linked reference of a memory: who wrote it, when, and where it stands relative to the memory's source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReferenceFact {
@@ -1501,11 +1534,7 @@ fn reference_facts(
         .map(|(writer, written, cited)| ReferenceFact {
             writer,
             written,
-            relation: match (cited, written, newest_cited) {
-                (true, _, _) => Relation::Source,
-                (false, Some(written), Some(source)) if written < source => Relation::Earlier,
-                (false, _, _) => Relation::Later,
-            },
+            relation: Relation::of(cited, written, newest_cited),
         })
         .collect())
 }
@@ -1890,6 +1919,27 @@ mod tests {
     use kernel::{ArtifactIngestRequest, CommitIntent, DomainSpec, ProviderEgress, Sensitivity};
 
     use super::*;
+
+    /// A reference the memory cites is its source. A message older than the newest cited message was written before the memory. Every other reference is later evidence: a message at or after the source, a reference with no message time such as a tool result or a repository document, and every reference of a memory whose source the store no longer retains.
+    #[test]
+    fn a_reference_is_placed_against_the_memorys_source() {
+        assert_eq!(Relation::of(true, Some(5), Some(5)), Relation::Source);
+        assert_eq!(Relation::of(true, None, None), Relation::Source);
+        assert_eq!(Relation::of(false, Some(4), Some(5)), Relation::Earlier);
+        assert_eq!(Relation::of(false, Some(5), Some(5)), Relation::Later);
+        assert_eq!(Relation::of(false, Some(6), Some(5)), Relation::Later);
+        assert_eq!(
+            Relation::of(false, None, Some(5)),
+            Relation::Later,
+            "a tool result or a repository document beside a retained source"
+        );
+        assert_eq!(
+            Relation::of(false, Some(4), None),
+            Relation::Later,
+            "the store retains no source"
+        );
+        assert_eq!(Relation::of(false, None, None), Relation::Later);
+    }
 
     /// A fact-set run is offered the project's working tree; a memory review is offered its references and related memories, and the four actions a memory admits.
     #[test]

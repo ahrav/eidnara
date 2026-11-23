@@ -157,6 +157,18 @@ pub enum DisclosureRefusal {
     },
 }
 
+impl DisclosureRefusal {
+    /// Whether a request byte left the host before this refusal: the request was sent and failed, another model answered it, or its terminal could not be recorded. Bytes charged for a request that never left return to the run's bound.
+    pub fn left_host(&self) -> bool {
+        matches!(
+            self,
+            Self::Send { sent: true, .. }
+                | Self::ModelMismatch { .. }
+                | Self::TerminalNotRecorded { .. }
+        )
+    }
+}
+
 /// One accepted disclosure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Disclosed {
@@ -702,7 +714,7 @@ impl Disclosure<'_> {
             .map_err(|_| DisclosureRefusal::PolicyUnion)
     }
 
-    /// One stage-1 attempt by the chat model this disclosure's sender reaches through the host: the fixed instructions as the system text and the review state as the prompt, under an attempt marker like a proposal request ([`Self::exchange_through_host`]). Returns the decider's answers, or `None` for an answer outside the closed form, with the SHA-256 of the request body. An answer the provider stopped or cut at the output cap reads as outside the closed form.
+    /// One stage-1 attempt by the chat model this disclosure's sender reaches through the host: the fixed instructions as the system text and the review state as the prompt, under an attempt marker like a proposal request (`exchange_through_host`). Returns the decider's answers, or `None` for an answer outside the closed form, with the SHA-256 of the request body. An answer the provider stopped or cut at the output cap reads as outside the closed form.
     pub async fn screen(
         &self,
         review: &ReviewState,
@@ -921,7 +933,7 @@ mod tests {
             Err(DisclosureRefusal::RenderCheck)
         );
 
-        // JSON text escapes the line ends of a key block, so only the plain form of the state holds the block as its scanner rule reads it. Each form is checked.
+        // A key block holds line ends, which JSON text escapes. Each form of the request is checked: the text that is sent, and the plain texts a decider reads once the JSON is parsed.
         let key = format!(
             "-----BEGIN {kind} PRIVATE KEY-----\n{body}\n-----END {kind} PRIVATE KEY-----",
             kind = "RSA",

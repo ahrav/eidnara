@@ -176,12 +176,6 @@ pub enum ArtifactDestination {
 impl ArtifactDestination {
     /// The destinations a route can name; egress proofs derive destinations from this list. [`Self::ConfiguredModel`] is the daemon's own and has its own table in `kernel_cas`.
     pub const ALL: &'static [Self] = &[Self::Local, Self::Remote];
-
-    /// Whether the destination is the unconfigured remote one, whose class and provider-egress
-    /// rules admit only content proven publishable.
-    pub const fn is_remote(self) -> bool {
-        matches!(self, Self::Remote)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
