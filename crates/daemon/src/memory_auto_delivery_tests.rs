@@ -90,6 +90,14 @@ pub(super) fn classed(quote: &str, lifetime: &'static str) -> Extracted {
     }
 }
 
+/// A lasting statement of the user that replaces the memory `target`.
+pub(super) fn replacing(quote: &str, target: &str) -> Extracted {
+    Extracted {
+        replaces: vec![target.to_string()],
+        ..classed(quote, "lasting")
+    }
+}
+
 fn fact(quote: &str) -> Extracted {
     Extracted {
         quote: quote.to_string(),

@@ -477,6 +477,36 @@ async fn a_memory_older_than_its_retained_messages_is_reviewed_on_new_evidence()
     assert!(rig.block().await.contains(&stated(THURSDAY)));
 }
 
+/// A proposal that waits for a reader, and a dispute, leave capture free to act: when the user's later statement is captured as the replacement of the memory, the memory leaves the block and the replacement is delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_replaces_a_memory_whose_proposal_waits_for_a_reader() {
+    for apply in [ReviewApply::Propose, ReviewApply::Contest] {
+        let rig = reviewed(apply).await;
+        assert_eq!(rig.active_review_holds(), 1);
+        memory_auto_delivery_tests::capture(
+            &rig.handler,
+            FIRST,
+            "s1",
+            &[("m9", "user", TUESDAY)],
+            |text, existing| {
+                let target = existing
+                    .iter()
+                    .find(|memory| memory["content"] == stated(THURSDAY))
+                    .expect("the reviewed memory is offered to the extractor");
+                vec![memory_auto_delivery_tests::replacing(
+                    text,
+                    target["id"].as_str().unwrap(),
+                )]
+            },
+        )
+        .await;
+        let block = rig.block().await;
+        assert!(block.contains(&stated(TUESDAY)), "{block}");
+        assert!(!block.contains(THURSDAY), "{block}");
+        assert!(block.contains(&stated(LINTER)), "{block}");
+    }
+}
+
 /// Where the project names a classifier and its harness answers classifier work, the classifier decides first. A keep settles the review with no chat request: the request the harness received holds the statement and the later message with its writer and time, the proposal is settled, and the statement stays delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_classifier_keeps_a_memory_without_a_chat_request() {
