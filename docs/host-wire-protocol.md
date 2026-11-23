@@ -1318,7 +1318,9 @@ later session; `request`, an instruction the turn at hand answers, such as an
 edit, a specification of the thing being built, steering, or an instruction
 for one occasion; `current_work`, work the user leaves open beyond the turn
 at hand, such as a goal, a plan, or work deferred to a later session;
-`status`, what happened or is observed; or `unsettled`, a matter the user
+`status`, what happened or is observed, and general talk about people,
+careers, the organisation, or teamwork that leaves the work on the project
+nothing to follow; or `unsettled`, a matter the user
 leaves undecided.
 A value outside these five is a schema defect of its source's decision, and
 a `lifetime` given as `null` reads as absent. The class withholds approval
