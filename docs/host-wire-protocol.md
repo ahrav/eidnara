@@ -1423,29 +1423,36 @@ message of the user named and the agent then used. Each transform pass of a
 primary Pi session whose configuration permits memory capture, and whose
 request carries the empty `working_directory` (the session works in the
 project root), is observed before its window is resolved. The observation
-reads the last message the user typed and the rows after it; the rows
+reads the last message of the user and the rows after it. A message of the
+user is a row that Pi gives the user role and that carries neither the
+synthetic nor the summary mark: a prompt the user types, a template the
+user invokes, or a prompt an extension sends in the user's name. The rows
 before that message show nothing, since a fork copies its parent's rows
 into a session of another id. A message whose text parts hold more than
-64 KiB together names no file. Each text part is read through the line
-before its first line that holds one tag alone, opening or closing: a block
-another writer appends to a message opens with such a line, so the text
-after it, the sender's included, names no file. The text of a prompt
-template the user invoked is the user's message. From those lines the daemon
+64 KiB together names no file. Each text part is read up to its first `<`
+that an ASCII letter or a `/` follows, where a tag opens: a block another
+writer adds to a message, such as an attached file or a hint, opens with a
+tag, so the text after it, the sender's included, names no file. From that
+text the daemon
 takes the runs of ASCII letters, digits, and `._-/+@` that hold a `.` or a
 `/` once the periods that end them are dropped, and reads the first 32
 distinct ones, each as written and, for a run that opens with Pi's
 file-reference mark `@`, without that character. A path is held relative to
 the project root: a relative path is taken without its leading `./` marks,
-an absolute path beneath the root as the daemon spells the root is taken
+an absolute path that opens with the root as the daemon spells it is taken
 relative to it, and the result names a file when it is at most 256 bytes of
 those characters and passes the confined-path rules (at most 16 components,
 none of them empty, `.`, `..`, or `.git` or `.eidnara` in any letter case).
+The daemon normalizes nothing, and a `read` argument that holds another
+character names no file, so a root spelled with another character admits
+relative paths alone.
 A call after the message uses a named file when it is a call of Pi's `read`
 whose `path` argument, read without one leading `@` as Pi opens it, names
 the file, or a call of Pi's `bash` whose `command` names the file in one of
 its first 256 such runs, read as written with their periods, and when the
 call's id is the id of no other call after the message and of exactly one
-result, which is text, JSON, or content that carries no error. A file the
+result, which follows the call and is text, JSON, or content that carries
+no error. A file the
 turn also edits is used the same way. When the pass's transform has
 succeeded, the first eight observed paths that the session has not
 recorded, that are regular files beneath
@@ -1470,9 +1477,10 @@ changes the domain: a `kernel.commit` operation that names `named-files`,
 that writes a row under the id prefixes `nfu_` or `dnf_` or the id
 `domain:named-files`, or that replaces, retires, or marks one of the
 domain's rows, is refused as `invalid_input`, and so is a
-`kernel.artifact.ingest.begin` whose artifact names one of those ids, the
-domain, or the source kind `named_file_recorder`; a path leaves the element
-when its file does. The search projection publishes none of the records, so
+`kernel.artifact.ingest.begin` whose artifact's object id is one of those
+ids or an id under the verifier's prefixes, or whose artifact names the
+domain, the source kind `named_file_recorder`, or the verifier's source
+kind; a path leaves the element when its file does. The search projection publishes none of the records, so
 `eidnara_search` ranks none, and a `kernel.read` page returns them with
 `domain_id` `named-files`. A pass reads the newest records
 under the read's row and byte bounds, counts the ones the recorder wrote,
@@ -1818,7 +1826,7 @@ Paging rule. A request may be split into pages that share one `transform_page_id
 
 #### 7.10.4 Outcomes and errors
 
-The daemon resolves a window against one snapshot of the session's coverage, before any other work of the pass and without writing:
+The daemon resolves a window against one snapshot of the session's coverage, without writing, before any other work of the pass except the named-file observation of Section 7.9, which reads the submitted window and writes nothing:
 
 - The declared segment is the rendered boundary: the window is served as submitted.
 - The declared segment is older than the rendered boundary and the rendered boundary's message is in the window: the daemon slices the window at that message and serves the rest (a stale slice); the consumer's coordinates are unchanged (Section 7.10.5).
