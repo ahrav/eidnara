@@ -75,9 +75,9 @@ impl ChildSession {
     /// Deletes the session and waits a short while for the deletion, always ending [`DELETION_MARGIN`] before `deadline`. The attempt's terminal is recorded after this returns and the ledger takes it only before the deadline, so a slow deletion is left to its own task.
     async fn end(mut self, deadline: Instant) {
         if let Some(deletion) = self.delete() {
-            let until = (Instant::now() + DELETION_WAIT)
-                .min(deadline.checked_sub(DELETION_MARGIN).unwrap_or(deadline));
-            let _ = tokio::time::timeout_at(until, deletion).await;
+            let _ =
+                tokio::time::timeout_at(deletion_wait_until(Instant::now(), deadline), deletion)
+                    .await;
         }
     }
 }
@@ -86,6 +86,11 @@ impl Drop for ChildSession {
     fn drop(&mut self) {
         self.delete();
     }
+}
+
+/// When a request stops waiting for its session's deletion: [`DELETION_WAIT`] after `now`, and no later than [`DELETION_MARGIN`] before the attempt's `deadline`.
+fn deletion_wait_until(now: Instant, deadline: Instant) -> Instant {
+    (now + DELETION_WAIT).min(deadline.checked_sub(DELETION_MARGIN).unwrap_or(deadline))
 }
 
 /// A failed host request and whether the request reached the model runtime.
@@ -276,5 +281,28 @@ impl HostExecution {
             model: output.model,
             accounting: *accounting,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request waits a short while for its session's deletion and never into the last second before its attempt's deadline, where the ledger still takes the attempt's terminal.
+    #[test]
+    fn the_wait_for_a_sessions_deletion_ends_before_the_attempt_deadline() {
+        let now = Instant::now();
+        let seconds = std::time::Duration::from_secs;
+        assert_eq!(
+            deletion_wait_until(now, now + seconds(30)),
+            now + DELETION_WAIT,
+            "a deadline far off leaves the whole wait"
+        );
+        assert_eq!(
+            deletion_wait_until(now, now + seconds(2)),
+            now + seconds(2) - DELETION_MARGIN,
+            "a near deadline ends the wait one margin before it"
+        );
+        assert!(deletion_wait_until(now, now + DELETION_MARGIN) <= now);
     }
 }

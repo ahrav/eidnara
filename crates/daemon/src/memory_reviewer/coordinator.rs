@@ -503,7 +503,7 @@ struct Run<'a> {
     later_evidence: Vec<String>,
     /// Set once a request to an unproven default stage-1 model failed: the review model answers the run's remaining stage-1 attempts.
     stage_one_by_review_model: bool,
-    /// The refusal of a later reference that counts as evidence, that the store still holds, and that the run could not read.
+    /// The refusal of a later reference that counts as evidence, that the store still holds, and that the policy withheld from the model. A review with one records no keep.
     withheld_later: Option<RefusalCode>,
 }
 
@@ -799,18 +799,16 @@ impl Run<'_> {
                         self.push_labeled(broker, read.buffer);
                     }
                     Err(refusal) => {
-                        // A later reference that counts as evidence and was left unread is evidence no decider judged. A read the store failed ends the run unsettled, and a later pass reads again. A reference the store has retired is evidence that is gone. Any other refusal ends the review on that refusal.
                         if fact.relation == Relation::Later && review.takes(fact.writer) {
-                            match refusal.code {
-                                RefusalCode::Store => {
+                            match Unread::of(refusal.code) {
+                                Unread::Unsettled => {
                                     return Err(InvestigationError::Store(
                                         refusal.code.to_string(),
                                     ));
                                 }
-                                RefusalCode::ExpectationChanged
-                                | RefusalCode::NotFound
-                                | RefusalCode::OriginRevoked => {}
-                                code => self.withheld_later = Some(code),
+                                Unread::OverBound => return Ok(Err(RunResult::Exhausted)),
+                                Unread::Gone => {}
+                                Unread::Withheld => self.withheld_later = Some(refusal.code),
                             }
                         }
                         refused(broker, &mut self.transcript, &refusal);
@@ -878,6 +876,15 @@ impl Run<'_> {
         );
     }
 
+    /// Ends a review that would be kept while the policy withheld a later reference from the model: the review settles on that reference's refusal, and the log says so.
+    fn unread_later(&self, code: RefusalCode) -> Classified {
+        eprintln!(
+            "daemon: memory_reviewer review ended on a later reference the model was not shown: job={} refusal={code}",
+            &self.context.job.causal_identity[..16.min(self.context.job.causal_identity.len())],
+        );
+        Classified::Ended(RunResult::Refused(code))
+    }
+
     /// One stage-1 attempt. A review with no later reference that may change it is a keep by the flag rule, which the host records without a request. Otherwise the state is disclosed to the stage-1 model under an attempt marker, as a proposal request is, and its answers decide. An answer outside the closed form flags the review, and so does a state too large for one request. The state's bytes are charged against the run's model-visible bound like a resend, and the charge returns when no request byte left the host.
     async fn stage_one(
         &mut self,
@@ -887,11 +894,10 @@ impl Run<'_> {
         let (Some(stage), Some(review)) = (&coordinator.stage_one, &self.review) else {
             return Ok(Classified::Flagged);
         };
-        // A decision on part of the evidence would read as a decision on all of it, so a review with an unread later reference ends on that reference's refusal.
-        if let Some(code) = self.withheld_later {
-            return Ok(Classified::Ended(RunResult::Refused(code)));
-        }
         if !review.has_eligible_later() {
+            if let Some(code) = self.withheld_later {
+                return Ok(self.unread_later(code));
+            }
             self.decided_by_host(stage, Stage1::Keep);
             return Ok(Classified::Keep);
         }
@@ -1029,9 +1035,11 @@ impl Run<'_> {
                 later: self.later_evidence.clone(),
             },
         );
-        Ok(match decision {
-            Stage1::Keep => Classified::Keep,
-            Stage1::Flagged => Classified::Flagged,
+        Ok(match (decision, self.withheld_later) {
+            // A keep judged on part of the evidence would stand as a keep on all of it. A flag goes on: the review model reads what the run read, and a change still needs a later reference it cites.
+            (Stage1::Keep, Some(code)) => self.unread_later(code),
+            (Stage1::Keep, None) => Classified::Keep,
+            (Stage1::Flagged, _) => Classified::Flagged,
         })
     }
 
@@ -1427,6 +1435,32 @@ enum Relation {
     Later,
     /// A message written before the newest cited message.
     Earlier,
+}
+
+/// What a refused opening read of a later reference that counts as evidence means for its review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unread {
+    /// The store failed the read: the run ends unsettled and a later pass reads again.
+    Unsettled,
+    /// The reference is past what one run may read: the run ends as a spent budget, as it does when the memory itself is.
+    OverBound,
+    /// The store has retired the reference: the evidence is gone, and the review goes on with the rest.
+    Gone,
+    /// The policy withholds the reference from the model: the review records no keep.
+    Withheld,
+}
+
+impl Unread {
+    fn of(code: RefusalCode) -> Self {
+        match code {
+            RefusalCode::Store => Self::Unsettled,
+            RefusalCode::ExpectationChanged
+            | RefusalCode::NotFound
+            | RefusalCode::OriginRevoked => Self::Gone,
+            code if code.is_capacity() => Self::OverBound,
+            _ => Self::Withheld,
+        }
+    }
 }
 
 impl Relation {
@@ -1924,6 +1958,35 @@ mod tests {
     use kernel::{ArtifactIngestRequest, CommitIntent, DomainSpec, ProviderEgress, Sensitivity};
 
     use super::*;
+
+    /// A refused read of a later reference ends its review by what the refusal means: a store failure leaves the review for a later pass, a reference past the run's bounds spends the run, a retired reference is gone, and any other refusal is the policy's.
+    #[test]
+    fn an_unread_later_reference_ends_its_review_by_its_refusal() {
+        assert_eq!(Unread::of(RefusalCode::Store), Unread::Unsettled);
+        for code in [
+            RefusalCode::ByteLimit,
+            RefusalCode::BufferLimit,
+            RefusalCode::InspectionLimit,
+            RefusalCode::BatchLimit,
+        ] {
+            assert_eq!(Unread::of(code), Unread::OverBound, "{code}");
+        }
+        for code in [
+            RefusalCode::ExpectationChanged,
+            RefusalCode::NotFound,
+            RefusalCode::OriginRevoked,
+        ] {
+            assert_eq!(Unread::of(code), Unread::Gone, "{code}");
+        }
+        for code in [
+            RefusalCode::PolicyBlocked,
+            RefusalCode::RenderCheck,
+            RefusalCode::HoldInvalid,
+            RefusalCode::Unsupported,
+        ] {
+            assert_eq!(Unread::of(code), Unread::Withheld, "{code}");
+        }
+    }
 
     /// A reference the memory cites is its source. A message older than the newest cited message was written before the memory. Every other reference is later evidence: a message at or after the source, a reference with no message time such as a tool result or a repository document, and every reference of a memory whose source the store no longer retains.
     #[test]

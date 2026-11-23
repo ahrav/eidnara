@@ -594,7 +594,7 @@ pub(super) mod tests {
 
     /// A text carries another writer's label when it holds one anywhere, whatever the case and whatever precedes it.
     #[test]
-    fn a_text_that_opens_a_line_with_another_writers_label_claims_that_writer() {
+    fn a_text_that_holds_another_writers_label_claims_that_writer() {
         let reported = "Assistant reported: the suite needs Redis on port 6390.";
         assert!(!Writer::Assistant.claims_another(reported));
         assert!(Writer::Unrecorded.claims_another(reported));

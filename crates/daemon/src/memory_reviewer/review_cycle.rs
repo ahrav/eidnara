@@ -216,17 +216,20 @@ impl Walk {
     };
 }
 
-/// The descriptor a job reads a source through and who wrote the source. The writer is fixed for an evidence row. The descriptor is live until the store retires it: a captured message is retained for a bounded time, and a memory outlives it.
+/// What a selection remembers of one source: who wrote it and the commit that published it. Both are fixed for a source. A captured message is retained for a bounded time and a memory outlives it, so a source can be found retired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceFacts {
-    object_id: String,
     writer: Writer,
-    /// Set once a later read finds the descriptor retired; no job reads a retired source.
-    retired: bool,
+    /// The commit that published the source's descriptor. Sources are ordered by it, so a source keeps its place whatever later brings it up as evidence.
+    published: i64,
+    /// When a read found the descriptor retired; no job reads a retired source. The answer is read again after [`RETIRED_RECHECK`], because a message with the same text published later cites the same evidence.
+    retired: Option<Instant>,
 }
 
 /// Sources remembered at once; the map starts over past this.
 const MAX_REMEMBERED_SOURCES: usize = 65_536;
+/// How long a source found retired is skipped before its descriptor is read again.
+const RETIRED_RECHECK: Duration = Duration::from_secs(60 * 60);
 
 impl SelectionMemory {
     /// Sets the walk's bounds, so a test covers a store larger than one selection examines.
@@ -235,7 +238,7 @@ impl SelectionMemory {
         self.walk = Some(walk);
     }
 
-    /// The descriptor and writer of `evidence_id`, read once and remembered, with whether a read found the descriptor retired. `None` while no descriptor has cited the evidence, which is looked up again on the next pass. A read the store fails is an error and is remembered as nothing.
+    /// The writer and publishing commit of the live source `evidence_id`, read once and remembered. `None` for a source no live descriptor cites: one not yet published, which the next pass looks up again, and one found retired, which is looked up again after [`RETIRED_RECHECK`]. A read the store fails is an error and is remembered as nothing.
     fn source(
         &mut self,
         kernel: &KernelStore,
@@ -244,30 +247,42 @@ impl SelectionMemory {
         budget: &EvalBudget,
     ) -> Result<Option<SourceFacts>, CycleError> {
         if let Some(facts) = self.sources.get(evidence_id) {
-            return Ok(Some(facts.clone()));
-        }
-        let facts = match source_descriptor(kernel, evidence_id, tip, budget)? {
-            Source::Uncited => return Ok(None),
-            // A retired source is remembered as such, so the passes that follow skip its lookup.
-            Source::Retired => SourceFacts {
-                object_id: String::new(),
-                writer: Writer::Unrecorded,
-                retired: true,
-            },
-            Source::Live(object_id) => {
-                let (_, admission) = kernel
-                    .preview(Instant::now() + Duration::from_secs(5), |preview| {
-                        preview.subject_admission(&object_id)
-                    })
-                    .map_err(CycleError::Kernel)?;
-                SourceFacts {
-                    writer: admission.map_or(Writer::Unrecorded, |(prior, _)| {
-                        Writer::of_source(prior.source_class)
-                    }),
-                    object_id,
-                    retired: false,
-                }
+            match facts.retired {
+                None => return Ok(Some(facts.clone())),
+                Some(found) if found.elapsed() < RETIRED_RECHECK => return Ok(None),
+                Some(_) => {}
             }
+        }
+        let descriptor = match source_descriptor(kernel, evidence_id, tip, budget)? {
+            CitingDescriptor::Live(descriptor) => descriptor,
+            CitingDescriptor::Uncited => return Ok(None),
+            // A retired source is remembered as such, so the passes of the next hour skip its lookup.
+            CitingDescriptor::Retired => {
+                if self.sources.len() >= MAX_REMEMBERED_SOURCES {
+                    self.sources.clear();
+                }
+                self.sources.insert(
+                    evidence_id.to_string(),
+                    SourceFacts {
+                        writer: Writer::Unrecorded,
+                        published: 0,
+                        retired: Some(Instant::now()),
+                    },
+                );
+                return Ok(None);
+            }
+        };
+        let (_, admission) = kernel
+            .preview(Instant::now() + Duration::from_secs(5), |preview| {
+                preview.subject_admission(&descriptor.object_id)
+            })
+            .map_err(CycleError::Kernel)?;
+        let facts = SourceFacts {
+            writer: admission.map_or(Writer::Unrecorded, |(prior, _)| {
+                Writer::of_source(prior.source_class)
+            }),
+            published: descriptor.created_commit_seq,
+            retired: None,
         };
         if self.sources.len() >= MAX_REMEMBERED_SOURCES {
             self.sources.clear();
@@ -276,7 +291,7 @@ impl SelectionMemory {
         Ok(Some(facts))
     }
 
-    /// The descriptor a job may read `evidence_id` through now, read from the Kernel at this call, or `None` once the store has retired it. A remembered source found retired is marked, so later passes skip the read.
+    /// The descriptor a job may read `evidence_id` through now, read from the Kernel at this call, or `None` once the store has retired it. A remembered source found retired is marked, so the passes that follow skip it.
     fn readable(
         &mut self,
         kernel: &KernelStore,
@@ -284,18 +299,11 @@ impl SelectionMemory {
         tip: i64,
         budget: &EvalBudget,
     ) -> Result<Option<String>, CycleError> {
-        if self
-            .sources
-            .get(evidence_id)
-            .is_some_and(|facts| facts.retired)
-        {
-            return Ok(None);
-        }
         match source_descriptor(kernel, evidence_id, tip, budget)? {
-            Source::Live(object_id) => Ok(Some(object_id)),
-            Source::Retired | Source::Uncited => {
+            CitingDescriptor::Live(descriptor) => Ok(Some(descriptor.object_id)),
+            CitingDescriptor::Retired | CitingDescriptor::Uncited => {
                 if let Some(facts) = self.sources.get_mut(evidence_id) {
-                    facts.retired = true;
+                    facts.retired = Some(Instant::now());
                 }
                 Ok(None)
             }
@@ -427,8 +435,6 @@ fn active_review_holds(
 /// One later source that may bear on a memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LaterEvidence {
-    /// The publish tip of a ledger candidate row, or the commit of the later memory that cites the source.
-    recency: i64,
     evidence_id: String,
     trigger: Trigger,
 }
@@ -437,7 +443,7 @@ struct Candidate<'a> {
     descriptor: &'a LiveDescriptor,
     decision: &'a DecisionRow,
     trigger: Trigger,
-    /// The newest later source's recency, so the newest evidence is reviewed first.
+    /// The commit that published the newest later source, so the newest evidence is reviewed first.
     recency: i64,
     cited: Vec<String>,
     /// The later sources' evidence ids, newest first.
@@ -575,7 +581,7 @@ fn reopened_by_later_statements(decisions: &[&DecisionRow]) -> Vec<Vec<usize>> {
     reopened
 }
 
-/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, newest evidence first, each Ready with its starting references. Evidence is a later source the memory does not cite, written by someone who may change it: a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. A user's statement takes evidence only from the user; a fact the assistant reported, and work in progress, take it from anyone. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit at which it first became evidence for the memory. A memory whose change proposal is pending waits for it.
+/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, newest evidence first, each Ready with its starting references. Evidence is a later source the memory does not cite, written by someone who may change it: a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. A user's statement takes evidence only from the user; a fact the assistant reported, and work in progress, take it from anyone. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit that published it. A memory whose change proposal is pending waits for it.
 pub fn select_and_enqueue(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -669,7 +675,6 @@ pub fn select_and_enqueue(
             .into_iter()
             .filter(|row| row.publish_tip > stated && row.evidence_id.len() <= MAX_IDENTITY_BYTES)
             .map(|row| LaterEvidence {
-                recency: row.publish_tip,
                 evidence_id: row.evidence_id,
                 trigger: Trigger::LaterMessage,
             })
@@ -678,14 +683,13 @@ pub fn select_and_enqueue(
             let statement = rows[later];
             evidence.extend(cited_by(statement).into_iter().take(1).map(|evidence_id| {
                 LaterEvidence {
-                    recency: crate::memory_capture::stated_commit(statement),
                     evidence_id,
                     trigger: Trigger::LaterStatement,
                 }
             }));
         }
         let work_in_progress = crate::memory_capture::states_current_work(decision);
-        // The memory that contests a statement names its own source, which is what the review is shown. Two rewrites of a statement's row set a floor under its evidence, the row's commit. A contest without a recording session is one a review wrote: every source that was evidence by then is one the statement was reviewed on. A statement the user settled after a contest is the user's latest word, which evidence older than it leaves standing.
+        // The memory that contests a statement names its own source, which is what the review is shown. Two rewrites of a statement's row set a floor under its evidence, the row's commit. A contest without a recording session is one a review wrote: the sources published by then are the ones the statement was reviewed on. A statement the user settled after a contest is the user's latest word, which sources older than it leave standing.
         let mut reviewed_through =
             crate::memory_capture::is_settled(decision).then_some(decision.created_commit_seq);
         if crate::memory_capture::is_contested(decision)
@@ -696,42 +700,45 @@ pub fn select_and_enqueue(
             } else if let Some(contesting) = decisions.get(&contest.memory) {
                 evidence.extend(cited_by(contesting).into_iter().take(1).map(|evidence_id| {
                     LaterEvidence {
-                        recency: crate::memory_capture::stated_commit(contesting),
                         evidence_id,
                         trigger: Trigger::Contested,
                     }
                 }));
             }
         }
-        let mut evidence = newest_first(evidence);
-        evidence.retain(|later| {
-            !cited.contains(&later.evidence_id)
-                && reviewed_through.is_none_or(|through| later.recency > through)
-        });
         let own_words =
             Writer::of_statement(&decision.payload.summary) == Writer::User && !work_in_progress;
-        let mut signals = Vec::new();
-        let mut trigger = None;
-        let mut recency = decision.created_commit_seq;
-        for item in evidence {
-            if signals.len() == MAX_LATER_SOURCES {
-                break;
+        // Each source the memory does not cite, with the commit that published it. A source keeps that place whichever trigger brings it up and whenever a later memory comes to cite it.
+        let mut later = Vec::new();
+        for (evidence_id, trigger) in strongest_triggers(evidence) {
+            if cited.contains(&evidence_id) {
+                continue;
             }
-            let Some(source) = memory.source(kernel, &item.evidence_id, tip, &budget)? else {
+            let Some(source) = memory.source(kernel, &evidence_id, tip, &budget)? else {
                 continue;
             };
-            if source.retired || (own_words && source.writer != Writer::User) {
+            if (own_words && source.writer != Writer::User)
+                || reviewed_through.is_some_and(|through| source.published <= through)
+            {
                 continue;
             }
-            if signals.is_empty() {
-                recency = item.recency;
-            }
-            trigger = Some(trigger.map_or(item.trigger, |seen: Trigger| seen.min(item.trigger)));
-            signals.push(item.evidence_id);
+            later.push((source.published, evidence_id, trigger));
         }
-        let Some(trigger) = trigger else {
+        // Newest first.
+        later.sort_by(|a, b| (std::cmp::Reverse(a.0), &a.1).cmp(&(std::cmp::Reverse(b.0), &b.1)));
+        later.truncate(MAX_LATER_SOURCES);
+        let Some(&(recency, _, _)) = later.first() else {
             continue;
         };
+        let trigger = later
+            .iter()
+            .map(|(_, _, trigger)| *trigger)
+            .min()
+            .unwrap_or(Trigger::LaterMessage);
+        let signals: Vec<String> = later
+            .into_iter()
+            .map(|(_, evidence_id, _)| evidence_id)
+            .collect();
         candidates.push(Candidate {
             descriptor,
             decision,
@@ -943,24 +950,16 @@ fn subject_descriptors(
     Ok((rows, after))
 }
 
-/// `evidence` newest first, each source once, under its strongest trigger and at the commit it first became evidence: the oldest of its recencies. A source a candidate row named keeps its place when a later memory comes to cite it, so the memory stored for a message that was already reviewed names no new job.
-fn newest_first(evidence: Vec<LaterEvidence>) -> Vec<LaterEvidence> {
-    let mut sources: HashMap<String, LaterEvidence> = HashMap::new();
+/// Each source of `evidence` once, under the strongest of the triggers that found it.
+fn strongest_triggers(evidence: Vec<LaterEvidence>) -> BTreeMap<String, Trigger> {
+    let mut sources: BTreeMap<String, Trigger> = BTreeMap::new();
     for later in evidence {
         sources
-            .entry(later.evidence_id.clone())
-            .and_modify(|first| {
-                first.recency = first.recency.min(later.recency);
-                first.trigger = first.trigger.min(later.trigger);
-            })
-            .or_insert(later);
+            .entry(later.evidence_id)
+            .and_modify(|trigger| *trigger = (*trigger).min(later.trigger))
+            .or_insert(later.trigger);
     }
-    let mut evidence: Vec<LaterEvidence> = sources.into_values().collect();
-    evidence.sort_by(|a, b| {
-        (std::cmp::Reverse(a.recency), &a.evidence_id)
-            .cmp(&(std::cmp::Reverse(b.recency), &b.evidence_id))
-    });
-    evidence
+    sources
 }
 
 /// The review runs the hold bounds still admit for the project: what is left of the project's bound and of the host's. Every run a model answers ends in a proposal that takes a review hold, so with none left no run can settle: the worker selects and runs nothing for the project until a pending proposal is settled or its review window ends. The wait is logged once.
@@ -996,33 +995,22 @@ fn hold_room(project_holds: usize, host_holds: usize) -> usize {
         .min(kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST.saturating_sub(host_holds))
 }
 
-/// What the store holds for the source of one evidence row.
-enum Source {
-    /// The object id of a live descriptor citing the evidence.
-    Live(String),
-    /// Descriptors cited the evidence and the store retired each.
-    Retired,
-    Uncited,
-}
-
-/// The source descriptor citing `evidence_id`: a message block first, then a repository document, then a tool span.
+/// The source descriptor citing `evidence_id`, looked up as a message block first, then a repository document, then a tool span: the first live one, else whether any class holds a retired one.
 fn source_descriptor(
     kernel: &KernelStore,
     evidence_id: &str,
     tip: i64,
     budget: &EvalBudget,
-) -> Result<Source, CycleError> {
-    let mut found = Source::Uncited;
+) -> Result<CitingDescriptor, CycleError> {
+    let mut found = CitingDescriptor::Uncited;
     for class in [
         OccurrenceClass::Messages,
         OccurrenceClass::RepositoryDocuments,
         OccurrenceClass::RawToolSpans,
     ] {
         match kernel.source_descriptor_citing_evidence(class, evidence_id, tip, budget) {
-            Ok(CitingDescriptor::Live(descriptor)) => {
-                return Ok(Source::Live(descriptor.object_id));
-            }
-            Ok(CitingDescriptor::Retired) => found = Source::Retired,
+            Ok(live @ CitingDescriptor::Live(_)) => return Ok(live),
+            Ok(CitingDescriptor::Retired) => found = CitingDescriptor::Retired,
             Ok(CitingDescriptor::Uncited) => {}
             // A row of another class under the evidence fails this class's row check; the next class reads it.
             Err(KernelError::CorruptCanonicalRow) => {}
@@ -1603,31 +1591,26 @@ mod tests {
         }
     }
 
-    fn later(recency: i64, evidence_id: &str, trigger: Trigger) -> LaterEvidence {
-        LaterEvidence {
-            recency,
-            evidence_id: evidence_id.to_string(),
-            trigger,
-        }
-    }
-
-    /// One source two triggers found at different times takes one of a job's later slots, at the first of those times and under its strongest trigger.
+    /// One source two triggers found takes one of a job's later slots, under its strongest trigger.
     #[test]
     fn a_source_found_twice_is_one_piece_of_evidence() {
-        let evidence = newest_first(vec![
-            later(5, "a", Trigger::LaterMessage),
-            later(9, "b", Trigger::LaterMessage),
-            later(7, "a", Trigger::LaterStatement),
-            later(6, "b", Trigger::LaterMessage),
-            later(3, "a", Trigger::Contested),
+        let later = |evidence_id: &str, trigger| LaterEvidence {
+            evidence_id: evidence_id.to_string(),
+            trigger,
+        };
+        let sources = strongest_triggers(vec![
+            later("a", Trigger::LaterMessage),
+            later("b", Trigger::LaterMessage),
+            later("a", Trigger::LaterStatement),
+            later("b", Trigger::LaterMessage),
+            later("a", Trigger::Contested),
         ]);
         assert_eq!(
-            evidence,
+            sources.into_iter().collect::<Vec<_>>(),
             [
-                later(6, "b", Trigger::LaterMessage),
-                later(3, "a", Trigger::Contested),
-            ],
-            "each source stands at the commit it first became evidence"
+                ("a".to_string(), Trigger::Contested),
+                ("b".to_string(), Trigger::LaterMessage),
+            ]
         );
     }
 

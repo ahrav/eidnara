@@ -1520,7 +1520,9 @@ impl EvidenceBroker {
                 RunBufferRefusal::CapacityExhausted => {
                     refuse(Some(alias), RefusalCode::BufferLimit)
                 }
-                RunBufferRefusal::Unreadable | RunBufferRefusal::RangeOutOfBounds => {
+                // A read the store failed is a fault a later run can pass; a range outside the object is a reference that no longer stands.
+                RunBufferRefusal::Unreadable => refuse(Some(alias), RefusalCode::Store),
+                RunBufferRefusal::RangeOutOfBounds => {
                     refuse(Some(alias), RefusalCode::ExpectationChanged)
                 }
             })?;

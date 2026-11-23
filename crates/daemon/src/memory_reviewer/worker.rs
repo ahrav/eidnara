@@ -29,7 +29,7 @@ use super::coordinator::{
 use super::disclosure::{DisclosureApproval, ModelProfile};
 use super::host_execution::{HOST_CREDENTIAL_ID, HostExecution};
 use super::lifecycle::{ActivationState, MemoryReviewerStatus};
-use super::model_request::{Provider, Providers, Sender};
+use super::model_request::{Credential, Provider, Providers, Sender};
 use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use super::review_cycle::{self, Applied, ApplyScope, SelectionScope};
 use super::settlement::Settled;
@@ -87,13 +87,13 @@ pub struct ProjectRoute {
     pub authority_generation: u64,
     /// Newest binding first.
     pub roots: Vec<RootScope>,
-    /// The review switch of the project's newest bound root, when its user tier set one.
+    /// The review switch of the project, when the user tier sets one: the user tier's models and mode as they read at this listing, with the harness and credential fingerprints of the project's newest listed root.
     pub review: Option<ReviewSwitch>,
     /// Whether the owner's activation record runs this project: its memories authority is one the owner recorded and a route of it is bound. The authority the review switch gives a root covers reviews of its stored memories alone, and a root listed after its routes closed is listed for those reviews.
     pub recorded: bool,
 }
 
-/// One project's `memory_reviewer` settings as its newest route froze them at bind, with the route facts a host-routed request connects under.
+/// One project's `memory_reviewer` settings as the user tier reads at the worker's pass, with the route facts a host-routed request connects under, which the newest listed root's binding froze.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewSwitch {
     /// The `provider/model` every proposal request of the project's reviews names.
@@ -195,6 +195,8 @@ pub struct RootScope {
     pub project_root: PathBuf,
     pub project_digest: String,
     pub scope_id: String,
+    /// Whether a route of the root is bound. A root listed after its routes closed is listed for the review switch, which reviews its stored memories; a fact set is run under a bound root.
+    pub bound: bool,
 }
 
 pub struct Worker {
@@ -292,6 +294,7 @@ pub(crate) fn module_projects(
                 project_root: binding.project_root.clone(),
                 project_digest: binding.kernel_project.digest().to_string(),
                 scope_id: binding.kernel_project.scope_id(),
+                bound: bound.contains(&binding.project_root),
             });
         }
     }
@@ -391,6 +394,28 @@ impl Worker {
             .unwrap_or_else(|_| Err(Closed::Unreadable("gate evaluation".to_string())))
     }
 
+    /// Evaluates the owner's record to its conclusion: the gate, then the credential the record's provider sends with. Every evaluation ends in one state, so the status reads the same after a pass's first evaluation and after any later one.
+    async fn recorded_gate(
+        self: &Arc<Self>,
+        kernel: &Arc<kernel::KernelStore>,
+    ) -> Option<(Activation, Provider, Credential)> {
+        let (activation, provider) = self.gate_off_runtime(kernel).await.ok()?;
+        let credential = provider.credential(activation.approval.credential_id.clone(), |name| {
+            self.host
+                .credentials
+                .get(name)
+                .map(|value| value.to_string())
+        });
+        match credential {
+            Ok(credential) => Some((activation, provider, credential)),
+            Err(_) => {
+                self.status
+                    .set_activation(ActivationState::Closed("unknown_credential"));
+                None
+            }
+        }
+    }
+
     /// Closes the gate as `unavailable` for the rest of the process after a provider rejected an attempt. The first rejection logs once, naming the status or the reported model and never any content.
     fn latch(&self, rejection: Rejection) {
         if self.rejection.0.set(rejection.clone()).is_ok() {
@@ -476,7 +501,7 @@ impl Worker {
         })
     }
 
-    /// Whether a route's project is reviewed under the switch: its newest root set one and the worker can reach the host's model execution.
+    /// Whether a route's project is reviewed under the switch: the user tier sets one for it and the worker can reach the host's model execution.
     fn is_switched(&self, route: &ProjectRoute) -> bool {
         route.review.is_some() && self.switched.producers.is_some()
     }
@@ -689,7 +714,7 @@ impl Worker {
                 }
                 // A pass over many reviews outlasts one evaluation's lifetime, so each run restates that a switched project is under review and evaluates the owner's record again, which is what admits fact sets meanwhile.
                 self.status.set_switched_review(true);
-                let _ = self.gate_off_runtime(&kernel).await;
+                let _ = self.recorded_gate(&kernel).await;
                 let job = Arc::new(job);
                 let outcome = self
                     .run_job(&coordinator, &kernel, &route, Arc::clone(&job), cancel)
@@ -828,20 +853,7 @@ impl Worker {
             self.status.set_activation(ActivationState::Closed("store"));
             return 0;
         };
-        let (activation, provider) = match self.gate_off_runtime(&kernel).await {
-            Ok(gate) => gate,
-            Err(_) => return 0,
-        };
-        let Ok(credential) =
-            provider.credential(activation.approval.credential_id.clone(), |name| {
-                self.host
-                    .credentials
-                    .get(name)
-                    .map(|value| value.to_string())
-            })
-        else {
-            self.status
-                .set_activation(ActivationState::Closed("unknown_credential"));
+        let Some((activation, provider, credential)) = self.recorded_gate(&kernel).await else {
             return 0;
         };
         let coordinator = Coordinator {
@@ -1172,7 +1184,7 @@ fn job_root<'a>(
     let root = route
         .roots
         .iter()
-        .find(|root| root.project_digest == binding.project_digest)?;
+        .find(|root| root.bound && root.project_digest == binding.project_digest)?;
     Some((root, binding))
 }
 

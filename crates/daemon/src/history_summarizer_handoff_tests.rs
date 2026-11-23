@@ -3364,6 +3364,7 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
             project_root: project_root.clone(),
             project_digest: PROJECT_DIGEST.to_string(),
             scope_id: format!("project:{PROJECT_DIGEST}"),
+            bound: true,
         }],
     };
     let status = Arc::new(MemoryReviewerStatus::default());

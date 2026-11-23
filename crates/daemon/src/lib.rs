@@ -36309,6 +36309,68 @@ mod tests {
         }
     }
 
+    /// A project whose authority its owner recorded stays under the owner's record while any of its
+    /// roots is bound. A root that closed with the review switch on is still listed, newest first,
+    /// for the reviews of its stored memories, and a fact set is run under a bound root alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_owner_recorded_project_stays_under_the_record_while_a_root_is_bound() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = MemoryClassifierHarness::start(&producer).await;
+        harness.handler.bind_route(
+            test_route(7),
+            binding_with_harness(&harness.route_root, "pi", "ses-live"),
+        );
+        let worktree = harness._dir.path().join("switched-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        harness
+            .store
+            .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
+            .unwrap();
+        let mut switched = binding_with_harness(worktree.to_str().unwrap(), "pi", "ses-switched");
+        switched.config.memory_reviewer = config::MemoryReviewerConfig {
+            enabled: true,
+            model: Some("test/reviewer".to_string()),
+            ..Default::default()
+        };
+        harness.handler.bind_route(test_route(8), switched);
+        harness.handler.unbind_route(test_route(8));
+        let projects = memory_reviewer::worker::module_projects(
+            &harness.store,
+            &harness.handler.bindings,
+            None,
+        );
+        assert_eq!(projects.len(), 1);
+        let project = &projects[0];
+        assert_eq!(
+            project
+                .roots
+                .iter()
+                .map(|root| (root.project_root.clone(), root.bound))
+                .collect::<Vec<_>>(),
+            [
+                (worktree, false),
+                (PathBuf::from(&harness.route_root), true)
+            ],
+            "the closed root was bound last"
+        );
+        assert!(project.review.is_some(), "the closed root set the switch");
+        assert!(
+            project.recorded,
+            "the bound root keeps the project under the owner's record"
+        );
+        harness.handler.unbind_route(test_route(7));
+        let projects = memory_reviewer::worker::module_projects(
+            &harness.store,
+            &harness.handler.bindings,
+            None,
+        );
+        assert_eq!(projects.len(), 1);
+        assert!(
+            !projects[0].recorded,
+            "with every root closed the record runs nothing for the project"
+        );
+    }
+
     /// Several route roots can bind to one authority project; the scheduler
     /// reports that project once, under its most recently bound root.
     #[tokio::test(flavor = "current_thread")]

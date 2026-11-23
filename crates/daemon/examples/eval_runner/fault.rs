@@ -2542,6 +2542,7 @@ impl ReviewerRig {
                 project_root: self.project_root.clone(),
                 project_digest: REVIEWER_DIGEST.to_string(),
                 scope_id: format!("project:{REVIEWER_DIGEST}"),
+                bound: true,
             }],
         };
         Arc::new(Worker {

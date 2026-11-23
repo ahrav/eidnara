@@ -4850,6 +4850,34 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A statement is settled when a contest was lifted from it: its rationale keeps the commit that first recorded it and names no contest. A contested statement and one no contest ever rewrote are not.
+    #[test]
+    fn a_statement_is_settled_once_its_contest_is_lifted() {
+        let statement = |rationale: Value| kernel::DecisionRow {
+            decision_id: "decision".to_string(),
+            object_id: "memory".to_string(),
+            proposition_id: None,
+            scope_id: None,
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: "PROJECT_RULES".to_string(),
+            payload: kernel::DecisionPayload {
+                summary: "User stated: Deploy from main.".to_string(),
+                rationale: rationale.to_string(),
+            },
+            created_commit_seq: 9,
+            sensitivity: kernel::Sensitivity::Normal,
+        };
+        assert!(is_settled(&statement(json!({"stated_seq": 4}))));
+        assert!(!is_settled(&statement(json!({}))));
+        let contested = statement(json!({
+            "stated_seq": 4,
+            "contested_by": {"memory": "mem_later", "stated_seq": 4},
+        }));
+        assert!(is_contested(&contested));
+        assert!(!is_settled(&contested));
+    }
+
     /// A parse in which every user quotation counts as a statement.
     fn parse_batch(
         text: &str,

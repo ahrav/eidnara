@@ -1504,6 +1504,59 @@ async fn a_contested_statement_is_not_reviewed_again_on_the_evidence_of_its_revi
     );
 }
 
+/// A review that marks a statement contested was shown every message published by then. When memory capture stores a statement from one of those messages after the mark, the marked statement is not reviewed again: a message published before the mark is no evidence for the statement's rewritten row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_statement_stored_after_a_mark_for_an_earlier_message_starts_no_review() {
+    const HELPER_PREFIX: &str = "Name helper modules with the prefix lib_; the suffix _spec stays.";
+    /// A `revise` whose contradiction is the older of the two later messages.
+    const REVISE_CITING_OLDER: &str = r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"User stated: Name test files with the suffix _test and helper modules with the prefix util_.","support":[],"contradictions":[{"alias":"ref-4"}],"limitations":[],"uncertainty":"low"}}"#;
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[TWO_RULES]).await;
+    rig.user_states_later("later-1", 1_700_000_000_000, TEST_SUFFIX)
+        .await;
+    // The newer message is published and scored, and capture has yet to store a statement from it.
+    rig.user_says_later("later-2", 1_700_000_100_000, HELPER_PREFIX)
+        .await;
+    rig.flagged(&[REVISE_CITING_OLDER]);
+    rig.decides(&[KEEP, KEEP]);
+    rig.drain().await;
+    let reviews_of_the_statement = |rig: &Rig| {
+        rig.attempts()
+            .iter()
+            .filter(|attempt| attempt.model == SMALL && attempt.prompt.contains(TWO_RULES))
+            .map(|attempt| {
+                serde_json::from_str::<Value>(&attempt.prompt).expect("the state is JSON text")
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = reviews_of_the_statement(&rig);
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0]["later"].as_array().map(Vec::len),
+        Some(2),
+        "the review was shown both later messages"
+    );
+    let block = rig.block().await;
+    assert!(
+        block
+            .lines()
+            .any(|line| line.contains(TWO_RULES) && line.contains("; contested ")),
+        "{block}"
+    );
+    memory_auto_delivery_tests::capture(
+        &rig.handler,
+        SECOND,
+        "s2",
+        &[("later-2", "user", HELPER_PREFIX)],
+        |text, _| vec![memory_auto_delivery_tests::classed(text, "lasting")],
+    )
+    .await;
+    rig.decides(&[KEEP, KEEP]);
+    rig.drain().await;
+    assert_eq!(reviews_of_the_statement(&rig).len(), 1);
+    assert_eq!(rig.status.activation_state(), ActivationState::Open);
+}
+
 /// A message that was evidence in a review keeps its place when memory capture later stores a statement from it: the stored statement cites a source the memory was already reviewed on, and starts no second review.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_statement_stored_for_a_reviewed_message_starts_no_second_review() {

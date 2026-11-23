@@ -143,6 +143,7 @@ impl Rig {
             project_root,
             project_digest: digest.to_string(),
             scope_id: format!("project:{digest}"),
+            bound: true,
         }
     }
 

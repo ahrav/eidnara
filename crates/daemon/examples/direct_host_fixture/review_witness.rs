@@ -147,6 +147,7 @@ pub async fn run(core: &daemon::HandlerCore, project_root: &str) -> Result<Value
             project_root: root,
             project_digest: digest,
             scope_id,
+            bound: true,
         }],
     };
     let ran = worker(home.path(), &kernel, &store, &peer, route)
