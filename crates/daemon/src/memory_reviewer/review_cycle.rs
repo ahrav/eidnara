@@ -216,13 +216,13 @@ impl Walk {
     };
 }
 
-/// What a selection remembers of one source: who wrote it and the commit that published it. The commit is that of the first live descriptor the store returns for the evidence, which a message repeated byte for byte shares with its first copy. A captured message is retained for a bounded time and a memory outlives it, so a source can be found retired.
+/// What a selection remembers of one source: who wrote it and the commit that published it. Messages with equal text published in one commit share one evidence row and that commit; a repeat published later is a source of its own. A captured message is retained for a bounded time and a memory outlives it, so a source can be found retired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceFacts {
     writer: Writer,
     /// The commit that published the source's descriptor. Sources are ordered by it, so a source keeps its place whatever later brings it up as evidence.
     published: i64,
-    /// When a read found the descriptor retired; no job reads a retired source. The answer is read again after [`RETIRED_RECHECK`], because a message with the same text published later cites the same evidence.
+    /// When a read found the descriptor retired; no job reads a retired source. The lookup is repeated after [`RETIRED_RECHECK`], which bounds how long a remembered answer stands in for the store's.
     retired: Option<Instant>,
 }
 
@@ -689,7 +689,7 @@ pub fn select_and_enqueue(
             }));
         }
         let work_in_progress = crate::memory_capture::states_current_work(decision);
-        // The memory that contests a statement names its own source, which is what the review is shown. Two rewrites of a statement's row set a floor under its evidence, the row's commit. A contest without a recording session is one a review wrote: the sources published by then are the ones the statement was reviewed on. A statement the user settled after a contest is the user's latest word, which sources older than it leave standing.
+        // The memory that contests a statement names its own source, which is what the review is shown. Two rewrites of a statement's row set a floor under its evidence, the row's commit. A contest without a recording session is one a review wrote: the statement takes as evidence only sources published after it. A statement the user settled after a contest is the user's latest word, which sources older than it leave standing.
         let mut reviewed_through =
             crate::memory_capture::is_settled(decision).then_some(decision.created_commit_seq);
         if crate::memory_capture::is_contested(decision)
