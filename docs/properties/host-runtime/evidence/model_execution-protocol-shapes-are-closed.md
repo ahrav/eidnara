@@ -126,7 +126,7 @@ would close what remains:
 
 ### Q: Does every malformed case return `schema_violation` and no other code?
 
-- Sources examined: `tests/model_execution_protocol.rs:126-320`; `protocol.rs:142-144`,
+- Sources examined: `tests/model_execution_protocol.rs:138-340`; `protocol.rs:142-144`,
   `:147-158`, `:160-190`, `:197-243`; `local_embeddings/protocol.rs:27`.
 - Findings: yes. Every rejection path in `preflight`, `decode`,
   `decode_request`, `parse_run_id`, and `parse_send` builds its error through

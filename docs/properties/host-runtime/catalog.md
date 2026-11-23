@@ -9962,7 +9962,7 @@ footprint.
 Type: safety
 Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
 this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/model_execution_subprocess.rs:1102`, which opens a store to materialise a fixture
+`tests/model_execution_subprocess.rs:1111`, which opens a store to materialise a fixture
 closure), and `manifest_digest` is reached through the store and directly from
 `tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
@@ -10244,7 +10244,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
 this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/model_execution_subprocess.rs:1102`, which opens a store to materialise a fixture
+`tests/model_execution_subprocess.rs:1111`, which opens a store to materialise a fixture
 closure), and `manifest_digest` is reached through the store and directly from
 `tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
@@ -10335,7 +10335,7 @@ Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
 Open questions:
 
-- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3625`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
+- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3750`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
 
 ### model_execution-child-environment-carries-only-the-provider-row
 
