@@ -708,6 +708,8 @@ mod unix {
         ReviewWitness {
             project_root: String,
         },
+        /// Runs MemoryReviewer passes until one settles nothing, and answers the runs settled.
+        ReviewDrain,
         /// Every live message, tool, and repository-document descriptor at the kernel tip: its
         /// class and identity fields.
         LiveSourceDescriptors,
@@ -1074,6 +1076,18 @@ mod unix {
                                     .await
                                     .map(|witness| (ControlResult::ReviewWitness(witness), false))
                             }
+                            ControlCommand::ReviewDrain => core
+                                .drain_memory_reviewer()
+                                .await
+                                .ok_or("memory_reviewer_unavailable")
+                                .map(|settled| {
+                                    (
+                                        ControlResult::Source(
+                                            serde_json::json!({ "settled": settled }),
+                                        ),
+                                        false,
+                                    )
+                                }),
                             ControlCommand::GracefulShutdown => {
                                 Ok((ControlResult::Ack { accepted: true }, true))
                             }
@@ -1618,7 +1632,24 @@ mod unix {
             .map(|production| production.lane.clone());
         let publication =
             host_runtime::runtime_dir_path(Some(&root))?.join(host_runtime::CONNECTION_FILE_NAME);
-        let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()));
+        let model_execution = match &harness_runtime {
+            Some(spec) => harness_runtime_component(&root, spec)?,
+            None => ModelExecutionComponent::new(
+                model_backend,
+                host_runtime::model_execution::subprocess::group_registry::StateRoot::resolve(
+                    Some(&root),
+                )?,
+            ),
+        };
+        // The worker runs here as it does under `eidnara-host`: a root whose user tier sets `memory_reviewer.enabled` is reviewed through this host's model execution. The fixture's envelope carries no credential for the reviewer's own connection, so an activation record opens nothing here.
+        let memory_reviewer_host = Arc::new(daemon::memory_reviewer::worker::MemoryReviewerHost {
+            supervisor: model_execution.supervisor(),
+            credentials: Default::default(),
+            credential_identities: Default::default(),
+            worker_instance: "memory_reviewer-worker:direct-host-fixture".to_owned(),
+        });
+        let handler = daemon::Handler::new_with_connection_file(Some(publication.clone()))
+            .with_memory_reviewer_host(memory_reviewer_host);
         let handler = match &production_lane {
             Some(lane) => {
                 let handler = handler.with_local_embeddings(lane.clone());
@@ -1653,19 +1684,7 @@ mod unix {
             .map_err(|_| "control server failed to start")?;
 
         let local_embeddings = production_lane.unwrap_or_else(local_embeddings_component);
-        let composite = StaticComposite::new(
-            handler,
-            local_embeddings,
-            match &harness_runtime {
-                Some(spec) => harness_runtime_component(&root, spec)?,
-                None => ModelExecutionComponent::new(
-                    model_backend,
-                    host_runtime::model_execution::subprocess::group_registry::StateRoot::resolve(
-                        Some(&root),
-                    )?,
-                ),
-            },
-        )?;
+        let composite = StaticComposite::new(handler, local_embeddings, model_execution)?;
         let config = HostConfig {
             data_dir: Some(root.clone()),
             daemon_ver: "eidnara-host/direct-host-fixture".to_owned(),

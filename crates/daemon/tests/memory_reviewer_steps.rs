@@ -212,6 +212,27 @@ fn steps_are_rejected_before_any_effect() {
         let outcome = Step::parse(text, &broker, *targets_memory).map(|_| ());
         assert_eq!(outcome, *expected, "{text}");
     }
+    // A whole answer inside one code fence is the step it wraps; text around a fence, a fence of another language, or a second fence is refused as any other text is.
+    let step = r#"{"v":1,"step":{"kind":"abstain","reason":"the evidence does not warrant a conclusion"}}"#;
+    for fenced in [
+        format!("```json\n{step}\n```"),
+        format!("```\n{step}\n```\n"),
+        format!("  ```json\n{step}\n```"),
+    ] {
+        assert!(Step::parse(&fenced, &broker, true).is_ok(), "{fenced}");
+    }
+    for refused in [
+        format!("Here is the step:\n```json\n{step}\n```"),
+        format!("```yaml\n{step}\n```"),
+        format!("```json\n{step}\n```\n```json\n{step}\n```"),
+        format!("```json {step}```"),
+    ] {
+        assert_eq!(
+            Step::parse(&refused, &broker, true).map(|_| ()),
+            Err(RefusalCode::Undecodable),
+            "{refused}"
+        );
+    }
     // A traversal path decodes; confinement is the project-text reader's to refuse, on the read itself.
     let Step::ReadBatch { operations } = Step::parse(
         r#"{"v":1,"step":{"kind":"read_batch","operations":[{"op":"read_project","path":"../etc/passwd"}]}}"#,

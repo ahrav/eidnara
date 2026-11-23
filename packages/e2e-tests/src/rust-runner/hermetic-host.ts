@@ -192,6 +192,7 @@ type ControlCommand =
     | "review-witness"
     | "live-source-descriptors"
     | "source-capture-report"
+    | "review-drain"
     | "graceful-shutdown";
 
 type PendingControl = {
@@ -873,6 +874,15 @@ class FixtureControlClient {
         );
     }
 
+    /** Runs MemoryReviewer passes until one settles nothing; resolves the number of runs settled. Reviews run model requests, so the wait is the caller's `timeoutMs`. */
+    async reviewDrain(timeoutMs: number): Promise<number> {
+        const object = record(await this.request("review-drain", {}, timeoutMs));
+        if (!object || typeof object.settled !== "number") {
+            throw new Error("fixture control review drain was malformed");
+        }
+        return object.settled;
+    }
+
     /** Every live message, tool, and repository-document descriptor at the kernel tip. */
     async liveSourceDescriptors(): Promise<LiveSourceDescriptor[]> {
         const rows = await this.request("live-source-descriptors");
@@ -1244,6 +1254,11 @@ export class HermeticHostStack {
     /** Runs a fixture-class and a production-class MemoryReviewer job over the host's stores for the MODULE root `projectRoot`. */
     reviewWitness(projectRoot: string): Promise<ReviewWitness> {
         return this.requireControl().reviewWitness(projectRoot);
+    }
+
+    /** Runs the daemon's MemoryReviewer until no review is pending, as a harness does between sessions. */
+    reviewDrain(timeoutMs = 600_000): Promise<number> {
+        return this.requireControl().reviewDrain(timeoutMs);
     }
 
     liveSourceDescriptors(): Promise<LiveSourceDescriptor[]> {
