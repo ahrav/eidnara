@@ -7,9 +7,9 @@
 //! composed. A record holds the path,
 //! the session, and the time of the pass that showed the use, and holds none
 //! of the file's content. A delivered line also gives the time the file last
-//! changed ([`changes`]), and the `User stated` lines of a block that lists a
-//! file give the time memory recorded each ([`date_statements`]), so a
-//! reader can compare a statement and a file that disagree.
+//! changed ([`changes`]), and the `User stated` lines of a read that finds a
+//! file to list give the time memory recorded each ([`date_statements`]),
+//! so a reader can compare a statement and a file that disagree.
 //!
 //! Each admitted transform pass of a primary Pi session at the project root
 //! shows the turn in progress: the last message of the user and the tool
@@ -43,6 +43,12 @@ use crate::tool_vocabulary::{self, PiOperand};
 use crate::{HandlerCore, SessionBinding};
 
 mod changes;
+
+/// How long a pass waits for the history reader's answer about its listed
+/// files, for the test that fits the wait inside the plugins' transform
+/// deadline.
+#[cfg(test)]
+pub(crate) const HISTORY_WAIT: std::time::Duration = changes::WAIT;
 #[cfg(test)]
 pub(crate) use changes::fixtures as change_fixtures;
 
@@ -1039,9 +1045,9 @@ const HISTORY_UNREAD: &str = "at a time the read history does not show";
 /// The clause the packer charges for every `NAMED_FILES` line, whatever
 /// the line's own clause holds: the form of the most tokens. The block's
 /// selection, and so its revision, then stays as it is when a file's last
-/// change moves. `a_clause_costs_at_most_its_charge` pins that no clause
-/// [`last_change`] writes costs more, over the minutes of the years 0000
-/// to 9999 and the forms without a minute.
+/// change moves. `a_clause_costs_at_most_its_charge` checks that no clause
+/// [`last_change`] writes costs more, for minutes sampled over the years
+/// 0000 to 9999 and for the forms without a minute.
 pub(crate) const CHARGED_CLAUSE: &str = "; last changed 2888-08-28T18:58Z on disk)";
 
 /// A statement of the user that a read serves: its id, the commit that
@@ -1080,7 +1086,7 @@ pub(crate) fn user_statements(response: &kernel_routes::read::ReadResponse) -> V
         .collect()
 }
 
-/// Appends ` (recorded <minute>)` to the line of each of `statements` in
+/// Appends ` [<minute>]` to the line of each of `statements` in
 /// `response`: the UTC minute of the commit that first recorded the
 /// statement, read from the store in one statement for the pass. Capture
 /// records a statement after the user made it, so the statement was made at
@@ -1128,7 +1134,7 @@ pub(crate) fn mark_recorded(
             decision
                 .payload
                 .summary
-                .push_str(&format!(" (recorded {})", minute(*at_ms)));
+                .push_str(&format!(" [{}]", minute(*at_ms)));
         }
     }
 }

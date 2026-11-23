@@ -17,7 +17,9 @@
 //! A pass reads the file and no repository. One thread, the reader, reads
 //! the repository for every pass, and a pass waits at most [`WAIT`] for its
 //! answer, so a repository that blocks or spins a read costs a pass that
-//! wait and the line its commit time. The reader takes HEAD through
+//! wait and the line its commit time. The pass's own reads of the listed
+//! files have no deadline, as its reads of the project's documents have
+//! none. The reader takes HEAD through
 //! [`crate::memory_capture::observe_head`], which capture calls for every
 //! session it captures, and each commit and tree through the attestation
 //! verifier's object reader, which returns an object whose bytes hash to
@@ -35,6 +37,7 @@ use std::os::fd::BorrowedFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -59,10 +62,15 @@ pub(crate) enum LastChange {
 const MAX_PARENTS_READ: usize = 256;
 /// The largest file whose bytes are hashed against the blob HEAD holds.
 const MAX_HASHED_BYTES: u64 = 256 * 1024;
-/// How long a pass waits for the reader's answer, and so how long the
-/// reader works for the pass: it checks the time before each object it
-/// reads and takes up no job whose pass has stopped waiting.
-const WAIT: Duration = Duration::from_secs(1);
+/// How long a pass waits for the reader's answer. The wait is in the
+/// pass's first unit, beside an emergency pass's
+/// [`crate::history_summarizer::EMERGENCY_WAIT_BUDGET`].
+pub(crate) const WAIT: Duration = Duration::from_millis(500);
+/// How long past a pass's wait the reader works on the pass's files, so a
+/// walk that needs longer than the wait settles for the next pass. The
+/// reader takes up no job whose pass has stopped waiting, and checks the
+/// time before it opens the repository and before each object it reads.
+const GRACE: Duration = Duration::from_millis(500);
 /// Jobs that wait in the queue beside the one the reader works on. A pass
 /// that finds the queue full asks nothing.
 const QUEUE: usize = 4;
@@ -102,7 +110,7 @@ enum Walked {
     /// the object, as a shallow clone does when it fetches more history,
     /// answers otherwise at the same HEAD.
     Unreadable(Found),
-    /// The pass's wait ended first.
+    /// The time the reader had for the walk ended first.
     Stopped,
 }
 
@@ -126,23 +134,23 @@ struct Kept {
     files: HashMap<String, (gix::ObjectId, Found)>,
 }
 
-/// The settled answers the reader keeps, for the [`KEPT_ROOTS`] roots
-/// asked about last. An answer stands for its path and blob while the root
-/// is the same directory at the same HEAD commit, so a pass at an
-/// unchanged HEAD costs the reader the read of HEAD and no walk. The
-/// reader thread alone reads and writes them.
+/// The settled answers the reader keeps, for the [`KEPT_ROOTS`] roots it
+/// answered at a HEAD commit last. An answer stands for its path and blob
+/// while the root is the same directory at the same HEAD commit, so a job
+/// at an unchanged HEAD costs the reader its reads of HEAD and of the work
+/// tree's identity, and a walk for the paths and blobs it keeps no answer
+/// for. The reader thread alone reads and writes them.
 #[derive(Default)]
 struct Answers {
     roots: HashMap<PathBuf, Kept>,
-    /// The kept roots, the one asked about longest ago first.
+    /// The kept roots, the one answered at a HEAD commit longest ago first.
     order: VecDeque<PathBuf>,
 }
 
 impl Answers {
-    /// The answers kept for `root`, made the root asked about last: those
+    /// The answers kept for `root`, made the root answered last: those
     /// read in `directory` at `head`, or none after another directory or
-    /// HEAD. A 65th root takes the place of the one asked about longest
-    /// ago.
+    /// HEAD. A 65th root takes the place of the one answered longest ago.
     fn at(
         &mut self,
         root: &Path,
@@ -186,7 +194,8 @@ fn keep(
 
 /// One pass's question to the reader: the files of `root`, which the pass
 /// opened as `directory`, whose bytes on disk hash to these blobs. The
-/// pass waits for the answer until `until`.
+/// pass waits for the answer until `until`, and the reader works on the
+/// job until [`GRACE`] after that.
 struct Job {
     root: PathBuf,
     directory: Directory,
@@ -241,12 +250,28 @@ impl History {
             until: Instant::now() + WAIT,
             answer,
         };
-        if self.jobs.try_send(job).is_err() {
-            return vec![None; files.len()];
-        }
-        answered
-            .recv_timeout(WAIT)
-            .unwrap_or_else(|_| vec![None; files.len()])
+        let until = job.until;
+        let answers = self.jobs.try_send(job).ok().and_then(|()| {
+            answered
+                .recv_timeout(until.saturating_duration_since(Instant::now()))
+                .ok()
+        });
+        answers.unwrap_or_else(|| {
+            say_once_unanswered();
+            vec![None; files.len()]
+        })
+    }
+}
+
+/// Says on standard error, the first time in the daemon's life, that a
+/// pass went without the reader's answer: the queue was full, the reader
+/// thread is gone, or the pass's wait ended.
+fn say_once_unanswered() {
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if !SAID.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "daemon: the named file history reader gave a pass no answer within its wait; the pass's lines show times on disk"
+        );
     }
 }
 
@@ -265,15 +290,23 @@ fn read_jobs(queued: &Receiver<Job>) {
 /// The answer to `job`: for each file the kept answer of its path and
 /// blob at the HEAD commit read now, or what a walk from that commit
 /// finds, which is kept when it is settled. Every file is
-/// [`Found::NotHeld`] when [`observe_head`] reads no commit at HEAD, and
-/// each file asked of the repository is when `root` opens as no SHA-1
-/// repository whose work tree is the directory the pass opened.
+/// [`Found::NotHeld`] when [`observe_head`] reads no SHA-1 commit at HEAD,
+/// and when `root` opens as no SHA-1 repository whose work tree is the
+/// directory the pass opened, whatever the reader keeps for the root. No
+/// file has an answer when the job's time ended while HEAD was read.
 fn answer(answers: &mut Answers, job: &Job) -> Vec<Option<Found>> {
     let not_held = || vec![Some(Found::NotHeld); job.files.len()];
     let FrozenHead::Commit(head) = observe_head(&job.root) else {
         return not_held();
     };
     let Some(head) = crate::git_sources::parse_oid(&head, gix::hash::Kind::Sha1) else {
+        return not_held();
+    };
+    let end = job.until + GRACE;
+    if Instant::now() >= end {
+        return vec![None; job.files.len()];
+    }
+    let Some(repo) = work_tree_repository(&job.root, job.directory) else {
         return not_held();
     };
     let kept = answers.at(&job.root, job.directory, head);
@@ -293,8 +326,7 @@ fn answer(answers: &mut Answers, job: &Job) -> Vec<Option<Found>> {
             .zip(&found)
             .filter_map(|(file, found)| found.is_none().then_some(file))
             .collect();
-        let mut walked =
-            read_history(&job.root, job.directory, head, &asked, job.until).into_iter();
+        let mut walked = read_history(&job.root, &repo, head, &asked, end).into_iter();
         for ((path, blob), slot) in job.files.iter().zip(&mut found) {
             if slot.is_none() {
                 let walked = walked.next().expect("an answer for each file asked");
@@ -328,7 +360,7 @@ struct Commit {
 enum Ended {
     /// The object could not be read whole as its kind.
     Unreadable,
-    /// The pass's wait ended.
+    /// The time the reader had for the read ended.
     Expired,
 }
 
@@ -454,43 +486,53 @@ impl Reader<'_> {
     }
 }
 
-/// What the history of the commit `head` says of each of `files` of the
-/// repository at `root`, read until `until`. Every file is
-/// [`Found::NotHeld`], unsettled, when `root` opens as no SHA-1 repository
-/// whose work tree is `directory`, or when the commit `head` cannot be
-/// read.
-fn read_history(
-    root: &Path,
-    directory: Directory,
-    head: gix::ObjectId,
-    files: &[&(String, gix::ObjectId)],
-    until: Instant,
-) -> Vec<Walked> {
-    let all = |walked: Walked| vec![walked; files.len()];
+/// The SHA-1 repository that opens at `root`, when its work tree is
+/// `directory`, the directory a pass opened as the root.
+fn work_tree_repository(root: &Path, directory: Directory) -> Option<gix::Repository> {
     let slots = gix::odb::store::init::Slots::Given(INDEX_SLOTS);
-    let Ok(repo) = crate::git_sources::open_with_slots(root, ALLOCATION_LIMIT, slots) else {
-        return all(Walked::Unreadable(Found::NotHeld));
-    };
-    let hash = repo.object_hash();
+    let repo = crate::git_sources::open_with_slots(root, ALLOCATION_LIMIT, slots).ok()?;
     let work_tree = repo
         .workdir()
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|status| (status.dev(), status.ino()));
-    if hash != gix::hash::Kind::Sha1 || work_tree != Some(directory) {
-        return all(Walked::Unreadable(Found::NotHeld));
-    }
+    (repo.object_hash() == gix::hash::Kind::Sha1 && work_tree == Some(directory)).then_some(repo)
+}
+
+/// When the walk of the next of `files_left` files ends: an equal share of
+/// the time from `now` to `end`, so a file whose walk is slow leaves the
+/// files after it their own time.
+fn share(now: Instant, end: Instant, files_left: usize) -> Instant {
+    let files_left = u32::try_from(files_left.max(1)).unwrap_or(u32::MAX);
+    now + end.saturating_duration_since(now) / files_left
+}
+
+/// What the history of the commit `head` says of each of `files` of
+/// `repo`, which opened at `root`, read until `end`. Every file is
+/// [`Found::NotHeld`], unsettled, when the commit `head` cannot be read.
+/// Each file's walk has its [`share`] of the time left.
+fn read_history(
+    root: &Path,
+    repo: &gix::Repository,
+    head: gix::ObjectId,
+    files: &[&(String, gix::ObjectId)],
+    end: Instant,
+) -> Vec<Walked> {
     let mut reader = Reader {
-        objects: Objects::new(root, &repo),
-        hash,
-        until,
+        objects: Objects::new(root, repo),
+        hash: repo.object_hash(),
+        until: end,
     };
     let head = match reader.commit(head) {
         Ok(head) => head,
-        Err(ended) => return all(ended.walked(Found::NotHeld)),
+        Err(ended) => return vec![ended.walked(Found::NotHeld); files.len()],
     };
     files
         .iter()
-        .map(|(path, blob)| reader.walk(&head, path, *blob))
+        .enumerate()
+        .map(|(index, (path, blob))| {
+            reader.until = share(Instant::now(), end, files.len() - index);
+            reader.walk(&head, path, *blob)
+        })
         .collect()
 }
 
@@ -513,31 +555,11 @@ fn is_regular(status: &rustix::fs::Stat) -> bool {
     rustix::fs::FileType::from_raw_mode(status.st_mode) == rustix::fs::FileType::RegularFile
 }
 
-/// Reads the regular file at `relative` beneath `root`.
-fn sample(root: BorrowedFd<'_>, relative: &str) -> Option<Sample> {
-    sample_between(root, relative, &mut || {})
-}
-
-/// [`sample`], with `between` called after the first status of each
-/// reading, where a test changes the file.
-///
-/// A reading takes the file's status, at most [`MAX_HASHED_BYTES`] and one
-/// byte, and the status again through one descriptor, and holds when the
-/// two statuses agree and the bytes are as many as the status states. A
-/// reading whose statuses differ, as a write during the read leaves, is
-/// taken once more. A file past [`MAX_HASHED_BYTES`] gives the time of its
-/// one status and no blob. A file whose bytes no reading holds, one that
-/// does not open for reading or that changed during both, gives the
-/// modification time of one status taken then and no blob. `None` for a
-/// path that names no regular file beneath the root through no symbolic
-/// link.
-fn sample_between(
-    root: BorrowedFd<'_>,
-    relative: &str,
-    between: &mut dyn FnMut(),
-) -> Option<Sample> {
-    use rustix::fs::OFlags;
-    let identity = |status: &rustix::fs::Stat| {
+/// Whether a reading holds: the statuses its descriptor had before and
+/// after the read agree in inode, link count, size, and modification and
+/// change times, and the read took as many bytes as they state.
+fn is_whole(before: &rustix::fs::Stat, after: &rustix::fs::Stat, read: usize) -> bool {
+    let version = |status: &rustix::fs::Stat| {
         (
             status.st_ino,
             status.st_nlink,
@@ -548,6 +570,34 @@ fn sample_between(
             status.st_ctime_nsec,
         )
     };
+    version(before) == version(after) && u64::try_from(before.st_size) == Ok(read as u64)
+}
+
+/// Reads the regular file at `relative` beneath `root`.
+fn sample(root: BorrowedFd<'_>, relative: &str) -> Option<Sample> {
+    sample_between(root, relative, &mut || {})
+}
+
+/// [`sample`], with `between` called after the first status of each
+/// reading, where a test changes the file.
+///
+/// A reading takes the file's status, at most [`MAX_HASHED_BYTES`] and one
+/// byte, and the status again through one descriptor, and holds when
+/// [`is_whole`] does. A reading whose statuses differ, as a write during
+/// the read leaves, is taken once more; a write that leaves every compared
+/// field as it was, as one of the same size within one tick of the file
+/// system's clock, goes unseen. A file past [`MAX_HASHED_BYTES`] gives the
+/// time of its one status and no blob. A file whose bytes no reading holds, one that
+/// does not open for reading or that changed during both, gives the
+/// modification time of one status taken then and no blob. `None` for a
+/// path that names no regular file beneath the root through no symbolic
+/// link.
+fn sample_between(
+    root: BorrowedFd<'_>,
+    relative: &str,
+    between: &mut dyn FnMut(),
+) -> Option<Sample> {
+    use rustix::fs::OFlags;
     crate::confined_path::check(relative).ok()?;
     let read = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     for _ in 0..2 {
@@ -579,7 +629,7 @@ fn sample_between(
         let Ok(after) = rustix::fs::fstat(&file) else {
             break;
         };
-        if identity(&before) == identity(&after) && bytes.len() as u64 == size {
+        if is_whole(&before, &after, bytes.len()) {
             let blob =
                 gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &bytes).ok();
             return Some(Sample {
@@ -600,9 +650,10 @@ fn sample_between(
 /// When each of `paths`, relative to `root`, last changed. `root_fd` is
 /// `root`, opened. `None` for a path [`sample`] reads no file at. A file
 /// whose bytes HEAD's history gives a commit for shows that commit's time;
-/// one whose history the reader did not follow to that commit shows
-/// [`LastChange::HistoryUnread`]; any other shows the modification time its
-/// sample read. The reader is asked when a sample holds a blob.
+/// one whose history the reader answered as unread shows
+/// [`LastChange::HistoryUnread`]; any other, a file the reader gave no
+/// answer for among them, shows the modification time its sample read. The
+/// reader is asked when a sample holds a blob.
 pub(crate) fn last_changes(
     history: &History,
     root: &Path,
@@ -793,6 +844,27 @@ mod tests {
         }
     }
 
+    /// [`job`] for a pass that stopped waiting two seconds ago, so the
+    /// reader's time for it has ended.
+    fn ended_job(root: &Path, files: &[(&str, &str)]) -> Job {
+        let mut job = job(root, files, Duration::ZERO);
+        job.until = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("a clock two seconds old");
+        job
+    }
+
+    /// What a reader of this call's own answers about `files` of `root`.
+    fn asked(root: &Path, files: &[(&str, &str)]) -> Vec<Option<Found>> {
+        let job = job(root, files, AMPLE);
+        let files: Vec<(&str, gix::ObjectId)> = job
+            .files
+            .iter()
+            .map(|(path, blob)| (path.as_str(), *blob))
+            .collect();
+        History::start().ask(root, job.directory, &files)
+    }
+
     const DAY: i64 = 86_400;
     const AMPLE: Duration = Duration::from_secs(60);
 
@@ -862,6 +934,29 @@ mod tests {
                 None,
             ]
         );
+        // One reader, asked about a file and then about that file, an absent
+        // path, and another file, answers each at its own place. The first
+        // commit is gone by then, so the first file's answer is the kept
+        // one: a walk for it would end unread.
+        let history = History::start();
+        assert_eq!(
+            changes_of(&history, root, &["docs/style.md"]),
+            [committed(2 * DAY)]
+        );
+        std::fs::remove_file(loose(root, first)).unwrap();
+        assert_eq!(
+            changes_of(
+                &history,
+                root,
+                &["docs/style.md", "absent.md", "tools/check.sh"]
+            ),
+            [committed(2 * DAY), None, committed(3 * DAY)]
+        );
+        assert_eq!(
+            changes(root, &["docs/style.md"]),
+            [Some(LastChange::HistoryUnread)]
+        );
+
         let fourth = commit(
             &repo,
             4 * DAY,
@@ -902,6 +997,20 @@ mod tests {
             changes(root, &["a.md", "b.md"]),
             [committed(2 * DAY), committed(4 * DAY)]
         );
+
+        // Both parents hold the file's bytes, each from a commit of its own:
+        // the walk follows the first.
+        let (dir, repo) = repository();
+        let root = dir.path();
+        let files = [("a.md", "same\n")];
+        let first = commit(&repo, 5 * DAY, &[], &files);
+        let second = commit(&repo, 6 * DAY, &[], &files);
+        let merge = commit(&repo, 7 * DAY, &[first, second], &files);
+        check_out(root, merge, &files);
+        assert_eq!(changes(root, &["a.md"]), [committed(5 * DAY)]);
+        let merge = commit(&repo, 8 * DAY, &[second, first], &files);
+        check_out(root, merge, &files);
+        assert_eq!(changes(root, &["a.md"]), [committed(6 * DAY)]);
     }
 
     /// A walk reads 256 parents: a file whose bytes 257 ancestors hold
@@ -920,6 +1029,16 @@ mod tests {
         // The tip is the 258th commit: the walk reads its 256 ancestors at
         // DAY + 256 down to DAY + 1 and stops with the first commit unread.
         assert_eq!(changes(root, &["a.md"]), [Some(LastChange::HistoryUnread)]);
+        // The reader keeps the answer the bound gave.
+        let mut answers = Answers::default();
+        assert_eq!(
+            answer(&mut answers, &job(root, &files, AMPLE)),
+            [Some(Found::Unread)]
+        );
+        assert_eq!(
+            answers.roots[root].files["a.md"],
+            (blob_of("same\n"), Found::Unread)
+        );
         let one_fewer = repo.find_commit(tip).unwrap().parent_ids().next().unwrap();
         check_out(root, one_fewer.detach(), &files);
         assert_eq!(changes(root, &["a.md"]), [committed(DAY)]);
@@ -1080,17 +1199,23 @@ mod tests {
     /// answers for a commit after it.
     #[test]
     fn a_file_without_readable_history_shows_its_modification_time() {
+        // In each case the reader answers that HEAD holds no such blob.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.md"), "text\n").unwrap();
         assert_eq!(
             changes(dir.path(), &["a.md"]),
             [on_disk(dir.path(), "a.md")]
         );
+        assert_eq!(
+            asked(dir.path(), &[("a.md", "text\n")]),
+            [Some(Found::NotHeld)]
+        );
 
         let (dir, repo) = repository();
         let root = dir.path();
         std::fs::write(root.join("a.md"), "text\n").unwrap();
         assert_eq!(changes(root, &["a.md"]), [on_disk(root, "a.md")]);
+        assert_eq!(asked(root, &[("a.md", "text\n")]), [Some(Found::NotHeld)]);
 
         let at_bound = "x".repeat(256 * 1024);
         let past_bound = format!("{at_bound}x");
@@ -1162,19 +1287,15 @@ mod tests {
             changes_of(&history, root, &["a.md"]),
             [Some(LastChange::HistoryUnread)]
         );
-        check_out(root, whole_in(&repo, &files), &files);
+        let whole = commit(&repo, 3 * DAY, &[], &files);
+        check_out(root, whole, &files);
         assert_eq!(changes_of(&history, root, &["a.md"]), [committed(3 * DAY)]);
     }
 
-    /// A commit of `files` with no parent, dated the third day.
-    fn whole_in(repo: &gix::Repository, files: &[(&str, &str)]) -> gix::ObjectId {
-        commit(repo, 3 * DAY, &[], files)
-    }
-
     /// A repository whose HEAD is a pipe nobody writes blocks the reader and
-    /// no pass: the pass waits one second and shows the modification time,
-    /// and once four jobs wait beside the one the reader holds a pass waits
-    /// for nothing.
+    /// no pass: the pass waits half a second and shows the modification
+    /// time, and once four jobs wait beside the one the reader holds a pass
+    /// waits for nothing.
     #[test]
     fn a_repository_that_blocks_the_reader_costs_a_pass_its_wait() {
         let (dir, repo) = repository();
@@ -1196,28 +1317,25 @@ mod tests {
         let started = Instant::now();
         assert_eq!(ask(), [on_disk(root, "a.md")]);
         let waited = started.elapsed();
+        let half_a_second = Duration::from_millis(500);
         assert!(
-            waited >= Duration::from_secs(1) && waited < Duration::from_secs(3),
+            waited >= half_a_second && waited < Duration::from_millis(1_500),
             "{waited:?}"
         );
         // The reader holds the first job; four more fill the queue, and each
-        // of their passes waits its second.
+        // of their passes waits its half second.
         for _ in 0..4 {
             let started = Instant::now();
             assert_eq!(ask(), [on_disk(root, "a.md")]);
-            assert!(started.elapsed() >= Duration::from_secs(1));
+            assert!(started.elapsed() >= half_a_second);
         }
         let started = Instant::now();
         assert_eq!(ask(), [on_disk(root, "a.md")]);
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "{:?}",
-            started.elapsed()
-        );
+        assert!(started.elapsed() < half_a_second, "{:?}", started.elapsed());
         // No path asks nothing and waits for nothing.
         let started = Instant::now();
         assert!(changes_of(&history, root, &[]).is_empty());
-        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(started.elapsed() < half_a_second);
     }
 
     /// One reader, asked at a commit and then at a later HEAD that holds
@@ -1295,25 +1413,127 @@ mod tests {
         );
     }
 
-    /// A job whose pass has stopped waiting is answered nothing and leaves
-    /// nothing kept; the same job with time left is answered.
+    /// One reader thread keeps its answers from job to job: asked again at
+    /// the same HEAD once the parent commit and HEAD's tree are gone, it
+    /// gives the commit time it found, where a reader with nothing kept
+    /// finds the history unread.
     #[test]
-    fn the_reader_reads_no_object_for_a_pass_that_stopped_waiting() {
+    fn one_reader_answers_a_second_job_from_what_it_kept() {
+        let (dir, repo) = repository();
+        let root = dir.path();
+        let files = [("a.md", "same\n")];
+        let parent = commit(&repo, DAY, &[], &files);
+        let head = commit(&repo, 2 * DAY, &[parent], &files);
+        check_out(root, head, &files);
+        let tree = repo.find_commit(head).unwrap().tree_id().unwrap().detach();
+        let history = History::start();
+        assert_eq!(changes_of(&history, root, &["a.md"]), [committed(DAY)]);
+        std::fs::remove_file(loose(root, parent)).unwrap();
+        std::fs::remove_file(loose(root, tree)).unwrap();
+        assert_eq!(changes_of(&history, root, &["a.md"]), [committed(DAY)]);
+        assert_eq!(changes(root, &["a.md"]), [Some(LastChange::HistoryUnread)]);
+    }
+
+    /// The reader loop takes up no job whose pass has stopped waiting: it
+    /// sends that job nothing and answers the job after it. A job whose
+    /// time ended while HEAD was read is answered nothing, before the
+    /// repository is opened for it, and leaves nothing kept.
+    #[test]
+    fn the_reader_works_for_no_pass_that_stopped_waiting() {
         let (dir, repo) = repository();
         let root = dir.path();
         let files = [("a.md", "same\n")];
         let head = commit(&repo, DAY, &[], &files);
         check_out(root, head, &files);
-        let mut answers = Answers::default();
+
+        let (jobs, queued) = sync_channel::<Job>(2);
+        let (answer_late, late) = sync_channel(1);
+        let (answer_live, live) = sync_channel(1);
+        let mut stopped = ended_job(root, &files);
+        stopped.answer = answer_late;
+        let mut waiting = job(root, &files, AMPLE);
+        waiting.answer = answer_live;
+        jobs.send(stopped).unwrap();
+        jobs.send(waiting).unwrap();
+        drop(jobs);
+        read_jobs(&queued);
         assert_eq!(
-            answer(&mut answers, &job(root, &files, Duration::ZERO)),
-            [None]
+            late.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
         );
-        assert!(answers.roots[root].files.is_empty());
+        assert_eq!(
+            live.try_recv(),
+            Ok(vec![Some(Found::Committed(DAY * 1_000))])
+        );
+
+        let mut answers = Answers::default();
+        assert_eq!(answer(&mut answers, &ended_job(root, &files)), [None]);
+        assert!(answers.roots.is_empty());
         assert_eq!(
             answer(&mut answers, &job(root, &files, AMPLE)),
             [Some(Found::Committed(DAY * 1_000))]
         );
+    }
+
+    /// A reader whose time has ended reads neither a commit nor a tree, and
+    /// a walk it starts then stops with no answer; with time left it reads
+    /// both.
+    #[test]
+    fn a_reader_past_its_time_reads_no_object() {
+        let (dir, repo) = repository();
+        let root = dir.path();
+        let files = [("docs/a.md", "same\n")];
+        let head = commit(&repo, DAY, &[], &files);
+        check_out(root, head, &files);
+        let opened = gix::open_opts(root, gix::open::Options::isolated()).unwrap();
+        let reader_until = |until: Instant| Reader {
+            objects: Objects::new(root, &opened),
+            hash: gix::hash::Kind::Sha1,
+            until,
+        };
+        let mut live = reader_until(Instant::now() + AMPLE);
+        let read = live.commit(head).unwrap();
+        assert_eq!(
+            live.blob_at(read.tree, "docs/a.md"),
+            Ok(Some(blob_of("same\n")))
+        );
+        let mut late = reader_until(Instant::now());
+        assert_eq!(late.commit(head).err(), Some(Ended::Expired));
+        assert_eq!(late.blob_at(read.tree, "docs/a.md"), Err(Ended::Expired));
+        assert_eq!(
+            late.walk(&read, "docs/a.md", blob_of("same\n")),
+            Walked::Stopped
+        );
+    }
+
+    /// Each file's walk has an equal share of the time left, so the files
+    /// after a slow one keep their own.
+    #[test]
+    fn each_files_walk_has_an_equal_share_of_the_time_left() {
+        let now = Instant::now();
+        let end = now + Duration::from_secs(8);
+        assert_eq!(share(now, end, 8), now + Duration::from_secs(1));
+        assert_eq!(share(now, end, 1), end);
+        assert_eq!(share(now, end, 0), end);
+        assert_eq!(share(end, now, 3), end);
+    }
+
+    /// A reading holds when its two statuses agree and the read took as
+    /// many bytes as they state: with equal statuses, one byte fewer and
+    /// one byte more do not hold, and neither does the stated count beside
+    /// a status another write left.
+    #[test]
+    fn a_reading_holds_when_its_statuses_and_its_byte_count_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        write_at(&path, "four", 1_000);
+        let status = rustix::fs::stat(&path).unwrap();
+        assert!(is_whole(&status, &status, 4));
+        assert!(!is_whole(&status, &status, 3));
+        assert!(!is_whole(&status, &status, 5));
+        write_at(&path, "more", 2_000);
+        let rewritten = rustix::fs::stat(&path).unwrap();
+        assert!(!is_whole(&status, &rewritten, 4));
     }
 
     /// A root whose repository names another directory as its work tree
@@ -1324,10 +1544,13 @@ mod tests {
     fn a_root_that_is_not_the_repositorys_work_tree_shows_times_on_disk() {
         let (dir, repo) = repository();
         let root = dir.path();
-        let files = [("a.md", "same\n")];
+        let files = [("a.md", "same\n"), ("b.md", "other\n")];
         let head = commit(&repo, DAY, &[], &files);
         check_out(root, head, &files);
-        assert_eq!(changes(root, &["a.md"]), [committed(DAY)]);
+        assert_eq!(
+            changes(root, &["a.md", "b.md"]),
+            [committed(DAY), committed(DAY)]
+        );
 
         // A linked work tree, whose `.git` file names its directory in the
         // repository, is the work tree of that repository.
@@ -1342,6 +1565,11 @@ mod tests {
         std::fs::write(linked.path().join("a.md"), "same\n").unwrap();
         assert_eq!(changes(linked.path(), &["a.md"]), [committed(DAY)]);
 
+        // A reader that keeps the file's commit time for this root and HEAD
+        // gives the time on disk once the repository names another work
+        // tree, for the file it kept and for one it was never asked about.
+        let history = History::start();
+        assert_eq!(changes_of(&history, root, &["a.md"]), [committed(DAY)]);
         let elsewhere = tempfile::tempdir().unwrap();
         let config = root.join(".git/config");
         let mut text = std::fs::read_to_string(&config).unwrap();
@@ -1350,6 +1578,10 @@ mod tests {
             elsewhere.path().display()
         ));
         std::fs::write(&config, text).unwrap();
+        assert_eq!(
+            changes_of(&history, root, &["a.md", "b.md"]),
+            [on_disk(root, "a.md"), on_disk(root, "b.md")]
+        );
         assert_eq!(changes(root, &["a.md"]), [on_disk(root, "a.md")]);
     }
 
@@ -1370,7 +1602,7 @@ mod tests {
                 Found::NotHeld,
             );
         }
-        // Asking about the first root again makes the second the oldest.
+        // Answering the first root again makes the second the oldest.
         assert_eq!(answers.at(&root(0), here, id(9)).len(), 1);
         answers.at(&root(64), here, id(9));
         assert_eq!((answers.roots.len(), answers.order.len()), (64, 64));
@@ -1401,6 +1633,21 @@ mod tests {
         assert_eq!(files["f1.md"], (id(4), Found::Committed(8)));
         keep(files, "one-more.md", id(1), Found::NotHeld);
         assert_eq!(files.len(), 1);
+
+        // A job whose root has no HEAD commit to read is answered at none,
+        // so its root, the oldest, keeps its place and leaves next.
+        let (oldest, next) = (answers.order[0].clone(), answers.order[1].clone());
+        let unread = Job {
+            root: oldest.clone(),
+            directory: here,
+            files: vec![("a.md".to_owned(), id(1))],
+            until: Instant::now() + AMPLE,
+            answer: sync_channel(1).0,
+        };
+        assert_eq!(answer(&mut answers, &unread), [Some(Found::NotHeld)]);
+        answers.at(&root(99), here, id(9));
+        assert!(!answers.roots.contains_key(&oldest));
+        assert!(answers.roots.contains_key(&next));
     }
 
     /// Writes `text` to `path` and gives the file the modification time
@@ -1457,7 +1704,8 @@ mod tests {
         assert_eq!(crossings, 1);
         assert_eq!((sample.modified_ms, sample.blob), (5_000_000, None));
 
-        // A file that leaves during the reading has no sample.
+        // A file unlinked during the reading, with no file at its path
+        // afterwards, has no sample.
         write_at(&path, "one\n", 1_000);
         let gone = sample_between(root.as_fd(), "a.md", &mut || {
             let _ = std::fs::remove_file(&path);
