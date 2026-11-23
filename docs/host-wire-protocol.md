@@ -1419,38 +1419,38 @@ passes 8 MiB is left unloaded and ends the read the same way. The block's
 first element, `<NAMED_FILES note="...">`, lists project files that a
 message of the user named and the agent then used. Each transform pass of a
 primary Pi session whose configuration permits memory capture, and whose
-request carries a `working_directory` that is a path beneath the project
-root, is observed before its window is resolved. The observation reads the
-last two messages the user typed, each with its turn: the rows after it, up
-to the next message the user typed. A message's text parts are read as one
-text, joined by line breaks, through its first 64 KiB; a run of path
-characters that the 64 KiB bound divides is left out. Of that text the
-daemon reads the lines the message's sender wrote: the lines of a code fence,
-and outside a fence every line except a block that a line holding one
-opening tag alone opens, which runs through the last line of the text that
-closes the tag, or to the end of the text when no line closes it, and except
-a line that holds a closing tag alone. The text of a prompt template the
-user invoked is the user's message. From those lines the daemon takes the
-runs of ASCII letters, digits, and `._-/+@` that hold a `.` or a `/` once the
-periods that end them are dropped, and reads the first 32 distinct ones,
-each as written and, for a run that opens with Pi's file-reference mark `@`,
-without that character. A path is held relative to the project root: a
-relative path is read from `working_directory`, an absolute path beneath the
-root is taken relative to the root, `.` and `..` components are resolved
-without reading the file system, and the result names a file when it stays
-beneath the root, is at most 256 bytes of those characters, and passes the
-confined-path rules (at most 16 components, none of them `.git` or
-`.eidnara` in any letter case). A call of the turn uses a named file when it
-is a call of Pi's `read` whose `path` argument, read without one leading `@`
-as Pi opens it, names the file, or a call of Pi's `bash` whose `command`
-names the file in one of its first 256 such runs, read as written, and when
-the turn holds the call's result and the result is no error. A file the
+request carries the empty `working_directory` (the session works in the
+project root), is observed before its window is resolved. The observation
+reads the last message the user typed and the rows after it; the rows
+before that message show nothing, since a fork copies its parent's rows
+into a session of another id. A message whose text parts hold more than
+64 KiB together names no file. Each text part is read through the line
+before its first line that holds one tag alone, opening or closing: a block
+another writer appends to a message opens with such a line, so the text
+after it, the sender's included, names no file. The text of a prompt
+template the user invoked is the user's message. From those lines the daemon
+takes the runs of ASCII letters, digits, and `._-/+@` that hold a `.` or a
+`/` once the periods that end them are dropped, and reads the first 32
+distinct ones, each as written and, for a run that opens with Pi's
+file-reference mark `@`, without that character. A path is held relative to
+the project root: a relative path is taken without its leading `./` marks,
+an absolute path beneath the root as the daemon spells the root is taken
+relative to it, and the result names a file when it is at most 256 bytes of
+those characters and passes the confined-path rules (at most 16 components,
+none of them empty, `.`, `..`, or `.git` or `.eidnara` in any letter case).
+A call after the message uses a named file when it is a call of Pi's `read`
+whose `path` argument, read without one leading `@` as Pi opens it, names
+the file, or a call of Pi's `bash` whose `command` names the file in one of
+its first 256 such runs, read as written with their periods, and when the
+call's id is the id of no other call after the message and of exactly one
+result, which is text, JSON, or content that carries no error. A file the
 turn also edits is used the same way. When the pass's transform has
-succeeded, the first eight observed paths that are regular files beneath
+succeeded, the first eight observed paths that the session has not
+recorded, that are regular files beneath
 the project root, reached through no symbolic link or mount point, and that
 the Kernel's durable-text redaction leaves as written, are handed to a
-tracked background write that the reply does not wait for; a pass the
-daemon refuses hands over nothing. Each path is recorded once for the
+tracked background write that the reply does not wait for; a pass whose
+transform the daemon refuses hands over nothing. Each path is recorded once for the
 session: one labeled decision of kind `named_file_use` in the Kernel domain
 `named-files`, scoped to the project, with source kind
 `named_file_recorder`, whose summary is the path and whose rationale holds
@@ -1467,7 +1467,9 @@ rules. The records hold no text of a file. The daemon alone writes and
 changes the domain: a `kernel.commit` operation that names `named-files`,
 that writes a row under the id prefixes `nfu_` or `dnf_` or the id
 `domain:named-files`, or that replaces, retires, or marks one of the
-domain's rows, is refused as `invalid_input`, so a path leaves the element
+domain's rows, is refused as `invalid_input`, and so is a
+`kernel.artifact.ingest.begin` whose artifact names one of those ids, the
+domain, or the source kind `named_file_recorder`; a path leaves the element
 when its file does. The search projection publishes none of the records, so
 `eidnara_search` ranks none, and a `kernel.read` page returns them with
 `domain_id` `named-files`. A pass reads the newest records
@@ -1744,7 +1746,8 @@ and defaults to true; the daemon ignores a project-tier value with a warning,
 and each plugin strips it from the project tier. False composes m0 with
 neither the `<project-memory>` nor the user-profile block and m1 with no
 `<new-user-profile>` delta, and turning it off rebuilds m0, while explicit
-search, capture, and the history summarizer's memory read are unchanged. Session deletion
+search and capture are unchanged and the history summarizer reads the
+project's facts itself, without the `NAMED_FILES` element. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes
@@ -1790,7 +1793,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `prev_response_cache_usage` | optional | `{"cache_read_tokens", "cache_write_tokens"}`; a malformed value is dropped |
 | `mid_turn`, `is_subagent`, `tool_present` | optional, default `false` | booleans |
 | `todo_tool_present` | optional | boolean |
-| `working_directory` | optional; `pi` sends it for a session that has a project identity | string: the session's working directory, at its physical path, as a path beneath the project root with `/` separators, empty for the root, at most 256 bytes; the named-file records of Section 7.9 read a turn's relative paths from it, a request without it, or with a value that is no such path, records none, and the daemon keeps the value no longer than the observation |
+| `working_directory` | optional; `pi` sends it for a session that has a project identity and whose working directory lies beneath the project root | string: the session's working directory, at its physical path, relative to the project root at its physical path, with `/` separators, empty for the root; the named-file records of Section 7.9 are taken for a request whose value is empty, where a relative path of a tool call names the file of that path, and a request without the field or with another value records none; the daemon keeps the value no longer than the observation |
 | `provider_id`, `model_key`, `cache_ttl`, `system_prompt_hash`, `upgrade_state`, `provider_error` | optional | strings |
 | `prev_response_completed_at_ms`, `request_observed_at_ms` | optional | unsigned integers (milliseconds) |
 | `effective_execute_threshold`, `history_budget_tokens` | optional | numbers |
