@@ -14787,7 +14787,7 @@ impl HandlerCore {
                 }
                 "memory.capture" => self.handle_memory_capture(channel, &request).await,
                 memory_reviewer::classifier_wire::NEXT => {
-                    self.handle_review_classify_next(channel, &request).await
+                    self.handle_review_classify_next(channel, &request)
                 }
                 memory_reviewer::classifier_wire::SUBMIT => {
                     self.handle_review_classify_submit(channel, &request)

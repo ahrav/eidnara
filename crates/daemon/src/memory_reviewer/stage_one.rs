@@ -317,18 +317,24 @@ impl Stage1 {
     }
 }
 
-/// The chat decider flags a review when an eligible later reference exists and `changes` is `yes` or `unsure`, or when the memory is work in progress with a later reference and `work_ended` is `yes` or `unsure`. A review whose answer [`ChatAnswers::parse`] could not read is flagged, so the review model decides it.
-pub fn decide(state: &ReviewState, answers: Option<&ChatAnswers>) -> Stage1 {
-    let Some(answers) = answers else {
-        return Stage1::Flagged;
-    };
-    let changed = state.has_eligible_later() && answers.changes.flags();
-    let ended = state.work_in_progress && !state.later.is_empty() && answers.work_ended.flags();
-    if changed || ended {
-        Stage1::Flagged
-    } else {
-        Stage1::Keep
+impl ReviewState {
+    /// The flag rule of every decider: a review is flagged when an eligible later reference exists and the decider answered that the memory `changes`, or when the memory is work in progress with a later reference and the decider answered that the `work_ended`.
+    pub fn flag(&self, changes: bool, work_ended: bool) -> Stage1 {
+        let changed = self.has_eligible_later() && changes;
+        let ended = self.work_in_progress && !self.later.is_empty() && work_ended;
+        if changed || ended {
+            Stage1::Flagged
+        } else {
+            Stage1::Keep
+        }
     }
+}
+
+/// The chat decider answers `changes` and `work_ended` for [`ReviewState::flag`] with `yes` or `unsure`. A review whose answer [`ChatAnswers::parse`] could not read is flagged, so the review model decides it.
+pub fn decide(state: &ReviewState, answers: Option<&ChatAnswers>) -> Stage1 {
+    answers.map_or(Stage1::Flagged, |answers| {
+        state.flag(answers.changes.flags(), answers.work_ended.flags())
+    })
 }
 
 /// Which decider answered a review's stage 1.

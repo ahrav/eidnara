@@ -1926,6 +1926,18 @@ impl HandlerCore {
         operation: &str,
         extra_fields: &[&str],
     ) -> Result<(String, SessionBinding), PreparedOutcome> {
+        self.closed_binding(channel, request, operation, extra_fields, "memory capture")
+    }
+
+    /// The session and binding of a routed management request whose body is closed: the routed envelope, `extra_fields`, and a `project_root` the route accepts. `subject` names the method family in a refusal.
+    pub(crate) fn closed_binding(
+        &self,
+        channel: RouteHandle,
+        request: &Value,
+        operation: &str,
+        extra_fields: &[&str],
+        subject: &str,
+    ) -> Result<(String, SessionBinding), PreparedOutcome> {
         let bound = self.management_binding(channel, request, operation)?;
         if request.as_object().is_none_or(|body| {
             body.keys().any(|key| {
@@ -1933,9 +1945,9 @@ impl HandlerCore {
                     && !extra_fields.contains(&key.as_str())
             })
         }) {
-            return Err(invalid_params_error(
-                "memory capture request has unknown fields",
-            ));
+            return Err(invalid_params_error(format!(
+                "{subject} request has unknown fields"
+            )));
         }
         if let Some(root) = request.get("project_root") {
             let valid = root.as_str().is_some_and(|root| {
@@ -1943,9 +1955,9 @@ impl HandlerCore {
                 path.is_absolute() && bound.1.kernel_project.accepts(path)
             });
             if !valid {
-                return Err(invalid_params_error(
-                    "memory capture project does not match the route",
-                ));
+                return Err(invalid_params_error(format!(
+                    "{subject} project does not match the route"
+                )));
             }
         }
         Ok(bound)

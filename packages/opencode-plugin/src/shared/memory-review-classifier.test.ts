@@ -89,7 +89,7 @@ describe("createReviewClassifierPump", () => {
             seen.push(item.state);
             return { changes: { type: "bool", probability: 0.03 } };
         };
-        const pump = createReviewClassifierPump(fake.client, execute);
+        const pump = createReviewClassifierPump(fake.client, execute, { pollIntervalMs: 1 });
         pump.start(SCOPE);
         await pump.idle();
         await pump.close();
@@ -107,7 +107,6 @@ describe("createReviewClassifierPump", () => {
             session_id: "s1",
             project_root: "/work/project",
             classifier: "typesafe/jev-latest",
-            wait_ms: 20_000,
         });
         expect(fake.calls[2]?.body).toEqual({
             method: "memory.review.classify.submit",
@@ -139,6 +138,95 @@ describe("createReviewClassifierPump", () => {
         }
     });
 
+    it("reports a classifier call that outlasts the work's duration as provider_unavailable", async () => {
+        const fake = daemon([work({ max_duration_ms: 5 }), { state: "disabled" }]);
+        const pump = createReviewClassifierPump(
+            fake.client,
+            (_item, signal) =>
+                new Promise((_resolve, reject) => {
+                    signal.addEventListener("abort", () =>
+                        reject(new ReviewClassifierError("cancelled")),
+                    );
+                }),
+        );
+        pump.start(SCOPE);
+        await pump.idle();
+        const submitted = fake.calls.find(
+            (call) => call.method === "memory.review.classify.submit",
+        );
+        expect(submitted?.body.error).toBe("provider_unavailable");
+    });
+
+    it("reports answers once, and a submit the daemon does not receive is left to the review's wait", async () => {
+        const methods: string[] = [];
+        const client = {
+            call: async (args: { method: string }) => {
+                methods.push(args.method);
+                if (args.method === "memory.review.classify.submit")
+                    throw new Error("transport closed");
+                return methods.length === 1 ? work() : { state: "disabled" };
+            },
+        };
+        const pump = createReviewClassifierPump(client, async () => ({ changes: {} }));
+        pump.start(SCOPE);
+        await pump.idle();
+        expect(methods).toEqual([
+            "memory.review.classify.next",
+            "memory.review.classify.submit",
+            "memory.review.classify.next",
+        ]);
+    });
+
+    it("waits the poll interval between two next calls that found no work", async () => {
+        const fake = daemon(Array.from({ length: 50 }, () => ({ state: "ready" })));
+        const pump = createReviewClassifierPump(fake.client, async () => ({}), {
+            pollIntervalMs: 40,
+        });
+        pump.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await pump.close();
+        expect(fake.calls.length).toBeGreaterThanOrEqual(2);
+        expect(fake.calls.length).toBeLessThanOrEqual(4);
+    });
+
+    it("closes at once while a next call is in flight or a pause is running", async () => {
+        // The transport rejects a call whose signal aborts.
+        const client = {
+            call: (args: { signal?: AbortSignal }) =>
+                new Promise((_resolve, reject) => {
+                    args.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+                }),
+        };
+        const inFlight = createReviewClassifierPump(client, async () => ({}));
+        inFlight.start(SCOPE);
+        const paused = createReviewClassifierPump(daemon([{ state: "ready" }]).client, async () => ({}));
+        paused.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const started = Date.now();
+        await Promise.all([inFlight.close(), paused.close()]);
+        expect(Date.now() - started).toBeLessThan(1_000);
+    });
+
+    it("stops the loops of a released session and starts again for the next one", async () => {
+        const fake = daemon(Array.from({ length: 200 }, () => ({ state: "ready" })));
+        const pump = createReviewClassifierPump(fake.client, async () => ({}), {
+            pollIntervalMs: 1,
+        });
+        pump.start(SCOPE);
+        pump.stop("another-session");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(fake.calls.length).toBeGreaterThan(0);
+        pump.stop(SCOPE.sessionId);
+        await pump.idle();
+        const settled = fake.calls.length;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(fake.calls).toHaveLength(settled);
+        pump.start({ ...SCOPE, sessionId: "s2" });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(fake.calls.at(-1)?.body.session_id).toBe("s2");
+        await pump.close();
+    });
+
     it("retries a failed next call and gives up after five in a row", async () => {
         const fake = daemon(Array.from({ length: 8 }, () => new Error("unreachable")));
         const pump = createReviewClassifierPump(
@@ -149,11 +237,11 @@ describe("createReviewClassifierPump", () => {
             { retryDelayMs: 1 },
         );
         pump.start(SCOPE);
-        await new Promise((resolve) => setTimeout(resolve, 60));
+        await pump.idle();
         expect(fake.calls).toHaveLength(5);
         // A later start begins a new loop for the root.
         pump.start(SCOPE);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await pump.idle();
         expect(fake.calls.length).toBeGreaterThan(5);
         await pump.close();
     });
@@ -171,7 +259,9 @@ describe("createReviewClassifierPump", () => {
                 return { state: "disabled" };
             },
         };
-        const pump = createReviewClassifierPump(client, async () => ({}));
+        const pump = createReviewClassifierPump(client, async () => ({}), {
+            pollIntervalMs: 1,
+        });
         pump.start(SCOPE);
         pump.start({ ...SCOPE, sessionId: "s2" });
         await new Promise((resolve) => setTimeout(resolve, 5));

@@ -8,22 +8,23 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::stage_one::{
     CHANGES_FALSE, CHANGES_QUESTION, CHANGES_TRUE, RELATION_ADDS, RELATION_QUESTION,
-    RELATION_REPLACES, RELATION_RESTATES, RELATION_UNRELATED, ReviewState, STRONGEST_QUESTION,
-    Stage1, StateReference, WORK_ENDED_FALSE, WORK_ENDED_QUESTION, WORK_ENDED_TRUE, WireState,
+    RELATION_REPLACES, RELATION_RESTATES, RELATION_UNRELATED, Relation, ReviewState,
+    STRONGEST_QUESTION, Stage1, StateReference, WORK_ENDED_FALSE, WORK_ENDED_QUESTION,
+    WORK_ENDED_TRUE, WireState,
 };
 
-/// A run that waits longer than this for its classifier answer ends unsettled, and a later pass takes the job up again.
+/// How long a run waits for a harness to answer a classifier request; past it the attempt ends as failed.
+#[cfg(not(test))]
 pub const CLASSIFY_WAIT: Duration = Duration::from_secs(20);
-/// [`PRESENCE_WINDOW`] spans six maximum-length long polls, so a harness can remain present between pulls.
+#[cfg(test)]
+pub const CLASSIFY_WAIT: Duration = Duration::from_secs(2);
+/// How long after a pull a project's harness counts as answering classifier work. A harness pulls every few seconds, so the window spans many pulls.
 pub const PRESENCE_WINDOW: Duration = Duration::from_secs(120);
-/// Lease expiry makes an unanswered request available for another pull.
-pub const LEASE_DURATION: Duration = Duration::from_secs(30);
-pub const MAX_NEXT_WAIT_MS: u64 = 20_000;
 pub const MAX_CLASSIFY_DURATION_MS: u64 = 10_000;
 pub const MAX_PARKED_REQUESTS: usize = 64;
 pub const FLAG_THRESHOLD: f64 = 0.5;
@@ -133,7 +134,7 @@ const STRONGEST_NONE: &str = "no entry of `later` bears on the memory, or `later
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answers {
     pub changes: f64,
-    pub relation: String,
+    pub relation: Relation,
     pub work_ended: f64,
     pub strongest: Option<String>,
 }
@@ -165,14 +166,12 @@ impl Answers {
                 .and_then(Value::as_str)
                 .ok_or(MalformedAnswers)
         };
-        let relation = choice("relation")?;
-        if !["replaces", "adds", "restates", "unrelated"].contains(&relation) {
-            return Err(MalformedAnswers);
-        }
+        let relation = serde_json::from_value(Value::from(choice("relation")?))
+            .map_err(|_| MalformedAnswers)?;
         let strongest = choice("strongest")?;
         Ok(Self {
             changes: probability("changes")?,
-            relation: relation.to_string(),
+            relation,
             work_ended: probability("work_ended")?,
             strongest: state
                 .later
@@ -185,14 +184,10 @@ impl Answers {
 
 /// The classifier flags a review if an eligible later reference exists and the change probability reaches [`FLAG_THRESHOLD`], or if the memory is work in progress and the probability that work ended reaches [`FLAG_THRESHOLD`]. Otherwise the review settles as a keep.
 pub fn decide(state: &ReviewState, answers: &Answers) -> Stage1 {
-    let changed = state.has_eligible_later() && answers.changes >= FLAG_THRESHOLD;
-    let ended =
-        state.work_in_progress && !state.later.is_empty() && answers.work_ended >= FLAG_THRESHOLD;
-    if changed || ended {
-        Stage1::Flagged
-    } else {
-        Stage1::Keep
-    }
+    state.flag(
+        answers.changes >= FLAG_THRESHOLD,
+        answers.work_ended >= FLAG_THRESHOLD,
+    )
 }
 
 /// The classifier one project's reviews ask at stage 1, and where its requests wait for the harness.
@@ -204,6 +199,13 @@ pub struct ClassifierRoute {
     /// The Kernel project digest the harness's routes are bound under.
     pub project: String,
     pub wait: Duration,
+}
+
+impl ClassifierRoute {
+    /// Whether a harness of the project pulled this classifier's work within [`PRESENCE_WINDOW`].
+    pub fn present(&self) -> bool {
+        self.exchange.present(&self.project, &self.classifier)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +220,8 @@ pub struct ClassifierWork {
 pub enum ClassifyError {
     #[error("the wait ended before a classifier answer")]
     Unanswered,
+    #[error("no harness pulled the request")]
+    Unpulled,
     #[error("classifier exchange is full")]
     Full,
     #[error("harness reported {0}")]
@@ -232,7 +236,8 @@ struct Parked {
     classifier: String,
     request: Arc<str>,
     reply: Option<oneshot::Sender<Result<Value, ClassifyError>>>,
-    lease: Option<(String, Instant)>,
+    /// Set when a harness pulls the request. It names the request to `submit` for as long as the review waits.
+    lease: Option<String>,
 }
 
 #[derive(Default)]
@@ -245,7 +250,6 @@ struct Inner {
 #[derive(Default)]
 pub struct ClassifierExchange {
     inner: Mutex<Inner>,
-    arrived: Notify,
 }
 
 impl ClassifierExchange {
@@ -256,12 +260,17 @@ impl ClassifierExchange {
     }
 
     pub fn present(&self, project: &str, classifier: &str) -> bool {
+        self.present_at(project, classifier, Instant::now())
+    }
+
+    fn present_at(&self, project: &str, classifier: &str, now: Instant) -> bool {
         self.lock()
             .pulls
             .get(&(project.to_string(), classifier.to_string()))
-            .is_some_and(|at| at.elapsed() <= PRESENCE_WINDOW)
+            .is_some_and(|at| now.saturating_duration_since(*at) <= PRESENCE_WINDOW)
     }
 
+    /// Parks `request` for the project's harness and waits up to `wait` for its answers. A request that waits its whole time while no harness pulls it ends [`ClassifyError::Unpulled`] and ends the project's presence, so the chat model decides the attempts that follow.
     pub async fn classify(
         &self,
         project: &str,
@@ -288,7 +297,6 @@ impl ClassifierExchange {
             });
             id
         };
-        self.arrived.notify_waiters();
         let outcome = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(ClassifyError::Cancelled),
@@ -297,51 +305,39 @@ impl ClassifierExchange {
                 Ok(Err(_)) | Err(_) => Err(ClassifyError::Unanswered),
             },
         };
-        self.lock().parked.retain(|parked| parked.id != id);
+        let mut inner = self.lock();
+        let pulled = inner
+            .parked
+            .iter()
+            .position(|parked| parked.id == id)
+            .and_then(|at| inner.parked.remove(at))
+            .is_some_and(|parked| parked.lease.is_some());
+        if outcome == Err(ClassifyError::Unanswered) && !pulled {
+            inner
+                .pulls
+                .remove(&(project.to_string(), classifier.to_string()));
+            return Err(ClassifyError::Unpulled);
+        }
         outcome
     }
 
-    pub async fn next(
-        &self,
-        project: &str,
-        classifier: &str,
-        wait: Duration,
-    ) -> Option<ClassifierWork> {
-        let deadline = Instant::now() + wait;
-        loop {
-            let arrived = self.arrived.notified();
-            tokio::pin!(arrived);
-            // Registering before the scan means a request parked between the scan and the wait still wakes this pull.
-            arrived.as_mut().enable();
-            if let Some(work) = self.take(project, classifier) {
-                return Some(work);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return None;
-            }
-            // A lapsed lease frees its request silently, so the wait runs in short slices that rescan.
-            let slice = remaining.min(Duration::from_millis(250));
-            let _ = tokio::time::timeout(slice, arrived).await;
-        }
-    }
-
-    fn take(&self, project: &str, classifier: &str) -> Option<ClassifierWork> {
+    /// The oldest request of `project` for `classifier` that no harness holds, under a new lease. Every call marks the project's harness present.
+    pub fn next(&self, project: &str, classifier: &str) -> Option<ClassifierWork> {
         let mut inner = self.lock();
-        let now = Instant::now();
-        inner
-            .pulls
-            .insert((project.to_string(), classifier.to_string()), now);
+        inner.pulls.insert(
+            (project.to_string(), classifier.to_string()),
+            Instant::now(),
+        );
         let parked = inner.parked.iter_mut().find(|parked| {
             parked.project == project
                 && parked.classifier == classifier
                 && parked.reply.is_some()
-                && parked.lease.as_ref().is_none_or(|(_, until)| *until <= now)
+                && parked.lease.is_none()
         })?;
         let mut nonce = [0_u8; 16];
         getrandom::getrandom(&mut nonce).ok()?;
         let lease: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-        parked.lease = Some((lease.clone(), now + LEASE_DURATION));
+        parked.lease = Some(lease.clone());
         Some(ClassifierWork {
             lease,
             classifier: parked.classifier.clone(),
@@ -349,16 +345,14 @@ impl ClassifierExchange {
         })
     }
 
+    /// Hands `result` to the review that waits under `lease`; `false` when no request of `project` waits under it.
     pub fn submit(&self, project: &str, lease: &str, result: Result<Value, String>) -> bool {
         let mut inner = self.lock();
-        let now = Instant::now();
-        let Some(parked) = inner.parked.iter_mut().find(|parked| {
-            parked.project == project
-                && parked
-                    .lease
-                    .as_ref()
-                    .is_some_and(|(held, until)| held == lease && *until > now)
-        }) else {
+        let Some(parked) = inner
+            .parked
+            .iter_mut()
+            .find(|parked| parked.project == project && parked.lease.as_deref() == Some(lease))
+        else {
             return false;
         };
         parked
@@ -459,8 +453,21 @@ mod tests {
             ..by_assistant.clone()
         };
         assert_eq!(
-            decided(&work, answers(0.1, "restates", 0.7, "ref-3")),
+            decided(&work, answers(0.1, "restates", 0.5, "ref-3")),
             Stage1::Flagged
+        );
+        assert_eq!(
+            decided(&work, answers(0.1, "restates", 0.49, "ref-3")),
+            Stage1::Keep
+        );
+        let work_alone = ReviewState {
+            work_in_progress: true,
+            ..user_statement(Vec::new())
+        };
+        assert_eq!(
+            decided(&work_alone, answers(0.1, "restates", 0.99, "none")),
+            Stage1::Keep,
+            "work in progress with no later reference has nothing that ended it"
         );
         assert_eq!(
             decided(&by_user, answers(0.1, "restates", 0.7, "ref-3")),
@@ -479,7 +486,7 @@ mod tests {
         let state = user_statement(vec![reference("ref-3", Writer::User, "Deploy from main.")]);
         let parsed = Answers::parse(&state, &answers(0.7, "adds", 0.2, "ref-9")).unwrap();
         assert_eq!(parsed.strongest, None);
-        assert_eq!(parsed.relation, "adds");
+        assert_eq!(parsed.relation, Relation::Adds);
         for malformed in [
             json!({}),
             answers(1.5, "adds", 0.2, "ref-3"),
@@ -492,6 +499,20 @@ mod tests {
             }),
         ] {
             assert_eq!(Answers::parse(&state, &malformed), Err(MalformedAnswers));
+        }
+    }
+
+    /// Pulls the request a spawned run parks, once the run has parked it.
+    async fn pull(
+        exchange: &ClassifierExchange,
+        project: &str,
+        classifier: &str,
+    ) -> ClassifierWork {
+        loop {
+            if let Some(work) = exchange.next(project, classifier) {
+                return work;
+            }
+            tokio::task::yield_now().await;
         }
     }
 
@@ -513,30 +534,11 @@ mod tests {
                     .await
             })
         };
-        assert_eq!(
-            exchange
-                .next("other", "typesafe/jev-latest", Duration::from_millis(20))
-                .await,
-            None,
-            "another project's harness"
-        );
-        assert_eq!(
-            exchange
-                .next("project", "other/classifier", Duration::from_millis(20))
-                .await,
-            None,
-            "another classifier's harness"
-        );
-        let work = exchange
-            .next("project", "typesafe/jev-latest", Duration::from_secs(5))
-            .await
-            .expect("the parked request");
+        let work = pull(&exchange, "project", "typesafe/jev-latest").await;
         assert_eq!(&*work.request, r#"{"state":{},"questions":{}}"#);
         assert!(exchange.present("project", "typesafe/jev-latest"));
         assert_eq!(
-            exchange
-                .next("project", "typesafe/jev-latest", Duration::from_millis(20))
-                .await,
+            exchange.next("project", "typesafe/jev-latest"),
             None,
             "the lease holds the request"
         );
@@ -551,32 +553,124 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unanswered_failed_or_cancelled_request_leaves_the_exchange() {
+    async fn a_request_is_offered_to_its_own_project_and_classifier() {
         let exchange = Arc::new(ClassifierExchange::default());
-        let classify = |wait: Duration, cancel: CancellationToken| {
+        let run = {
             let exchange = Arc::clone(&exchange);
-            async move {
+            tokio::spawn(async move {
                 exchange
-                    .classify("project", "c/m", "{}".to_string(), wait, &cancel)
+                    .classify(
+                        "project",
+                        "c/m",
+                        "{}".to_string(),
+                        Duration::from_secs(5),
+                        &CancellationToken::new(),
+                    )
                     .await
-            }
+            })
         };
+        let work = pull(&exchange, "project", "c/m").await;
+        assert!(exchange.submit("project", &work.lease, Err("cancelled".to_string())));
+        run.await.unwrap().unwrap_err();
+        let cancel = CancellationToken::new();
+        let run = {
+            let (exchange, cancel) = (Arc::clone(&exchange), cancel.clone());
+            tokio::spawn(async move {
+                exchange
+                    .classify(
+                        "project",
+                        "c/m",
+                        "{}".to_string(),
+                        Duration::from_secs(5),
+                        &cancel,
+                    )
+                    .await
+            })
+        };
+        while exchange.lock().parked.is_empty() {
+            tokio::task::yield_now().await;
+        }
         assert_eq!(
-            classify(Duration::from_millis(20), CancellationToken::new()).await,
-            Err(ClassifyError::Unanswered)
+            exchange.next("other", "c/m"),
+            None,
+            "another project's harness"
         );
+        assert_eq!(
+            exchange.next("project", "other/m"),
+            None,
+            "another classifier"
+        );
+        cancel.cancel();
+        assert_eq!(run.await.unwrap(), Err(ClassifyError::Cancelled));
+        assert_eq!(
+            exchange.next("project", "c/m"),
+            None,
+            "a cancelled request left"
+        );
+    }
+
+    /// A harness counts as present for [`PRESENCE_WINDOW`] after a pull, and a request no harness pulled ends the presence at once.
+    #[tokio::test]
+    async fn presence_lasts_the_window_after_a_pull_and_ends_at_an_unpulled_request() {
+        let exchange = ClassifierExchange::default();
+        let before = Instant::now();
+        assert_eq!(exchange.next("project", "c/m"), None);
+        let pulled = Instant::now();
+        assert!(exchange.present_at("project", "c/m", before + PRESENCE_WINDOW));
+        assert!(!exchange.present_at(
+            "project",
+            "c/m",
+            pulled + PRESENCE_WINDOW + Duration::from_secs(1)
+        ));
+        assert!(!exchange.present("project", "other/m"));
+        assert!(!exchange.present("other", "c/m"));
         assert_eq!(
             exchange
-                .next("project", "c/m", Duration::from_millis(5))
+                .classify(
+                    "project",
+                    "c/m",
+                    "{}".to_string(),
+                    Duration::from_millis(20),
+                    &CancellationToken::new(),
+                )
                 .await,
-            None,
-            "the unanswered request left with its run"
+            Err(ClassifyError::Unpulled)
         );
-        let run = tokio::spawn(classify(Duration::from_secs(5), CancellationToken::new()));
-        let work = exchange
-            .next("project", "c/m", Duration::from_secs(5))
-            .await
-            .unwrap();
+        assert!(!exchange.present("project", "c/m"));
+        assert_eq!(
+            exchange.next("project", "c/m"),
+            None,
+            "the request left with its run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pulled_request_without_an_answer_or_with_a_failure_keeps_the_presence() {
+        let exchange = Arc::new(ClassifierExchange::default());
+        let classify = |wait: Duration| {
+            let exchange = Arc::clone(&exchange);
+            tokio::spawn(async move {
+                exchange
+                    .classify(
+                        "project",
+                        "c/m",
+                        "{}".to_string(),
+                        wait,
+                        &CancellationToken::new(),
+                    )
+                    .await
+            })
+        };
+        let run = classify(Duration::from_millis(200));
+        let work = pull(&exchange, "project", "c/m").await;
+        assert_eq!(run.await.unwrap(), Err(ClassifyError::Unanswered));
+        assert!(exchange.present("project", "c/m"));
+        assert!(
+            !exchange.submit("project", &work.lease, Ok(json!({}))),
+            "the review stopped waiting"
+        );
+        let run = classify(Duration::from_secs(5));
+        let work = pull(&exchange, "project", "c/m").await;
         assert!(exchange.submit(
             "project",
             &work.lease,
@@ -586,17 +680,46 @@ mod tests {
             run.await.unwrap(),
             Err(ClassifyError::Harness("provider_unavailable".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn a_full_exchange_refuses_the_next_request() {
+        let exchange = Arc::new(ClassifierExchange::default());
         let cancel = CancellationToken::new();
-        cancel.cancel();
-        assert_eq!(
-            classify(Duration::from_secs(5), cancel).await,
-            Err(ClassifyError::Cancelled)
-        );
+        let runs: Vec<_> = (0..MAX_PARKED_REQUESTS)
+            .map(|_| {
+                let (exchange, cancel) = (Arc::clone(&exchange), cancel.clone());
+                tokio::spawn(async move {
+                    exchange
+                        .classify(
+                            "project",
+                            "c/m",
+                            "{}".to_string(),
+                            Duration::from_secs(5),
+                            &cancel,
+                        )
+                        .await
+                })
+            })
+            .collect();
+        while exchange.lock().parked.len() < MAX_PARKED_REQUESTS {
+            tokio::task::yield_now().await;
+        }
         assert_eq!(
             exchange
-                .next("project", "c/m", Duration::from_millis(5))
+                .classify(
+                    "project",
+                    "c/m",
+                    "{}".to_string(),
+                    Duration::from_secs(5),
+                    &cancel
+                )
                 .await,
-            None
+            Err(ClassifyError::Full)
         );
+        cancel.cancel();
+        for run in runs {
+            assert_eq!(run.await.unwrap(), Err(ClassifyError::Cancelled));
+        }
     }
 }

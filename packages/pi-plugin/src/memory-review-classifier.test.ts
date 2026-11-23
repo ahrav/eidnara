@@ -39,6 +39,14 @@ describe("piHasReviewClassifier", () => {
             piHasReviewClassifier(context({ find: () => undefined }), "typesafe/jev-latest"),
         ).toBe(false);
         expect(piHasReviewClassifier(context(undefined), "typesafe/jev-latest")).toBe(false);
+        // A classifier the registry lists without a credential leaves the chat model to decide.
+        for (const [configured, expected] of [
+            [true, true],
+            [false, false],
+        ] as const) {
+            const listed = { ...registry({}), hasConfiguredAuth: () => configured };
+            expect(piHasReviewClassifier(context(listed), "typesafe/jev-latest")).toBe(expected);
+        }
     });
 });
 

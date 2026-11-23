@@ -32,6 +32,8 @@ export interface ReviewClassifierScope {
 export interface ReviewClassifierPump {
     /** Starts answering classifier work for `scope.projectRoot`; a later scope of the same root replaces the session the calls travel on. */
     start(scope: ReviewClassifierScope): void;
+    /** Ends each loop whose calls travel on `sessionId`, once its call in flight has ended. */
+    stop(sessionId: string): void;
     /** Settles once every loop that is running has ended on its own. */
     idle(): Promise<void>;
     /** Stops every loop and settles once the calls in flight have ended. */
@@ -39,11 +41,13 @@ export interface ReviewClassifierPump {
 }
 
 const LEASE_PATTERN = /^[a-f0-9]{32}$/;
-/** The daemon holds a `next` request open this long for work to arrive. */
-const NEXT_WAIT_MS = 20_000;
-/** The transport outlives the daemon's wait. */
-const NEXT_TIMEOUT_MS = NEXT_WAIT_MS + 10_000;
-const SUBMIT_TIMEOUT_MS = 10_000;
+/**
+ * The pause between two `next` calls that found no work. A session's daemon calls travel in
+ * order, so each `next` call is one short round trip; a review waits 20 seconds for its answer
+ * and the daemon counts a harness present for 120 seconds after a call.
+ */
+const POLL_INTERVAL_MS = 2_000;
+const CALL_TIMEOUT_MS = 10_000;
 /** The largest request text the harness parses. */
 const MAX_REQUEST_BYTES = 128 * 1024;
 /** The longest classifier call the harness makes, whatever the work states. */
@@ -99,96 +103,107 @@ export function reviewClassifierWork(response: unknown): ReviewClassifierWork | 
 
 /**
  * Answers the daemon's stage-1 classifier work for each project a session is open on. One loop
- * per project root long-polls `memory.review.classify.next`, runs the classifier through
- * `execute`, and returns the answers or one failure code with `memory.review.classify.submit`.
- * The daemon reads each `next` call as the sign that this project's harness has a classifier,
- * so a harness that cannot call one starts no loop and the chat model decides. A `disabled`
- * reply ends the loop: the project names no classifier, or another one.
+ * per project root asks `memory.review.classify.next` for work every few seconds, runs the
+ * classifier through `execute`, and returns the answers or one failure code with
+ * `memory.review.classify.submit`. The daemon reads each `next` call as the sign that this
+ * project's harness has a classifier, so a harness that cannot call one starts no loop and the
+ * chat model decides. A `disabled` reply ends the loop: the project names no classifier, or
+ * another one.
  */
 export function createReviewClassifierPump(
     client: Pick<RustModeModuleClient, "call">,
     execute: ReviewClassifierExecutor,
-    options: { retryDelayMs?: number } = {},
+    options: { retryDelayMs?: number; pollIntervalMs?: number } = {},
 ): ReviewClassifierPump {
+    interface Loop {
+        scope: ReviewClassifierScope;
+        stopped: boolean;
+        done: Promise<void>;
+    }
     const closing = new AbortController();
-    const loops = new Map<string, { scope: ReviewClassifierScope; done: Promise<void> }>();
+    const loops = new Map<string, Loop>();
     const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
+    const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
 
+    /** Settles after `ms`, or at once when the pump closes. */
     const pause = (ms: number) =>
         new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, ms);
-            closing.signal.addEventListener(
-                "abort",
-                () => {
-                    clearTimeout(timer);
-                    resolve();
-                },
-                { once: true },
-            );
+            if (closing.signal.aborted) return resolve();
+            const wake = () => {
+                clearTimeout(timer);
+                closing.signal.removeEventListener("abort", wake);
+                resolve();
+            };
+            const timer = setTimeout(wake, ms);
+            closing.signal.addEventListener("abort", wake, { once: true });
         });
 
     async function answer(scope: ReviewClassifierScope, work: ReviewClassifierWork): Promise<void> {
-        const submit = (extra: Record<string, unknown>) =>
-            client.call({
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        closing.signal.addEventListener("abort", cancel, { once: true });
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            cancel();
+        }, work.maxDurationMs);
+        let outcome: Record<string, unknown>;
+        try {
+            outcome = { answers: await execute(work, controller.signal) };
+        } catch (error) {
+            const code = closing.signal.aborted
+                ? "cancelled"
+                : timedOut
+                  ? "provider_unavailable"
+                  : error instanceof ReviewClassifierError
+                    ? error.code
+                    : "model_failed";
+            outcome = { error: code };
+        } finally {
+            clearTimeout(timer);
+            closing.signal.removeEventListener("abort", cancel);
+        }
+        // A report the daemon does not receive leaves the review to the end of its own wait.
+        await client
+            .call({
                 sessionId: scope.sessionId,
                 projectRoot: scope.projectRoot,
                 method: "memory.review.classify.submit",
-                timeoutMs: SUBMIT_TIMEOUT_MS,
+                timeoutMs: CALL_TIMEOUT_MS,
                 body: {
                     method: "memory.review.classify.submit",
                     session_id: scope.sessionId,
                     project_root: scope.projectRoot,
                     classifier: scope.classifier,
                     lease: work.lease,
-                    ...extra,
+                    ...outcome,
                 },
-            });
-        const controller = new AbortController();
-        const cancel = () => controller.abort();
-        closing.signal.addEventListener("abort", cancel, { once: true });
-        const timer = setTimeout(cancel, work.maxDurationMs);
-        try {
-            const answers = await execute(work, controller.signal);
-            await submit({ answers });
-        } catch (error) {
-            const code = closing.signal.aborted
-                ? "cancelled"
-                : error instanceof ReviewClassifierError
-                  ? error.code
-                  : controller.signal.aborted
-                    ? "provider_unavailable"
-                    : "model_failed";
-            // A lost failure report leaves a lease that lapses on its own.
-            await submit({ error: code }).catch(() => undefined);
-        } finally {
-            clearTimeout(timer);
-            closing.signal.removeEventListener("abort", cancel);
-        }
+            })
+            .catch(() => undefined);
     }
 
-    async function run(projectRoot: string): Promise<void> {
+    async function run(loop: Loop): Promise<void> {
         let failures = 0;
         try {
-            while (!closing.signal.aborted) {
-                const scope = loops.get(projectRoot)?.scope;
-                if (!scope) return;
+            while (!closing.signal.aborted && !loop.stopped) {
+                const scope = loop.scope;
                 let response: unknown;
                 try {
                     response = await client.call({
                         sessionId: scope.sessionId,
                         projectRoot: scope.projectRoot,
                         method: "memory.review.classify.next",
-                        timeoutMs: NEXT_TIMEOUT_MS,
+                        timeoutMs: CALL_TIMEOUT_MS,
                         signal: closing.signal,
                         body: {
                             method: "memory.review.classify.next",
                             session_id: scope.sessionId,
                             project_root: scope.projectRoot,
                             classifier: scope.classifier,
-                            wait_ms: NEXT_WAIT_MS,
                         },
                     });
                 } catch {
+                    if (closing.signal.aborted) return;
                     failures += 1;
                     if (failures >= MAX_CONSECUTIVE_FAILURES) return;
                     await pause(retryDelayMs);
@@ -196,14 +211,17 @@ export function createReviewClassifierPump(
                 }
                 failures = 0;
                 const state = record(response)?.state;
-                if (state === "ready") continue;
+                if (state === "ready") {
+                    await pause(pollIntervalMs);
+                    continue;
+                }
                 if (state !== "work") return;
                 const work = reviewClassifierWork(response);
-                // Work outside the contract is left to its lease.
+                // Work outside the contract stays unanswered, and its review's wait ends the attempt.
                 if (work) await answer(scope, work);
             }
         } finally {
-            loops.delete(projectRoot);
+            if (loops.get(loop.scope.projectRoot) === loop) loops.delete(loop.scope.projectRoot);
         }
     }
 
@@ -213,15 +231,20 @@ export function createReviewClassifierPump(
             const running = loops.get(scope.projectRoot);
             if (running) {
                 running.scope = scope;
+                running.stopped = false;
                 return;
             }
-            const entry = { scope, done: Promise.resolve() };
-            loops.set(scope.projectRoot, entry);
-            entry.done = run(scope.projectRoot);
+            const loop: Loop = { scope, stopped: false, done: Promise.resolve() };
+            loops.set(scope.projectRoot, loop);
+            loop.done = run(loop);
+        },
+        stop(sessionId) {
+            for (const loop of loops.values()) {
+                if (loop.scope.sessionId === sessionId) loop.stopped = true;
+            }
         },
         async idle() {
-            while (loops.size > 0)
-                await Promise.all([...loops.values()].map((entry) => entry.done));
+            while (loops.size > 0) await Promise.all([...loops.values()].map((loop) => loop.done));
         },
         async close() {
             closing.abort();

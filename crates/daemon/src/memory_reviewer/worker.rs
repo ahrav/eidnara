@@ -26,7 +26,6 @@ use super::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
 use super::classifier::{CLASSIFY_WAIT, ClassifierExchange, ClassifierRoute};
 use super::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, Rejection, StageOne,
-    StageOneDecider,
 };
 use super::disclosure::{DisclosureApproval, ModelProfile};
 use super::host_execution::{HOST_CREDENTIAL_ID, HostExecution};
@@ -260,7 +259,7 @@ pub(crate) fn module_projects(
     let mut projects: BTreeMap<String, ProjectRoute> = BTreeMap::new();
     for (_, binding) in roots {
         let root = binding.project_root.to_string_lossy().to_string();
-        // The four `memory_reviewer` keys are the user tier's alone. The tier as it reads now decides them, so a switch turned off stops the reviews of a root whose routes have closed; without it the binding's own load stands.
+        // The five `memory_reviewer` keys are the user tier's alone. The tier as it reads now decides them, so a switch turned off stops the reviews of a root whose routes have closed; without it the binding's own load stands.
         let config = user_tier.unwrap_or(&binding.config);
         // A root whose own tier file the load refused is reviewed by no one, as it is folded by no one.
         let admitted = binding.config.admission == crate::config::ConfigAdmission::Admitted;
@@ -466,21 +465,7 @@ impl Worker {
         }
     }
 
-    /// The classifier route of a switched project: its configured classifier, while a harness of the project answers classifier work.
-    fn classifier_route(&self, switch: &ReviewSwitch, root: &RootScope) -> Option<ClassifierRoute> {
-        let classifier = switch.classifier.as_ref()?;
-        self.switched
-            .classifiers
-            .present(&root.project_digest, classifier)
-            .then(|| ClassifierRoute {
-                exchange: Arc::clone(&self.switched.classifiers),
-                classifier: classifier.clone(),
-                project: root.project_digest.clone(),
-                wait: CLASSIFY_WAIT,
-            })
-    }
-
-    /// Stage 1 of a switched project's reviews. The typed classifier decides while the project names one and a harness answers its work; otherwise a small chat model decides through the host's model execution. `None` when the stage-1 model reference names no host route.
+    /// Stage 1 of a switched project's reviews: a small chat model decides through the host's model execution, and the typed classifier the project names decides in its place while a harness answers classifier work. `None` when the stage-1 model reference names no host route.
     fn stage_one(
         &self,
         producers: &Arc<dyn HistorySummarizerProducerFactory>,
@@ -488,47 +473,48 @@ impl Worker {
         root: &RootScope,
         (kernel_incarnation, memstore_incarnation): (&str, &str),
     ) -> Option<StageOne> {
-        let decider = match self.classifier_route(switch, root) {
-            Some(route) => StageOneDecider::Classifier(route),
-            None => {
-                let (model, unproven_default) = {
-                    let defaults = self
-                        .switched
-                        .derived_defaults
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    (
-                        defaults.model(switch).to_string(),
-                        defaults.unproven(switch),
-                    )
-                };
-                let host = HostExecution::new(
-                    Arc::clone(producers),
-                    root.project_root.clone(),
-                    switch.harness.clone(),
-                    switch.credential_fingerprints.clone(),
-                    model.clone(),
-                )
-                .ok()?;
-                let sender = Arc::new(Sender::through_host(Arc::new(host)));
-                StageOneDecider::Chat {
-                    approval: DisclosureApproval {
-                        provider: sender.provider_identity(),
-                        model,
-                        credential_id: HOST_CREDENTIAL_ID.to_string(),
-                        kernel_incarnation: kernel_incarnation.to_string(),
-                        memstore_incarnation: memstore_incarnation.to_string(),
-                    },
-                    sender,
-                    unproven_default,
-                }
-            }
+        let (model, unproven_default) = {
+            let defaults = self
+                .switched
+                .derived_defaults
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                defaults.model(switch).to_string(),
+                defaults.unproven(switch),
+            )
         };
+        let host = HostExecution::new(
+            Arc::clone(producers),
+            root.project_root.clone(),
+            switch.harness.clone(),
+            switch.credential_fingerprints.clone(),
+            model.clone(),
+        )
+        .ok()?;
+        let sender = Arc::new(Sender::through_host(Arc::new(host)));
         Some(StageOne {
-            decider,
+            approval: DisclosureApproval {
+                provider: sender.provider_identity(),
+                model,
+                credential_id: HOST_CREDENTIAL_ID.to_string(),
+                kernel_incarnation: kernel_incarnation.to_string(),
+                memstore_incarnation: memstore_incarnation.to_string(),
+            },
+            sender,
+            classifier: switch
+                .classifier
+                .as_ref()
+                .map(|classifier| ClassifierRoute {
+                    exchange: Arc::clone(&self.switched.classifiers),
+                    classifier: classifier.clone(),
+                    project: root.project_digest.clone(),
+                    wait: CLASSIFY_WAIT,
+                }),
             book: Arc::clone(&self.switched.stage_one),
             project: root.project_digest.clone(),
             retry_pause: STAGE_ONE_RETRY_PAUSE,
+            unproven_default,
         })
     }
 

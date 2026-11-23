@@ -1121,7 +1121,10 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     pi.on("session_before_switch", (_event, ctx) => {
         try {
             const outgoingSessionId = sessionIdFromContext(ctx);
-            if (outgoingSessionId) releaseSessionResources(outgoingSessionId);
+            if (outgoingSessionId) {
+                reviewClassifier.pump?.stop(outgoingSessionId);
+                releaseSessionResources(outgoingSessionId);
+            }
         } catch {
             // Releasing the outgoing session is best effort; the switch itself must proceed.
         }

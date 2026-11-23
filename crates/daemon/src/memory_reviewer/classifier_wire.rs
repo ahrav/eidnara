@@ -1,10 +1,8 @@
-//! The two routed methods a harness answers stage-1 classifier work through. `memory.review.classify.next` hands the calling route the oldest classifier request of its project, waiting a bounded time for one; `memory.review.classify.submit` returns the classifier's answers, or one content-free failure code, under the lease the work carried. The classifier's credential and its call stay in the harness.
-
-use std::time::Duration;
+//! The two routed methods a harness answers stage-1 classifier work through. `memory.review.classify.next` hands the calling route the oldest classifier request of its project and answers at once; `memory.review.classify.submit` returns the classifier's answers, or one content-free failure code, under the lease the work carried. The classifier's credential and its call stay in the harness.
 
 use serde_json::{Value, json};
 
-use super::classifier::{MAX_CLASSIFY_DURATION_MS, MAX_NEXT_WAIT_MS};
+use super::classifier::MAX_CLASSIFY_DURATION_MS;
 use crate::{HandlerCore, PreparedOutcome, RouteHandle, invalid_params_error, respond};
 
 pub(crate) const NEXT: &str = "memory.review.classify.next";
@@ -16,7 +14,7 @@ const MAX_LEASE_BYTES: usize = 64;
 const MAX_ANSWERS_BYTES: usize = 16 * 1024;
 
 impl HandlerCore {
-    /// The project digest and classifier of the route's project, when its user tier set the review switch and named the classifier the request names.
+    /// The project digest and classifier of the route's project, when the configuration the route loaded at its bind set the review switch and named the classifier the request names.
     fn review_classifier(
         &self,
         channel: RouteHandle,
@@ -24,29 +22,13 @@ impl HandlerCore {
         operation: &str,
         fields: &[&str],
     ) -> Result<Option<(String, String)>, PreparedOutcome> {
-        let (_, binding) = self.management_binding(channel, request, operation)?;
-        // The body is closed: the routed envelope and this method's own fields.
-        if request.as_object().is_none_or(|body| {
-            body.keys().any(|key| {
-                !["method", "session_id", "project_root"].contains(&key.as_str())
-                    && !fields.contains(&key.as_str())
-            })
-        }) {
-            return Err(invalid_params_error(
-                "memory review classifier request has unknown fields",
-            ));
-        }
-        if let Some(root) = request.get("project_root") {
-            let bound = root.as_str().is_some_and(|root| {
-                let path = std::path::Path::new(root);
-                path.is_absolute() && binding.kernel_project.accepts(path)
-            });
-            if !bound {
-                return Err(invalid_params_error(
-                    "memory review classifier project does not match the route",
-                ));
-            }
-        }
+        let (_, binding) = self.closed_binding(
+            channel,
+            request,
+            operation,
+            fields,
+            "memory review classifier",
+        )?;
         let Some(named) = request.get("classifier").and_then(Value::as_str) else {
             return Err(invalid_params_error(
                 "classifier must be a provider/model string",
@@ -64,33 +46,19 @@ impl HandlerCore {
             }))
     }
 
-    /// Hands the harness one classifier request of its project, or reports that none waits. `wait_ms`, at most [`MAX_NEXT_WAIT_MS`], holds the request open for work to arrive. A project that has the switch off, names no classifier, or names another one answers `disabled`.
-    pub(crate) async fn handle_review_classify_next(
+    /// Hands the harness one classifier request of its project, or reports that none waits. A project that has the switch off, names no classifier, or names another one answers `disabled`.
+    pub(crate) fn handle_review_classify_next(
         &self,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
         let (project, classifier) =
-            match self.review_classifier(channel, request, NEXT, &["classifier", "wait_ms"]) {
+            match self.review_classifier(channel, request, NEXT, &["classifier"]) {
                 Ok(Some(bound)) => bound,
                 Ok(None) => return respond(json!({"state":"disabled"})),
                 Err(error) => return error,
             };
-        let wait = match request.get("wait_ms") {
-            None => 0,
-            Some(value) => match value.as_u64() {
-                Some(wait) if wait <= MAX_NEXT_WAIT_MS => wait,
-                _ => return invalid_params_error("wait_ms is out of range"),
-            },
-        };
-        let work = tokio::select! {
-            biased;
-            () = self.cancel.cancelled() => None,
-            work = self
-                .review_classifiers
-                .next(&project, &classifier, Duration::from_millis(wait)) => work,
-        };
-        match work {
+        match self.review_classifiers.next(&project, &classifier) {
             Some(work) => respond(json!({
                 "state": "work",
                 "lease": work.lease,
@@ -102,7 +70,7 @@ impl HandlerCore {
         }
     }
 
-    /// Takes a harness's answers, or its failure code, for the request `lease` names. `processed` means the waiting review took them; `stale` means the lease had lapsed or the review had ended.
+    /// Takes a harness's answers, or its failure code, for the request `lease` names. `processed` means the waiting review took them; `stale` means no review waits under the lease.
     pub(crate) fn handle_review_classify_submit(
         &self,
         channel: RouteHandle,

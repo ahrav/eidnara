@@ -139,25 +139,19 @@ pub struct Coordinator {
 
 /// Stage 1 of one project's memory reviews: who answers it, where its records and failures are kept, and how long a run pauses after a failed request.
 pub struct StageOne {
-    pub decider: StageOneDecider,
+    /// The sender that reaches the stage-1 model through the host's model execution.
+    pub sender: Arc<super::model_request::Sender>,
+    /// The approval of that sender's requests; its `model` is the stage-1 model's `provider/model`.
+    pub approval: DisclosureApproval,
+    /// The typed classifier the project names. It decides each attempt made while a harness of the project answers classifier work, in the stage-1 model's place.
+    pub classifier: Option<ClassifierRoute>,
     pub book: Arc<StageOneBook>,
     /// The Kernel project digest the book records failures under.
     pub project: String,
     /// The pause between two stage-1 attempts of one run after an attempt ended without an answer.
     pub retry_pause: Duration,
-}
-
-/// The decider of a project's stage 1.
-pub enum StageOneDecider {
-    /// A small chat model, reached through the host's model execution under its own approval.
-    Chat {
-        sender: Arc<super::model_request::Sender>,
-        approval: DisclosureApproval,
-        /// Whether the model is a default derived from the review model's name that no answer has proven. A run whose request to it fails asks the review model for its remaining stage-1 attempts, so the review is decided whatever the host's catalog holds.
-        unproven_default: bool,
-    },
-    /// The typed classifier the project names, while its harness answers classifier work.
-    Classifier(ClassifierRoute),
+    /// Whether the stage-1 model is a default derived from the review model's name that no answer has proven. A run whose request to it fails asks the review model for its remaining stage-1 attempts, so the review is decided whatever the host's catalog holds.
+    pub unproven_default: bool,
 }
 
 /// One claimed job with its begun receipt and the trusted bindings the daemon resolved for it.
@@ -912,18 +906,23 @@ impl Run<'_> {
         }
         // A request to an unproven default that failed moved this run's stage 1 to the review model.
         let by_review_model = self.stage_one_by_review_model;
-        let (decider, request_bytes) = match (&stage.decider, &coordinator.approval) {
-            (StageOneDecider::Chat { .. }, Some(review_model)) if by_review_model => (
-                Decider::ChatModel(review_model.model.clone()),
-                review.state_json().len(),
-            ),
-            (StageOneDecider::Chat { approval, .. }, _) => (
+        let (sender, approval) = match (&coordinator.approval, by_review_model) {
+            (Some(review_model), true) => (&coordinator.sender, review_model),
+            _ => (&stage.sender, &stage.approval),
+        };
+        // The project's classifier decides this attempt while a harness answers its work. Its request is the state with the four questions.
+        let classifier = stage
+            .classifier
+            .as_ref()
+            .filter(|route| route.present())
+            .map(|route| (route, review.request_json()));
+        let (decider, request_bytes) = match &classifier {
+            Some((route, request)) => {
+                (Decider::Classifier(route.classifier.clone()), request.len())
+            }
+            None => (
                 Decider::ChatModel(approval.model.clone()),
                 review.state_json().len(),
-            ),
-            (StageOneDecider::Classifier(route), _) => (
-                Decider::Classifier(route.classifier.clone()),
-                review.request_json().len(),
             ),
         };
         let request_bytes = u64::try_from(request_bytes).unwrap_or(u64::MAX);
@@ -949,15 +948,10 @@ impl Run<'_> {
             claim_id: &self.context.claim.claim_id,
             now_ms: &now_ms,
         };
+        let by_classifier = classifier.is_some();
         // Each arm yields the decision, the answers as the log names them, and the request's digest.
-        let decided = match &stage.decider {
-            StageOneDecider::Chat {
-                sender, approval, ..
-            } => {
-                let (sender, approval) = match (&coordinator.approval, by_review_model) {
-                    (Some(review_model), true) => (&coordinator.sender, review_model),
-                    _ => (sender, approval),
-                };
+        let decided = match classifier {
+            None => {
                 let deadline = Instant::now()
                     .checked_add(Duration::from_millis(MEMORY_REVIEWER_ATTEMPT_MAX_MS as u64))
                     .map_or(cutoff, |attempt| attempt.min(cutoff));
@@ -979,19 +973,19 @@ impl Run<'_> {
                         (decision, shown, request)
                     })
             }
-            StageOneDecider::Classifier(route) => {
+            Some((route, request)) => {
                 let deadline = Instant::now()
                     .checked_add(route.wait)
                     .map_or(cutoff, |wait| wait.min(cutoff));
-                disclosure(&coordinator.sender, coordinator.approval.as_ref())
-                    .classify(route, review, cancel, deadline)
+                disclosure(&coordinator.sender, None)
+                    .classify(route, review, request, cancel, deadline)
                     .await
                     .map(|(answers, request)| {
                         let decision = super::classifier::decide(review, &answers);
                         let shown = format!(
                             "changes={:.2} relation={} work_ended={:.2} strongest={}",
                             answers.changes,
-                            answers.relation,
+                            answers.relation.as_str(),
                             answers.work_ended,
                             answers.strongest.as_deref().unwrap_or("none"),
                         );
@@ -1050,13 +1044,7 @@ impl Run<'_> {
                 | DisclosureRefusal::PolicyUnion,
             ) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
             Err(refusal) => {
-                let moves = matches!(
-                    &stage.decider,
-                    StageOneDecider::Chat {
-                        unproven_default: true,
-                        ..
-                    }
-                ) && !by_review_model;
+                let moves = stage.unproven_default && !by_review_model && !by_classifier;
                 // A refused credential or an answer from another model ends review for the process, as on a proposal request. An unproven default is a guess at the host's catalog, so its failure of any kind moves the run to the review model instead.
                 if !moves && let Some(rejection) = Rejection::of(&refusal) {
                     return Err(InvestigationError::Rejected(rejection));

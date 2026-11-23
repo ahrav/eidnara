@@ -7,6 +7,9 @@
 //! models' answers and a harness task scripts the classifier's.
 
 use host_runtime::model_execution::supervisor::Supervisor;
+use memory_store::memory_reviewer_ledger::{
+    MEMORY_REVIEWER_MAX_ATTEMPTS, MemoryReviewerAttemptTerminal,
+};
 
 use super::*;
 use crate::config::{MemoryReviewerConfig, ReviewApply};
@@ -318,9 +321,10 @@ impl Rig {
         let mut requests = Vec::new();
         while !drain.is_finished() {
             let work = self
-                .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 50}))
+                .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
                 .await;
             if work["state"] != "work" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
                 continue;
             }
             assert_eq!(work["classifier"], CLASSIFIER);
@@ -776,6 +780,19 @@ async fn the_classifier_keeps_a_memory_without_a_chat_request() {
     let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
     assert_eq!(outcomes.outcomes.len(), 1);
     assert!(outcomes.outcomes[0].selected, "a host-built keep proposal");
+    // The attempt ledger names the classifier and the harness's credential as the request's destination.
+    let attempts = rig
+        .store
+        .list_memory_reviewer_attempts(&root, &outcomes.outcomes[0].causal_identity)
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].marker.provider, "harness-classifier");
+    assert_eq!(attempts[0].marker.model, CLASSIFIER);
+    assert_eq!(attempts[0].marker.credential_id, "harness-registry");
+    assert!(matches!(
+        attempts[0].terminal,
+        Some((MemoryReviewerAttemptTerminal::Complete, _))
+    ));
     assert_eq!(rig.active_review_holds(), 0);
     assert!(rig.block().await.contains(&stated(THURSDAY)));
 }
@@ -1369,96 +1386,117 @@ async fn a_response_the_provider_stopped_settles_the_review_on_one_request() {
     assert_eq!(rig.status.activation_state(), ActivationState::Open);
 }
 
-/// A classifier that fails spends the attempts of one job. The project's other reviews stay queued for a later pass, and no chat request is made.
+/// A classifier that fails spends the attempts of one job, whether the harness reports a failure code or returns answers outside the question types. Each failed request is one attempt, the project's other reviews stay queued for a later pass, and no chat request is made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_failing_classifier_spends_one_job_and_the_rest_wait() {
+    for failure in ["error", "answers"] {
+        let rig = Rig::classified(ReviewApply::Apply).await;
+        rig.state_rules(&[THURSDAY, LINTER]).await;
+        rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+            .await;
+        rig.user_says_later(
+            "later-2",
+            1_700_000_100_000,
+            "Run the formatter instead of the linter before every commit.",
+        )
+        .await;
+        let idle = rig
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await;
+        assert_eq!(idle, json!({"state": "ready"}));
+        let drain = {
+            let worker = Arc::clone(&rig.worker);
+            tokio::spawn(async move { worker.drain(&CancellationToken::new()).await })
+        };
+        let mut failed = 0_usize;
+        while !drain.is_finished() {
+            let work = rig
+                .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+                .await;
+            if work["state"] != "work" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                continue;
+            }
+            let mut submit = json!({
+                "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+                "lease": work["lease"],
+            });
+            submit[failure] = match failure {
+                "error" => json!("model_failed"),
+                _ => json!({}),
+            };
+            assert_eq!(rig.call(submit).await, json!({"state": "processed"}));
+            failed += 1;
+        }
+        assert_eq!(drain.await.unwrap(), 1, "one job ended");
+        assert_eq!(
+            failed,
+            usize::try_from(MEMORY_REVIEWER_MAX_ATTEMPTS).unwrap(),
+            "{failure}: each failed request is one attempt"
+        );
+        assert!(rig.attempts().is_empty(), "no chat model was asked");
+        let root = rig.project.to_string_lossy().to_string();
+        let ready = rig
+            .store
+            .ready_memory_reviewer_jobs(&root, 16, crate::now_ms())
+            .unwrap();
+        assert_eq!(ready.len(), 1, "the other review waits");
+        let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+        assert_eq!(outcomes.outcomes.len(), 1);
+        let attempts = rig
+            .store
+            .list_memory_reviewer_attempts(&root, &outcomes.outcomes[0].causal_identity)
+            .unwrap();
+        assert_eq!(attempts.len(), failed);
+        for attempt in &attempts {
+            assert_eq!(attempt.marker.provider, "harness-classifier");
+            assert!(matches!(
+                attempt.terminal,
+                Some((MemoryReviewerAttemptTerminal::Failed, _))
+            ));
+        }
+        for statement in [THURSDAY, LINTER] {
+            assert!(rig.block().await.contains(&stated(statement)));
+        }
+    }
+}
+
+/// A harness that stops pulling leaves its project to the small chat model. The request no harness pulled spends one attempt and ends the project's presence, and the run's next attempt asks the chat model, so the review is decided in the same run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_harness_that_stops_pulling_hands_the_review_to_the_small_chat_model() {
     let rig = Rig::classified(ReviewApply::Apply).await;
-    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.state_rules(&[THURSDAY]).await;
     rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
         .await;
-    rig.user_says_later(
-        "later-2",
-        1_700_000_100_000,
-        "Run the formatter instead of the linter before every commit.",
-    )
-    .await;
     let idle = rig
         .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
         .await;
     assert_eq!(idle, json!({"state": "ready"}));
-    let drain = {
-        let worker = Arc::clone(&rig.worker);
-        tokio::spawn(async move { worker.drain(&CancellationToken::new()).await })
-    };
-    let mut failed = 0;
-    while !drain.is_finished() {
-        let work = rig
-            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 50}))
-            .await;
-        if work["state"] != "work" {
-            continue;
-        }
-        let submitted = rig
-            .call(json!({
-                "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
-                "lease": work["lease"], "error": "model_failed",
-            }))
-            .await;
-        assert_eq!(submitted, json!({"state": "processed"}));
-        failed += 1;
-    }
-    assert_eq!(drain.await.unwrap(), 1, "one job ended");
-    assert!((1..=4).contains(&failed), "{failed} classifier requests");
-    assert!(rig.attempts().is_empty(), "no chat model was asked");
-    let ready = rig
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    let asked: Vec<String> = rig
+        .attempts()
+        .into_iter()
+        .map(|attempt| attempt.model)
+        .collect();
+    assert_eq!(asked, [SMALL, MODEL]);
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+    let attempts = rig
         .store
-        .ready_memory_reviewer_jobs(&rig.project.to_string_lossy(), 16, crate::now_ms())
+        .list_memory_reviewer_attempts(&root, &outcomes.outcomes[0].causal_identity)
         .unwrap();
-    assert_eq!(ready.len(), 1, "the other review waits");
-    for statement in [THURSDAY, LINTER] {
-        assert!(rig.block().await.contains(&stated(statement)));
-    }
-}
-
-/// A stage-1 request of the small chat model that ends without an answer spends one attempt of its job. The project's other reviews stay queued for a later pass, the review model is asked nothing, and both statements stay delivered.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failing_small_chat_model_spends_one_job_and_the_rest_wait() {
-    let rig = Rig::open(ReviewApply::Contest).await;
-    rig.state_rules(&[THURSDAY, LINTER]).await;
-    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
-        .await;
-    rig.user_says_later(
-        "later-2",
-        1_700_000_100_000,
-        "Run the formatter instead of the linter before every commit.",
-    )
-    .await;
-    {
-        let mut results = rig.state.await_results.lock().unwrap();
-        for _ in 0..4 {
-            results.push_back(Err(HistorySummarizerProducerError::RunFailed {
-                run_id: "run".to_string(),
-                detail: "provider unavailable".to_string(),
-                classification: None,
-                class_field_present: false,
-            }));
-        }
-    }
-    assert_eq!(rig.drain().await, 1, "one job ended");
-    let attempts = rig.attempts();
-    assert!((1..=4).contains(&attempts.len()), "{}", attempts.len());
-    assert!(
-        attempts.iter().all(|attempt| attempt.model == SMALL),
-        "the review model was not asked"
-    );
-    let ready = rig
-        .store
-        .ready_memory_reviewer_jobs(&rig.project.to_string_lossy(), 16, crate::now_ms())
-        .unwrap();
-    assert_eq!(ready.len(), 1, "the other review waits");
-    for statement in [THURSDAY, LINTER] {
-        assert!(rig.block().await.contains(&stated(statement)));
-    }
+    let destinations: Vec<&str> = attempts
+        .iter()
+        .map(|attempt| attempt.marker.provider.as_str())
+        .collect();
+    assert_eq!(destinations.len(), 3, "{destinations:?}");
+    assert_eq!(destinations[0], "harness-classifier");
+    assert!(matches!(
+        attempts[0].terminal,
+        Some((MemoryReviewerAttemptTerminal::Failed, _))
+    ));
+    assert!(!rig.block().await.contains(THURSDAY));
 }
 
 /// The classifier methods answer only a project whose user tier names the classifier the harness asks for, and refuse a body outside their fields.
@@ -1490,21 +1528,43 @@ async fn classifier_work_is_offered_only_for_the_configured_classifier() {
         .await,
         json!({"state": "stale"})
     );
+    // A request may name the project root its route is bound to.
+    let root = rig.project.to_string_lossy().to_string();
+    assert_eq!(
+        rig.call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "project_root": root}))
+            .await,
+        json!({"state": "ready"})
+    );
+    let submit = |fields: Value| {
+        let mut body = json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER});
+        for (key, value) in fields.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        body
+    };
     for refused in [
         json!({"method": NEXT, "session_id": "s1"}),
-        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 60_000}),
-        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "extra": 1}),
-        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0"}),
-        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0", "error": "boom"}),
-        json!({"method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER, "lease": "0", "answers": {}, "error": "cancelled"}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": 7}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "wait_ms": 50}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "v": 1}),
+        json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER, "project_root": "/elsewhere"}),
+        submit(json!({"lease": "0"})),
+        submit(json!({"lease": "0", "error": "boom"})),
+        submit(json!({"lease": "0", "answers": {}, "error": "cancelled"})),
+        submit(json!({"lease": "0", "answers": []})),
+        submit(json!({"lease": "0", "answers": {"pad": "x".repeat(16 * 1024)}})),
+        submit(json!({"lease": "", "error": "cancelled"})),
+        submit(json!({"lease": "0".repeat(65), "error": "cancelled"})),
+        submit(json!({"lease": 7, "error": "cancelled"})),
+        submit(json!({"error": "cancelled"})),
     ] {
         let outcome = rig
             .handler
             .dispatch_value_for_test(test_route(FIRST), refused.clone())
             .await;
         assert!(
-            matches!(outcome, PreparedOutcome::Error { .. }),
-            "{refused} must be refused"
+            matches!(&outcome, PreparedOutcome::Error { code, .. } if code == "invalid_params"),
+            "{refused} must be refused as invalid_params"
         );
     }
 }

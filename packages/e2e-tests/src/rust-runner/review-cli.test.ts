@@ -272,7 +272,6 @@ describe("review command against the direct host", () => {
                         method: "memory.review.classify.next",
                         session_id: "classifier-session",
                         classifier: "typesafe/jev-latest",
-                        wait_ms: 10,
                     }),
                 ).toEqual({ state: "disabled" });
                 expect(

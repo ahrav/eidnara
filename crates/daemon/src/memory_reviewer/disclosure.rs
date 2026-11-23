@@ -33,6 +33,8 @@ use super::stage_one::{self, ChatAnswers, MAX_REQUEST_BYTES, ReviewState};
 
 /// The provider identity an attempt marker records for a classifier request, which the harness sends under its own registry and credential.
 pub const CLASSIFIER_PROVIDER: &str = "harness-classifier";
+/// The credential a classifier request's marker names: the one the harness's model registry holds for the classifier.
+pub const CLASSIFIER_CREDENTIAL_ID: &str = "harness-registry";
 
 /// The complete API and model profile of one request: the requested canonical model id and the exact sampling values or their omission. It is serialized into the body before dispatch and bound to the marker through the body digest; nothing resolves an alias or asks the provider what it means.
 #[derive(Debug, Clone, PartialEq)]
@@ -781,15 +783,15 @@ impl Disclosure<'_> {
         Ok((answers, body.digest().to_string()))
     }
 
-    /// One stage-1 attempt by the project's typed classifier, which returns the answers with the SHA-256 of the request text: the review state and its questions go to the classifier through the harness, under the checks and the marker of [`Self::screen`]. The attempt's terminal is recorded on every path past the marker.
+    /// One stage-1 attempt by the project's typed classifier, which returns the answers with the SHA-256 of `request`, the text [`ReviewState::request_json`] wrote for `review`. The text goes to the classifier through the harness after the checks [`Self::screen`] makes on a state, under a marker that names the classifier and the harness's credential. The attempt's terminal is recorded on every path past the marker.
     pub async fn classify(
         &self,
         route: &ClassifierRoute,
         review: &ReviewState,
+        request: String,
         cancel: &CancellationToken,
         deadline: Instant,
     ) -> Result<(Answers, String), DisclosureRefusal> {
-        let request = review.request_json();
         let union_digest = self.admit_stage_one(review, &request, cancel)?;
         let body_digest = format!("{:x}", Sha256::digest(request.as_bytes()));
         let marker = AttemptMarker {
@@ -801,7 +803,7 @@ impl Disclosure<'_> {
             })?,
             provider: CLASSIFIER_PROVIDER.to_string(),
             model: route.classifier.clone(),
-            credential_id: self.sender.credential_id().to_string(),
+            credential_id: CLASSIFIER_CREDENTIAL_ID.to_string(),
             policy_union_digest: union_digest,
         };
         let (attempt_index, attempt_deadline_ms, _) = self.begin_attempt(&marker)?;
@@ -813,10 +815,11 @@ impl Disclosure<'_> {
             .exchange
             .classify(&route.project, &route.classifier, request, wait, cancel)
             .await;
-        let failed = |error| DisclosureRefusal::Send {
+        // A request the harness pulled left the host; one that waited unpulled, or that the full exchange refused, stayed in it.
+        let failed = |error, sent| DisclosureRefusal::Send {
             attempt_index: Some(attempt_index),
             error,
-            sent: true,
+            sent,
         };
         let value = match answered {
             Ok(value) => value,
@@ -833,10 +836,12 @@ impl Disclosure<'_> {
                     attempt_index,
                     MemoryReviewerAttemptTerminal::Failed,
                     ResponseUsage::NONE,
-                    failed(match error {
-                        ClassifyError::Unanswered => SendError::Deadline,
-                        _ => SendError::Transport,
-                    }),
+                    match error {
+                        ClassifyError::Unanswered => failed(SendError::Deadline, true),
+                        ClassifyError::Unpulled => failed(SendError::Deadline, false),
+                        ClassifyError::Full => failed(SendError::Transport, false),
+                        _ => failed(SendError::Transport, true),
+                    },
                 ));
             }
         };
@@ -852,7 +857,7 @@ impl Disclosure<'_> {
                     attempt_index,
                     MemoryReviewerAttemptTerminal::Failed,
                     usage,
-                    failed(SendError::Transport),
+                    failed(SendError::Transport, true),
                 ));
             }
         };

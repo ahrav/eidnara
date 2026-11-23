@@ -11,6 +11,8 @@ import {
  */
 interface ClassifierRegistry {
     getModelOfType(type: "classifier", provider: string, id: string): unknown;
+    /** Whether the user configured a credential for the model's provider. */
+    hasConfiguredAuth?(model: unknown): boolean;
     classify(
         model: unknown,
         context: { state: Record<string, unknown>; questions: Record<string, unknown> },
@@ -29,19 +31,18 @@ function classifierRegistry(ctx: ExtensionContext): ClassifierRegistry | undefin
         : undefined;
 }
 
-/** Whether this Pi can call the classifier `classifier` (`provider/model`) with a credential the user configured. */
+/** Whether this Pi's registry lists the classifier `classifier` (`provider/model`) and holds a credential the user configured for it. */
 export function piHasReviewClassifier(ctx: ExtensionContext, classifier: string): boolean {
     const registry = classifierRegistry(ctx);
     const separator = classifier.indexOf("/");
     if (!registry || separator <= 0) return false;
     try {
-        return Boolean(
-            registry.getModelOfType(
-                "classifier",
-                classifier.slice(0, separator),
-                classifier.slice(separator + 1),
-            ),
+        const model = registry.getModelOfType(
+            "classifier",
+            classifier.slice(0, separator),
+            classifier.slice(separator + 1),
         );
+        return Boolean(model) && (registry.hasConfiguredAuth?.(model) ?? true);
     } catch {
         return false;
     }

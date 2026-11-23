@@ -87,8 +87,8 @@ impl Default for TerseTextCompressionConfig {
     }
 }
 
-/// The longest classifier reference the user tier may name.
-pub const MAX_CLASSIFIER_REF_BYTES: usize = 256;
+/// The longest classifier reference the user tier may name: the attempt ledger records the reference as a request's model.
+pub const MAX_CLASSIFIER_REF_BYTES: usize = memory_store::memory_reviewer_ledger::MAX_MODEL_BYTES;
 
 /// What the MemoryReviewer worker does with a proposal it publishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1494,7 +1494,7 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                         cfg.memory_reviewer.classifier = Some(classifier.to_string());
                     }
                     _ => warnings.push(format!(
-                        "ignoring {pointer}: expected a literal provider/model without {{env:}} or {{file:}} references; the stage-1 chat model decides each review"
+                        "ignoring {pointer}: expected a literal provider/model of at most {MAX_CLASSIFIER_REF_BYTES} bytes without control characters or {{env:}} or {{file:}} references; the stage-1 chat model decides each review"
                     )),
                 }
             }
@@ -2745,6 +2745,25 @@ mod tests {
                 "{warnings:?}"
             );
         }
+
+        // A classifier reference is at most 256 bytes and holds no control character.
+        let classifier_of = |reference: &str| {
+            let tier = serde_json::json!({
+                "history_summarizer": { "module_model": "prov/summarizer" },
+                "memory_reviewer": { "enabled": true, "classifier": reference },
+            });
+            let (cfg, warnings) = merge_tiers_with_warnings(Some(&tier), None);
+            (
+                cfg.memory_reviewer_classifier().map(str::to_string),
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("/memory_reviewer/classifier")),
+            )
+        };
+        let longest = format!("typesafe/{}", "j".repeat(MAX_CLASSIFIER_REF_BYTES - 9));
+        assert_eq!(classifier_of(&longest), (Some(longest.clone()), false));
+        assert_eq!(classifier_of(&format!("{longest}j")), (None, true));
+        assert_eq!(classifier_of("typesafe/jev\nlatest"), (None, true));
 
         // The daemon reads a model key as written and resolves no reference, and the mode is one of three exact words: a reference and a padded mode are refused with a warning.
         let unresolved = serde_json::json!({
