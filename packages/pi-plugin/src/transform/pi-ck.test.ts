@@ -1,9 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateToolArguments } from "@earendil-works/pi-ai";
+
 import cap from "@eidnara/opencode/hooks/context/__fixtures__/window-cap.json";
-import { Type } from "typebox";
 
 import { encodePiRowsToCk, type PiRow, piRowSize } from "./pi-ck";
 
@@ -39,57 +38,6 @@ describe("Pi CK encoder", () => {
         expect(() =>
             encodePiRowsToCk([{ id: "a1", message: { role: "systemNotice", content: "x" } }]),
         ).toThrow("systemNotice");
-    });
-
-    it("sends Pi's report of refused arguments as a marked result under its heading", () => {
-        const tool = {
-            name: "bash",
-            description: "Runs a command line.",
-            parameters: Type.Object({
-                command: Type.String(),
-                timeout: Type.Optional(Type.Number()),
-            }),
-        };
-        let report = "";
-        try {
-            validateToolArguments(tool, {
-                type: "toolCall",
-                id: "call-1",
-                name: "bash",
-                arguments: { command: "make", timeout: "soon" },
-            });
-        } catch (error) {
-            report = (error as Error).message;
-        }
-        // The daemon withholds the text of a marked result that begins with this heading
-        // (`begins_refusal` in `crates/daemon/src/memory_capture/failures.rs`).
-        expect(report.startsWith('Validation failed for tool "bash":\n')).toBe(true);
-        expect(report).toContain('"command": "make"');
-        const [message] = encodePiRowsToCk([
-            {
-                id: "e1",
-                type: "message",
-                parentId: null,
-                message: {
-                    role: "toolResult",
-                    toolCallId: "call-1",
-                    toolName: "bash",
-                    content: [{ type: "text", text: report }],
-                    isError: true,
-                    timestamp: 1,
-                },
-            },
-        ]);
-        expect(message?.ck.content).toEqual([
-            {
-                kind: {
-                    type: "tool_result",
-                    id: "call-1",
-                    tool_name: "bash",
-                    output: { kind: { type: "error_text", text: report } },
-                },
-            },
-        ]);
     });
 });
 

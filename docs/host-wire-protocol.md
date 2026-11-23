@@ -1763,15 +1763,20 @@ transform under its entry's id and carries no `type`, so it writes, resolves,
 and settles nothing. A window names no execution, and its pass hands off
 nothing, when the request carries no native rows, when the rows and the
 messages differ in number, when a message's id is another than its row's
-`id`, when two messages share an id, when a message's id is longer than 128
-bytes, and when the session's id is longer than 256 bytes; the transform
-refuses the last three with `invalid_params`. A request that is refused
-before the pass reaches its checkpoints (an absent boundary, a window or a
-profile the intake refuses, a codec decline, a route or store precondition, a
-blank tool description) hands off nothing. A request that passes them and that
-the transform then refuses while it resolves the window, such as another
-identity field past its bound or a boundary the store does not hold, is read
-as it was submitted, as the capture checkpoint reads it.
+`id`, when two messages share an id, and when a message's id is longer than
+128 bytes; the transform refuses the last two with `invalid_params`. A route
+binds a session id of at most 256 bytes, so a request whose session id is
+longer answers `session_mismatch` before the pass reaches its checkpoints and
+hands off nothing; the recorder also names no execution under a longer session
+id. A request that is refused before the pass reaches its checkpoints (such
+as an absent boundary or one whose sequence is no safe integer, a window or a
+profile the intake refuses, a missing `base_revision`, a codec decline, a
+route or store precondition, a load refusal such as `session_busy`,
+admission, or a page stream in progress, or a blank tool description) hands
+off nothing. A request that passes them is read as it was submitted whatever
+the transform then answers, as the capture checkpoint reads it, also when the
+transform refuses the window while resolving it, such as another identity
+field past its bound or a boundary the store does not hold.
 
 The handler reads the window as the request carries it, before the pass
 resolves it, as the capture checkpoint does. A pass considers the last 1,024
@@ -1791,8 +1796,10 @@ copied and read by the task, which judges it or settles it (below). A session
 has one such task at a time and the daemon eight: a pass that finds its
 session's task running, or eight tasks running, hands off nothing, and so does
 a pass while the Kernel is not ready. A result that a pass leaves unjudged is
-judged by a later pass of the session whose window still carries the call and
-its result, while the session's windows grow by appending. A session
+judged by a later pass of the session that admits a task while the result and
+its call still stand among the last 1,024 command results of that pass's
+window; a result that 1,024 newer command results push out of that range
+before such a pass reaches it is not judged. A session
 remembers the last 1,024 calls it judged. A session that moves among branches
 whose windows together hold more command results than that judges the
 earliest results of a window again when it returns to it (a call with a
@@ -1888,27 +1895,32 @@ several lines share once, at its first line. Each line of a marked result is
 read as a line of an output block: it states an error when it is a failure
 line by that reading, when it completes one (the line right after a failure
 line that ends with `:`, or one that begins with `-->` or `at `, and that is
-no code fence line), when one of its runs of letters and digits is `error`,
+no code fence line), when one of its runs of alphabetic and numeric
+characters, as Unicode classes them (which counts a few combining marks and
+numerals such as fractions), is `error`,
 `errors`, `failed`, `failure`, `fatal`, `panic`, `panicked`, `exception`, or
-`traceback` in any letter case or ends in `Error` or `Exception` after a
-letter or digit (so `error_count` holds the run `error`), or when it holds
+`traceback` in any letter case or ends in `Error` or `Exception` after such
+a character (so `error_count` holds the run `error`), or when it holds
 `command not found`. These readings choose lines of a result the
 harness marked and decide no failure. A line is judged as trimmed: an empty
 line, a line with a control character other than a tab, and a line with U+2028
 or U+2029 are left out. Pi answers a call whose arguments its schema refuses
 with a report that begins `Validation failed for tool "`, then the tool's
 name, and that lists the call's arguments after the lines that state what it
-refused. The daemon reads the heading and no further part of the report: a
-marked result whose text begins with those words and that quote is recorded as a
-marked result with its text withheld. The fact keeps no line of it, names no
-path and no error, and says that the output begins as the harness's report of
-a call it refused and where the text stands, so the call's arguments and the
-words of Pi's diagnostic, which can hold a key the model chose, stay in the
-tool result. The rule reads the first bytes of the text alone. It therefore
-also holds for a command's own output that begins with that heading, whose
-lines are withheld the same way, and a report that an extension's
-`tool_result` handler put other text ahead of is read as any other marked
-result. The lines of every other marked result are chosen from its whole
+refused. The daemon recognizes the report by its heading and chooses nothing
+from it: a marked result whose text begins with those words and that quote is
+recorded as a marked result with its text withheld, while its exit code is
+read from its last non-empty line and the redactor judges its whole text as
+for any marked result. The fact keeps no line of it, names no
+path and no error, and says that the output begins with the heading of the
+harness's report of a refused call and where the text stands, so the call's
+arguments and the words of Pi's diagnostic, which can hold a key the model
+chose, stay in the tool result. The rule tests the first bytes of the text
+alone. It therefore also holds for a command's own output that begins with
+that heading, whose lines are withheld the same way and whose fact states the
+same reason, and a marked result in which other text stands ahead of the
+heading is read as any other marked result. The lines of every other marked
+result are chosen from its whole
 text; a program's own output can repeat an
 argument, and such a line is kept under the redactor's rule like any other.
 The exit code is read from the whole text in every case. The redactor judges
@@ -2012,8 +2024,8 @@ one line `Output text withheld: <reason>. The text stands in the result of
 tool call <call> of session <session> while that session's history holds
 it.`, with each id in at most 96 bytes and `<reason>` one of `the
 redactor found credential-shaped content in the output`, `the redactor's
-scan of the output did not finish`, and `the output begins as the harness's
-report of a call it refused`.
+scan of the output did not finish`, and `the output begins with the heading
+of the harness's report of a refused call`.
 
 The fact's `rationale` is a string that holds a JSON object. Its fields are
 `source` (`tool_failure`), `session` and `call` (the session's id and the tool
@@ -2086,9 +2098,10 @@ check of the replaced fact's user authority, a replaced fact on a reserved
 stands in another project answers `invalid:not_found`, live or retired, and a
 live one of the bound project on a reserved `source_id` answers
 `invalid:admission_policy`. A
-`kernel.artifact.ingest.begin` whose fields and size the route accepts as for
-any `source_id`, and whose `source_id` is one, answers
-`invalid:invalid_input`. The MemoryReviewer forms no proposal that targets a
+`kernel.artifact.ingest.begin` whose upload id, digests, page layout,
+`provider_egress`, and size the route accepts as for any `source_id`, and
+whose `source_id` is one, answers `invalid:invalid_input`, ahead of the check
+of its operation key. The MemoryReviewer forms no proposal that targets a
 fact on one. Retiring a fact and recording a disposition on it stay open.
 
 The task reads each result ahead of the capture publication gate and judges it
@@ -2173,7 +2186,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `previous_output_revision` | optional | the revision of the consumer's retained, applied output, when it offers one |
 | `serializer_profile` | required | `owned-llmrunner`, `pi`, `opencode-aisdk`, or `claude-code-anthropic` |
 | `render_config` | required | string; a change is a render-configuration change |
-| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read, and a row of a message entry whose message differs from the message the entry holds (a `context` handler that ran before the plugin's changed it), is `{"id", "message"}` alone. The plugin reads the two messages as equal when both are plain JSON data with the same own keys in the same order, the same property attributes, and the same values, where a key that holds `undefined` counts as absent. A message that is no plain JSON data (one that holds a cycle, more than 256 levels, an array hole, an accessor, a proxy, or a `toJSON`) reads as changed without a call to its code, and so does each message the pass compares after its comparisons have spent 64 MiB of the charge under which a pass captures a window (a slot for each key, item, and value, and two bytes for each UTF-16 unit of a string), so a window a pass can capture is compared whole. A row that carries `type` holds the plugin's own copy of the compared message, so a change that a handler makes to its message after the comparison stays out of the request, and the model reads the copy. The daemon reads `type` and `parentId` for source capture and `type` for failed-command facts (section 7.9): a row without `type` or whose `type` is not `"message"` contributes no source, is counted as an adapter refusal, and names no execution of a command, and neither field changes the transform or its response |
+| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read, and a row of a message entry whose message differs from the message the entry holds (a `context` handler that ran before the plugin's changed it), is `{"id", "message"}` alone. The plugin reads the two messages as equal when they serialize to the same JSON text. It serializes a message only after a walk has admitted that message and the entry's as plain JSON data: the walk reads own data properties, so the comparison calls no code of either message, and it refuses a message that holds, for example, a cycle, more than 256 levels, an array hole or an `undefined` item, an accessor, a proxy, a `toJSON`, a class instance, or a value JSON cannot hold. A message the walk refuses reads as changed, and so does a message whose walk, together with its entry's, does not fit in what the pass's comparisons have left of 128 MiB, charged as a capture charges a window. A pass compares the newest rows of its window first, so the rows that lose `type` in a window past that charge are its oldest. A live entry that holds a value the walk refuses, such as a class instance in a tool result's `details`, reads as changed until the session is loaded again from its file, although no handler changed it. The comparison alone gives these guarantees: the plugin names a row's entry by the message's `role`, `timestamp`, and `toolCallId`, and for a custom message or a branch summary by its content fields, which it reads as ordinary properties. A row holds the message the handler returned. The pass records each row's content in the synchronous step that compares it and checks that record again before it serializes the request, before it serializes a page series again, and before it publishes the response, so a message of any row that changes in place while the pass awaits, and a `toJSON` that appears on `Object.prototype` or `Array.prototype`, decline the pass. The daemon reads `type` and `parentId` for source capture and `type` for failed-command facts (section 7.9): a row without `type` or whose `type` is not `"message"` contributes no source, is counted as an adapter refusal, and names no execution of a command. Neither field enters the CK window; a recipe matches whole rows, so a row's `type` and `parentId` can decide whether an unchanged message keeps from the previous output or from the input |
 | `messages` | the window of `owned-llmrunner` and `claude-code-anthropic`, empty when absent; absent for `pi` and `opencode-aisdk` | the window in CK form, in canonical order: `[{"mid": string, "ck": CK message}]` |
 | `usage` | optional | `{"current_total_input_tokens", "context_limit_tokens", "final_wire_input_tokens", "final_wire_trusted"}` |
 | `geometry` | optional | `{"usable_soft": integer, "usable_hard": integer, "derivation": string}` |
@@ -2215,7 +2228,7 @@ A fold whose newest history segment ends on a message the window no longer holds
 
 A write that races the pass's commit makes the pass resolve again from a fresh snapshot. A revert whose removal committed before its fold commits (a conflict or a crash between the two) leaves the newest surviving segment as the rendered boundary, or, when the removal left none, no coverage; the next pass sends `null`. The reconcile stays pending. The retry after a conflict, or the next pass after a crash, declares that segment, resolves as the rendered boundary, and folds from the surviving history; its fold renders that segment's end message, so it removes nothing further.
 
-Errors, each an application `Error` (Section 10.2) with a stable `code` and a human-readable `message`. Every refusal decided before the pass runs, which is every code below except `transform_failed` and `transform_output_too_large`, changes no session state:
+Errors, each an application `Error` (Section 10.2) with a stable `code` and a human-readable `message`. A refusal decided before the pass reaches its checkpoints hands off nothing and changes no session state. A refusal decided while the daemon resolves the window (`boundary_unknown`, and the `invalid_params` causes below that resolution checks, such as a repeated or overlong `mid` or an identity field past its bound) leaves `row_version`, `meta`, and the stored history segments as they were; the capture and failed-command checkpoints have already read the submitted window (Section 7.9). `transform_failed` and `transform_output_too_large` are decided after the pass runs:
 
 | Code | Cause |
 | --- | --- |

@@ -5,7 +5,6 @@ import {
     type CapturedHistory,
     type CapturedMessages,
     type CaptureLease,
-    ContentComparison,
     capturedMessagesUnchanged,
     captureHistory as captureHistoryWithLease,
     captureReserved,
@@ -14,6 +13,7 @@ import {
     historyDigestsEqual,
     inspectReferenceableMessages,
     type MessageContentSnapshot,
+    ReferenceableAllowance,
     readOwnDataProperty,
     rootArrayRejection,
     snapshotFieldsEqual,
@@ -2361,52 +2361,19 @@ describe("bounded capture sizing", () => {
     });
 });
 
-describe("content comparison", () => {
+describe("referenceable allowance", () => {
     const message = () => ({
         role: "toolResult",
         content: [{ type: "text", text: "exit 2" }],
         details: { lines: [1, 2] },
         isError: true,
     });
-    const same = (value: unknown, other: unknown) => new ContentComparison().same(value, other);
+    const admits = (...values: unknown[]) => new ReferenceableAllowance().admits(...values);
 
-    it("matches a copy and tells apart a value, a key, an item, an order, and an attribute", () => {
-        expect(same(message(), structuredClone(message()))).toBe(true);
-        expect(same(null, null)).toBe(true);
-        const edits: [string, (value: Record<string, unknown>) => unknown][] = [
-            ["value", (value) => ({ ...value, isError: false })],
-            ["further key", (value) => ({ ...value, extra: 1 })],
-            ["missing key", ({ isError: _mark, ...rest }) => rest],
-            ["renamed key", (value) => ({ ...value, details: { rows: [1, 2] } })],
-            ["further item", (value) => ({ ...value, details: { lines: [1, 2, 3] } })],
-            ["missing item", (value) => ({ ...value, details: { lines: [1] } })],
-            ["key order", ({ role, ...rest }) => ({ ...rest, role })],
-            [
-                "hidden key",
-                (value) => Object.defineProperty(value, "isError", { enumerable: false }),
-            ],
-            ["null prototype", (value) => Object.assign(Object.create(null), value)],
-            ["array for object", (value) => ({ ...value, details: [] })],
-        ];
-        for (const [label, edit] of edits) {
-            const edited = edit(message());
-            expect([label, same(message(), edited)]).toEqual([label, false]);
-            expect([label, same(edited, message())]).toEqual([label, false]);
-        }
-    });
-
-    it("counts a key that holds undefined as absent on either side", () => {
-        const sparse = {
-            ...message(),
-            note: undefined,
-            details: { lines: [1, 2], gone: undefined },
-        };
-        expect(same(message(), sparse)).toBe(true);
-        expect(same(sparse, message())).toBe(true);
-        expect(same(sparse, structuredClone(sparse))).toBe(true);
-    });
-
-    it("reads a value the walk refuses as another value, and runs none of its code", () => {
+    it("admits plain records and refuses the values the walk refuses, running none of their code", () => {
+        expect(admits(message(), structuredClone(message()))).toBe(true);
+        expect(admits(null, "text", 1, true)).toBe(true);
+        expect(admits(Object.freeze(Object.assign(Object.create(null), message())))).toBe(true);
         let runs = 0;
         const run = () => {
             runs += 1;
@@ -2453,47 +2420,39 @@ describe("content comparison", () => {
             ["nonfinite number", () => ({ ...message(), details: Number.NaN })],
         ];
         for (const [label, build] of refused) {
-            expect([label, same(build(), build())]).toEqual([label, false]);
-            expect([label, same(message(), build())]).toEqual([label, false]);
-            expect([label, same(build(), message())]).toEqual([label, false]);
+            expect([label, admits(build())]).toEqual([label, false]);
+            expect([label, admits(message(), build())]).toEqual([label, false]);
         }
         expect(runs).toBe(0);
     });
 
-    it("draws the first value's walk from one allowance and bounds the second walk by it", () => {
-        const fits = (allowance: number, times: number): boolean[] => {
-            const comparison = new ContentComparison(allowance);
-            return Array.from({ length: times }, () =>
-                comparison.same(message(), structuredClone(message())),
-            );
+    it("draws every walk from one budget, the walk it refuses included", () => {
+        const walks = (budget: number, times: number): boolean[] => {
+            const allowance = new ReferenceableAllowance(budget);
+            return Array.from({ length: times }, () => allowance.admits(message()));
         };
         let spend = 1;
-        while (!fits(spend, 1)[0]) spend += 1;
-        expect(spend).toBeGreaterThan(64);
-        expect(fits(spend - 1, 1)).toEqual([false]);
-        expect(fits(2 * spend, 3)).toEqual([true, true, false]);
-        expect(fits(2 * spend - 1, 2)).toEqual([true, false]);
+        while (spend < 4096 && !walks(spend, 1)[0]) spend += 1;
+        expect(walks(spend, 1)).toEqual([true]);
+        expect(walks(spend - 1, 1)).toEqual([false]);
+        expect(walks(2 * spend, 3)).toEqual([true, true, false]);
+        // Two values in one call spend what two calls spend.
+        const pair = new ReferenceableAllowance(2 * spend);
+        expect([pair.admits(message(), message()), pair.admits(message())]).toEqual([true, false]);
 
         // Sixty levels that each hold one child under two keys: 2^60 paths over 60 objects.
         let shared: unknown = null;
         for (let level = 0; level < 60; level += 1) shared = { left: shared, right: shared };
-        // Keys that hold `undefined` add no field to the tape, so their reads spend the second
-        // walk's own allowance: a few pass, and a hundred thousand end the walk.
-        const padded = (count: number) => {
-            const value: Record<string, unknown> = message();
-            for (let index = 0; index < count; index += 1) value[`absent${index}`] = undefined;
-            return value;
-        };
         const descriptors = spyOn(Object, "getOwnPropertyDescriptor");
         try {
-            const comparison = new ContentComparison(4096);
-            expect(comparison.same(shared, shared)).toBe(false);
-            expect(comparison.same(message(), structuredClone(message()))).toBe(false);
-            expect(same(message(), padded(4))).toBe(true);
-            expect(same(message(), padded(100_000))).toBe(false);
-            expect(same(message(), shared)).toBe(false);
-            expect(same(message(), new Array(2 ** 32 - 1))).toBe(false);
-            expect(descriptors.mock.calls.length).toBeLessThan(1000);
+            const allowance = new ReferenceableAllowance(4096);
+            expect(allowance.admits(shared)).toBe(false);
+            const afterShared = descriptors.mock.calls.length;
+            expect(afterShared).toBeLessThan(1000);
+            // What is left of the budget pays for no further value.
+            expect(allowance.admits(message())).toBe(false);
+            expect(allowance.admits(new Array(2 ** 32 - 1))).toBe(false);
+            expect(descriptors.mock.calls.length - afterShared).toBeLessThan(8);
         } finally {
             descriptors.mockRestore();
         }

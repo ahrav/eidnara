@@ -173,8 +173,9 @@ enum Excerpt {
     /// The redactor's scan of the output did not finish. The record holds
     /// no text of it.
     Unscanned,
-    /// The output begins as the harness's report of a refused call (see
-    /// [`begins_refusal`]). The record withholds the output text.
+    /// The output begins with the heading of the harness's report of a
+    /// refused call (see [`begins_refusal`]). The record withholds the
+    /// output text.
     Refusal,
 }
 
@@ -818,6 +819,8 @@ struct Chosen {
     lines: Vec<(Kept, Range<usize>)>,
     /// How many of `lines`, from the first, state an error.
     errors: usize,
+    /// The text begins with the refusal heading (see [`begins_refusal`]).
+    refusal: bool,
 }
 
 /// Whether a marked result's text begins with the heading of Pi's report of
@@ -863,7 +866,14 @@ fn stated_in(text: &str) -> Option<(i64, Range<usize>)> {
 /// neither holds a table of the output's lines.
 fn chosen_of(text: &str) -> Chosen {
     let stated = stated_in(text);
-    let text = if begins_refusal(text) { "" } else { text };
+    if begins_refusal(text) {
+        return Chosen {
+            stated,
+            lines: Vec::new(),
+            errors: 0,
+            refusal: true,
+        };
+    }
     let mut lines: Vec<(Kept, Range<usize>)> =
         Vec::with_capacity(MAX_ERROR_LINES + MAX_CLOSING_LINES);
     let mut start = 0;
@@ -921,6 +931,7 @@ fn chosen_of(text: &str) -> Chosen {
         stated,
         lines,
         errors,
+        refusal: false,
     }
 }
 
@@ -970,6 +981,7 @@ fn screened_with(text: &str, scan: impl FnOnce(&str) -> Option<Vec<Range<usize>>
         stated,
         lines,
         errors,
+        refusal,
     } = chosen_of(text);
     let findings = scan(text);
     let clear = |span: &Range<usize>| {
@@ -993,7 +1005,7 @@ fn screened_with(text: &str, scan: impl FnOnce(&str) -> Option<Vec<Range<usize>>
     };
     let (path, error) = (named(named_path), named(named_error));
     let excerpt = match findings.as_deref() {
-        Some([]) if begins_refusal(text) => Excerpt::Refusal,
+        Some([]) if refusal => Excerpt::Refusal,
         Some([]) => Excerpt::Kept(lines.into_iter().map(|(line, _)| line).collect()),
         Some(_) => Excerpt::Finding,
         None => Excerpt::Unscanned,
@@ -1138,23 +1150,29 @@ fn summary_of(unit: &Observed, session: &str, failure: &Failure) -> String {
     );
     let limit = MAX_SUMMARY_BYTES - RESOLVED_NOTE.len();
     let cost = |line: &Kept| 1 + QUOTE_MARK.len() + line.text.len();
+    let withheld = |reason: &str| {
+        format!(
+            "\nOutput text withheld: {reason}. The text stands in the result of tool call {} of session {} while that session's history holds it.",
+            clipped(&unit.call, MAX_ID_BYTES),
+            clipped(session, MAX_ID_BYTES),
+        )
+    };
     let (lines, ending) = match &failure.excerpt {
         Excerpt::Kept(lines) => (lines.as_slice(), "\nOutput lines:".to_owned()),
-        withheld => {
-            let reason = match withheld {
-                Excerpt::Unscanned => "the redactor's scan of the output did not finish",
-                Excerpt::Refusal => {
-                    "the output begins as the harness's report of a call it refused"
-                }
-                _ => "the redactor found credential-shaped content in the output",
-            };
-            let sentence = format!(
-                "\nOutput text withheld: {reason}. The text stands in the result of tool call {} of session {} while that session's history holds it.",
-                clipped(&unit.call, MAX_ID_BYTES),
-                clipped(session, MAX_ID_BYTES),
-            );
-            (&[][..], sentence)
-        }
+        Excerpt::Finding => (
+            &[][..],
+            withheld("the redactor found credential-shaped content in the output"),
+        ),
+        Excerpt::Unscanned => (
+            &[][..],
+            withheld("the redactor's scan of the output did not finish"),
+        ),
+        Excerpt::Refusal => (
+            &[][..],
+            withheld(
+                "the output begins with the heading of the harness's report of a refused call",
+            ),
+        ),
     };
     let mut reserved: usize = ending.len()
         + lines
@@ -2863,7 +2881,7 @@ mod tests {
             let record = failed_record("s1", &unit, &failure);
             assert!(
                 record.summary.ends_with(
-                    "\nCommand: deploy /srv/app/config.yaml [arguments left out]\nOutput text withheld: the output begins as the harness's report of a call it refused. The text stands in the result of tool call call-1 of session s1 while that session's history holds it."
+                    "\nCommand: deploy /srv/app/config.yaml [arguments left out]\nOutput text withheld: the output begins with the heading of the harness's report of a refused call. The text stands in the result of tool call call-1 of session s1 while that session's history holds it."
                 ),
                 "{}",
                 record.summary
@@ -2899,8 +2917,48 @@ mod tests {
         let (assignment, value) = keyed_credential();
         let secret = text.replace(&unruled, &assignment);
         let failure = recorded(&command.replace(&unruled, &assignment), &secret, true).unwrap();
-        assert_eq!(failure.excerpt, Excerpt::Finding);
+        assert_eq!(
+            failure,
+            Failure {
+                exit_code: None,
+                path: None,
+                error: None,
+                excerpt: Excerpt::Finding,
+            }
+        );
         assert!(!format!("{failure:?}").contains(&value));
+        // A scan that does not finish is the reason such a record states.
+        assert_eq!(
+            screened_with(&text, |_| None),
+            Failure {
+                exit_code: None,
+                path: None,
+                error: None,
+                excerpt: Excerpt::Unscanned,
+            }
+        );
+        // The heading ends at the quote that opens the tool's name: a text
+        // without that quote, and one with a shorter beginning, are read
+        // whole, and the heading alone is withheld.
+        for near in [
+            "Validation failed for tool bash:\n  - TypeError at src/check.ts:10 failed",
+            "Validation failed: TypeError at src/check.ts:10 failed",
+        ] {
+            let failure = recorded("make", near, true).unwrap();
+            assert_eq!(failure.path.as_deref(), Some("src/check.ts:10"), "{near}");
+            assert_eq!(failure.error.as_deref(), Some("TypeError"), "{near}");
+            assert!(matches!(failure.excerpt, Excerpt::Kept(_)), "{near}");
+        }
+        let bare = "Validation failed for tool \"bash: TypeError at src/check.ts:10 failed";
+        assert_eq!(
+            recorded("make", bare, true).unwrap(),
+            Failure {
+                exit_code: None,
+                path: None,
+                error: None,
+                excerpt: Excerpt::Refusal,
+            }
+        );
     }
 
     /// A line states an error when one of its runs of letters and digits
@@ -3169,6 +3227,8 @@ mod tests {
             ("\u{bd}Error alone", None),
             ("Parse\u{bd}Error alone", None),
             ("Parse\u{2167}Error then ValueError", Some("ValueError")),
+            ("Half\u{bd}ValueError alone", None),
+            ("Half\u{bd}ValueError then E0308", Some("E0308")),
             ("error: \u{345}ParseError", None),
             ("\u{93e}Exception then E0308", Some("E0308")),
             // Punctuation of any script parts a name from its line.
@@ -3574,6 +3634,32 @@ mod tests {
             answer_row("r1", "c1"),
         ];
         assert_eq!(paired(&read), pairs(&[]));
+    }
+
+    /// A closed turn holds empty tables, so the turn after a wide one grows
+    /// its own.
+    #[test]
+    fn a_closed_turn_keeps_no_table_of_a_wide_turn() {
+        let ids: Vec<String> = (0..4096).map(|n| format!("call-{n}")).collect();
+        let mut turn = Turn::default();
+        for id in &ids {
+            turn.named.insert(id.as_str());
+            turn.answered.insert(id.as_str());
+            turn.shared.insert(id.as_str());
+        }
+        let mut kept = VecDeque::new();
+        turn.close(&mut kept);
+        assert_eq!(
+            (
+                turn.calls.capacity(),
+                turn.named.capacity(),
+                turn.answered.capacity(),
+                turn.shared.capacity(),
+                turn.paired.capacity(),
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        assert!(kept.is_empty());
     }
 
     /// The window keeps its last 1,024 pairs. A pair under an id its turn
@@ -4269,8 +4355,28 @@ mod tests {
         );
         assert!(record.summary.ends_with(&ending), "{}", record.summary);
         assert!(record.summary.contains("\nOutput lines:\n"));
-        for excerpt in [Excerpt::Finding, Excerpt::Unscanned, Excerpt::Refusal] {
+        for (excerpt, reason) in [
+            (
+                Excerpt::Finding,
+                "the redactor found credential-shaped content in the output",
+            ),
+            (
+                Excerpt::Unscanned,
+                "the redactor's scan of the output did not finish",
+            ),
+            (
+                Excerpt::Refusal,
+                "the output begins with the heading of the harness's report of a refused call",
+            ),
+        ] {
             let withheld = failed_record(&session, &unit, &at_limits(excerpt));
+            assert!(
+                withheld.summary.contains(&format!(
+                    "\nOutput text withheld: {reason}. The text stands"
+                )),
+                "{}",
+                withheld.summary
+            );
             let ids = format!(
                 "tool call {}{CUT_MARK} of session {}{CUT_MARK} while that session's history holds it.",
                 "c".repeat(MAX_ID_BYTES - CUT_MARK.len()),

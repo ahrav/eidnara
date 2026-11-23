@@ -1,7 +1,7 @@
 import type { CompactionEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
-    ContentComparison,
     defaultTransformCaptureAdmission,
+    ReferenceableAllowance,
     type TransformCaptureAdmission,
 } from "@eidnara/opencode/hooks/context/transform-capture";
 import {
@@ -68,30 +68,26 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
 /**
  * A row carries the `type` and `parentId` of the session entry it was built from, so the daemon
  * reads native entry identity from the wire; a row whose entry cannot be read keeps its id and
- * message alone.
- *
- * The daemon retains a tool result and records a failed command from a row that carries the
- * `type` of a message entry. Pi passes each `context` handler the array the handlers before it
- * returned, and an earlier `context` handler can change a message before this pass reads it and
- * while the pass awaits. A row of a message entry therefore carries the entry's `type` when
- * `message` compares equal to the entry's message within `comparison`'s allowance, and it then
- * holds a copy of `message` that the pass alone references, so the request carries the compared
- * content. A message that compares unequal, or that the allowance leaves uncompared, keeps its
- * id and `message` alone.
+ * message alone. For a message entry, `type` and `parentId` identify a match between the
+ * handler's message and the stored message: `allowance` admits both and their JSON
+ * serializations match.
  */
 export function entryRow(
     id: string,
     message: Json,
     reader: PiBranchReader,
-    comparison: ContentComparison,
+    allowance: ReferenceableAllowance,
 ): PiRow {
     const entryId = rowEntry(id)?.entryId;
     const entry = entryId === undefined ? undefined : reader.getEntry(entryId);
     if (!entry) return { id, message };
-    const identity = { id, type: entry.type, parentId: entry.parentId ?? null };
-    if (entry.type !== "message") return { ...identity, message };
-    if (!comparison.same(message, (entry as unknown as Json).message)) return { id, message };
-    return { ...identity, message: structuredClone(message) };
+    if (entry.type === "message") {
+        const stored = (entry as unknown as Json).message;
+        const matches =
+            allowance.admits(message, stored) && JSON.stringify(message) === JSON.stringify(stored);
+        if (!matches) return { id, message };
+    }
+    return { id, type: entry.type, parentId: entry.parentId ?? null, message };
 }
 
 function isToolResultEntry(entry: SessionEntry | undefined): boolean {
@@ -264,23 +260,24 @@ export function createPiTransform(options: PiTransformOptions) {
     async function run(inputs: PiPassInputs): Promise<PiPassResult> {
         const branch = options.branchOf(inputs.sessionId);
         const branchEntriesVisited = branch.sync(inputs.reader);
+        const hostLength = inputs.messages.length;
+        const coldLead = inputs.messages[0]?.role === "compactionSummary" ? 1 : 0;
         const admitted = admission.admit(inputs.sessionId);
         if ("declined" in admitted) return { branchEntriesVisited, entriesAligned: 0 };
         declined.add(inputs.sessionId);
         const alignment = new PiAlignment(inputs.messages, branch, inputs.reader);
         // The client's capture rechecks compare slot references, so a slot keeps one row.
         const slotRows = new Map<number, PiRow>();
-        // Calls to `same` on this `ContentComparison` share one byte allowance across the pass.
-        const comparison = new ContentComparison();
-        const rows = (start: number, end: number): PiRow[] | undefined => {
+        const allowance = new ReferenceableAllowance();
+        const rows = (start: number, end: number, fresh: boolean): PiRow[] | undefined => {
             const window: PiRow[] = [];
             for (let index = end - 1; index >= start; index -= 1) {
-                let row = slotRows.get(index);
+                let row = fresh ? undefined : slotRows.get(index);
                 if (!row) {
                     const id = alignment.idAt(index);
                     const message = inputs.messages[index] as Json;
                     if (id === undefined || !isPiRole(message.role)) return undefined;
-                    row = entryRow(id, message, inputs.reader, comparison);
+                    row = entryRow(id, message, inputs.reader, allowance);
                     slotRows.set(index, row);
                 }
                 window.push(row);
@@ -292,17 +289,19 @@ export function createPiTransform(options: PiTransformOptions) {
             serializerProfile: "pi",
             invocationProfile: "pi-heuristic",
             host: {
-                length: inputs.messages.length,
+                length: hostLength,
                 idAt: (index) => alignment.idAt(index),
                 holds: (id) => alignment.holds(id),
             },
             preflight: async () => inputs.projectRoot,
-            readWindow: rows,
+            readWindow: (start, end) => rows(start, end, true),
             ...(inputs.eidnaraFolds
                 ? {
                       measure: () => (index: number) => {
-                          const row = rows(index, index + 1)?.[0];
-                          return row && piRowSize(row);
+                          const id = alignment.idAt(index);
+                          const message = inputs.messages[index] as Json;
+                          if (id === undefined || !isPiRole(message.role)) return undefined;
+                          return piRowSize({ id, message });
                       },
                   }
                 : {}),
@@ -310,10 +309,9 @@ export function createPiTransform(options: PiTransformOptions) {
             startsWindow: (index) =>
                 (inputs.messages[index] as Json | undefined)?.role !== "toolResult",
             // After a store reset the compaction summary heads a cold import as ordinary content.
-            coldLead: inputs.messages[0]?.role === "compactionSummary" ? 1 : 0,
+            coldLead,
             idOf: (value) => (value as PiRow).id,
-            liveWindow: rows,
-            privateWindow: true,
+            liveWindow: (start, end) => rows(start, end, false),
             contextLimit: () => inputs.contextLimit,
             prepare: async (members) => {
                 const window = members as PiRow[];
