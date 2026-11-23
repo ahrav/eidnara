@@ -172,6 +172,9 @@ enum Excerpt {
     /// The redactor's scan of the output did not finish. The record holds
     /// no text of it.
     Unscanned,
+    /// The output begins as the harness's report of a refused call (see
+    /// [`begins_refusal`]). The record withholds the output text.
+    Refusal,
 }
 
 /// A marked result as a record states it. Every text here has passed the
@@ -816,28 +819,11 @@ struct Chosen {
     errors: usize,
 }
 
-/// The part of a marked result's text whose lines a record chooses. Pi's
-/// report of a call it refused before running it begins `Validation failed
-/// for tool`, and after the line `Received arguments:` it holds the call's
-/// arguments as one JSON value that runs to the end of the text. Of such a
-/// report the record chooses from the part before that line, which states
-/// what the harness refused; the arguments stay in the tool result. Any
-/// other text is read whole, also one that holds those two lines and then
-/// other text, as the output of a command that printed a report does.
-fn read_part(text: &str) -> &str {
-    const REFUSAL: &str = "Validation failed for tool \"";
-    const ARGUMENTS: &str = "\nReceived arguments:\n";
-    if !text.starts_with(REFUSAL) {
-        return text;
-    }
-    let Some(at) = text.find(ARGUMENTS) else {
-        return text;
-    };
-    let arguments = &text[at + ARGUMENTS.len()..];
-    match serde_json::from_str::<serde::de::IgnoredAny>(arguments) {
-        Ok(_) => &text[..at],
-        Err(_) => text,
-    }
+/// Whether a marked result's text begins with the heading of Pi's report of
+/// a call whose arguments its schema refused. The record withholds the
+/// output text when the heading matches.
+fn begins_refusal(text: &str) -> bool {
+    text.starts_with("Validation failed for tool \"")
 }
 
 /// The exit code that the last non-empty line of a marked result's whole
@@ -862,9 +848,8 @@ fn stated_in(text: &str) -> Option<(i64, Range<usize>)> {
 
 /// The lines a record chooses from the text of a marked result, and the
 /// exit code the harness states. The code is read from the whole text (see
-/// [`stated_in`]). The lines are chosen from the part of the text a record
-/// chooses from (see [`read_part`]), and each carries its place in the
-/// whole text.
+/// [`stated_in`]). When [`begins_refusal`] matches, the record withholds all
+/// lines. Otherwise, the record selects lines from the full text.
 ///
 /// The chosen lines are the first [`MAX_ERROR_LINES`] lines that state an
 /// error, each failure line with the line that completes it, and then the
@@ -877,7 +862,7 @@ fn stated_in(text: &str) -> Option<(i64, Range<usize>)> {
 /// neither holds a table of the output's lines.
 fn chosen_of(text: &str) -> Chosen {
     let stated = stated_in(text);
-    let text = read_part(text);
+    let text = if begins_refusal(text) { "" } else { text };
     let mut lines: Vec<(Kept, Range<usize>)> =
         Vec::with_capacity(MAX_ERROR_LINES + MAX_CLOSING_LINES);
     let mut start = 0;
@@ -1007,6 +992,7 @@ fn screened_with(text: &str, scan: impl FnOnce(&str) -> Option<Vec<Range<usize>>
     };
     let (path, error) = (named(named_path), named(named_error));
     let excerpt = match findings.as_deref() {
+        Some([]) if begins_refusal(text) => Excerpt::Refusal,
         Some([]) => Excerpt::Kept(lines.into_iter().map(|(line, _)| line).collect()),
         Some(_) => Excerpt::Finding,
         None => Excerpt::Unscanned,
@@ -1155,6 +1141,9 @@ fn summary_of(unit: &Observed, session: &str, failure: &Failure) -> String {
         withheld => {
             let reason = match withheld {
                 Excerpt::Unscanned => "the redactor's scan of the output did not finish",
+                Excerpt::Refusal => {
+                    "the output begins as the harness's report of a call it refused"
+                }
                 _ => "the redactor found credential-shaped content in the output",
             };
             let sentence = format!(
@@ -1937,7 +1926,7 @@ fn failed_record(session: &str, unit: &Observed, failure: &Failure) -> kernel::D
     let mut rationale = serde_json::Map::new();
     let text = match failure.excerpt {
         Excerpt::Kept(_) => "kept",
-        Excerpt::Finding | Excerpt::Unscanned => "withheld",
+        Excerpt::Finding | Excerpt::Unscanned | Excerpt::Refusal => "withheld",
     };
     for (name, value) in [
         ("source", json!(FAILURE_SOURCE_ID)),
@@ -2299,7 +2288,7 @@ mod tests {
         let failure = screened(text);
         let lines = match failure.excerpt {
             Excerpt::Kept(lines) => lines.into_iter().map(|line| line.text).collect(),
-            Excerpt::Finding | Excerpt::Unscanned => Vec::new(),
+            Excerpt::Finding | Excerpt::Unscanned | Excerpt::Refusal => Vec::new(),
         };
         (failure.exit_code, lines)
     }
@@ -2827,12 +2816,11 @@ mod tests {
     }
 
     /// Pi answers a call whose arguments its schema refuses with a report
-    /// that lists the arguments as JSON after the line `Received
-    /// arguments:`. The record reads the part before that line, so no
-    /// argument of the call reaches its lines, its path, or its error, also
-    /// one the redactor has no rule for.
+    /// under the heading `Validation failed for tool`. The record of a text
+    /// that begins with the heading names the heading as the reason and
+    /// withholds the lines, the path, and the error.
     #[test]
-    fn the_arguments_of_a_refused_call_are_left_out() {
+    fn the_text_of_a_refused_call_s_report_is_withheld() {
         let unruled = ["-p", "hunter", "2-fixture"].concat();
         let command = format!("deploy /srv/app/config.yaml {unruled}");
         let arguments = format!(
@@ -2847,24 +2835,56 @@ mod tests {
             None,
             "the redactor passes the fixture"
         );
-        let failure = recorded(&command, &text, true).unwrap();
-        assert_eq!(
-            (failure.exit_code, &failure.path, &failure.error),
-            (None, &None, &None)
-        );
+        // Pi's report; one whose diagnostic holds the arguments' heading as
+        // a line of its own; one with CRLF line ends; one with text after
+        // the arguments.
+        let reports = [
+            text.clone(),
+            text.replacen(
+                "  - timeout: must be number",
+                "  - /env/a\nReceived arguments:\nb: must be string",
+                1,
+            ),
+            text.replace('\n', "\r\n"),
+            format!("{text}\n\nRetry with a number."),
+        ];
+        for report in &reports {
+            let failure = recorded(&command, report, true).unwrap();
+            assert_eq!(
+                failure,
+                Failure {
+                    exit_code: None,
+                    path: None,
+                    error: None,
+                    excerpt: Excerpt::Refusal,
+                },
+                "{report}"
+            );
+            let unit = input(&command, report, true).observe(SCOPE).unwrap();
+            let record = failed_record("s1", &unit, &failure);
+            assert!(
+                record.summary.ends_with(
+                    "\nCommand: deploy /srv/app/config.yaml [arguments left out]\nOutput text withheld: the output begins as the harness's report of a call it refused. The text stands in the result of tool call call-1 of session s1 while that session's history holds it."
+                ),
+                "{}",
+                record.summary
+            );
+            for stored in [&record.summary, &record.rationale] {
+                for argument in [unruled.as_str(), "TypeError", "must be", "/env/a", "Retry"] {
+                    assert!(!stored.contains(argument), "{stored}");
+                }
+            }
+            assert_eq!(
+                serde_json::from_str::<Value>(&record.rationale).unwrap()["output_text"],
+                "withheld"
+            );
+        }
         let kept = |failure: &Failure| match &failure.excerpt {
             Excerpt::Kept(lines) => lines.iter().map(|line| line.text.clone()).collect(),
             _ => Vec::new(),
         };
-        assert_eq!(
-            kept(&failure),
-            [
-                "Validation failed for tool \"bash\":",
-                "- timeout: must be number"
-            ]
-        );
-        // The positive control: the same lines as the output of a command
-        // that ran are read whole.
+        // The positive control: the same lines behind another first line, as
+        // the output of a command that ran, are read whole.
         let ran = format!("deploy says:\n{text}\n\nCommand exited with code 2");
         let failure = recorded(&command, &ran, true).unwrap();
         assert_eq!(failure.exit_code, Some(2));
@@ -2875,19 +2895,13 @@ mod tests {
                 .iter()
                 .any(|line: &String| line.contains("TypeError"))
         );
-        // The redactor judges the whole text of the refusal: a credential
-        // among the arguments withholds the record's lines.
+        // The redactor judges the whole text of the report: a credential
+        // among the arguments is the reason the record states.
         let (assignment, value) = keyed_credential();
         let secret = text.replace(&unruled, &assignment);
         let failure = recorded(&command.replace(&unruled, &assignment), &secret, true).unwrap();
         assert_eq!(failure.excerpt, Excerpt::Finding);
         assert!(!format!("{failure:?}").contains(&value));
-        // A report without the arguments' line is read whole.
-        assert_eq!(
-            read_part("Validation failed for tool \"bash\":\n  - x"),
-            "Validation failed for tool \"bash\":\n  - x"
-        );
-        assert_eq!(read_part(&ran), ran);
     }
 
     /// A line states an error when one of its runs of letters and digits
@@ -2906,24 +2920,20 @@ mod tests {
     }
 
     /// The exit code is the one the last non-empty line of the whole
-    /// result states. A command's own output that holds the two lines of a
-    /// refusal report, with other text after its arguments, is read whole.
+    /// result states, also of a text that begins as a refusal report: a
+    /// command's own output that begins with the heading and ends in the
+    /// harness's status line keeps that line's code and withholds its lines.
     #[test]
-    fn a_command_s_output_that_holds_a_refusal_report_keeps_its_own_exit_code() {
-        // The output states a code ahead of the arguments' line and ends
-        // in the harness's status line.
+    fn a_command_s_output_that_begins_as_a_refusal_report_keeps_its_own_exit_code() {
+        // The output states a code in an earlier line and ends in the
+        // harness's status line.
         let printed = "Validation failed for tool \"x\":\nCommand exited with code 7\n\nReceived arguments:\n{}\n\nCommand exited with code 2";
-        assert_eq!(read_part(printed), printed);
-        let (code, kept) = failed(printed);
-        assert_eq!(code, Some(2));
-        assert_eq!(
-            kept.last().map(String::as_str),
-            Some("Command exited with code 2")
-        );
+        assert_eq!(failed(printed), (Some(2), Vec::new()));
         let unit = input("make", printed, true).observe(SCOPE).unwrap();
         let Outcome::Failed(failure) = &unit.outcome else {
             panic!("a marked result");
         };
+        assert_eq!(failure.excerpt, Excerpt::Refusal);
         let record = failed_record("s1", &unit, failure);
         assert!(
             record.summary.contains("its last line states exit code 2"),
@@ -2934,26 +2944,10 @@ mod tests {
             serde_json::from_str::<Value>(&record.rationale).unwrap()["exit_code"],
             2
         );
-        // A whole report that a command printed, and then the status line.
-        let saved = "Validation failed for tool \"bash\":\n  - timeout: must be number\n\nReceived arguments:\n{\n  \"command\": \"make\"\n}\n\nCommand exited with code 3";
-        assert_eq!(read_part(saved), saved);
-        assert_eq!(failed(saved).0, Some(3));
         // The harness's own report ends in its arguments and states no
-        // code, also when a line ahead of the arguments holds one.
+        // code, also when an earlier line holds one.
         let refused = "Validation failed for tool \"bash\":\nCommand exited with code 7\n\nReceived arguments:\n{\n  \"command\": \"make\"\n}\n";
-        assert_eq!(
-            read_part(refused),
-            "Validation failed for tool \"bash\":\nCommand exited with code 7\n"
-        );
-        let (code, kept) = failed(refused);
-        assert_eq!(code, None);
-        assert_eq!(
-            kept,
-            [
-                "Validation failed for tool \"bash\":",
-                "Command exited with code 7"
-            ]
-        );
+        assert_eq!(failed(refused), (None, Vec::new()));
         // A code of 0 and a last line of other words state no code.
         assert_eq!(
             stated_in("error: boom\nCommand exited with code 0").map(|(code, _)| code),
@@ -4272,7 +4266,7 @@ mod tests {
         );
         assert!(record.summary.ends_with(&ending), "{}", record.summary);
         assert!(record.summary.contains("\nOutput lines:\n"));
-        for excerpt in [Excerpt::Finding, Excerpt::Unscanned] {
+        for excerpt in [Excerpt::Finding, Excerpt::Unscanned, Excerpt::Refusal] {
             let withheld = failed_record(&session, &unit, &at_limits(excerpt));
             let ids = format!(
                 "tool call {}{CUT_MARK} of session {}{CUT_MARK} while that session's history holds it.",

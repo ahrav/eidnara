@@ -6700,14 +6700,13 @@ async fn a_fact_the_redactor_refuses_as_composed_is_left_unwritten() {
     assert!(kernel.tip().unwrap() > tip);
 }
 
-/// Pi answers a call whose arguments its schema refuses with a report that
-/// lists the arguments after the line `Received arguments:`. The result is
-/// marked and is recorded with the lines that state what was refused; the
-/// arguments are left out, so an argument the redactor has no rule for
-/// reaches neither the fact's text nor its rationale, and no argument
-/// names the fact's path or error.
+/// Pi answers a call whose arguments its schema refuses with a report under
+/// the heading `Validation failed for tool`. The result is marked and is
+/// recorded as a marked result whose text is withheld: the fact names the
+/// heading as the reason, and its text and its rationale hold the command's
+/// shown words alone.
 #[tokio::test]
-async fn a_refused_call_s_report_reaches_a_fact_without_the_call_s_arguments() {
+async fn a_refused_call_s_report_is_recorded_with_its_text_withheld() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
     let unruled = ["-p", "hunter", "2-fixture"].concat();
     let command: &'static str = format!("deploy /srv/app/config.yaml {unruled}").leak();
@@ -6734,21 +6733,21 @@ async fn a_refused_call_s_report_reaches_a_fact_without_the_call_s_arguments() {
         .remove(0);
     assert_eq!(
         rows[0].0,
-        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the harness marked the result as an error.\nCommand: deploy /srv/app/config.yaml [arguments left out]\nOutput lines:\n> Validation failed for tool \"bash\":\n> - timeout: must be number"
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the harness marked the result as an error.\nCommand: deploy /srv/app/config.yaml [arguments left out]\nOutput text withheld: the output begins as the harness's report of a call it refused. The text stands in the result of tool call call-1 of session s1 while that session's history holds it."
     );
     for text in [rows[0].0.clone(), rationale.to_string()] {
-        assert!(
-            !text.contains(&unruled) && !text.contains("TypeError"),
-            "{text}"
-        );
+        for argument in [unruled.as_str(), "TypeError", "must be number"] {
+            assert!(!text.contains(argument), "{text}");
+        }
     }
     assert_eq!(
         (
             rationale.get("exit_code"),
             rationale.get("path"),
-            rationale.get("error")
+            rationale.get("error"),
+            rationale.get("output_text"),
         ),
-        (None, None, None)
+        (None, None, None, Some(&json!("withheld")))
     );
 }
 

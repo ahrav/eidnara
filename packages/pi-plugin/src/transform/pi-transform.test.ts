@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { type SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
-import { TransformCaptureAdmission } from "@eidnara/opencode/hooks/context/transform-capture";
+import {
+    ContentComparison,
+    TransformCaptureAdmission,
+} from "@eidnara/opencode/hooks/context/transform-capture";
 import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/transform-session-client";
 import { HALF_CAP_BLOCKS } from "@eidnara/opencode/hooks/context/window-cap";
 
@@ -571,18 +574,180 @@ describe("Pi native entry identity", () => {
     it("keeps a row whose entry cannot be read to its id and message", () => {
         const messages: Json[] = [user("first")];
         const reader = branchOver(messages);
-        const message = messages[0] as Json;
-        expect(entryRow("e1", message, reader)).toEqual({
+        const message = structuredClone(messages[0] as Json);
+        const comparison = new ContentComparison();
+        expect(entryRow("e1", message, reader, comparison)).toEqual({
             id: "e1",
             type: "message",
             parentId: null,
             message,
         });
-        expect(entryRow("e9", message, reader)).toEqual({ id: "e9", message });
-        expect(entryRow("eidnara:custom", message, reader)).toEqual({
+        expect(entryRow("e9", message, reader, comparison)).toEqual({ id: "e9", message });
+        expect(entryRow("eidnara:custom", message, reader, comparison)).toEqual({
             id: "eidnara:custom",
             message,
         });
+    });
+
+    const typed = (row: PiRow) => row.type !== undefined;
+    const result = () => ({
+        ...toolResult("call-1"),
+        isError: true,
+        details: { lines: [1, 2] },
+        timestamp: 7,
+    });
+
+    it("reads a message as its entry's only when both hold the same keys, items, and values", () => {
+        const persisted = result();
+        const row = (message: Json, held: Json = persisted) =>
+            entryRow("e1", message, branchOver([held]), new ContentComparison());
+        expect(typed(row(structuredClone(persisted)))).toBe(true);
+        // A key that holds `undefined` is absent from the JSON copy an earlier handler returns.
+        const sparse = { ...persisted, note: undefined };
+        expect(typed(row(JSON.parse(JSON.stringify(sparse)), sparse))).toBe(true);
+        expect(typed(row(structuredClone(persisted), sparse))).toBe(true);
+
+        const changed: [string, Json][] = [
+            ["a further key", { ...persisted, extra: 1 }],
+            ["a missing key", { ...persisted, details: undefined }],
+            ["another key under the same count", { ...persisted, details: { rows: [1, 2] } }],
+            ["a further item", { ...persisted, details: { lines: [1, 2, 3] } }],
+            ["a missing item", { ...persisted, details: { lines: [1] } }],
+            ["keys in another order", { details: persisted.details, ...persisted }],
+        ];
+        for (const [label, message] of changed) {
+            expect([label, typed(row(structuredClone(message)))]).toEqual([label, false]);
+        }
+
+        // The mark hidden from the request beside a further key: two keys the request carries,
+        // as the entry's message has, and another message on the wire.
+        const hidden: Json = { ...structuredClone(persisted), extra: true };
+        Object.defineProperty(hidden, "isError", { value: true, enumerable: false });
+        expect(JSON.parse(JSON.stringify(hidden)).isError).toBeUndefined();
+        expect(typed(row(hidden))).toBe(false);
+        // A key the entry's message holds as its own and the context message inherits.
+        const inherited = JSON.parse('{"role":"user","content":"x","timestamp":1,"__proto__":{}}');
+        expect(typed(row({ role: "user", content: "x", timestamp: 1 }, inherited))).toBe(false);
+        expect(typed(row(structuredClone(inherited), inherited))).toBe(true);
+    });
+
+    it("reads a message with an array hole as changed, on either side", () => {
+        const filled = () => ({
+            ...result(),
+            content: [
+                { type: "text", text: "planted" },
+                { type: "text", text: "ok" },
+            ],
+        });
+        const holed = () => {
+            const message = filled();
+            delete message.content[0];
+            return message;
+        };
+        const row = (message: Json, held: Json) =>
+            entryRow("e1", message, branchOver([held]), new ContentComparison());
+        // The entry holds the hole and a handler filled it; then the reverse; then both hold it.
+        expect(typed(row(filled(), holed()))).toBe(false);
+        expect(typed(row(holed(), filled()))).toBe(false);
+        expect(typed(row(holed(), holed()))).toBe(false);
+        expect(typed(row(filled(), filled()))).toBe(true);
+    });
+
+    it("ends the comparison of a cyclic, a deep, and a widely shared message as changed", () => {
+        const row = (message: Json, held: Json, comparison = new ContentComparison()) =>
+            entryRow("e1", message, branchOver([held]), comparison);
+        const cyclic = () => {
+            const message: Json = result();
+            (message.details as Json).self = message;
+            return message;
+        };
+        expect(typed(row(cyclic(), cyclic()))).toBe(false);
+
+        const nested = (levels: number) => {
+            const message: Json = result();
+            let leaf = message.details as Json;
+            for (let level = 0; level < levels; level += 1) {
+                leaf.next = {};
+                leaf = leaf.next as Json;
+            }
+            return message;
+        };
+        expect(typed(row(nested(200), nested(200)))).toBe(true);
+        expect(typed(row(nested(300), nested(300)))).toBe(false);
+        expect(typed(row(nested(100_000), nested(100_000)))).toBe(false);
+
+        // Sixty levels that each hold one child under two keys: 2^60 paths over 60 objects.
+        const shared = () => {
+            const message: Json = result();
+            let node: Json = {};
+            for (let level = 0; level < 60; level += 1) node = { left: node, right: node };
+            message.details = node;
+            return message;
+        };
+        const startedAt = performance.now();
+        expect(typed(row(shared(), shared()))).toBe(false);
+        expect(performance.now() - startedAt).toBeLessThan(30_000);
+
+        // One allowance serves the pass: the row that spends it and the rows after it are read
+        // as changed, and a fresh allowance reads the same small row as its entry's.
+        const small = result();
+        const comparison = new ContentComparison();
+        expect(typed(row(shared(), shared(), comparison))).toBe(false);
+        expect(typed(row(structuredClone(small), small, comparison))).toBe(false);
+        expect(typed(row(structuredClone(small), small))).toBe(true);
+    });
+
+    it("runs no accessor of a message it compares", () => {
+        let reads = 0;
+        const trapped = () => {
+            const message: Json = result();
+            Object.defineProperty(message, "content", {
+                enumerable: true,
+                get() {
+                    reads += 1;
+                    return [{ type: "text", text: "ok" }];
+                },
+            });
+            return message;
+        };
+        const row = (message: Json, held: Json) =>
+            entryRow("e1", message, branchOver([held]), new ContentComparison());
+        expect(typed(row(trapped(), result()))).toBe(false);
+        expect(typed(row(result(), trapped()))).toBe(false);
+        expect(reads).toBe(0);
+    });
+
+    it("carries the compared content when the message is edited in place after the comparison", async () => {
+        const persisted: Json[] = [user("first"), toolCall("call-1"), result()];
+        const context = structuredClone(persisted);
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [] })],
+            transform: [rawReply],
+        });
+        const pass = {
+            ...passOver(branchOver(persisted), context),
+            // An earlier handler that kept the message edits it while the pass awaits.
+            fields: () => {
+                const kept = context[2] as Json;
+                kept.isError = false;
+                kept.content = [{ type: "text", text: "edited after the comparison" }];
+                return { model_key: "faux/faux-model" };
+            },
+        };
+        const published = await transformOver(transport.client, pass.branch).run(pass);
+        expect(published.outcome?.kind).toBe("applied");
+        const sent = transport.calls.find((entry) => entry.method === "transform")?.body ?? {};
+        const row = (sent.native_messages as PiRow[])[2];
+        expect(row?.type).toBe("message");
+        expect(row?.message).toEqual(persisted[2] as Json);
+        expect(published.messages?.[2]).toEqual(persisted[2] as Json);
+
+        // The copy is the row's own: the handler's object and the entry's stay as they were.
+        const message = structuredClone(persisted[2] as Json);
+        const own = entryRow("e3", message, branchOver(persisted), new ContentComparison());
+        expect(own.message).toEqual(message);
+        expect(own.message).not.toBe(message);
+        expect(own.message).not.toBe(persisted[2]);
     });
 
     it("reads a reserved row's entry by its entry id and copies its own type and parent", () => {
@@ -604,7 +769,7 @@ describe("Pi native entry identity", () => {
             getLeafId: () => "c7",
             getEntry: (id) => entries.get(id),
         };
-        expect(entryRow("eidnara:custom:c7", custom, reader)).toEqual({
+        expect(entryRow("eidnara:custom:c7", custom, reader, new ContentComparison())).toEqual({
             id: "eidnara:custom:c7",
             type: "custom_message",
             parentId: "root-outside-window",

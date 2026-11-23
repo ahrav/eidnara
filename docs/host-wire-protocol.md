@@ -1853,6 +1853,8 @@ results too: a command it aborted or timed out, a call an extension blocked,
 and a call whose arguments or tool it refused. Each is a marked result of its
 command line and is recorded as one, with the lines the harness wrote; the
 fact states that the harness marked the result, and its lines say why. The
+report of a call whose arguments Pi refused is the exception: its text is
+withheld (below). The
 reading of the exit code is by the line's text: a marked result of any tool,
 and a blocked call's reason, that ends in such a line is read the same way, so
 the fact says that the result's last line states the code and leaves open
@@ -1884,18 +1886,25 @@ letter or digit (so `error_count` holds the run `error`), or when it holds
 harness marked and decide no failure. A line is judged as trimmed: an empty
 line, a line with a control character other than a tab, and a line with U+2028
 or U+2029 are left out. Pi answers a call whose arguments its schema refuses
-with a report that begins `Validation failed for tool` and, after the line
-`Received arguments:`, holds the call's arguments as one JSON value that runs
-to the end of the text. Of such a result the fact chooses from the part
-before that line: the chosen lines, the path, and the error come from the
-lines that state what Pi refused, and the arguments stay in the tool result.
-The lines of every other marked result are chosen from its whole text, also
-of one that holds those two lines and then other text, as the output of a
-command that printed such a report does; a program's own output can repeat an
+with a report that begins `Validation failed for tool "`, then the tool's
+name, and that lists the call's arguments after the lines that state what it
+refused. The daemon reads the heading and no further part of the report: a
+marked result whose text begins with those words and that quote is recorded as a
+marked result with its text withheld. The fact keeps no line of it, names no
+path and no error, and says that the output begins as the harness's report of
+a call it refused and where the text stands, so the call's arguments and the
+words of Pi's diagnostic, which can hold a key the model chose, stay in the
+tool result. The rule reads the first bytes of the text alone. It therefore
+also holds for a command's own output that begins with that heading, whose
+lines are withheld the same way, and a report that an extension's
+`tool_result` handler put other text ahead of is read as any other marked
+result. The lines of every other marked result are chosen from its whole
+text; a program's own output can repeat an
 argument, and such a line is kept under the redactor's rule like any other.
 The exit code is read from the whole text in every case. The redactor judges
 the whole text of every marked result the task reads, the arguments of a
-refused call included. With a finding
+refused call included, and its finding, or a scan that did not finish, is
+the reason such a fact states. With a finding
 the fact keeps no line of the output and says that the text is withheld and
 that it stands in the result of its tool call in its session while that
 session's history holds it; Pi keeps the end of a long output there and the
@@ -1991,9 +2000,10 @@ the chosen lines follow, each behind `> `, the mark of quoted tool output, the
 last two whole and the lines that state an error in the bytes that remain; or
 one line `Output text withheld: <reason>. The text stands in the result of
 tool call <call> of session <session> while that session's history holds
-it.`, with each id in at most 96 bytes and `<reason>` either `the
-redactor found credential-shaped content in the output` or `the redactor's
-scan of the output did not finish`.
+it.`, with each id in at most 96 bytes and `<reason>` one of `the
+redactor found credential-shaped content in the output`, `the redactor's
+scan of the output did not finish`, and `the output begins as the harness's
+report of a call it refused`.
 
 The fact's `rationale` is a string that holds a JSON object. Its fields are
 `source` (`tool_failure`), `session` and `call` (the session's id and the tool
@@ -2152,7 +2162,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `previous_output_revision` | optional | the revision of the consumer's retained, applied output, when it offers one |
 | `serializer_profile` | required | `owned-llmrunner`, `pi`, `opencode-aisdk`, or `claude-code-anthropic` |
 | `render_config` | required | string; a change is a render-configuration change |
-| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read, and a row of a message entry whose message differs from the message the entry holds (a `context` handler that ran before the plugin's changed it), is `{"id", "message"}` alone. The daemon reads `type` and `parentId` for source capture and `type` for failed-command facts (section 7.9): a row without `type` or whose `type` is not `"message"` contributes no source, is counted as an adapter refusal, and names no execution of a command, and neither field changes the transform or its response |
+| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read, and a row of a message entry whose message differs from the message the entry holds (a `context` handler that ran before the plugin's changed it), is `{"id", "message"}` alone. The plugin reads the two messages as equal when both are plain JSON data with the same own keys in the same order, the same property attributes, and the same values, where a key that holds `undefined` counts as absent. A message that is no plain JSON data (one that holds a cycle, more than 256 levels, an array hole, an accessor, a proxy, or a `toJSON`) reads as changed without a call to its code, and so does each message the pass compares after its comparisons have spent 64 MiB of the charge under which a pass captures a window (a slot for each key, item, and value, and two bytes for each UTF-16 unit of a string), so a window a pass can capture is compared whole. A row that carries `type` holds the plugin's own copy of the compared message, so a change that a handler makes to its message after the comparison stays out of the request, and the model reads the copy. The daemon reads `type` and `parentId` for source capture and `type` for failed-command facts (section 7.9): a row without `type` or whose `type` is not `"message"` contributes no source, is counted as an adapter refusal, and names no execution of a command, and neither field changes the transform or its response |
 | `messages` | the window of `owned-llmrunner` and `claude-code-anthropic`, empty when absent; absent for `pi` and `opencode-aisdk` | the window in CK form, in canonical order: `[{"mid": string, "ck": CK message}]` |
 | `usage` | optional | `{"current_total_input_tokens", "context_limit_tokens", "final_wire_input_tokens", "final_wire_trusted"}` |
 | `geometry` | optional | `{"usable_soft": integer, "usable_hard": integer, "derivation": string}` |

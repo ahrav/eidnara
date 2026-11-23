@@ -1,5 +1,6 @@
 import type { CompactionEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
+    ContentComparison,
     defaultTransformCaptureAdmission,
     type TransformCaptureAdmission,
 } from "@eidnara/opencode/hooks/context/transform-capture";
@@ -65,40 +66,32 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
 }
 
 /**
- * Whether `left` and `right` hold the same JSON value: equal primitives, arrays equal item by
- * item, and objects equal key by key, where a key that holds `undefined` counts as absent. The
- * comparison reads both values in place.
+ * A row carries the `type` and `parentId` of the session entry it was built from, so the daemon
+ * reads native entry identity from the wire; a row whose entry cannot be read keeps its id and
+ * message alone.
+ *
+ * The daemon retains a tool result and records a failed command from a row that carries the
+ * `type` of a message entry. Pi passes each `context` handler the array the handlers before it
+ * returned, and an earlier `context` handler can change a message before this pass reads it and
+ * while the pass awaits. A row of a message entry therefore carries the entry's `type` when
+ * `message` compares equal to the entry's message within `comparison`'s allowance, and it then
+ * holds a copy of `message` that the pass alone references, so the request carries the compared
+ * content. A message that compares unequal, or that the allowance leaves uncompared, keeps its
+ * id and `message` alone.
  */
-function sameValue(left: unknown, right: unknown): boolean {
-    if (left === right) return true;
-    if (typeof left !== "object" || typeof right !== "object" || !left || !right) return false;
-    if (Array.isArray(left) || Array.isArray(right)) {
-        if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length)
-            return false;
-        return left.every((item, index) => sameValue(item, right[index]));
-    }
-    const [a, b] = [left as Json, right as Json];
-    const held = (value: Json) => Object.keys(value).filter((key) => value[key] !== undefined);
-    const keys = held(a);
-    return keys.length === held(b).length && keys.every((key) => sameValue(a[key], b[key]));
-}
-
-/**
- * The row for `message` at host id `id`, carrying the `type` and `parentId` of the session entry
- * the row was built from, so the daemon reads native entry identity from the wire. A row whose
- * entry cannot be read keeps its id and message alone. So does a row of a message entry whose
- * message differs from the entry's: Pi hands each context handler the array the handlers before
- * it returned, and a message one of them changed is the entry's message under its id for the
- * transform alone. The daemon retains a tool result and records a failed command for a row that
- * carries its entry's `type`, so both read the message the session holds.
- */
-export function entryRow(id: string, message: Json, reader: PiBranchReader): PiRow {
+export function entryRow(
+    id: string,
+    message: Json,
+    reader: PiBranchReader,
+    comparison: ContentComparison,
+): PiRow {
     const entryId = rowEntry(id)?.entryId;
     const entry = entryId === undefined ? undefined : reader.getEntry(entryId);
     if (!entry) return { id, message };
-    if (entry.type === "message" && !sameValue((entry as unknown as Json).message, message))
-        return { id, message };
-    return { id, type: entry.type, parentId: entry.parentId ?? null, message };
+    const identity = { id, type: entry.type, parentId: entry.parentId ?? null };
+    if (entry.type !== "message") return { ...identity, message };
+    if (!comparison.same(message, (entry as unknown as Json).message)) return { id, message };
+    return { ...identity, message: structuredClone(message) };
 }
 
 function isToolResultEntry(entry: SessionEntry | undefined): boolean {
@@ -277,6 +270,8 @@ export function createPiTransform(options: PiTransformOptions) {
         const alignment = new PiAlignment(inputs.messages, branch, inputs.reader);
         // The client's capture rechecks compare slot references, so a slot keeps one row.
         const slotRows = new Map<number, PiRow>();
+        // Calls to `same` on this `ContentComparison` share one byte allowance across the pass.
+        const comparison = new ContentComparison();
         const rows = (start: number, end: number): PiRow[] | undefined => {
             const window: PiRow[] = [];
             for (let index = end - 1; index >= start; index -= 1) {
@@ -285,7 +280,7 @@ export function createPiTransform(options: PiTransformOptions) {
                     const id = alignment.idAt(index);
                     const message = inputs.messages[index] as Json;
                     if (id === undefined || !isPiRole(message.role)) return undefined;
-                    row = entryRow(id, message, inputs.reader);
+                    row = entryRow(id, message, inputs.reader, comparison);
                     slotRows.set(index, row);
                 }
                 window.push(row);
@@ -293,8 +288,6 @@ export function createPiTransform(options: PiTransformOptions) {
             return window.reverse();
         };
         let replacement: Json[] | undefined;
-        // Pi hands each handler its own clone of the array, so no other code can change or
-        // resize it while the pass awaits, and a publication cannot be refused.
         const outcome = await client.run(inputs.sessionId, admitted.lease, {
             serializerProfile: "pi",
             invocationProfile: "pi-heuristic",

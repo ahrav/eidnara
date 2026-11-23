@@ -1233,3 +1233,39 @@ export class TransformCaptureAdmission {
 
 /** Module-wide default owner; tests can inject a separate instance. */
 export const defaultTransformCaptureAdmission = new TransformCaptureAdmission();
+
+/**
+ * Compares values by the tapes a {@link ReferenceableWalk} records. Each `ContentComparison`
+ * instance shares one byte allowance across calls to `same`.
+ */
+export class ContentComparison {
+    constructor(private remaining = TRANSFORM_CAPTURE_MAX_BYTES) {}
+
+    /**
+     * `same` returns `true` when the walk of `other` matches the tape recorded for `value`, and
+     * `false` when a walk refuses its value or the allowance leaves a walk unfinished. The walk
+     * of `value` spends from the allowance; the walk of `other` spends at most what `value`
+     * spent, plus up to that many untaped bytes.
+     */
+    same(value: unknown, other: unknown): boolean {
+        const walker = new ReferenceableWalk(this.remaining, false);
+        try {
+            const tape = walker.recordOrCompare(() => walker.walk(value));
+            const again = new ReferenceableWalk(walker.bytes, false, {
+                untapedMaxBytes: walker.bytes,
+            });
+            again.recordOrCompare(() => again.walk(other), tape);
+            return true;
+        } catch (error) {
+            if (
+                error === CONTENT_CHANGED ||
+                error instanceof SourceRejected ||
+                error instanceof CaptureBudgetExceeded
+            )
+                return false;
+            throw error;
+        } finally {
+            this.remaining -= walker.bytes;
+        }
+    }
+}
