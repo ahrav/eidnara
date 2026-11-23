@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1810`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9318`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:7063`). Every holder runs on a blocking thread, so the gate is never held across an await.
+`capture_commit_gate` is one `Mutex<()>` per daemon handler. `publish` holds it for the frozen-plan read and the Kernel commit (`crates/daemon/src/memory_capture.rs:1817`); the checkpoint and the explicit capture route hold it while enqueuing; the source-capture job receives it through `capture_after_response` (`crates/daemon/src/lib.rs:9334`); session deletion holds it for the whole sweep (`crates/daemon/src/lib.rs:7068`). The failed-command recorder's detached task reads each command result ahead of the gate and holds the gate once per result, for the session-epoch check, the Kernel reads, the commit, and the memo update (`crates/daemon/src/memory_capture/failures.rs:2272`); `a_result_is_judged_under_the_capture_publication_gate` (`crates/daemon/src/memory_auto_delivery_tests.rs:6362`) pauses a judgment at a hook under the gate, ahead of its Kernel reads and its commit, and observes that the gate is held and that a `session.delete` of the session has not finished while the hook blocks, and `a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writes_nothing` (`crates/daemon/src/memory_auto_delivery_tests.rs:5565`) hands a task off, runs a `session.delete` that stops between its two stores, observes that the handed-off task writes nothing, completes the delete on a retry, and then observes that a fresh pass writes. Every holder runs on a blocking thread, so the gate is never held across an await.
 
 ## Failure scenario
 
@@ -18,13 +18,13 @@ A checkpoint or publish admitted before a delete that runs after it.
 
 ## What a test must construct
 
-Hold the gate from a test thread, issue the competing operation, assert it has not committed, release, and assert the order of the two commits.
+Hold the gate from a test thread, issue the competing operation, assert it has not committed, and release. The outcome follows the order of the gate's holders: a capture or source publish handed off before a completed delete commits nothing for the deleted session once it takes the gate, and a pass handed off after the delete publishes as before; a failed-command judgment that holds the gate first commits its fact ahead of the delete, and a failed-command task handed off before the delete, or while it holds the gate, commits nothing once it takes the gate. A delete that ends between its two stores fences the failed-command task alone: a source publish handed off before it may still commit, and the retry of the delete retires what it published.
 
 ## Investigation log
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/lib.rs:25538`, `:25876`, `:26088`, `:26741`, `:25263`; `crates/daemon/src/source_capture_tests.rs:1062`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/lib.rs:25554`, `:25892`, `:26104`, `:26757`, `:25279`; `crates/daemon/src/source_capture_tests.rs:1062`, cited at their current lines and first read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
