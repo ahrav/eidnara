@@ -1913,8 +1913,8 @@ Each `next` call answered `work` or `ready` marks the project as having that
 classifier for 120 seconds. A stage-1 attempt of a project with no such mark is
 decided by the small chat model, as it is for a project that names no
 classifier, so a harness that cannot call a classifier makes no `next` call. A
-request that ends without an answer spends its attempt, and the mark ends when
-its wait lasted ten seconds or more; a `cancelled` that the waiting review
+request whose wait ends with no `submit` spends its attempt, and the mark ends
+when that wait lasted ten seconds or more; a `cancelled` that the waiting review
 took, which a harness sends as it closes, ends the mark too. The small chat model then decides the attempts
 that follow until a harness calls `next` again. A harness that answers these
 methods sends the memory and the messages under review to the classifier's

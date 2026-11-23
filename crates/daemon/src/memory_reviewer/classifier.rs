@@ -23,11 +23,12 @@ use super::stage_one::{
 pub const CLASSIFY_WAIT: Duration = Duration::from_secs(20);
 #[cfg(test)]
 pub const CLASSIFY_WAIT: Duration = Duration::from_secs(2);
-/// A request that ends without an answer after a wait of at least this long shows that the project's harness left: a harness asks for work every two seconds and answers within [`MAX_CLASSIFY_DURATION_MS`].
+/// A wait of at least this long that ends with no submission is taken as the project's harness having left: a harness asks for work every two seconds and submits within [`MAX_CLASSIFY_DURATION_MS`] of its pull plus a short settle grace. A harness still running restores its presence with its next call.
 #[cfg(not(test))]
 pub const ABSENCE_WAIT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 pub const ABSENCE_WAIT: Duration = Duration::from_millis(200);
+const _: () = assert!(ABSENCE_WAIT.as_millis() <= CLASSIFY_WAIT.as_millis());
 /// How long after a pull a project's harness counts as answering classifier work. A harness pulls every few seconds, so the window spans many pulls.
 pub const PRESENCE_WINDOW: Duration = Duration::from_secs(120);
 /// The longest classifier call a work response allows the harness.

@@ -45,7 +45,8 @@ const LEASE_PATTERN = /^[a-f0-9]{32}$/;
 /**
  * The pause between two `next` calls that found no work. A session's daemon calls travel in
  * order, so each `next` call is one short round trip; a review waits 20 seconds for its answer
- * and the daemon counts a harness present for 120 seconds after a call.
+ * and the daemon counts a harness present for 120 seconds after a call it answers `work` or
+ * `ready`.
  */
 const POLL_INTERVAL_MS = 2_000;
 const CALL_TIMEOUT_MS = 10_000;
