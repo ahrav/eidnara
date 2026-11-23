@@ -1863,8 +1863,9 @@ mod credential_form_tests {
         }
     }
 
-    /// The first window ends inside the value of a field line, where `$` holds at the cut.
-    /// The cut prefix is left to the second window, which reads the line whole.
+    /// The first window ends inside the value of a field line, where the line gate reads the
+    /// cut as the end of the input. The cut prefix is left to the second window, which reads
+    /// the line whole.
     #[test]
     fn a_window_end_inside_a_field_value_reports_the_whole_value() {
         let issued = issued();
@@ -2335,7 +2336,7 @@ mod credential_form_tests {
                 "",
                 "<REDACTED:api_token>",
             ),
-            ("password=\n", "Tr0ub4dor&3", "\n", "<REDACTED:password>"),
+            ("password=\n", "Tr0ub4dor", "&3\n", "<REDACTED:password>"),
             ("FERNET_KEY=\n", "q7Lm-2Xv_9Rt4Kp=", "\n", "<REDACTED:key>"),
         ];
         for (before, value, after, placeholder) in cases {
@@ -2406,5 +2407,226 @@ mod credential_form_tests {
             &with_line_break,
             "<REDACTED:basic>",
         );
+    }
+
+    /// A value detached from its `=` is reported where the delimiter that ends it stands
+    /// directly after it: the quote that closes the string around it, a bracket, `;`, `|`.
+    #[test]
+    fn a_detached_value_is_reported_before_the_delimiter_that_ends_it() {
+        let chosen = chosen();
+        for (before, after) in [
+            ("msg=\"login password= ", "\" user=bob"),
+            ("(password= ", ")"),
+            ("password= ", "; echo done"),
+            ("password=\n", "|cat"),
+            ("API_TOKEN=\n", ">"),
+            ("token= ", " \\\n  --flag"),
+            ("password=\t", "\t\n"),
+        ] {
+            let label = if before.contains("TOKEN") || before.contains("token") {
+                if before.contains("API") {
+                    "<REDACTED:api_token>"
+                } else {
+                    "<REDACTED:token>"
+                }
+            } else {
+                "<REDACTED:password>"
+            };
+            assert_redacts(&format!("{before}{chosen}{after}"), &chosen, label);
+        }
+    }
+
+    /// Text after an empty assignment stays as written in two shapes: a word that another
+    /// word follows on its line, and a word that is an assignment of its own.
+    #[test]
+    fn a_word_after_an_empty_assignment_that_starts_other_text_stays_exact() {
+        let chosen = chosen();
+        for input in [
+            format!("api_token= {chosen} --verbose"),
+            format!("api_token=\n{chosen} and more words"),
+            "API_KEY= run command".to_owned(),
+            "API_TOKEN=\nDATABASE_URL=postgres://localhost/db".to_owned(),
+            "API_TOKEN=\nURL=".to_owned(),
+        ] {
+            assert_exact(&input);
+        }
+    }
+
+    /// The assignment below an empty one is read with its own key, whichever way its value
+    /// is attached.
+    #[test]
+    fn an_assignment_below_an_empty_one_is_read_with_its_own_key() {
+        let chosen = chosen();
+        for line in [
+            format!("DB_PASSWORD= {chosen}"),
+            format!("DB_PASSWORD={chosen}"),
+            format!("DB_PASSWORD = {chosen}"),
+        ] {
+            assert_redacts(
+                &format!("API_TOKEN=\n{line}\n"),
+                &chosen,
+                "<REDACTED:db_password>",
+            );
+        }
+        assert_redacts(
+            &format!("secret: password: {chosen}"),
+            &chosen,
+            "<REDACTED:password>",
+        );
+    }
+
+    /// Serialized text writes a line break as `\n`, which ends the shell word an option or a
+    /// client's `-p` takes.
+    #[test]
+    fn an_option_value_ends_at_an_escaped_line_break() {
+        let (issued, chosen) = (issued(), chosen());
+        for (input, value, placeholder) in [
+            (
+                format!("deploy --password {issued}\\nnext line"),
+                issued.clone(),
+                "<REDACTED:password>",
+            ),
+            (
+                format!("tool -token {issued}\\r\\nrest"),
+                issued.clone(),
+                "<REDACTED:token>",
+            ),
+            (
+                format!("mysql -uroot -p{chosen}\\nnext line"),
+                chosen.clone(),
+                "<REDACTED:password>",
+            ),
+            (
+                format!("sshpass -p {chosen}\\nssh deploy@host"),
+                chosen.clone(),
+                "<REDACTED:password>",
+            ),
+        ] {
+            assert_redacts(&input, &value, placeholder);
+        }
+    }
+
+    /// Blanks after a line-final value stay outside the match, so a run of them longer than
+    /// the match bound leaves the verdict as it is, whole or in windows.
+    #[test]
+    fn blank_padding_after_a_line_final_value_stays_outside_the_match() {
+        let chosen = chosen();
+        let padding = " ".repeat(secret_scanner::MAX_MATCH_BYTES + 1024);
+        for (line, placeholder) in [
+            (
+                format!("password: {chosen}{padding}"),
+                "<REDACTED:password>",
+            ),
+            (
+                format!("DB_PASSWORD= {chosen}{padding}"),
+                "<REDACTED:db_password>",
+            ),
+        ] {
+            assert_redacts(&format!("{line}\nnext line\n"), &chosen, placeholder);
+            // The first window ends inside the padding.
+            let window = MAX_REDACTABLE_BYTES;
+            let (text, offset) =
+                text_with_line_at(window - padding.len() / 2, &line, window + window / 2);
+            assert!(offset + line.len() - padding.len() < window && offset + line.len() > window);
+            let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+            assert_eq!(
+                redaction.text,
+                text.replacen(chosen.as_str(), placeholder, 1)
+            );
+        }
+        // A clean field line with the same padding carries no finding in either reading.
+        let line = format!("password: string{padding}");
+        assert_exact(&format!("{line}\nnext line\n"));
+        let window = MAX_REDACTABLE_BYTES;
+        let (text, _) = text_with_line_at(window - padding.len() / 2, &line, window + window / 2);
+        let redaction = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+        assert_eq!(redaction.text, text);
+    }
+
+    /// A line gets the redaction it gets alone wherever the edges of the scan windows fall
+    /// around it: at the first window's end, at that window's edge margin, at the second
+    /// window's start, and at the second window's edge margin.
+    #[test]
+    fn windowed_redaction_agrees_with_the_redaction_of_a_line_alone_at_every_window_edge() {
+        const FILLER: &str = "plain filler line with nothing to report 0123\n";
+        let (issued, chosen) = (issued(), chosen());
+        let lines = [
+            format!("password={chosen}"),
+            format!("api_key = {issued};tail9"),
+            format!("DB_PASSWORD= {chosen}"),
+            format!("DB_PASSWORD=\n{chosen}"),
+            format!("msg=\"login password= {chosen}\" user=bob"),
+            format!("api_token= {chosen} --verbose"),
+            "API_TOKEN=\nDATABASE_URL=postgres://localhost/db".to_owned(),
+            format!("API_TOKEN=\nDB_PASSWORD= {chosen}"),
+            format!("deploy --password {chosen} --verbose"),
+            format!("  password: {chosen}  # note"),
+            format!("password: {chosen}{}", " ".repeat(3000)),
+            format!("X-Api-Key: {issued}"),
+            url("https", "alice", &chosen, "example.org/r.git"),
+            format!("mysql -uroot -p{chosen} app"),
+            format!("sshpass -p {chosen} ssh deploy@host"),
+            format!("Authorization: Basic {}", basic_credentials()),
+            format!("out\\napi_token= {issued}\\nnext line"),
+            format!(
+                "{}\n{}",
+                private_key_header(),
+                [private_key_body_line(), private_key_body_line()].join("\n")
+            ),
+        ];
+        let window = MAX_REDACTABLE_BYTES;
+        let (mut left_to_second, mut kept_by_first) = (0, 0);
+        for line in &lines {
+            let alone = redact_durable_text(&format!("{FILLER}{line}\n{FILLER}")).text;
+            let redacted = &alone[FILLER.len()..alone.len() - FILLER.len() - 1];
+            let size = line.len();
+            for edge in [
+                window - EDGE_MARGIN_BYTES,
+                window,
+                window - WINDOW_OVERLAP_BYTES,
+                window - WINDOW_OVERLAP_BYTES + EDGE_MARGIN_BYTES,
+            ] {
+                for offset in [
+                    edge - size - FILLER.len(),
+                    edge - size - 2,
+                    edge - size,
+                    edge - size / 2,
+                    edge - 1,
+                    edge,
+                    edge + 1,
+                    edge + FILLER.len(),
+                ] {
+                    let (text, start) = text_with_line_at(offset, line, window + window / 2);
+                    let (second_start, _) = scan_windows(&text).nth(1).unwrap();
+                    if start + size > window - EDGE_MARGIN_BYTES {
+                        left_to_second += 1;
+                    } else if start < second_start + EDGE_MARGIN_BYTES {
+                        kept_by_first += 1;
+                    }
+                    let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+                    assert_eq!(
+                        windowed.text,
+                        text.replacen(line.as_str(), redacted, 1),
+                        "{line:?} at {offset}"
+                    );
+                }
+            }
+        }
+        // The sweep puts lines on both sides of each window's keep boundary.
+        assert!(left_to_second >= lines.len() && kept_by_first >= lines.len());
+    }
+
+    /// The `-p` of a `login` client follows the subcommand within 256 bytes of one command.
+    #[test]
+    fn a_client_option_is_read_within_the_gap_its_rule_bounds() {
+        let chosen = chosen();
+        let command = |gap: usize| {
+            format!(
+                "docker login {} -p {chosen} registry.io",
+                "x".repeat(gap - 1)
+            )
+        };
+        assert_redacts(&command(256), &chosen, "<REDACTED:password>");
+        assert_exact(&command(257));
     }
 }

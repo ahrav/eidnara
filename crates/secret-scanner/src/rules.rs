@@ -25,9 +25,9 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "7e62965771b8bb8fe3e5d38e567ec40a98e3d39b6bf2bb5a6550345699be3503";
+    "18c699a510c9c44ffbc5c9d3168252f082fcc891423f7f388877eb8952c8c69e";
 
-const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
+pub(crate) const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
 
 /// Suppresses an upstream-parity candidate whose surroundings show the value is
@@ -224,13 +224,25 @@ pub(crate) struct Rule {
     pub password_valued: bool,
     /// An option whose name begins with `no` is a switch, and the next word is another argument.
     pub negated_switch_gate: bool,
-    /// A detached value that is a line of structure (`}`, `[section]`, `# comment`) is left alone.
+    /// A detached value that is a line of structure (`}`, `[section]`, `# comment`) or an
+    /// assignment of its own (`NAME=value`) is left alone.
     pub structural_value_gate: bool,
+    /// The rule reports an unquoted value by the text that follows it on its line.
+    pub line_tail: Option<LineTail>,
     /// `-p` followed by a port mapping belongs to another program on the line.
     pub port_mapping_gate: bool,
     /// A bare field value that spells a built-in non-null type is a schema declaration.
     pub type_annotation_gate: bool,
     pub encoded_declaration: Vec<u8>,
+}
+
+/// What may stand directly after an unquoted value that the line gate reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LineTail {
+    /// Any delimiter that ends the value run of an assignment: a quote, `;`, `&`, `|`, a bracket.
+    Delimiter,
+    /// The quote that closes the string holding a field (`-H "X-Api-Key: VALUE"`).
+    ClosingQuote,
 }
 
 /// Keyed rules whose unquoted value can be source code naming a secret, as in
@@ -327,7 +339,7 @@ impl RuleSet {
         )
     }
 
-    fn from_sources(
+    pub(crate) fn from_sources(
         upstream: &[u8],
         upstream_digest: &str,
         overlay: &[u8],
@@ -668,13 +680,21 @@ pub(crate) fn compile_rule(
         "generic-api-key" => Some(CodeReferenceGate::GenericApiKey),
         _ => None,
     };
-    let continues_past_semicolons = declaration.name == "magic-keyed-assignment";
+    let continues_past_semicolons = matches!(
+        declaration.name.as_str(),
+        "magic-keyed-assignment" | "magic-detached-assignment"
+    );
     let password_valued = matches!(
         declaration.name.as_str(),
         "magic-client-password-attached" | "magic-client-password-option"
     );
     let negated_switch_gate = declaration.name == "magic-option-value";
     let structural_value_gate = declaration.name == "magic-detached-assignment";
+    let line_tail = match declaration.name.as_str() {
+        "magic-detached-assignment" => Some(LineTail::Delimiter),
+        "magic-field-value" => Some(LineTail::ClosingQuote),
+        _ => None,
+    };
     let port_mapping_gate = password_valued;
     let type_annotation_gate = declaration.name == "magic-field-value";
     let encoded_declaration =
@@ -694,6 +714,7 @@ pub(crate) fn compile_rule(
         password_valued,
         negated_switch_gate,
         structural_value_gate,
+        line_tail,
         port_mapping_gate,
         type_annotation_gate,
         encoded_declaration,
@@ -1130,11 +1151,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "01ba785aa4277f83bd722ae99d05965633000bd7ce0159a291c5b4efcc06136f",
+                "ca3324c7df8e53ae57d784eab487b569a6f5856b2f93a2a4b0e50c774bbc07d4",
             ),
             (
                 ScanProfile::Comprehensive,
-                "9e51af4c98ba3b71da46cc0aa5ccb9bb20f325c600b3d1ab3756654e1139cca1",
+                "36ef9c45afddea188da383240f50be63244b9cf461fdc19b8fc9844329b7d9a9",
             ),
         ] {
             let digest = rules
