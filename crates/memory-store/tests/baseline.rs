@@ -88,6 +88,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "memory_reviewer_jobs"),
     ("table", "memory_reviewer_metadata_totals"),
     ("table", "memory_reviewer_receipts"),
+    ("table", "memory_reviewer_retired_generation"),
     ("table", "memory_reviewer_selection_cursors"),
     ("table", "memory_reviewer_store_identity"),
     ("table", "note_deliveries"),

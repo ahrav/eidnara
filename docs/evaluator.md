@@ -2957,8 +2957,8 @@ not a panic. `verdict` and `validate` re-check the step, commit, and R24
 ordering over the whole ledger, with every cumulative count
 (`commit_log_rows`, `terminal_jobs`, `admitted_total`, `r24_refusals`, and
 frozen plus terminal pages) never receding (`CountNotMonotonic { step,
-field }`, the commit log being append-only and job and page rows permanent
-receipts) and `admitted_total` equal to pending plus terminal jobs
+field }`, the commit log being append-only and job and page rows staying for
+the ninety-day retention window, far past a run) and `admitted_total` equal to pending plus terminal jobs
 (`AdmittedMismatch`), and refuse a negative
 commit sequence (`CommitSeqNegative`, since a negative baseline would buy
 allowance for commits that never happened), because a deserialized
@@ -3445,8 +3445,8 @@ settled by abstention as well (a handed one by the coordinator at once; its
 passes count toward the next quiescence's witness and draw on that
 quiescence's `reviewer_coordinator_passes`, so the drain's own settle runs
 only what the cap-triggered one left); the pending queue then holds one slot free and
-every later admission becomes a permanent receipt charge, which is how a long
-history reaches the receipt quota. The reviewer
+every later admission holds a receipt charge for the ninety-day retention
+window, which is how a long history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with
 the wall clock; every other time the drive passes is the event's own.
 

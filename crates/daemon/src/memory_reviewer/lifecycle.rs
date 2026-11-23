@@ -359,7 +359,7 @@ fn maintenance_slice(
     Ok(Some(advanced))
 }
 
-/// One cleanup-and-sample pass: the Memory Store closes expired jobs and selections, the Kernel runs one maintenance slice when it is ready, and the facts are sampled. `last_sampled_at_ms` is kept on the unavailable block when a step fails. `cancelled` is read before every blocking step; `None` means it fired, and the steps already taken keep their effects.
+/// One cleanup-and-sample pass: the Memory Store closes expired jobs and selections and retires the jobs and pages settled a retention window ago, the Kernel runs one maintenance slice when it is ready, and the facts are sampled. `last_sampled_at_ms` is kept on the unavailable block when a step fails. `cancelled` is read before every blocking step; `None` means it fired, and the steps already taken keep their effects.
 pub fn sweep_and_sample(
     store: &MemoryStore,
     kernel: Option<&kernel::KernelStore>,
@@ -1101,6 +1101,19 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // A pass cancelled after its expiry step returns before the retirement and leaves the job.
+        let checks = std::cell::Cell::new(0);
+        let cancelled_after_expiry = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 1
+        };
+        assert!(sweep_and_sample(&store, None, retire_at, None, &cancelled_after_expiry).is_none());
+        assert!(
+            store
+                .lookup_memory_reviewer_job("git:p", &job.causal_identity)
+                .unwrap()
+                .is_some()
+        );
         let pass =
             sweep_and_sample(&store, None, retire_at, None, &|| false).expect("not cancelled");
         assert!(pass.healthy);
@@ -1112,8 +1125,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // A pass cancelled before the retirement writes nothing.
-        assert!(sweep_and_sample(&store, None, retire_at, None, &|| true).is_none());
     }
 
     /// The sweep closes reserved work past its deadline with a recorded outcome, leaves live work alone, and the sample reports every count content-free; a staged review input past its deadline is abandoned by the Kernel's own maintenance in the same pass.

@@ -654,7 +654,9 @@ pub fn begin_memory_reviewer_receipt_in_tx(
              project, causal_identity, database_incarnation_id, kernel_incarnation_id,
              authority_generation, authority_context_store, state, generation, claim_id,
              run_deadline_ms, execution_cutoff_ms, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?10, 'in_progress', 1, ?6, ?7, ?8, ?9, ?9)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?10, 'in_progress',
+                   1 + COALESCE((SELECT generation FROM memory_reviewer_retired_generation WHERE id = 0), 0),
+                   ?6, ?7, ?8, ?9, ?9)",
         params![
             project,
             causal_identity,

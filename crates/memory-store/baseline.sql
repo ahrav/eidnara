@@ -490,6 +490,14 @@ CREATE TRIGGER memory_reviewer_store_identity_no_reinsert BEFORE INSERT ON memor
 WHEN EXISTS (SELECT 1 FROM memory_reviewer_store_identity)
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
+-- The highest generation a retired receipt reached, absent until the first
+-- retirement. A receipt begins one above it, so a job enqueued again for a
+-- retired job's inputs runs under a generation its Kernel holds never carried.
+CREATE TABLE memory_reviewer_retired_generation (
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            generation INTEGER NOT NULL CHECK (generation >= 1)
+        );
+
 -- `job_id` is the task id a MemoryReviewer claim persists; a declared integer key survives a
 -- rebuild, where a hidden rowid may be renumbered. The key counts upward for the life of the
 -- file, so a claim that names a retired job names no later one.
@@ -544,8 +552,9 @@ END;
 -- selection deadline. `state` moves frozen -> enqueued | expired | failed_slot; only
 -- `frozen` counts against capacity, and a capacity deferral leaves it frozen. A frozen
 -- page keeps its references and continuation cursor so an enqueue commits both or
--- neither; a terminal row drops both and keeps its receipt charge, so the table is
--- bounded by the metadata quota the same way `memory_reviewer_jobs` is.
+-- neither; a terminal row drops both and keeps its receipt charge until the
+-- retirement sweep deletes it after the jobs it enqueued, so the table is bounded
+-- by the metadata quota the same way `memory_reviewer_jobs` is.
 CREATE TABLE memory_reviewer_frozen_selections (
             project TEXT NOT NULL CHECK (length(project) > 0),
             slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),

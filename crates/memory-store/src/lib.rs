@@ -767,7 +767,7 @@ pub struct MemoryReviewerStatusFacts {
     pub attempts_open: u64,
     pub receipts_in_progress: u64,
     pub receipts_complete: u64,
-    /// Permanent receipt charges every admitted job keeps; these never shrink for the incarnation.
+    /// Receipt charges of the jobs and frozen selection pages the store holds; a charge returns when the retirement sweep deletes its row.
     pub receipt_charge_bytes: u64,
     /// Temporary allowances still held by non-terminal jobs and frozen selection pages; released when the work is terminal.
     pub allowance_bytes: u64,

@@ -248,6 +248,11 @@ fn reserved_job_at(store: &MemoryStore, candidate: &str, now_ms: i64) -> String 
 }
 
 fn ready_job(store: &MemoryStore, candidate: &str) -> String {
+    ready_job_at(store, candidate, T0)
+}
+
+/// Reserves and activates a job for `candidate` at `now_ms` and returns its causal identity.
+fn ready_job_at(store: &MemoryStore, candidate: &str, now_ms: i64) -> String {
     let producer = ProducerBinding {
         producer: "history-summarizer".to_string(),
         firing_id: format!("firing-{candidate}"),
@@ -264,7 +269,7 @@ fn ready_job(store: &MemoryStore, candidate: &str) -> String {
         policy_versions: BTreeMap::new(),
     };
     let ReserveOutcome::Reserved(job) = store
-        .reserve_memory_reviewer_job(PROJECT, &producer, &inputs, T0)
+        .reserve_memory_reviewer_job(PROJECT, &producer, &inputs, now_ms)
         .unwrap()
     else {
         panic!("fresh inputs reserve")
@@ -279,7 +284,7 @@ fn ready_job(store: &MemoryStore, candidate: &str) -> String {
                 starting_references: vec![],
                 question_template: "extracted_facts".to_string(),
             },
-            T0,
+            now_ms,
         )
         .unwrap();
     job.causal_identity
@@ -4134,16 +4139,19 @@ fn the_delete_guards_hold_a_receipt_in_progress_and_release_a_completed_one() {
     let MemoryReviewerBeginOutcome::Begun(begun) = fixture.begin(&claim, T0) else {
         panic!("the first claim begins the receipt")
     };
-    let DispatchOutcome::Handed { attempt_index, .. } =
-        fixture.dispatch(begun.generation, &claim, T0 + 1).unwrap()
-    else {
-        panic!("a fresh receipt hands its first attempt off")
-    };
     let delete = |table: &str| {
         fixture.store.execute_tag_sql_for_test(&format!(
             "DELETE FROM {table} WHERE causal_identity = '{}'",
             fixture.identity
         ))
+    };
+    // A receipt with no attempt yet has the guard alone between it and a delete.
+    let refused = format!("{:?}", delete("memory_reviewer_receipts").unwrap_err());
+    assert!(refused.contains("in-progress"), "{refused}");
+    let DispatchOutcome::Handed { attempt_index, .. } =
+        fixture.dispatch(begun.generation, &claim, T0 + 1).unwrap()
+    else {
+        panic!("a fresh receipt hands its first attempt off")
     };
     let receipts = || {
         fixture
@@ -4306,8 +4314,80 @@ fn a_retired_job_takes_the_scan_audit_of_its_writes_with_it() {
         1,
         "the claim's copy stays for the claim's retention"
     );
+    let job_owners: i64 = fixture
+        .store
+        .with_conn_for_test(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM scan_domain_owners WHERE owner_kind = 'memory_reviewer_jobs'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        job_owners, 0,
+        "every owner of the retired job's own writes is gone"
+    );
     assert!(owners_left < owners, "{owners_left} of {owners} owners");
     assert!(scans_left < scans, "{scans_left} of {scans} scans");
+}
+
+/// A job enqueued again for a retired job's inputs is a new task under a later job id, and its receipt begins above the retired receipt's generation. The Kernel names a run's holds by causal identity and generation, so the second review runs under holds of its own.
+#[test]
+fn a_job_enqueued_again_after_retirement_begins_above_the_retired_generation() {
+    use memory_store::memory_reviewer_jobs::{
+        MEMORY_REVIEWER_QUEUE_LIFETIME_MS, MEMORY_REVIEWER_SETTLED_RETENTION_MS,
+    };
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(begun) = fixture.begin(&claim, T0) else {
+        panic!("the first claim begins the receipt")
+    };
+    fixture.completed_attempt(begun.generation, &claim, T0 + 1);
+    complete(
+        &fixture,
+        &fixture.identity,
+        &claim,
+        "completion-1",
+        "worker-a",
+        begun.generation,
+        MemoryReviewerReceiptTerminal::Complete,
+        Some(&selection()),
+        T0 + 3,
+    )
+    .unwrap();
+    let job_id = |fixture: &Fixture| -> i64 {
+        fixture
+            .store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT job_id FROM memory_reviewer_jobs WHERE causal_identity = ?1",
+                    [&fixture.identity],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    };
+    let first = job_id(&fixture);
+    let retire_at = T0 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    assert_eq!(
+        fixture
+            .store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        1
+    );
+    let again = ready_job_at(&fixture.store, "cand-1", retire_at + 1);
+    assert_eq!(
+        again, fixture.identity,
+        "the same inputs name the same identity"
+    );
+    assert!(job_id(&fixture) > first, "a later job takes a later id");
+    let claim = fixture.claim("acq-2", "worker-a", retire_at + 2).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(second) = fixture.begin(&claim, retire_at + 2) else {
+        panic!("the new job's first claim begins a receipt")
+    };
+    assert_eq!(second.generation, begun.generation + 1);
 }
 
 /// One retirement sweep deletes at most its batch, oldest queue deadline first, and the next sweep takes the rest.

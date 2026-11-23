@@ -1454,6 +1454,86 @@ fn a_cursor_for_an_overlong_project_is_refused_before_it_is_written() {
     assert_eq!(rows, 0);
 }
 
+/// A terminal page leaves the store after the jobs it enqueued: the retirement sweep deletes the page one queue lifetime after its jobs retire, with the scan audit of its references, and its receipt charge returns. A project's metadata therefore holds the pages and jobs of one retention window.
+#[test]
+fn a_terminal_page_is_retired_after_the_jobs_it_enqueued() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1"), inputs("cand-2")],
+        next_cursor: None,
+    };
+    let frozen = store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let outcome = store
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, EnqueueOutcome::Enqueued { jobs: 2, .. }),
+        "{outcome:?}"
+    );
+    let count = |sql: &str| -> i64 {
+        store
+            .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .unwrap()
+    };
+    let page_rows = || count("SELECT COUNT(*) FROM memory_reviewer_frozen_selections");
+    let owners = || count("SELECT COUNT(*) FROM scan_domain_owners");
+    let charged = || {
+        store
+            .memory_reviewer_headroom("proj")
+            .unwrap()
+            .project_metadata_bytes
+    };
+    assert!(
+        owners() > 0,
+        "the page owns the scan audit of its references"
+    );
+
+    // The queue deadline closes both jobs, and the first retirement takes them. The page is one queue lifetime short of its own window.
+    let jobs_retire_at =
+        NOW + 1 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    store.expire_memory_reviewer_work(jobs_retire_at).unwrap();
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(jobs_retire_at)
+            .unwrap(),
+        2
+    );
+    assert_eq!(page_rows(), 1);
+    assert_eq!(charged(), FROZEN_PAGE_RECEIPT_CHARGE_BYTES);
+    assert!(owners() > 0);
+
+    let page_retires_at = frozen.selection_deadline_ms
+        + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+        + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(page_retires_at - 1)
+            .unwrap(),
+        0
+    );
+    assert_eq!(page_rows(), 1, "the page stays inside its window");
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(page_retires_at)
+            .unwrap(),
+        0,
+        "the sweep counts jobs"
+    );
+    assert_eq!(page_rows(), 0);
+    assert_eq!(charged(), 0, "the page returned its charge");
+    assert_eq!(
+        owners(),
+        0,
+        "the audit of the page's references went with it"
+    );
+}
+
 /// The transaction-local enqueue writes nothing when it defers: a caller that commits its own transaction around a `Deferred` outcome must find the page still frozen with its references, not a committed `enqueued` row without jobs.
 #[test]
 fn a_deferred_enqueue_leaves_the_page_frozen_even_when_its_transaction_commits() {
