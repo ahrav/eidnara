@@ -1032,7 +1032,21 @@ sentence goes on (a terminator is `.`, `!`, a question mark of the statement
 rule's list, or one of `。`, `｡`, `．`, `！`, `।`, `॥`, `۔`, `…`, `։`, `።`,
 `၊`, `။`, `។`, `‼`, `﹒`, `․`, `﹗`); when the
 occurrences the search yields lie in qualifying sentences that differ; and
-when it and a proposal of another category name one sentence. A proposal that
+when it and a proposal of another category name one sentence. The widened
+sentence does not qualify at an occurrence where one of its two edges has a
+quotation mark of its paragraph before it and another at or after it. Such an
+edge may lie inside a quoted literal of several sentences, and the words
+around a literal can forbid what it says: for
+`The banner must never read "Ready! Enable sync by default! Done."`, a
+quotation of `Enable sync` is stored as proposed. The marks are compared by
+position and are not paired, so an edge between two separate literals is
+excluded too, and a sentence widens when every quotation mark of its
+paragraph is on one side of each of its edges. The quotation marks are `"`,
+`'`, `«`, `»`, `‹`, `›`, `‘`, `’`, `‚`, `‛`, `“`, `”`, `„`, `‟`, `❛`, `❜`,
+`❝`, `❞`, `❮`, `❯`, `「`, `」`, `『`, `』`, `〝`, `〞`, `〟`, `＂`, `＇`, `｢`,
+and `｣`; a `'` or `’` between two letters is an apostrophe. Such an
+occurrence yields no sentence, and the quotation's other occurrences are
+judged on their own. A proposal that
 names `replaces`, `also_replaces`, or `contests`, and one whose replacement
 the parser released as a contest, is stored as proposed or, when its
 quotation joins a run (below), with the joined text, so only a
@@ -1208,7 +1222,9 @@ and approves no quotation that fails it, whatever speaker the extractor names.
 A quotation mark, an apostrophe, and a mark of measure are characters of a
 sentence like any other to the structure check: a user writes them around a
 literal (`Prefix every test name with 'it_'.`), in a possessive, and after a
-number, and they do not show who is speaking. Plain prose leaves out code fences
+number, and they do not show who is speaking. The widening rule (above) alone
+reads quotation marks, and only so that neither edge of a widened sentence
+splits a quoted literal. Plain prose leaves out code fences
 (closed by a run of the opener's character at least as long), each block a
 line holding only a markup tag opens through the last line closing that tag
 (such as `<context_researcher-augmentation>`), every paragraph holding a list

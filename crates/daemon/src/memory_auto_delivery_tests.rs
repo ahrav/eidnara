@@ -5574,6 +5574,50 @@ async fn a_cut_quotation_widens_only_for_a_user_message_held_whole() {
     );
 }
 
+#[tokio::test]
+async fn a_clause_cut_from_a_quoted_literal_is_not_delivered_as_the_users_sentence() {
+    let clause = "Enable sync";
+    let sentence = "Enable sync by default!";
+    for (message, widens) in [
+        (
+            "The banner must never read \"Ready! Enable sync by default! Done.\"",
+            false,
+        ),
+        ("Ready! Enable sync by default! Done.", true),
+    ] {
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(&handler, FIRST, "s1", &[("m1", "user", message)], |_, _| {
+            vec![fact(clause)]
+        })
+        .await;
+        let (stored, visibility) = if widens {
+            (sentence, "visible")
+        } else {
+            (clause, "labeled")
+        };
+        assert_eq!(
+            explicit_search(&handler, (SECOND, "s2"), &project).await,
+            [(stated(stored), visibility.to_string())],
+            "{message:?}"
+        );
+        assert_eq!(
+            live_statement_records(&handler, &project),
+            if widens {
+                vec![stated(sentence)]
+            } else {
+                vec![]
+            },
+            "{message:?}"
+        );
+        let served = serve(&handler, SECOND, "s2").await;
+        assert_eq!(
+            project_memory_block(&served).is_some_and(|block| block.contains(sentence)),
+            widens,
+            "{message:?}"
+        );
+    }
+}
+
 /// The extractor cuts a clause out of a negated sentence and names the
 /// approved statement of that clause as the memory that already holds it.
 /// The widened sentence is another text, so it is written as the user's own

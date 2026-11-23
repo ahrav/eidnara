@@ -2320,6 +2320,7 @@ pub(super) struct Prose<'a> {
     layout: std::cell::OnceCell<ProseLayout>,
     colons: std::cell::OnceCell<Vec<usize>>,
     lowercase: std::cell::OnceCell<Vec<bool>>,
+    quotation_marks: std::cell::OnceCell<Vec<Option<(usize, usize)>>>,
 }
 
 /// Byte ranges of one message, each list ascending and disjoint.
@@ -2336,6 +2337,7 @@ impl<'a> Prose<'a> {
             layout: std::cell::OnceCell::new(),
             colons: std::cell::OnceCell::new(),
             lowercase: std::cell::OnceCell::new(),
+            quotation_marks: std::cell::OnceCell::new(),
         }
     }
 
@@ -2376,6 +2378,22 @@ impl<'a> Prose<'a> {
                     self.text[first..last]
                         .find([':', '\u{ff1a}'])
                         .map_or(last, |at| first + at)
+                })
+                .collect()
+        })
+    }
+
+    /// For each paragraph, the offsets of its first and last quotation mark
+    /// ([`quotation_mark_bounds`]), or `None` when it holds none.
+    fn quotation_marks(&self) -> &[Option<(usize, usize)>] {
+        self.quotation_marks.get_or_init(|| {
+            self.paragraphs()
+                .iter()
+                .map(|&(first, last)| {
+                    #[cfg(test)]
+                    QUOTATION_BYTES.with(|bytes| bytes.set(bytes.get() + (last - first)));
+                    quotation_mark_bounds(&self.text[first..last])
+                        .map(|(opening, closing)| (first + opening, first + closing))
                 })
                 .collect()
         })
@@ -2873,6 +2891,11 @@ fn following_text(after: &str) -> &str {
 /// words hold such a period, another terminator, or a line break is kept as
 /// quoted (see [`adds_plain_words`]).
 ///
+/// An exclamation or question mark also ends a sentence inside a quoted
+/// literal, as in `The banner must never read "Ready! Enable sync! Done."`.
+/// [`splits_quoted_literal`] identifies occurrences to skip when widening
+/// to sentence boundaries splits a quoted literal.
+///
 /// When the quotation occurs in more than one sentence, the result is the
 /// one statement every qualifying occurrence the search yields widens to;
 /// occurrences that widen to different statements leave the quotation as
@@ -2987,6 +3010,7 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
             && reads_as_statement(statement)
             && !inside_code_span(code_spans, first + from)
             && !inside_code_span(code_spans, first + to)
+            && !splits_quoted_literal(prose.quotation_marks()[cursor], first + from, first + to)
             && bounds_sentences(
                 paragraph,
                 from,
@@ -3008,6 +3032,53 @@ pub(super) fn enclosing_statement<'t>(prose: &Prose<'t>, quote: &str) -> Option<
         }
     }
     found
+}
+
+/// The check treats the paragraph's first and last quotation marks as one
+/// span. This keeps multi-sentence quotations together and also flags
+/// boundaries between separate quotations.
+fn splits_quoted_literal(marks: Option<(usize, usize)>, from: usize, to: usize) -> bool {
+    marks.is_some_and(|(first, last)| [from, to].iter().any(|&edge| first < edge && edge <= last))
+}
+
+/// Returns byte offsets. Between two letters, `'` and `’` count as
+/// apostrophes.
+fn quotation_mark_bounds(paragraph: &str) -> Option<(usize, usize)> {
+    let mut marks = paragraph.char_indices().filter(|&(at, ch)| {
+        is_quotation_mark(ch)
+            && !(matches!(ch, '\'' | '\u{2019}')
+                && paragraph[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphabetic)
+                && paragraph[at + ch.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphabetic))
+    });
+    let first = marks.next()?.0;
+    Some((first, marks.next_back().map_or(first, |(at, _)| at)))
+}
+
+fn is_quotation_mark(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\''
+            | '\u{ab}'
+            | '\u{bb}'
+            | '\u{2018}'..='\u{201f}'
+            | '\u{2039}'
+            | '\u{203a}'
+            | '\u{275b}'..='\u{275e}'
+            | '\u{276e}'
+            | '\u{276f}'
+            | '\u{300c}'..='\u{300f}'
+            | '\u{301d}'..='\u{301f}'
+            | '\u{ff02}'
+            | '\u{ff07}'
+            | '\u{ff62}'
+            | '\u{ff63}'
+    )
 }
 
 /// The length of the `.` or `!` that directly follows a quotation which
@@ -3130,6 +3201,8 @@ thread_local! {
     static EDGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// How many bytes this thread read to decide a paragraph's casing.
     static CASING_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many bytes this thread examined for a paragraph's quotation marks.
+    static QUOTATION_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn prose_paragraphs(text: &str) -> ProseLayout {
@@ -5652,6 +5725,93 @@ mod tests {
         ));
     }
 
+    /// A sentence that contains only part of a quoted literal is ineligible
+    /// for widening: the surrounding text can forbid what the literal says.
+    #[test]
+    fn a_quotation_cut_from_a_quoted_literal_widens_to_no_sentence_of_the_literal() {
+        let mut wrong = Vec::new();
+        for (text, quote, statement) in [
+            (
+                "The banner must never read \"Ready! Enable sync by default! Done.\"",
+                "Enable sync",
+                None,
+            ),
+            (
+                "\"Enable sync by default! Done.\" must never be the banner.",
+                "sync by default",
+                None,
+            ),
+            (
+                "Never show \"Ready! Enable sync by default\" in the banner! Thanks.",
+                "Enable sync",
+                None,
+            ),
+            (
+                "The banner must never read 'Ready! Enable sync by default! Done.'",
+                "Enable sync",
+                None,
+            ),
+            (
+                "The banner must never read \u{201c}Ready! Enable sync by default! Done.\u{201d}",
+                "Enable sync",
+                None,
+            ),
+            (
+                "The banner must never read \u{2018}Ready! Enable sync by default! Done.\u{2019}",
+                "Enable sync",
+                None,
+            ),
+            (
+                "The banner must never read \u{ab}Ready! Enable sync by default! Done.\u{bb}",
+                "Enable sync",
+                None,
+            ),
+            (
+                "Use the 15\" screen! \"Enable sync by default! Done.",
+                "sync by default",
+                None,
+            ),
+            // Both boundaries of the widened statement fall outside quoted
+            // literals.
+            (
+                "Thanks for the \"fix\"! Never deploy on Fridays.",
+                "deploy on Fridays",
+                Some("Never deploy on Fridays."),
+            ),
+            (
+                "Never deploy on Fridays! The label reads \"prod\".",
+                "deploy on Fridays",
+                Some("Never deploy on Fridays!"),
+            ),
+            (
+                "Great! The label must read \"Enable sync\" in prod! Thanks.",
+                "must read \"Enable sync\"",
+                Some("The label must read \"Enable sync\" in prod!"),
+            ),
+            (
+                "\"Enable sync\" is the label! Thanks.",
+                "is the label",
+                Some("\"Enable sync\" is the label!"),
+            ),
+            (
+                "Don't worry! Never deploy on Fridays! It\u{2019}s settled.",
+                "deploy on Fridays",
+                Some("Never deploy on Fridays!"),
+            ),
+            (
+                "Enable sync by default! The banner must never read \"Ready! Enable sync by default! Done.\"",
+                "Enable sync",
+                Some("Enable sync by default!"),
+            ),
+        ] {
+            let widened = enclosing_statement(&Prose::of(text), quote);
+            if widened != statement {
+                wrong.push(format!("{quote:?} in {text:?}: {widened:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// For every substring of several messages, a widened statement holds
     /// the quotation, comes from the message, and passes the strict rule the
     /// publication step applies.
@@ -7027,6 +7187,25 @@ mod tests {
         );
         let labeled = format!("Note: {text}");
         assert!(!quotes_whole_statements(&Prose::of(&labeled), "A."));
+    }
+
+    #[test]
+    fn a_paragraph_is_scanned_for_its_quotation_marks_once_however_often_the_quote_occurs() {
+        for (sentence, statement) in [
+            ("Never use tabs! ", Some("Never use tabs!")),
+            ("Never use \"x\"! ", None),
+        ] {
+            let text = sentence.repeat(2_000);
+            let prose = Prose::of(&text);
+            let before = QUOTATION_BYTES.with(std::cell::Cell::get);
+            assert_eq!(enclosing_statement(&prose, "use"), statement);
+            assert_eq!(enclosing_statement(&prose, "Never"), statement);
+            assert_eq!(
+                QUOTATION_BYTES.with(std::cell::Cell::get) - before,
+                text.len(),
+                "one scan of the one paragraph serves every occurrence and both quotations"
+            );
+        }
     }
 
     #[test]
