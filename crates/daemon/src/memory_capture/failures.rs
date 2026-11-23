@@ -204,6 +204,9 @@ struct Reported {
     /// The exit status that echo printed in the output's last non-empty
     /// line, with the bytes of that line.
     printed: Option<(i64, Range<usize>)>,
+    /// The bytes of the line Pi cut at its start, which names no path and
+    /// no error: its first word may be the end of a longer one.
+    fragment: Option<Range<usize>>,
     /// The lines that state an error, in output order, and then the closing
     /// lines that are none of them, each with the bytes it stands at. A
     /// text that several chosen lines share stands once.
@@ -276,8 +279,8 @@ struct Command {
     /// [`ARGUMENTS_NOTE`] when the command line holds more; [`LEFT_OUT`]
     /// when the command line begins with no plain word.
     shown: String,
-    /// The digest of the project and the redacted, normalized command line,
-    /// which names the lineage of the command's records.
+    /// The digest that names the lineage of the command's records (see
+    /// [`command_named`]).
     digest: String,
 }
 
@@ -937,12 +940,6 @@ fn plain_word(word: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_./+-".contains(&byte))
 }
 
-/// The redactor's text of `text`, or `None` when its scan does not finish.
-fn redacted(text: &str) -> Option<String> {
-    let scanned = context_core::redaction::redact_windowed_durable_text(text, usize::MAX);
-    Some(scanned.ok()?.text)
-}
-
 /// What a record shows of a command whose words are `words`: the first
 /// when it is a plain word, the second when it is a plain word that begins
 /// with no `-`, and [`ARGUMENTS_NOTE`] when the command holds more than
@@ -972,10 +969,17 @@ fn shown_of(words: &[&str], more: bool) -> String {
 /// lines that differ in a credential the redactor finds are one command.
 ///
 /// The digest names the command line as it is written: the SHA-256 of the
-/// project and the whole redacted line, each behind its length. Two
-/// spellings of one operation, such as a run with and without a leading
-/// `cd` or with other spacing, are two commands with a record each, so a
-/// run of one spelling changes the record of that spelling alone.
+/// project, the whole redacted line, and the mark of how an unmarked result
+/// of the command line is read (see [`Reading`]), each behind its length,
+/// and then, for each finding of the redactor in order, the count of the
+/// command line's bytes between the finding before it and that finding.
+/// Two spellings of one operation, such as a run with and without a
+/// leading `cd` or with other spacing, are two commands with a record
+/// each, so a run of one spelling changes the record of that spelling
+/// alone. The counts hold no byte and no length of a finding, so a
+/// credential of another length keeps the digest, and a command line that
+/// spells the redactor's mark itself has another digest than one in which
+/// the redactor wrote that mark.
 ///
 /// The record shows the program and its first plain operand. For a command
 /// line the reader follows (see [`commands_of`]) they are the first two
@@ -987,11 +991,26 @@ fn shown_of(words: &[&str], more: bool) -> String {
 /// the record. The words shown are a reading aid: the digest alone names
 /// the command.
 fn command_named(scope: &str, command: &str) -> Option<Command> {
-    let line = redacted(command)?;
+    let scanned = context_core::redaction::redact_windowed_durable_text(command, usize::MAX);
+    let scanned = scanned.ok()?;
+    let line = scanned.text;
     let mut hash = Sha256::new();
-    for part in [scope, line.as_str()] {
+    for part in [scope, line.as_str(), Reading::of(command).mark()] {
         hash.update((part.len() as u64).to_le_bytes());
         hash.update(part.as_bytes());
+    }
+    // The bytes between two findings place each of the redactor's marks,
+    // so a mark the command line itself spells is no finding's mark.
+    let mut findings: Vec<(usize, usize)> = scanned
+        .detections
+        .iter()
+        .map(|finding| (finding.offset, finding.offset + finding.length))
+        .collect();
+    findings.sort_unstable();
+    let mut end = 0;
+    for (start, next) in findings {
+        hash.update((start.saturating_sub(end) as u64).to_le_bytes());
+        end = end.max(next);
     }
     let digest = format!("{:x}", hash.finalize())[..32].to_owned();
     let shown = match commands_of(&line) {
@@ -1150,29 +1169,70 @@ fn printed_word(word: &str, out: &mut String) -> Option<()> {
 
 /// The first words of the commands that end or replace the shell, run code
 /// the reader does not see, set code to run at the shell's exit, or run
-/// another command by its name. After one of them the last line of the
+/// another command behind them. After one of them the last line of the
 /// output is no sure line of a later `echo`.
-const SHELL_CONTROL: [&str; 10] = [
-    "exec", "exit", "return", "logout", "trap", "source", ".", "eval", "command", "builtin",
+const SHELL_CONTROL: [&str; 11] = [
+    "exec", "exit", "return", "logout", "trap", "source", ".", "eval", "command", "builtin", "time",
 ];
 
 /// Whether a command before the final echo keeps the shell running as far
-/// as its text shows: its first word after the words that open with a
-/// `NAME=` is a plain word and none of [`SHELL_CONTROL`], or it holds such
-/// assignments alone. A first word that is quoted, escaped, expanded, or a
-/// redirection names no program the reader can tell.
+/// as its text shows: its first word after its leading assignments (see
+/// [`assigns`]) is a plain word and none of [`SHELL_CONTROL`], or it holds
+/// such assignments alone. A first word that is quoted, escaped, expanded,
+/// or a redirection, and an assignment word that holds a `<` or a `>`,
+/// names no program the reader can tell.
 fn keeps_shell(step: &Step<'_>) -> bool {
-    let opens_assignment = |word: &str| {
-        let name = word
-            .bytes()
-            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            .count();
-        name > 0 && !word.as_bytes()[0].is_ascii_digit() && word[name..].starts_with('=')
-    };
     step.words
         .iter()
-        .find(|word| !opens_assignment(word))
+        .find(|word| !assigns(word))
         .is_none_or(|word| plain_word(word) && !SHELL_CONTROL.contains(word))
+}
+
+/// Whether the last command of a command line is an `echo` of a status
+/// parameter in a form the reader does not follow: the command holds a
+/// status parameter and a word whose text, without quotes and a leading
+/// backslash, is `echo`. The line that echo prints carries digits the
+/// shell may have changed, so the output is read for no status line.
+fn echoes_unfollowed(steps: &[Step<'_>]) -> bool {
+    steps.last().is_some_and(|last| {
+        last.statuses > 0
+            && last
+                .words
+                .iter()
+                .any(|word| word.trim_matches(['\'', '"']).trim_start_matches('\\') == "echo")
+    })
+}
+
+/// How an unmarked result of a command line is read, by the command line's
+/// own text.
+enum Reading {
+    /// By the number its final `echo` printed, between these two texts
+    /// (see [`status_echo`]).
+    Echo(String, String),
+    /// By the tool's status alone (see [`echoes_unfollowed`]).
+    Unfollowed,
+    /// By a status line of the output.
+    Lines,
+}
+
+impl Reading {
+    fn of(command: &str) -> Self {
+        let steps = commands_of(command);
+        match steps.as_deref().and_then(status_echo) {
+            Some((before, after)) => Self::Echo(before, after),
+            None if steps.as_deref().is_some_and(echoes_unfollowed) => Self::Unfollowed,
+            None => Self::Lines,
+        }
+    }
+
+    /// The reading's mark in a command's digest.
+    const fn mark(&self) -> &'static str {
+        match self {
+            Self::Echo(..) => "echo",
+            Self::Unfollowed => "unfollowed",
+            Self::Lines => "lines",
+        }
+    }
 }
 
 /// The text a command line's final `echo` prints before and after the exit
@@ -1193,8 +1253,8 @@ fn keeps_shell(step: &Step<'_>) -> bool {
 ///   text shows (see [`keeps_shell`]).
 ///
 /// The texts are returned with whitespace runs as single spaces. `None`
-/// for every other command line, whose exit status the tool's status alone
-/// reports. The form is read from the text of the call's command line:
+/// for every other command line, which has no followed echo (see
+/// [`Reading`]). The form is read from the text of the call's command line:
 /// code the command line runs from another file, and code a harness runs
 /// in the same shell before the command line, can still end the shell or
 /// print after the echo.
@@ -1385,7 +1445,8 @@ const HARNESS_UNSTARTED: [&str; 4] = [
 /// the command's own outcome unknown: the result carries the harness's
 /// error mark and its last non-empty line begins with one of
 /// [`HARNESS_ENDED`], its whole text is [`HARNESS_BLOCKED`],
-/// `Tool <name> not found`, or `spawn <shell> <ERRNO>`, or it begins with
+/// `Tool <name> not found`, or one line `spawn <shell> <ERRNO>` or
+/// `spawn <ERRNO>`, or it begins with
 /// [`HARNESS_INVALID`], with one of [`HARNESS_UNSTARTED`], or with
 /// [`HARNESS_UNRUN`] around a tool's name. The forms are the texts Pi writes, read as written: the reading
 /// is by text, so a marked result of a command that prints one of them in
@@ -1413,7 +1474,7 @@ fn harness_decided(text: &str, flagged: bool) -> bool {
     let unspawned = text
         .strip_prefix("spawn ")
         .filter(|rest| !rest.contains('\n'))
-        .and_then(|rest| rest.rsplit_once(' '))
+        .map(|rest| rest.rsplit_once(' ').unwrap_or(("shell", rest)))
         .is_some_and(|(shell, errno)| {
             !shell.trim().is_empty()
                 && errno.len() > 1
@@ -1498,55 +1559,43 @@ fn outcome_of(command: &str, text: &str, flagged: bool) -> Reported {
     let shown = |line: &str| {
         !line.is_empty() && printable(line) && !line.contains(['\u{2028}', '\u{2029}'])
     };
-    // The lines that can state a status, each with its place.
-    let whole = || {
+    // A line states a status when it is whole: the fragment keeps its place
+    // among the lines read and states none.
+    let states = |(index, (line, span)): (usize, &(&str, Range<usize>))| {
+        (Some(index) != fragment)
+            .then(|| Some((stated_exit_code(line)?, span.clone())))
+            .flatten()
+    };
+    let filled = || {
         lines
             .iter()
             .enumerate()
-            .filter(|(index, (line, _))| !line.is_empty() && Some(*index) != fragment)
-            .map(|(_, line)| line)
+            .filter(|(_, (line, _))| !line.is_empty())
     };
-    let states =
-        |(line, span): &(&str, Range<usize>)| Some((stated_exit_code(line)?, span.clone()));
-    let steps = commands_of(command);
-    let echo = steps.as_deref().and_then(status_echo);
-    // A final echo of a status parameter is the command line's own report
-    // of its status, also in a form the reader does not follow.
-    let reports = steps
-        .as_deref()
-        .and_then(<[Step<'_>]>::last)
-        .is_some_and(|last| last.words[0] == "echo" && last.statuses > 0);
-    let stated = {
-        let mut closing = lines
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(index, (line, _))| !line.is_empty() && Some(*index) != fragment)
-            .map(|(_, line)| line);
-        match (flagged, reports) {
-            (true, _) => closing.next().and_then(states),
-            (false, true) => None,
-            (false, false) => {
-                let first = whole()
-                    .next()
-                    .filter(|(_, span)| span.end <= MAX_FIRST_LINE_BYTES);
-                closing
-                    .take(EXIT_CODE_CLOSING_LINES)
-                    .find_map(states)
-                    .or_else(|| first.and_then(states))
-            }
+    let reading = Reading::of(command);
+    let stated = match (flagged, &reading) {
+        (true, _) => filled().next_back().and_then(states),
+        // The echo is the command line's own report of its status.
+        (false, Reading::Echo(..) | Reading::Unfollowed) => None,
+        (false, Reading::Lines) => {
+            let first = filled()
+                .next()
+                .filter(|(_, (_, span))| span.end <= MAX_FIRST_LINE_BYTES);
+            filled()
+                .rev()
+                .take(EXIT_CODE_CLOSING_LINES)
+                .find_map(states)
+                .or_else(|| first.and_then(states))
         }
     };
-    let printed = echo.as_ref().and_then(|(before, after)| {
-        let (index, (line, span)) = lines
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, (line, _))| !line.is_empty())?;
-        (Some(index) != fragment)
-            .then(|| Some((echoed_status(before, after, line)?, span.clone())))
-            .flatten()
-    });
+    let printed = match &reading {
+        Reading::Echo(before, after) => filled().next_back().and_then(|(index, (line, span))| {
+            (Some(index) != fragment)
+                .then(|| Some((echoed_status(before, after, line)?, span.clone())))
+                .flatten()
+        }),
+        Reading::Unfollowed | Reading::Lines => None,
+    };
     let mut errors: Vec<usize> = Vec::new();
     let mut chosen: HashSet<String> = HashSet::new();
     for (index, (line, _)) in lines.iter().enumerate().filter(|(_, line)| shown(line.0)) {
@@ -1585,8 +1634,9 @@ fn outcome_of(command: &str, text: &str, flagged: bool) -> Reported {
     Reported {
         flagged,
         stated,
-        echoes: echo.is_some(),
+        echoes: matches!(reading, Reading::Echo(..)),
         printed,
+        fragment: fragment.map(|index| lines[index].1.clone()),
         lines: kept,
     }
 }
@@ -1655,6 +1705,7 @@ fn screened(reported: Reported, text: &str) -> Option<Outcome> {
         stated,
         echoes,
         printed,
+        fragment,
         lines,
     } = reported;
     if !(flagged || stated.is_some() || echoes) {
@@ -1684,7 +1735,9 @@ fn screened(reported: Reported, text: &str) -> Option<Outcome> {
             code => (Evidence::Stated, Some(code)),
         },
     };
-    let (path, error) = named_in(&lines, text, clear);
+    let (path, error) = named_in(&lines, text, |span| {
+        clear(span) && fragment.as_ref() != Some(span)
+    });
     let excerpt = match findings.as_deref() {
         Some([]) => Excerpt::Kept(lines.into_iter().map(|(line, _)| line).collect()),
         Some(_) => Excerpt::Finding,
@@ -3041,6 +3094,49 @@ mod tests {
             digest(&format!("{assignment} make deploy")),
             digest(&format!("{rotated} make deploy"))
         );
+        // A command line that spells the redactor's mark itself is another
+        // command than one in which the redactor wrote that mark.
+        let found = deploy(&assignment);
+        let spelled =
+            context_core::redaction::redact_windowed_durable_text(&found, usize::MAX).unwrap();
+        assert_eq!(spelled.detections.len(), 1);
+        let again =
+            context_core::redaction::redact_windowed_durable_text(&spelled.text, usize::MAX)
+                .unwrap();
+        assert_eq!(
+            (again.text.as_str(), again.detections.len()),
+            (spelled.text.as_str(), 0),
+            "the mark is text the redactor leaves as it is"
+        );
+        assert_ne!(digest(&found), digest(&spelled.text));
+        // Two command lines that the redactor reads into one text, and
+        // whose unmarked results are read in two ways, are two commands.
+        let echoed = |value: &str| format!("{value} npm test; echo \"exit=$?\"");
+        let key = assignment.split_once('=').unwrap().0;
+        let literal = echoed(
+            &assignment
+                .replacen('=', "=\"", 1)
+                .replace(&value, &format!("{value}\"")),
+        );
+        let substituted = echoed(&format!("{key}=\"$(cat .key)\""));
+        assert_eq!(Reading::of(&literal).mark(), "echo");
+        assert_eq!(Reading::of(&substituted).mark(), "lines");
+        assert_eq!(
+            Reading::of("make; echo rc=$?").mark(),
+            "unfollowed",
+            "a status echo outside the followed form"
+        );
+        let text = |command: &str| {
+            context_core::redaction::redact_windowed_durable_text(command, usize::MAX)
+                .unwrap()
+                .text
+        };
+        assert_eq!(
+            text(&literal),
+            text(&substituted),
+            "the redactor reads both quoted values as the key's credential"
+        );
+        assert_ne!(digest(&literal), digest(&substituted));
     }
 
     #[test]
@@ -3363,6 +3459,11 @@ mod tests {
             ("IFS=1; make check; echo exit_code=$?", "exit_code=2"),
             ("true; echo exit_code=1$?", "exit_code=10"),
             ("make check; echo exit code $?", "exit code 2"),
+            ("true; LC_ALL=C echo exit_code=1$?", "exit_code=10"),
+            ("true; 'echo' exit_code=1$?", "exit_code=10"),
+            ("true; \\echo exit_code=1$?", "exit_code=10"),
+            ("true; >&2 echo exit_code=1$?", "exit_code=10"),
+            ("true; command echo \"exit_code=1$?\"", "exit_code=10"),
             ("false; echo \\* rc=$?", "* rc=3"),
             // The echo is joined by an operator that can skip it or feeds
             // it a pipe.
@@ -3386,6 +3487,17 @@ mod tests {
             ("logout; echo \"rc=$?\"", "rc=1"),
             ("command exec make; echo \"rc=$?\"", "rc=7"),
             ("builtin exit 0; echo \"rc=$?\"", "rc=7"),
+            ("time exec tail -n 1 build.log; echo \"rc=$?\"", "rc=7"),
+            ("TIMEFORMAT=; time exit 0; echo \"rc=$?\"", "rc=7"),
+            ("time make check; echo \"rc=$?\"", "rc=7"),
+            // An assignment word that holds a redirection hides the word
+            // after it.
+            (
+                "printf 'rc=7\\n'; MODE=fast> /dev/null exit 0; echo \"rc=$?\"",
+                "rc=7",
+            ),
+            ("MODE=> /dev/null exit 0; echo \"rc=$?\"", "rc=7"),
+            ("MODE=x< ./build.log exec cat; echo \"rc=$?\"", "rc=7"),
             // The first word of an earlier command is quoted, escaped,
             // expanded, or a redirection, so it names no program the
             // reader can tell.
@@ -3531,6 +3643,7 @@ mod tests {
             "spawn /bin/bash EACCES",
             "spawn /bin/bash EAGAIN",
             "spawn /opt/dev tools/bash EACCES\n",
+            "spawn E2BIG",
         ] {
             assert!(harness_decided(text, true), "{text}");
             assert!(!harness_decided(text, false), "unmarked: {text}");
@@ -3554,7 +3667,8 @@ mod tests {
             "spawn /bin/bash failed",
             "spawn /bin/bash EACCES again",
             "spawn /bin/bash E",
-            "spawn EACCES",
+            "spawn /bin/bash FAILED",
+            "spawn  EACCES",
             "spawn worker\nchild ENOENT",
             "Tool execution aborted",
         ] {
@@ -3631,6 +3745,35 @@ mod tests {
                 }
             }
         }
+        // The fragment keeps its place among the last three lines: a status
+        // line fourth from the end, counting the fragment, is outside them.
+        let cut_note =
+            format!("[Showing last 50.0KB of line 9 (line is 1.2MB). Full output: {LOG}]");
+        let fourth = format!("work\nexit code 7\none\ntwo\ncut fragment\n\n{cut_note}");
+        assert_eq!(failed("make", &fourth, false), None);
+        let third = format!("work\none\nexit code 7\ntwo\ncut fragment\n\n{cut_note}");
+        assert_eq!(
+            failed("make", &third, false).map(|failure| failure.1),
+            Some(Some(7))
+        );
+        // A fragment names no path and no error: its first word may be the
+        // end of a longer one. The same line before a note of whole lines
+        // names both.
+        let named = |note: &str| {
+            let text = format!(
+                "oj/src/main.rs:12:5: ValueError: boom\n\n{note}\n\nCommand exited with code 1"
+            );
+            let failure = recorded("make", &text, true).unwrap();
+            (failure.path, failure.error)
+        };
+        assert_eq!(named(&cut_note), (None, None));
+        assert_eq!(
+            named(&format!("[Showing lines 9-9 of 9. Full output: {LOG}]")),
+            (
+                Some("oj/src/main.rs:12:5".to_owned()),
+                Some("ValueError".to_owned())
+            )
+        );
         // A marked result keeps the code of the harness's own line after a
         // fragment and its note.
         let cut_line = format!(

@@ -7069,7 +7069,7 @@ impl HandlerCore {
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
-                // A failure recorder task reads its memo entry under the same gate. The fence holds the gate, retires the session's entry before the delete changes either store, and on every way out of this block retires it again and then releases the gate, so a task handed off before the delete or while it runs has nothing to write, also when the delete ends partway.
+                // A failure recorder task reads its memo entry under the same gate. The fence holds the gate, retires the session's entry before the delete changes either store, and on every way out of this block retires it again and then releases the gate, so a task handed off before the delete or while it holds the gate has nothing to write, also when the delete ends partway.
                 let _capture_gate = memory_capture::DeleteFence::raise(
                     capture_gate,
                     &core.failure_memo,

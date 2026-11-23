@@ -5062,10 +5062,10 @@ const RESOLVED: &str = " Resolved: a later run of this command reported no failu
 /// A command fails in one session. A later session finds the failure on
 /// explicit search: the command's name, the exit code, the path the output
 /// names, and the failure lines of the output, as a labeled row that no
-/// memory block holds. A later failure of the same command takes the
-/// record's place, a run that passes marks it resolved, and a command run
-/// from another directory or under an environment assignment is the same
-/// command.
+/// memory block holds. A later failure of the same command line takes the
+/// record's place, a run that passes marks it resolved, and the command
+/// line under a leading directory step is another command with a record of
+/// its own.
 #[tokio::test]
 async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_and_resolved_by_a_pass()
  {
@@ -6352,11 +6352,12 @@ async fn bind_pi_session(handler: &Handler, channel: u16, session: &str) {
     call_transform_request_on_channel(handler, channel, request).await;
 }
 
-/// The recorder holds the capture publication gate from its check of the
-/// session's memo entry through its commit, and `session.delete` takes the
-/// same gate: a delete that arrives while a judgment is under way waits for
-/// the judgment's commit, and the record committed ahead of the delete
-/// stands.
+/// The recorder judges a result under the capture publication gate, which
+/// `session.delete` takes too. The test pauses a judgment at a hook under
+/// the gate, ahead of its Kernel reads and its commit, and observes that
+/// the gate is held there and that a delete of the session has not
+/// finished while the hook blocks. Once the hook returns, the judgment
+/// writes its record and the delete completes, and the record stands.
 #[tokio::test]
 async fn a_result_is_judged_under_the_capture_publication_gate() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
@@ -6392,11 +6393,11 @@ async fn a_result_is_judged_under_the_capture_publication_gate() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         !delete.is_finished() && !task.is_finished(),
-        "the delete waits for the gate the judgment holds"
+        "neither has finished while the judgment's hook blocks under the gate"
     );
     handler.failure_memo.lock().unwrap().under_gate = None;
     drop(release);
-    assert_eq!(task.await.unwrap(), 1, "the judgment commits first");
+    assert_eq!(task.await.unwrap(), 1, "the judgment writes its record");
     let deleted = delete.await.unwrap();
     assert!(
         matches!(deleted, PreparedOutcome::Response(_)),
