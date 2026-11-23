@@ -239,7 +239,7 @@ Open questions:
 Type: safety
 Reachability: default-production - `domain_decisions_in_serving_order`
 (`canonical_memory.rs:318`) and `read_visible_within` with `RowSelection::DomainDecisions("memory")`
-(`crates/daemon/src/memory_capture.rs:3579-3586`) reach the domain read, both on default paths.
+(`crates/daemon/src/memory_capture.rs:3652-3659`) reach the domain read, both on default paths.
 Status: active
 Exercised: yes - `crates/kernel/tests/kernel_canonical_read.rs:229`, `:476`
 compare the domain selection to the filtered full read and show another

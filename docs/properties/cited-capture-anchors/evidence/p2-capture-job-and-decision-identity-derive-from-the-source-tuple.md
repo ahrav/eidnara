@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:1325`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:1353`). The object id of each decision a job's extraction writes is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:4556`). A contested, settled, or ended statement's revision takes its id from the statement it supersedes and the contesting fact, the settling job, or the ending fact (`crates/daemon/src/memory_capture.rs:4044`).
+`job_id` (`crates/memory-store/src/memory_capture.rs:136`) hashes a domain tag and the length-prefixed project, harness, session id, message id, role, and redacted text. `native_capture_fragments` (`crates/daemon/src/memory_capture.rs:1325`) replaces a fragment id with `{sha256}:{offset}` when the message exceeds 16 KiB or the id is empty, over 256 bytes, or holds control characters (`:1353`). The object id of each decision a job's extraction writes is `mem_` plus the first 32 hex characters of SHA-256 over `job_id:index` (`:4629`). A contested, settled, or ended statement's revision takes its id from the statement it supersedes and the contesting fact, the settling job, or the ending fact (`crates/daemon/src/memory_capture.rs:4117`).
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ The same source enqueued twice; a secret-bearing source; an out-of-grammar id; a
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:10966`, `:11015`, `:12145`, `:12123`, `:12415`; `crates/daemon/src/lib.rs:24958`, `:26418`, read at the branch that adds this part (base `3a3b916b7`); `crates/daemon/src/memory_capture.rs:11516`, the test of an ended revision's id, read at the branch that adds it.
+- Sources examined: `crates/memory-store/src/memory_capture.rs:882`; `crates/daemon/src/memory_capture.rs:11145`, `:11194`, `:12324`, `:12302`, `:12594`; `crates/daemon/src/lib.rs:24958`, `:26418`, read at the branch that adds this part (base `3a3b916b7`); `crates/daemon/src/memory_capture.rs:11695`, the test of an ended revision's id, read at the branch that adds it.
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.
