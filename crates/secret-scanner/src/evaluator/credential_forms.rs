@@ -63,7 +63,10 @@ fn the_text_of_a_word_is_the_word_without_what_surrounds_the_value() {
         ),
         ("Zx9kq7\\nuser:", bare("Zx9kq7")),
         ("Zx9kq7\\r\\nuser:", bare("Zx9kq7")),
-        ("\"Zx9kq7\\nmore\"", literal("Zx9kq7")),
+        ("\"Zx9kq7\\nmore\"", bare("Zx9kq7")),
+        ("\"true\"\\nuser=\"bob\"", literal("true")),
+        ("Zx9kq7\\\\nuser:", bare("Zx9kq7\\\\nuser:")),
+        ("Zx9kq7\\u000Auser:", bare("Zx9kq7")),
         ("\\\"Zx9kq7\\\",\\n\\t};", literal("Zx9kq7")),
         ("\"$DB_PASSWORD", bare("$DB_PASSWORD")),
         ("\\\"Zx9", bare("Zx9")),
@@ -89,7 +92,8 @@ fn placeholder_shapes_are_closed() {
         "value.",
         "two words",
         "\u{2581}our",
-        "\u{9700}\u{8981}\u{5bc6}\u{7801}",
+        "\u{9700}\u{8981}\u{5bc6}\u{7801}\u{ff0c}\u{8bf7}",
+        "p\u{e4}ssw\u{f6}rd",
         "****",
         "gho_************",
         "...",
@@ -147,6 +151,8 @@ fn placeholder_shapes_are_closed() {
         "/run/secrets/db7",
         "ID=npm7",
         "\u{43f}\u{430}\u{440}\u{43e}\u{43b}\u{44c}7",
+        "p\u{e4}ss\u{20ac}w\u{f6}rd9",
+        "12;ab!9",
     ] {
         assert!(!is_placeholder_shape(text.as_bytes()), "{text:?}");
     }
@@ -384,53 +390,236 @@ fn a_rule_without_a_form_keeps_its_matched_value() {
 
 static EMBEDDED: LazyLock<RuleSet> = LazyLock::new(|| RuleSet::from_embedded().unwrap());
 
-const WORD_RULES: [&str; 6] = [
-    "magic-option-value",
-    "magic-field-value",
-    "magic-field-value-serialized",
-    "magic-password-suffix-assignment",
-    "magic-client-password-attached",
-    "magic-client-password-option",
+const WORD_RULES: [&str; 5] = [
+    "magic-value-option",
+    "magic-value-field",
+    "magic-value-password-assignment",
+    "magic-value-client-attached",
+    "magic-value-client-option",
 ];
 
-fn is_separator(character: char) -> bool {
-    matches!(
-        character,
-        '\t' | '\n' | '\x0B' | '\x0C' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202f}'
-                | '\u{205f}'
-                | '\u{3000}'
-                | '\u{feff}'
-    )
-}
-
-fn word_findings(input: &str) -> Vec<Finding> {
+fn conservative_findings(input: &str) -> Vec<Finding> {
     let limits = ScanLimits::default();
     let digest = EMBEDDED
         .semantic_digest(ScanProfile::Conservative, limits)
         .unwrap();
     let report = evaluate(&EMBEDDED, ScanProfile::Conservative, limits, digest, input).unwrap();
     assert_eq!(report.limits_hit, None, "{input:?}");
-    report
-        .findings
+    report.findings
+}
+
+fn word_findings(input: &str) -> Vec<Finding> {
+    conservative_findings(input)
         .into_iter()
         .filter(|finding| WORD_RULES.contains(&finding.rule_id.as_str()))
         .collect()
 }
 
-fn assert_words_are_reported_whole(input: &str) {
-    for finding in word_findings(input) {
-        let after = input[finding.value_span.end()..].chars().next();
-        assert!(
-            after.is_none_or(is_separator),
-            "{} reports {:?} of {input:?} and leaves {after:?} after it",
-            finding.rule_id,
-            &input[finding.value_span.start()..finding.value_span.end()],
+const SEP: &str =
+    r"\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}";
+const BRK: &str = r"\n\x0B\f\r\x{2028}\x{2029}";
+const BLK: &str = r"\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}";
+
+/// The word grammar of the overlay as two anchored patterns: the quoted sections, and the
+/// sections with the run after them. Each alternative has one reading, so the leftmost-first
+/// match is the word.
+static WORD_PATTERNS: LazyLock<(regex::Regex, regex::Regex)> = LazyLock::new(|| {
+    let serialized =
+        format!(r#"\\"(?:[^"\\{BRK}]|(?:\\{{4}})*\\{{3}}"|\\+[^"\\{BRK}])*(?:\\{{4}})*\\""#);
+    let section = |quote: char| format!(r"{quote}(?:[^{quote}\\{BRK}]|\\[^{BRK}])*{quote}");
+    let sections = format!(
+        "^(?:{serialized}|{}|{}|{})*",
+        section('"'),
+        section('\''),
+        section('`')
+    );
+    let word = format!(r"{sections}(?:\\[{BLK}\\]|[^{SEP}])*");
+    (
+        regex::Regex::new(&sections).unwrap(),
+        regex::Regex::new(&word).unwrap(),
+    )
+});
+
+fn read(input: &str) -> Word {
+    let mut reader = WordReader {
+        input,
+        at: 0,
+        read: 0,
+        allowance: usize::MAX,
+    };
+    let word = read_word(&mut reader).unwrap();
+    assert!(reader.read >= word.end, "{input:?}");
+    word
+}
+
+fn assert_reader_agrees_with_the_word_patterns(input: &str) {
+    let word = read(input);
+    let (sections, whole) = &*WORD_PATTERNS;
+    assert_eq!(
+        (word.plain_start, word.end),
+        (
+            sections.find(input).unwrap().end(),
+            whole.find(input).unwrap().end()
+        ),
+        "{input:?}"
+    );
+}
+
+#[test]
+fn the_word_reader_reads_sections_then_the_run_to_the_next_separator() {
+    for (input, sections, word) in [
+        ("Zx9kq7 next", "", "Zx9kq7"),
+        ("\"Zx9 kq7\" next", "\"Zx9 kq7\"", "\"Zx9 kq7\""),
+        (
+            "'Zx9 kq7'\"a b\"tail next",
+            "'Zx9 kq7'\"a b\"",
+            "'Zx9 kq7'\"a b\"tail",
+        ),
+        ("'A9\\' B8' next", "'A9\\' B8'", "'A9\\' B8'"),
+        ("`A9\\` B8` next", "`A9\\` B8`", "`A9\\` B8`"),
+        ("\"A9\\\\\" B8\" next", "\"A9\\\\\"", "\"A9\\\\\""),
+        ("\\\"Zx9 kq7\\\" next", "\\\"Zx9 kq7\\\"", "\\\"Zx9 kq7\\\""),
+        (
+            "\\\"a\\\\\\\"b c\\\" next",
+            "\\\"a\\\\\\\"b c\\\"",
+            "\\\"a\\\\\\\"b c\\\"",
+        ),
+        (
+            "\\\"a\\\\\\\\\\\" next",
+            "\\\"a\\\\\\\\\\\"",
+            "\\\"a\\\\\\\\\\\"",
+        ),
+        ("\\\"a\\\\\" b\\\" next", "", "\\\"a\\\\\""),
+        ("\"Zx9 kq7 next", "", "\"Zx9"),
+        ("\"Zx9\nkq7\" next", "", "\"Zx9"),
+        ("Zx9\"a b\" next", "", "Zx9\"a"),
+        ("Zx9\\ kq7 next", "", "Zx9\\ kq7"),
+        ("Zx9\\\\ kq7 next", "", "Zx9\\\\"),
+        ("Zx9\\\u{a0}kq7\u{a0}next", "", "Zx9\\\u{a0}kq7"),
+        ("Zx9\\\nkq7", "", "Zx9\\"),
+        ("Zx9\u{2028}next", "", "Zx9"),
+        ("", "", ""),
+        (" Zx9", "", ""),
+    ] {
+        let read = read(input);
+        assert_eq!(
+            (&input[..read.plain_start], &input[..read.end]),
+            (sections, word),
+            "{input:?}"
         );
+        assert_reader_agrees_with_the_word_patterns(input);
     }
+}
+
+#[test]
+fn digits_are_reported_when_they_are_the_whole_assigned_word() {
+    let digits = ["1234", "5678"].concat();
+    let rules = |input: &str| -> Vec<String> {
+        conservative_findings(input)
+            .into_iter()
+            .filter(|finding| finding.rule_id.starts_with("magic-value-digits"))
+            .map(|finding| {
+                format!(
+                    "{} {}",
+                    finding.rule_id,
+                    &input[finding.value_span.start()..finding.value_span.end()]
+                )
+            })
+            .collect()
+    };
+    for (template, rule) in [
+        ("password={}", "magic-value-digits"),
+        ("client_secret: {}", "magic-value-digits"),
+        ("{\"password\": {}}", "magic-value-digits"),
+        (
+            "{\"password\": {}, \"user\": \"bob\"}",
+            "magic-value-digits",
+        ),
+        ("login?user=bob&password={}&next=1", "magic-value-digits"),
+        ("connect(password={});", "magic-value-digits"),
+        ("password=\"{}\"", "magic-value-digits-quoted"),
+        ("{\"password\":\"{}\"}", "magic-value-digits-quoted"),
+        ("{\\\"password\\\":\\\"{}\\\"}", "magic-value-digits-quoted"),
+    ] {
+        let input = template.replace("{}", &digits);
+        assert_eq!(rules(&input), [format!("{rule} {digits}")], "{input:?}");
+    }
+    for template in [
+        "password: {},Zx9kq7",
+        "DB_PASSWORD={}$Zx9kq7",
+        "password={};x9",
+        "password=\"{} abcd\"",
+        "password='{}-abcd'",
+        "password={}.5",
+        "password={}-abcd",
+        "password:{}",
+        "token={}",
+        "password_length={}",
+    ] {
+        let input = template.replace("{}", &digits);
+        assert_eq!(rules(&input), Vec::<String>::new(), "{input:?}");
+    }
+}
+
+#[test]
+fn a_section_still_open_past_the_match_bound_fails_the_scan_closed() {
+    let open = format!("\"{}", "a ".repeat(MAX_MATCH_BYTES));
+    let mut reader = WordReader {
+        input: &open,
+        at: 0,
+        read: 0,
+        allowance: usize::MAX,
+    };
+    assert!(matches!(read_word(&mut reader), Err(Abort::Match)));
+    let closed = format!("\"{}\"", "a ".repeat(MAX_MATCH_BYTES / 2 - 8));
+    assert_eq!(read(&closed).end, closed.len());
+    let report = {
+        let limits = ScanLimits::default();
+        let input = format!("deploy --password {open}");
+        let digest = EMBEDDED
+            .semantic_digest(ScanProfile::Conservative, limits)
+            .unwrap();
+        evaluate(&EMBEDDED, ScanProfile::Conservative, limits, digest, &input).unwrap()
+    };
+    assert_eq!(report.limits_hit, Some(LimitExhausted::Match));
+}
+
+#[test]
+fn the_word_reader_stops_at_the_work_budget_and_charges_what_it_read() {
+    let rule = EMBEDDED
+        .active(ScanProfile::Conservative)
+        .find(|rule| rule.declaration.name == "magic-value-field")
+        .unwrap();
+    let word = "a9".repeat(2_000);
+    let blanks = " ".repeat(100);
+    let input = format!("token: {word}{blanks}# note");
+    let captures = rule.regex.captures(input.as_bytes()).unwrap();
+    let spans = candidate_spans(rule, &captures, &input).unwrap().unwrap();
+    let read_with = |max_work_bytes| {
+        let mut work = 0usize;
+        let outcome = CredentialForm::FieldValue.word_spans(
+            spans,
+            &input,
+            &mut work,
+            ScanLimits {
+                max_work_bytes,
+                ..ScanLimits::default()
+            },
+        );
+        (outcome, work)
+    };
+    let read = word.len() + blanks.len();
+    let (outcome, work) = read_with(read);
+    let found = outcome.unwrap().unwrap();
+    assert_eq!(
+        (found.value.start(), found.value.end()),
+        (7, 7 + word.len())
+    );
+    assert_eq!(found.full.start(), 0);
+    assert_eq!(work, read);
+    let (outcome, work) = read_with(read - 1);
+    assert!(matches!(outcome, Err(Abort::Work)), "{outcome:?}");
+    assert_eq!(work, read - 1);
 }
 
 const LEADS: [&str; 12] = [
@@ -447,9 +636,10 @@ const LEADS: [&str; 12] = [
     "sshpass -p ",
     "docker login -u bob -p ",
 ];
-const WORD_PARTS: [&str; 28] = [
+const WORD_PARTS: [&str; 34] = [
     "Zx9", "kq7", "a", "9", "'", "\"", "`", "\\", "\\\"", "$", ";", "&", "|", "<", ">", "(", ")",
-    "{", "}", "[", "]", ",", "=", "#", "!", "\\n", "\\ ", "-",
+    "{", "}", "[", "]", ",", "=", "#", "!", "\\n", "\\ ", "-", " ", "\u{a0}", "\\\\", "\\'", " #",
+    "\\u000a",
 ];
 const ENDS: [&str; 12] = [
     "",
@@ -470,20 +660,65 @@ proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(6_000))]
 
     #[test]
-    fn a_reported_word_ends_at_a_separator_or_the_end_of_the_text(
-        lead in 0..LEADS.len(),
-        parts in proptest::collection::vec(0..WORD_PARTS.len(), 1..12),
+    fn the_word_reader_agrees_with_the_word_patterns_on_generated_text(
+        parts in proptest::collection::vec(0..WORD_PARTS.len(), 0..16),
         end in 0..ENDS.len(),
-        cut in 0usize..4096,
     ) {
         let word: String = parts.iter().map(|&part| WORD_PARTS[part]).collect();
-        let input = [LEADS[lead], &word, ENDS[end]].concat();
-        assert_words_are_reported_whole(&input);
+        assert_reader_agrees_with_the_word_patterns(&[&word, ENDS[end]].concat());
+    }
+
+    #[test]
+    fn a_reported_word_is_the_word_the_patterns_read_after_its_lead(
+        lines in proptest::collection::vec(
+            (0..LEADS.len(), proptest::collection::vec(0..WORD_PARTS.len(), 1..12), 0..ENDS.len()),
+            1..4,
+        ),
+        cut in 0usize..4096,
+    ) {
+        let input: String = lines
+            .iter()
+            .map(|(lead, parts, end)| {
+                let word: String = parts.iter().map(|&part| WORD_PARTS[part]).collect();
+                [LEADS[*lead], &word, ENDS[*end]].concat()
+            })
+            .collect();
+        let findings = word_findings(&input);
+        for finding in &findings {
+            let (start, end) = (finding.value_span.start(), finding.value_span.end());
+            let word = WORD_PATTERNS.1.find(&input[start..]).unwrap();
+            assert_eq!(start + word.end(), end, "{} on {input:?}", finding.rule_id);
+        }
         let mut at = cut % (input.len() + 1);
         while !input.is_char_boundary(at) {
             at -= 1;
         }
-        assert_words_are_reported_whole(&input[..at]);
+        let past = |findings: Vec<Finding>, offset: usize| -> Vec<(String, usize, usize, usize)> {
+            findings
+                .into_iter()
+                .filter(|finding| finding.full_span.start() + offset >= at + 8)
+                .map(|finding| {
+                    (
+                        finding.rule_id,
+                        finding.full_span.start() + offset,
+                        finding.value_span.start() + offset,
+                        finding.value_span.end() + offset,
+                    )
+                })
+                .collect()
+        };
+        let whole = past(findings, 0);
+        let from_cut = past(word_findings(&input[at..]), at);
+        for finding in &whole {
+            assert!(from_cut.contains(finding), "{finding:?} of {input:?} from {at}");
+        }
+        let cut_run_end = at + input[at..].find(is_separator).unwrap_or(input.len() - at);
+        for finding in &from_cut {
+            assert!(
+                whole.contains(finding) || finding.1 < cut_run_end,
+                "{finding:?} of {input:?} from {at}"
+            );
+        }
     }
 }
 

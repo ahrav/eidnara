@@ -188,35 +188,40 @@ rules:
   value_suppressors_any: *overlay_value_suppressors
 # Credential forms that the rules above leave in the text. Every rule from here on is an
 # addition: the rules above are evaluated as they are, and a finding of this document is the
-# union of what each rule reports.
+# union of what each rule reports. The added rules are named `magic-value-*`, which sorts
+# after every rule above, so the evaluator runs each rule above before the first added rule.
 #
 # Value grammar. `SEP` is the separator set of the keyed rules above; a line break is one of
 # LF, VT, FF, CR, U+2028, U+2029, and a blank is any other member of `SEP`.
 #
-# The value WORD of the option, field, password-assignment, and client rules is reported
-# whole, quotes included. It is read left to right:
-#   - at its start, one or more sections in double quotes, single quotes, or backquotes,
-#     each closed on its line by the first quote that no backslash escapes, and the
+# The option, field, password-assignment, and client rules match the lead of their form
+# (the name and what separates it from the value) and capture the one character before the
+# value. `credential_form` names how the evaluator reads the value WORD from there
+# (`read_word` in `evaluator.rs`), so the word of a lead is the same whatever precedes the
+# lead. The WORD is reported whole, quotes included. It is read left to right in one pass:
+#   - at its start, sections in double quotes, single quotes, or backquotes, each closed on
+#     its line by the first quote of its kind that no backslash escapes, and the
 #     double-quoted section that text serialized once writes (`\"...\"`); blanks inside a
-#     section belong to the word;
-#   - then every character outside `SEP` (a quote, `$`, a backslash, `;`, a bracket), and a
-#     backslash followed by a blank.
-# A word therefore ends at a blank, a line break, or the end of the text, and at nothing
-# else. In serialized text the word runs through an escaped line break (`\n`, `\r`,
-# `\u000a`, `\u000d`) to the next blank.
+#     section belong to the word; a quote whose section stays open is a character of the
+#     word, and a section still open 32 KiB after it opens fails the scan closed;
+#   - then every character outside `SEP` (a quote, `$`, `;`, a bracket); a backslash takes
+#     the blank or the backslash after it into the word.
+# A word therefore ends at a blank, a line break, or the end of the text. In serialized
+# text the word runs through an escaped line break (`\n`, `\r`, `\u000a`, `\u000d`) to
+# the next blank.
 #
 # | Rule | Reads | Value |
 # | --- | --- | --- |
-# | magic-option-value | `--name WORD`, `-name WORD` on one line | WORD that begins with a character other than `-` |
-# | magic-field-value | `name: WORD` where WORD ends its line; blanks and a `#` comment may follow | WORD whose leading quote, when it has one, opens a section |
-# | magic-field-value-serialized | `name: WORD` where WORD holds a serialized line break after its quoted sections | WORD whose leading quote, when it has one, opens a section |
-# | magic-password-suffix-assignment | `XPASSWORD=WORD`, the name ending in `PASSWORD` or `password` joined to a letter of the same case or a digit | WORD |
-# | magic-secret-digits | `name=DIGITS`, `name: DIGITS` with a blank after `:`, `"name": "DIGITS"`, the name ending in `password` or `secret` | 4 or more digits that are the whole assigned word |
-# | magic-url-userinfo | `scheme://user:VALUE@` | from the first `:` of the authority to its last `@`; no separator, `/`, `?`, `#`, quote, backquote, angle bracket, or backslash |
-# | magic-basic-authorization | `Authorization: Basic VALUE` | 4 or more Base64 characters of either alphabet and up to two `=`, decoding to `user:password` |
-# | magic-client-password-attached | `mysql ... -pWORD` (MySQL and MariaDB clients) | WORD |
-# | magic-client-password-option | `sshpass -p WORD`, `<client> login ... -p WORD`, attached or after up to 8 blanks | WORD that begins with a character other than `-` |
-# | magic-private-key-body | the lines under a `-----BEGIN ... PRIVATE KEY-----` header | lines of 16 or more Base64 characters, then one shorter line that is a whole line |
+# | magic-value-option | `--name WORD`, `-name WORD` on one line | WORD that begins with a character other than `-` |
+# | magic-value-field | `name: WORD` | WORD that ends its line (blanks and then a `#` comment may follow it; 1,024 bytes of blanks count as the line's end), or WORD whose part after the sections holds a serialized line break |
+# | magic-value-password-assignment | `XPASSWORD=WORD`, the name ending in `PASSWORD` or `password` joined to a letter of the same case or a digit | WORD |
+# | magic-value-digits | `name=DIGITS`, `name: DIGITS` with a blank after `:`, `"name": DIGITS`, the name ending in `password` or `secret` | 4 or more digits that are the whole assigned word: only quotes, `,`, `;`, and closing brackets follow them up to the next blank or `&` |
+# | magic-value-digits-quoted | the same names before `=` or `:` and digits in quotes (`"name": "DIGITS"`, `name='DIGITS'`) | 4 or more digits between two quotes |
+# | magic-value-url-userinfo | `scheme://user:VALUE@` | from the first `:` of the authority to its last `@`; no separator, `/`, `?`, `#`, quote, backquote, angle bracket, or backslash |
+# | magic-value-basic-authorization | `Authorization: Basic VALUE` on one line | 4 or more Base64 characters of either alphabet and up to two `=`, decoding to `user:password` |
+# | magic-value-client-attached | `mysql ... -pWORD` (MySQL and MariaDB clients) | WORD |
+# | magic-value-client-option | `sshpass -p WORD`, `<client> login ... -p WORD`, attached or after at most 8 blanks | WORD that begins with a character other than `-` |
+# | magic-value-private-key-body | the lines under a `-----BEGIN ... PRIVATE KEY-----` header | lines that begin with 16 or more Base64 characters, then one shorter line that is a whole line |
 #
 # A name counts for the option and field rules when its last word is `password`, `secret`,
 # `token`, or a `key` qualified as `api`, `auth`, `access`, `account`, or `secret`: a plural
@@ -224,16 +229,16 @@ rules:
 # A key may follow a line break or a tab that serialized text writes as `\n`, `\r`,
 # `\t`, `\u000a`, `\u000d`, or `\u0009`.
 #
-# Gates. `credential_form` names the reading of a WORD. The gates read the word's text:
-# the word up to its first serialized line break, with the `,`, `;`, and surplus closing
-# brackets that end it and one pair of enclosing quotes taken off. A word whose text is one
-# of these stand-ins is left as written, whole:
+# Gates. The gates read the word's text: the word up to its first serialized line break,
+# with the `,`, `;`, and surplus closing brackets that end it and one pair of enclosing
+# quotes taken off. A word whose text is one of these stand-ins is left as written, whole:
 #   - every form: a mask (`***`, punctuation alone), a reference (`$NAME`, `%NAME%`, a
 #     backquoted command, `os.environ/DB_PASSWORD`), a template (`<name>`, `{name}`,
 #     `[name]`, `%s`), and the stand-in words of `value_suppressors_any`;
-#   - option, field, client, and URL forms: a plain word (letters of any script, `_`, `-`),
+#   - option, field, client, and URL forms: a plain word (ASCII letters, `_`, `-`, and
+#     characters outside ASCII: a generated credential carries an ASCII digit or symbol),
 #     a file path, a URL, an attribute list (`id=npm,src=.npmrc`), and a port with a
-#     property list;
+#     property list (`1433;database=sales`);
 #   - option, field, password-assignment, and client forms: a scalar (a number, a boolean,
 #     a null, a duration). A PIN of 4 or more digits is a value under a name that ends in
 #     `password` or `secret` and after a client's `-p`;
@@ -242,12 +247,13 @@ rules:
 #   - bare text of the field form: text followed directly by `,`, `;`, or a closing bracket,
 #     text that holds a bracket, `,`, `;`, or a backquote, text that begins with a YAML
 #     indicator (`& * ! | > % @ #`), and a GraphQL non-null scalar (`String!`);
-#   - the option form: the word after an option whose name begins with `no`;
+#   - the option form: the word after an option whose name's first word is `no`
+#     (`--no-password`);
 #   - the client forms: a port mapping (`8080:80`).
 
-# A command-line option and its value as the next word of the line.
-- name: magic-option-value
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\B))--?(?P<key>[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+(?P<value>(?:(?:\\"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\{4}|\\{3}"|\\{1,3}[^"\\\n\x0B\f\r\x{2028}\x{2029}])*\\"|"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\[^\n\x0B\f\r\x{2028}\x{2029}])*"|''[^''\n\x0B\f\r\x{2028}\x{2029}]*''|`[^`\n\x0B\f\r\x{2028}\x{2029}]*`)+(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*|(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}-])(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*))'
+# A command-line option; its value is the next word of the line.
+- name: magic-value-option
+  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\B))--?(?P<key>[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
   anchors: [key, token, secret, password, auth, bearer, credential]
   radius: 256
   unicode: true
@@ -255,21 +261,10 @@ rules:
   value_group: value
   value_suppressors_any: *overlay_value_suppressors
   credential_form: option_value
-# A `name: value` line of a configuration file, a header dump, or a program's report.
-# The word ends its line; blanks and then a `#` comment may follow it.
-- name: magic-field-value
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+(?P<value>(?:(?:\\"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\{4}|\\{3}"|\\{1,3}[^"\\\n\x0B\f\r\x{2028}\x{2029}])*\\"|"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\[^\n\x0B\f\r\x{2028}\x{2029}])*"|''[^''\n\x0B\f\r\x{2028}\x{2029}]*''|`[^`\n\x0B\f\r\x{2028}\x{2029}]*`)+(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*|(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|\\[^"\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`\\])(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+#|[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?:[\n\x0B\f\r\x{2028}\x{2029}]|\z))'
-  anchors: [key, token, secret, password, auth, bearer, credential]
-  radius: 256
-  unicode: true
-  key_group: key
-  value_group: value
-  value_suppressors_any: *overlay_value_suppressors
-  credential_form: field_value
-# The same field in serialized text, where the line break after the value is written as an
-# escape: the word holds that escape and runs to the next blank.
-- name: magic-field-value-serialized
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+(?P<value>(?:(?:\\"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\{4}|\\{3}"|\\{1,3}[^"\\\n\x0B\f\r\x{2028}\x{2029}])*\\"|"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\[^\n\x0B\f\r\x{2028}\x{2029}])*"|''[^''\n\x0B\f\r\x{2028}\x{2029}]*''|`[^`\n\x0B\f\r\x{2028}\x{2029}]*`)+(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*?|(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|\\[^"\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`\\])(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*?)\\(?:[nr]|u000[aAdD])(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*)'
+# A `name: value` line of a configuration file, a header dump, or a program's report, real
+# or serialized.
+- name: magic-value-field
+  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
   anchors: [key, token, secret, password, auth, bearer, credential]
   radius: 256
   unicode: true
@@ -281,9 +276,11 @@ rules:
 # `PGPASSWORD=VALUE psql`. The key gate of the keyed rules reads such a name as one word
 # and declines it unless a credential qualifier precedes `password`. The join holds one
 # letter case (`PGPASSWORD`, `pgpassword`); the keyed rules read a camel-case name
-# (`userPassword`) word by word.
-- name: magic-password-suffix-assignment
-  regex: '(?-u:\b)[A-Za-z0-9_.-]*(?:[A-Z0-9]PASSWORD|[a-z0-9]password)=(?P<value>(?:(?:\\"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\{4}|\\{3}"|\\{1,3}[^"\\\n\x0B\f\r\x{2028}\x{2029}])*\\"|"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\[^\n\x0B\f\r\x{2028}\x{2029}])*"|''[^''\n\x0B\f\r\x{2028}\x{2029}]*''|`[^`\n\x0B\f\r\x{2028}\x{2029}]*`)+(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*|(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])+))'
+# (`userPassword`) word by word. The pattern also takes the run of characters outside `SEP`
+# after the `=`, so a second such name inside that run is text of the first name's word
+# and the runs this rule reads are disjoint.
+- name: magic-value-password-assignment
+  regex: '(?-u:\b)[A-Za-z0-9_.-]*(?:[A-Z0-9]PASSWORD|[a-z0-9]password)(?P<value>=)[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]*'
   anchors: [password]
   radius: 256
   unicode: true
@@ -292,21 +289,31 @@ rules:
   credential_form: password_assignment
 # Digits under a key whose last word is `password` or `secret`: a PIN or a numeric
 # password. The keyed rules above read a number as a scalar, which it is under `token` and
-# `key` (`max_tokens=4096`). The value group takes the whole assigned word and the form
-# admits it when every character is a digit, so `1234.5` and `1234-abcd` stay with the
-# rules above.
-- name: magic-secret-digits
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*(?:password|secret))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*=[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)(?:\\?["''])?(?P<value>[0-9]{4,}[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}''"`;&|<>()$\\,}\]]*)'
+# `key` (`max_tokens=4096`). The form reports the digits when they are the whole assigned
+# word: up to the next blank or `&`, only quotes, `,`, `;`, and closing brackets follow
+# them. `1234.5`, `1234-abcd`, and `1234,Zx9` stay with the rules above.
+- name: magic-value-digits
+  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*(?:password|secret))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*=[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)(?P<value>[0-9]{4,})'
   anchors: [key, token, secret, password, auth, bearer, credential]
   radius: 256
   unicode: true
   key_group: key
   value_group: value
   credential_form: digits
+# The same digits between two quotes. The closing quote follows the last digit, so a quoted
+# text that only begins with digits (`"1234 abcd"`) stays with the rules above.
+- name: magic-value-digits-quoted
+  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>[A-Za-z0-9_.-]*(?:password|secret))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*[=:][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)\\?["''](?P<value>[0-9]{4,})\\?["'']'
+  anchors: [key, token, secret, password, auth, bearer, credential]
+  radius: 256
+  unicode: true
+  key_group: key
+  value_group: value
 # RFC 7617 credentials: the Base64 of `user:password`, which anyone can decode. The
-# validator requires that decoding, so `Basic authentication` in prose is left alone.
-- name: magic-basic-authorization
-  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|\b)Authorization[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]*Basic[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+(?P<value>[A-Za-z0-9+/_-]{4,}={0,2})'
+# validator requires that decoding, so `Basic authentication` in prose is left alone. The
+# header stands on one line, so a header without a value ends at its line.
+- name: magic-value-basic-authorization
+  regex: '(?i)(?:\\(?:[nrt]|u000[aAdD9])|\b)Authorization[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*Basic[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+(?P<value>[A-Za-z0-9+/_-]{4,}={0,2})'
   anchors: [authorization]
   radius: 256
   unicode: true
@@ -316,8 +323,8 @@ rules:
 # RFC 3986 userinfo with a password. The user name runs to the first `:` and the password
 # ends at the last `@` of the authority. A leading `$`, `[`, or `{` marks a variable or a
 # template, and a leading `%` opens a percent-encoded octet.
-- name: magic-url-userinfo
-  regex: '[A-Za-z][A-Za-z0-9+.-]*://[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#:''\"`<>\\]*:(?P<value>(?:%[0-9A-Fa-f]{2}|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#''\"`<>\\@$%\[{])[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#''\"`<>\\]*)@'
+- name: magic-value-url-userinfo
+  regex: '[A-Za-z][A-Za-z0-9+.-]*://[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#:''"`<>\\]*:(?P<value>(?:%[0-9A-Fa-f]{2}|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#''"`<>\\$%\[{])[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#''"`<>\\]*)@'
   anchors: ['://']
   radius: 256
   unicode: true
@@ -327,39 +334,41 @@ rules:
 # `-p` names a password only for a program that defines it so; elsewhere it is a port, a
 # path, or a process id. The MySQL and MariaDB clients read the password attached to the
 # option. The program stands as a command word (at the start of the text or after a
-# separator, a quote, or a shell operator), bare or under a `bin/` or `./` path, and the
-# option follows it within 256 characters of one command: a line break, `|`, `;`, `&`, or
-# a serialized `\n`, `\r`, or `\u` escape ends the command.
-- name: magic-client-password-attached
-  regex: '(?:^|[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]|\\(?:[nrt]|u000[aAdD9]))(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]*bin/|\./)?(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump|mariadb-admin)(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}](?:(?:[^\n\x0B\f\r\x{2028}\x{2029}\x{85}|;&\\]|\\+[^nru\\\n\x0B\f\r\x{2028}\x{2029}\x{85}]){0,255}?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])?-p(?P<value>(?:(?:\\"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\{4}|\\{3}"|\\{1,3}[^"\\\n\x0B\f\r\x{2028}\x{2029}])*\\"|"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\[^\n\x0B\f\r\x{2028}\x{2029}])*"|''[^''\n\x0B\f\r\x{2028}\x{2029}]*''|`[^`\n\x0B\f\r\x{2028}\x{2029}]*`)+(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*|(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])+))'
+# separator, a quote, or a shell operator), bare or under a `bin/` or `./` path. The option
+# follows it within 256 units of one command, where a unit is one character or a backslash
+# and the character after it. A line break, `|`, `;`, `&`, and the escapes `\n`, `\r`,
+# and `\u` end the command.
+- name: magic-value-client-attached
+  regex: '(?:^|[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]|\\(?:[nrt]|u000[aAdD9]))(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]*bin/|\./)?(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump|mariadb-admin)(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}](?:(?:[^\n\x0B\f\r\x{2028}\x{2029}\x{85}|;&\\]|\\[^nru\n\x0B\f\r\x{2028}\x{2029}\x{85}]){0,255}?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])?-(?P<value>p)'
   anchors: [mysql, mariadb]
   radius: 256
   unicode: true
   value_group: value
   value_suppressors_any: *overlay_value_suppressors
   credential_form: client_password
-# `sshpass -p`, as the first option of `sshpass`, and the `login` subcommand of the
-# registry and platform clients listed here take the password attached or as the next
-# word. Each blank run of the pattern is bounded.
-- name: magic-client-password-option
-  regex: '(?:^|[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]|\\(?:[nrt]|u000[aAdD9]))(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]*bin/|\./)?(?:sshpass(?:\.exe)?|(?:docker|podman|nerdctl|buildah|skopeo|oras|crane|helm|oc|cf|az)(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8}(?:(?:registry|auth|acr)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8})?login(?-u:\b)(?:[^\n\x0B\f\r\x{2028}\x{2029}\x{85}|;&\\]|\\+[^nru\\\n\x0B\f\r\x{2028}\x{2029}\x{85}]){0,256}?)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8}-p[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{0,8}(?P<value>(?:(?:\\"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\{4}|\\{3}"|\\{1,3}[^"\\\n\x0B\f\r\x{2028}\x{2029}])*\\"|"(?:[^"\\\n\x0B\f\r\x{2028}\x{2029}]|\\[^\n\x0B\f\r\x{2028}\x{2029}])*"|''[^''\n\x0B\f\r\x{2028}\x{2029}]*''|`[^`\n\x0B\f\r\x{2028}\x{2029}]*`)+(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*|(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}-])(?:\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}])*))'
+# `sshpass -p`, at most 8 blanks after `sshpass`, and the `login` subcommand of the
+# registry and platform clients listed here, with `-p` within 256 units after `login`, take
+# the password attached or after at most 8 blanks.
+- name: magic-value-client-option
+  regex: '(?:^|[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]|\\(?:[nrt]|u000[aAdD9]))(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]*bin/|\./)?(?:sshpass(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8}|(?:docker|podman|nerdctl|buildah|skopeo|oras|crane|helm|oc|cf|az)(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8}(?:(?:registry|auth|acr)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8})?login(?-u:\b)(?:[^\n\x0B\f\r\x{2028}\x{2029}\x{85}|;&\\]|\\[^nru\n\x0B\f\r\x{2028}\x{2029}\x{85}]){0,256}?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])-(?P<value>p)'
   anchors: [sshpass, login]
   radius: 256
   unicode: true
   value_group: value
   value_suppressors_any: *overlay_value_suppressors
-  credential_form: client_password
+  credential_form: client_password_option
 # The body lines under a private-key header. The corpus `private-key` rule reports a whole
 # block, header to footer; a block cut short by `head` or by an output limit ends before
 # its footer, and its body lines are key material all the same. Up to four `Name: value`
 # lines (PGP armor headers, `Proc-Type` and `DEK-Info` of an encrypted PEM) and one blank
 # line may stand between the header and the body; lines may be indented and may end in
-# blanks, and a line break may be written `\n` or `\u000a`. A body line holds 16 or
-# more Base64 characters, so a header followed by `...` or by prose stays as written. A
-# last line of 1 to 15 Base64 characters joins the body when it is a whole line. The two
-# unnamed groups are the body with and without that line; the evaluator reports the one
-# that matched.
-- name: magic-private-key-body
+# blanks, and a line break may be written `\n` or `\u000a`. A body line begins with 16 or
+# more Base64 characters, and those characters are the reported part of it: an output
+# limit can cut the last line and append its own marker. A header followed by `...` or by
+# prose of shorter words stays as written. A last line of 1 to 15 Base64 characters joins
+# the body when it is a whole line. The two unnamed groups are the body with and without
+# that line; the evaluator reports the one that matched.
+- name: magic-value-private-key-body
   regex: '(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z][A-Za-z0-9-]{0,30}:[^\n\\]{0,200}){0,4}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*)?[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*(?:([A-Za-z0-9+/=]{16,}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{16,})*[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{1,15})[\t ]*(?:(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))|\\?["''`]|\z)|([A-Za-z0-9+/=]{16,}(?:[\t ]*(?:\r?\n|(?:\\r|\\u000[dD])?(?:\\n|\\u000[aA]))[\t ]*[A-Za-z0-9+/=]{16,})*))'
   anchors: ['-----begin']
   radius: 256

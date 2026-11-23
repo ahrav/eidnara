@@ -130,6 +130,11 @@ fn an_option_followed_by_its_value_is_redacted() {
             PASSWORD,
         ),
         (
+            format!("deploy --password --token {issued}"),
+            issued.clone(),
+            "<REDACTED:token>",
+        ),
+        (
             format!("run\\n--password {chosen}\\n--verbose"),
             format!("{chosen}\\n--verbose"),
             PASSWORD,
@@ -162,6 +167,7 @@ fn an_option_followed_by_a_stand_in_stays_exact() {
         "deploy --password --verbose".to_owned(),
         "deploy --token config.token".to_owned(),
         format!("deploy --no-password {issued}"),
+        "deploy --password --token".to_owned(),
         format!("deploy --password\n{issued}"),
     ] {
         assert_exact(&input);
@@ -173,6 +179,11 @@ fn a_field_line_is_redacted() {
     let (issued, chosen) = (issued(), chosen());
     for (input, value, placeholder) in [
         (format!("password: {chosen}"), chosen.clone(), PASSWORD),
+        (
+            format!("secret: password: {chosen}"),
+            chosen.clone(),
+            PASSWORD,
+        ),
         (
             format!("  db_password:\t{chosen}\n  user: bob"),
             chosen.clone(),
@@ -224,6 +235,16 @@ fn a_field_line_is_redacted() {
             PASSWORD,
         ),
         (
+            format!("password: \"{chosen}"),
+            format!("\"{chosen}"),
+            PASSWORD,
+        ),
+        (
+            format!("password: {chosen}\\ two"),
+            format!("{chosen}\\ two"),
+            PASSWORD,
+        ),
+        (
             format!("{{\"stdout\":\"user: bob\\npassword: {chosen}\"}}"),
             format!("{chosen}\"}}"),
             PASSWORD,
@@ -255,7 +276,8 @@ fn a_field_of_types_counts_and_references_stays_exact() {
         format!("password: {chosen} and more words"),
         format!("password: \"{chosen} #two\" and more words"),
         format!("password: \\\"{chosen} #two\\\" and more words"),
-        format!("password: \"{chosen}"),
+        format!("password: {chosen}\\ #two and more words"),
+        format!("password: \"{chosen}\"\"\\ntwo three\" and more words"),
         format!("the tokens: {chosen}"),
         format!("password:{chosen}"),
     ] {
@@ -283,6 +305,23 @@ fn a_word_with_a_quote_a_backslash_or_a_dollar_sign_is_replaced_whole() {
             ["Q7r9$", "$v9"].concat(),
         ),
         ("PGPASSWORD={} psql", ["ab;", "cd9"].concat()),
+        (
+            "deploy --password {} --verbose",
+            ["'A9\\'", " B8'"].concat(),
+        ),
+        (
+            "deploy --password {} --verbose",
+            ["\"A9\\\"", " B8\""].concat(),
+        ),
+        ("deploy --password {} --verbose", ["12;", "ab!9"].concat()),
+        (
+            "deploy --password {} --verbose",
+            ["p\u{e4}ss", "\u{20ac}w\u{f6}rd9"].concat(),
+        ),
+        (
+            "deploy --password {} --verbose",
+            ["Zx9\\\\n", "kq7"].concat(),
+        ),
     ] {
         assert_redacts(&template.replace("{}", &word), &word, PASSWORD);
     }
@@ -341,6 +380,13 @@ fn digits_under_a_password_or_secret_key_are_redacted() {
     ] {
         assert_redacts(&template.replace("{}", &digits), &digits, placeholder);
     }
+    for (template, placeholder) in [
+        ("password=\"{}\"", PASSWORD),
+        ("password:\"{}\"", PASSWORD),
+        ("{\"client_secret\":\"{}\"}", "<REDACTED:client_secret>"),
+    ] {
+        assert_redacts(&template.replace("{}", &digits), &digits, placeholder);
+    }
     for input in [
         "password=123",
         "password=1234.5",
@@ -368,6 +414,12 @@ fn a_password_in_url_userinfo_is_redacted() {
     ] {
         assert_redacts(&input, &chosen, "<REDACTED:url_password>");
     }
+    let at_first = format!("@{chosen}");
+    assert_redacts(
+        &url("https", "alice", &at_first, "db.internal/"),
+        &at_first,
+        "<REDACTED:url_password>",
+    );
     for input in [
         url("https", "user", "password", "example.org/"),
         url("https", "user", "$PASSWORD", "example.org/"),
@@ -390,6 +442,11 @@ fn basic_authorization_credentials_are_redacted() {
         assert_redacts(&input, &basic, "<REDACTED:basic>");
     }
     assert_exact("Authorization: Basic authentication is sent in clear text");
+    assert_redacts(
+        &format!("Authorization: Basic\nAuthorization: Basic {basic}"),
+        &basic,
+        "<REDACTED:basic>",
+    );
 }
 
 #[test]
@@ -671,6 +728,64 @@ fn a_quoted_word_cut_by_a_window_end_is_replaced_whole_or_refused() {
         );
         assert_ne!(detect_windowed_durable_text(&text), Ok(false));
     }
+}
+
+#[test]
+fn a_chain_of_quoted_option_words_is_replaced_the_same_in_every_window() {
+    let chosen = chosen();
+    let head = format!("--password \"{chosen} B8! ");
+    let unit = format!("{head}{} ", "q".repeat(1023 - head.len()));
+    assert_eq!(unit.len(), 1024);
+    let line = unit.repeat(320);
+    let alone = redactor().unwrap().redact(&line).unwrap();
+    assert!(!alone.text.contains(&chosen));
+    assert_eq!(alone.text.matches("B8!").count(), 1);
+    for filler_bytes in [201 * 1024, 201 * 1024 + 517, 230 * 1024, 193 * 1024 + 3] {
+        let filler = format!("{}\n", "f".repeat(filler_bytes - 1));
+        let text = format!("{filler}{line}\n");
+        assert!(text.len() > MAX_REDACTABLE_BYTES);
+        let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+        assert_eq!(
+            windowed.text,
+            format!("{filler}{}\n", alone.text),
+            "{filler_bytes}"
+        );
+    }
+}
+
+#[test]
+fn a_header_without_a_value_leaves_the_next_header_to_its_own_match_in_every_window() {
+    let basic = basic_credentials();
+    let start = MAX_REDACTABLE_BYTES - WINDOW_OVERLAP_BYTES;
+    let empty = format!("Authorization: Basic{}", "\n".repeat(16 * 1024 - 20));
+    let text = format!(
+        "{}\n{}Authorization: Basic {basic}",
+        "x".repeat(start - 16 * 1024 - 1),
+        empty.repeat(8)
+    );
+    assert!(text.len() > MAX_REDACTABLE_BYTES);
+    let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+    assert_eq!(windowed.text, text.replacen(&basic, "<REDACTED:basic>", 1));
+    assert_eq!(windowed.detections.len(), 1);
+}
+
+#[test]
+fn a_field_inside_a_quoted_field_word_is_replaced_the_same_in_every_window() {
+    let chosen = chosen();
+    let line = format!(
+        "password: \"wrap password: {chosen} # x\"{}",
+        " ".repeat(18 * 1024)
+    );
+    let alone = redact_durable_text(&format!("{line}tail\n"));
+    assert!(!alone.text.contains(&chosen));
+    let before = MAX_REDACTABLE_BYTES - line.len();
+    let text = format!("{}\n{line}tail\n", "x".repeat(before - 1));
+    assert!(text.len() > MAX_REDACTABLE_BYTES);
+    let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+    assert_eq!(
+        windowed.text,
+        format!("{}\n{}", "x".repeat(before - 1), alone.text)
+    );
 }
 
 fn filled(unit: &str, total: usize) -> String {

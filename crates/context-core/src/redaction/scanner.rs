@@ -17,12 +17,12 @@ fn provider_label(rule_id: &str) -> Option<(&'static str, &'static str)> {
         "magic-slack-token" => ("slack_token", "<SLACK_TOKEN_REDACTED>"),
         "magic-google-api-key" => ("google_api_key", "<GOOGLE_API_KEY_REDACTED>"),
         "magic-bearer-token" => ("bearer", "<REDACTED:bearer>"),
-        "magic-basic-authorization" => ("basic", "<REDACTED:basic>"),
-        "magic-url-userinfo" => ("url_password", "<REDACTED:url_password>"),
-        "magic-password-suffix-assignment"
-        | "magic-client-password-attached"
-        | "magic-client-password-option" => ("password", "<REDACTED:password>"),
-        "magic-private-key-body" => ("private_key", "<REDACTED:private_key>"),
+        "magic-value-basic-authorization" => ("basic", "<REDACTED:basic>"),
+        "magic-value-url-userinfo" => ("url_password", "<REDACTED:url_password>"),
+        "magic-value-password-assignment"
+        | "magic-value-client-attached"
+        | "magic-value-client-option" => ("password", "<REDACTED:password>"),
+        "magic-value-private-key-body" => ("private_key", "<REDACTED:private_key>"),
         "magic-jwt" => ("jwt", "<JWT_REDACTED>"),
         _ => return None,
     })
@@ -37,10 +37,10 @@ const KEYED_RULE_IDS: &[&str] = &[
     "magic-keyed-single-quoted",
     "magic-keyed-double-single",
     "magic-keyed-single-double",
-    "magic-option-value",
-    "magic-field-value",
-    "magic-field-value-serialized",
-    "magic-secret-digits",
+    "magic-value-option",
+    "magic-value-field",
+    "magic-value-digits",
+    "magic-value-digits-quoted",
 ];
 
 #[cfg(test)]

@@ -30,16 +30,16 @@ const BASE_OVERLAY_SHA256: &str =
 
 /// The rules the embedded overlay adds to `main`'s document.
 const ADDED_RULES: [&str; 10] = [
-    "magic-basic-authorization",
-    "magic-client-password-attached",
-    "magic-client-password-option",
-    "magic-field-value",
-    "magic-field-value-serialized",
-    "magic-option-value",
-    "magic-password-suffix-assignment",
-    "magic-private-key-body",
-    "magic-secret-digits",
-    "magic-url-userinfo",
+    "magic-value-basic-authorization",
+    "magic-value-client-attached",
+    "magic-value-client-option",
+    "magic-value-digits",
+    "magic-value-digits-quoted",
+    "magic-value-field",
+    "magic-value-option",
+    "magic-value-password-assignment",
+    "magic-value-private-key-body",
+    "magic-value-url-userinfo",
 ];
 
 static BASE: LazyLock<RuleSet> = LazyLock::new(|| {
@@ -143,6 +143,12 @@ fn every_rule_of_main_is_embedded_as_main_compiles_it() {
     added.sort_unstable();
     assert_eq!(added, ADDED_RULES);
     assert_eq!(matched + added.len(), embedded.len());
+    // `active` yields rules in evaluation order, and the added rules close it.
+    let order: Vec<&str> = EMBEDDED
+        .active(ScanProfile::Comprehensive)
+        .map(|rule| rule.declaration.name.as_str())
+        .collect();
+    assert_eq!(order[order.len() - ADDED_RULES.len()..], ADDED_RULES);
 }
 
 struct Row {

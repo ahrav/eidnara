@@ -427,7 +427,7 @@ fn non_ascii_neighbours_do_not_change_findings() {
     for ascii in cases {
         let baseline = scanner.scan(ascii).unwrap().findings;
         assert!(!baseline.is_empty(), "{ascii} produced no baseline finding");
-        // Surrounding text can change whether `magic-field-value` reports the Netlify token.
+        // Surrounding text can change whether `magic-value-field` reports the Netlify token.
         for (prefix, suffix, ascii_prefix, ascii_suffix) in [
             ("é\n", "", "e\n", ""),
             ("😀\n", "", "x\n", ""),
@@ -1171,52 +1171,52 @@ fn each_credential_form_rule_reports_its_value_under_its_rule_id() {
     for (input, rule, value) in [
         (
             format!("deploy --password {password} --verbose"),
-            "magic-option-value",
+            "magic-value-option",
             password.clone(),
         ),
         (
             format!("password: {password}"),
-            "magic-field-value",
+            "magic-value-field",
             password.clone(),
         ),
         (
             format!("out\\npassword: {password}\\nuser: bob"),
-            "magic-field-value-serialized",
+            "magic-value-field",
             format!("{password}\\nuser:"),
         ),
         (
             format!("PGPASSWORD={password} psql"),
-            "magic-password-suffix-assignment",
+            "magic-value-password-assignment",
             password.clone(),
         ),
         (
             format!("max_tokens=4096 password={digits}"),
-            "magic-secret-digits",
+            "magic-value-digits",
             digits.clone(),
         ),
         (
             format!("https://user:{password}@host.internal/r.git"),
-            "magic-url-userinfo",
+            "magic-value-url-userinfo",
             password.clone(),
         ),
         (
             format!("Authorization: Basic {basic}"),
-            "magic-basic-authorization",
+            "magic-value-basic-authorization",
             basic.clone(),
         ),
         (
             format!("mysql -uroot -p{password} app"),
-            "magic-client-password-attached",
+            "magic-value-client-attached",
             password.clone(),
         ),
         (
             format!("sshpass -p {password} ssh host"),
-            "magic-client-password-option",
+            "magic-value-client-option",
             password.clone(),
         ),
         (
             format!("{header}\n{body}\n{body}\nabcd12==\n"),
-            "magic-private-key-body",
+            "magic-value-private-key-body",
             format!("{body}\n{body}\nabcd12=="),
         ),
     ] {

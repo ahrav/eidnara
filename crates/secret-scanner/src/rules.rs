@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "219f0d299c80e6a32124e80ed63ecdc53e444162ea89a023ac9222ebe73646bb";
+    "528c1990d92ed6058b750e68c70558c7f020568b389ead03711f0dd830c63bca";
 
 const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -152,6 +152,7 @@ pub(crate) enum CredentialForm {
     UrlPassword,
     /// The word a named client reads as its password option: `-pWORD`, `-p WORD`.
     ClientPassword,
+    ClientPasswordOption,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -814,47 +815,44 @@ mod tests {
         let word = ["Zx9", "kq7"].concat();
         let basic = ["dXNlcjpaeDlr", "cTc="].concat();
         for (input, name) in [
-            (format!("deploy --PASSWORD {word}"), "magic-option-value"),
-            (format!("Password: {word}"), "magic-field-value"),
-            (
-                format!("PASSWORD: {word}\\nuser: bob"),
-                "magic-field-value-serialized",
-            ),
+            (format!("deploy --PASSWORD {word}"), "magic-value-option"),
+            (format!("Password: {word}"), "magic-value-field"),
+            (format!("PASSWORD: {word}\\nuser: bob"), "magic-value-field"),
             (
                 format!("PGPASSWORD={word}"),
-                "magic-password-suffix-assignment",
+                "magic-value-password-assignment",
             ),
             (
                 format!("pgpassword={word}"),
-                "magic-password-suffix-assignment",
+                "magic-value-password-assignment",
             ),
-            (format!("Password={}", 12_345_678), "magic-secret-digits"),
+            (format!("Password={}", 12_345_678), "magic-value-digits"),
             (
                 format!("AUTHORIZATION: basic {basic}"),
-                "magic-basic-authorization",
+                "magic-value-basic-authorization",
             ),
             (
                 format!("x://alice:{word}@host.internal/"),
-                "magic-url-userinfo",
+                "magic-value-url-userinfo",
             ),
             (
                 format!("mysql -uroot -p{word} app"),
-                "magic-client-password-attached",
+                "magic-value-client-attached",
             ),
             (
                 format!("sshpass -p {word} ssh host"),
-                "magic-client-password-option",
+                "magic-value-client-option",
             ),
             (
                 format!("docker login -u bob -p {word} registry"),
-                "magic-client-password-option",
+                "magic-value-client-option",
             ),
             (
                 format!(
                     "-----begin private key-----\n{}\n",
                     ["QUJDREVGR0hJSktM", "TU5PUFFSU1RVVldYWVo"].concat()
                 ),
-                "magic-private-key-body",
+                "magic-value-private-key-body",
             ),
         ] {
             let rule = rules
@@ -1131,11 +1129,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "642b117d11734203e78303074f527309d3a508207535a1716d05c7c941257689",
+                "52cba0aa60a24daebe7d326b983f47518ba11597e5a90de620b48788dc1ce508",
             ),
             (
                 ScanProfile::Comprehensive,
-                "4cef31a5453e2287c5c1fad079ca87655b9c431965b6342ed2d5d1c054a90de5",
+                "1ec9365b9513c24706b7ac3d86eceaf8f2929b86e8c0357744f0a88e6f35fecf",
             ),
         ] {
             let digest = rules
