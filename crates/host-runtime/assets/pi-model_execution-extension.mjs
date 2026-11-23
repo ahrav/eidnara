@@ -102,11 +102,14 @@ export default function (pi) {
 	});
 	pi.on("before_provider_request", (event, ctx) => {
 		// A flagged run whose system text was not replaced would send Pi's own lines to
-		// the model while its caller counts on the text as written, so it fails here.
+		// the model while its caller counts on the text as written. Pi catches a
+		// handler's throw and sends the request anyway, so the run ends here with a
+		// failing exit status, which the adapter reports as a failed run.
 		if (plainSystem && !sentAsWritten) {
-			throw new Error(
-				"model_execution payload hook: the system text could not be sent as written",
+			process.stderr.write(
+				"model_execution payload hook: the system text could not be sent as written\n",
 			);
+			process.exit(1);
 		}
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
 		const requestedTemperature = process.env[TEMPERATURE_ENV] === undefined

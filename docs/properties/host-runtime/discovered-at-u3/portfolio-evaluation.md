@@ -203,7 +203,7 @@ field at `:80`). The verifier is installed only by `new_with_credentials`
 constructor fingerprints nothing, and every other test and both examples use
 that constructor. The derivation function is still exercised, at
 `subprocess.rs:174` through `provider_row`, which production paths do call
-(`opencode.rs:116`, `pi.rs:215`); the *check* is what has no production
+(`opencode.rs:116`, `pi.rs:218`); the *check* is what has no production
 producer here.
 
 **[model_execution-child-environment-carries-only-the-provider-row](../catalog.md#model_execution-child-environment-carries-only-the-provider-row)
@@ -212,7 +212,7 @@ only public constructor is `capture_from` (`subprocess.rs:97`), and its callers
 are `tests/model_execution_subprocess.rs:2937`, `:2946`, `:2951`, `:2981`, `:2995`,
 `tests/model_execution_protocol.rs:463`, and the inline test at `subprocess.rs:1662`.
 Nothing in `src/` builds one. Every consumer takes it as an argument
-(`OpenCodeBackend::new` `opencode.rs:39`, `PiBackend::new` `pi.rs:60`,
+(`OpenCodeBackend::new` `opencode.rs:39`, `PiBackend::new` `pi.rs:63`,
 `new_with_credentials` `mod.rs:82`), and the first two have zero callers
 anywhere in the workspace. The record's own evidence file states this and
 concludes `needs human input`.

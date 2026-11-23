@@ -1964,6 +1964,17 @@ fn pi_project_pi_resources_ignored() {
 
 /// Runs `driver` with the bundled hook imported as `hook` and returns its standard output.
 fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
+    let output = hook_driver_output(driver, envs);
+    assert!(
+        output.status.success(),
+        "hook driver failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("driver output")
+}
+
+/// Runs `driver` with the bundled hook imported as `hook` and returns the process's output, whatever its exit status.
+fn hook_driver_output(driver: &str, envs: &[(&str, &str)]) -> std::process::Output {
     let scratch = tempfile::tempdir().expect("scratch");
     let hook_path = scratch.path().join(PI_MODEL_EXECUTION_EXTENSION_FILE);
     fs::write(&hook_path, PI_MODEL_EXECUTION_EXTENSION_BYTES).expect("materialize hook");
@@ -1976,7 +1987,7 @@ fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
         ),
     )
     .expect("driver");
-    let output = ["node", "bun"]
+    ["node", "bun"]
         .iter()
         .find_map(|runtime| {
             std::process::Command::new(runtime)
@@ -1988,13 +1999,7 @@ fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
                 .output()
                 .ok()
         })
-        .expect("a JavaScript runtime (node or bun) is required for the hook fixture");
-    assert!(
-        output.status.success(),
-        "hook driver failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("driver output")
+        .expect("a JavaScript runtime (node or bun) is required for the hook fixture")
 }
 
 /// A system text that opens with the plain-system directive reaches Pi with the directive removed and the flag set; a system text of any other shape sets no flag.
@@ -2065,36 +2070,46 @@ console.log(JSON.stringify([
         serde_json::from_str::<serde_json::Value>(unflagged.trim()).expect("json"),
         serde_json::json!([null, null])
     );
-    // A flagged run whose agent start carried no custom prompt fails at its provider request; once the text was replaced, and in an unflagged run, the request passes.
-    let request = r#"const handlers = {};
-hook({ on(name, fn) { handlers[name] = fn; } });
-const send = () => {
-  try {
-    handlers.before_provider_request({ payload: { modelId: "m", inferenceConfig: { maxTokens: 1 }, system: [], messages: [] } });
-    return "sent";
-  } catch (error) { return String(error.message); }
-};
-handlers.before_agent_start({ systemPrompt: "built", systemPromptOptions: {} });
-const unreplaced = send();
-handlers.before_agent_start({ systemPrompt: "built", systemPromptOptions: { customPrompt: "Review the memory." } });
-console.log(JSON.stringify([unreplaced, send()]));"#;
-    let limit = [(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "64")];
-    let flagged = run_hook_driver(
-        request,
-        &[limit[0], (MODEL_EXECUTION_PLAIN_SYSTEM_ENV, "1")],
+    // Pi catches a handler's throw and sends the request as it stands, so the driver catches errors the same way. A flagged run whose agent start carried no custom prompt ends the process with a failing status before any request is sent; once the text was replaced, and in an unflagged run, the request passes.
+    let request = |replaced: bool| {
+        format!(
+            r#"const handlers = {{}};
+hook({{ on(name, fn) {{ handlers[name] = fn; }} }});
+const send = () => {{
+  try {{
+    handlers.before_provider_request({{ payload: {{ modelId: "m", inferenceConfig: {{ maxTokens: 1 }}, system: [], messages: [] }} }});
+  }} catch (error) {{}}
+  return "sent";
+}};
+handlers.before_agent_start({{ systemPrompt: "built", systemPromptOptions: {{ {custom} }} }});
+console.log(send());"#,
+            custom = if replaced {
+                r#"customPrompt: "Review the memory.""#
+            } else {
+                ""
+            }
+        )
+    };
+    let limit = (MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "64");
+    let flag = (MODEL_EXECUTION_PLAIN_SYSTEM_ENV, "1");
+    let unreplaced = hook_driver_output(&request(false), &[limit, flag]);
+    assert_eq!(unreplaced.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&unreplaced.stdout),
+        "",
+        "no request was sent"
+    );
+    assert!(
+        String::from_utf8_lossy(&unreplaced.stderr)
+            .contains("the system text could not be sent as written"),
+        "{}",
+        String::from_utf8_lossy(&unreplaced.stderr)
     );
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(flagged.trim()).expect("json"),
-        serde_json::json!([
-            "model_execution payload hook: the system text could not be sent as written",
-            "sent"
-        ])
+        run_hook_driver(&request(true), &[limit, flag]).trim(),
+        "sent"
     );
-    let unflagged = run_hook_driver(request, &limit);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(unflagged.trim()).expect("json"),
-        serde_json::json!(["sent", "sent"])
-    );
+    assert_eq!(run_hook_driver(&request(false), &[limit]).trim(), "sent");
 }
 
 /// The hook removes cache markers from user messages and keeps the system prompt's marker, in the Bedrock Converse, Anthropic Messages, and OpenAI-completions payload shapes.
