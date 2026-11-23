@@ -231,12 +231,15 @@ selected IDs, order, content, revision, and truncation must remain equal.
 Rows of the `named-files` domain are selected by the pass and are no noise:
 they enter the selected rows, the served ids, and the revision, and their
 charge of up to an eighth of the budget can displace lasting facts. For each
-of the up to eight listed files the pass also reads the work tree: the
-file's status, at most 256 KiB of its bytes for a hash against HEAD's blob,
-and, at a HEAD whose walk the daemon does not hold, up to 256 parents of the
-file's history. That reading fills the last-change clause of the file's
-line, which the revision leaves out, and a block that lists a file reads
-the commit times of its user statements in one statement.
+of the up to eight listed files the pass also reads the file: its status
+twice and at most 256 KiB of its bytes, which it hashes. For bytes the
+daemon's history reader holds no answer for, the pass waits up to one
+second for that thread, which opens the repository, reads HEAD, and walks
+up to 256 parents of each file within two seconds; an answer is kept for
+the path and the blob. That reading fills the last-change clause of the
+file's line, which the revision and the budget's charge leave out, and a
+block that lists a file reads the commit times of its user statements in
+one statement.
 Compare snapshot metadata to each store's own pinned tip, not across tips.
 Fault/timing angle: An early SQL limit or changed predicate admits noise into
 the bounded set or removes candidates the baseline keeps.
@@ -795,7 +798,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8786
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L227-L505
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L228-L506
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
@@ -810,7 +813,7 @@ them without creating implementation tickets.
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L383
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3818-L4078
-[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L218-L255
+[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L233-L270
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180
 [soft-core]: ../../../crates/cache-stability/src/lib.rs#L221-L287

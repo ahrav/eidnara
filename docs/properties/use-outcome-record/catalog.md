@@ -156,39 +156,40 @@ revisions, and a change to any rendered row outside a last-change clause, or
 to the order of the `NAMED_FILES` or the `CURRENT_WORK` rows, changes it; a
 row the block does not render and a last-change clause contribute no byte to
 it, and how the two supplied-order sections interleave in the input, and
-which of two rows of one id the input holds first, change nothing.
+which of two rows of one id in two categories the input holds first, change
+nothing; two rows of one id in one category enter in the input's order.
 Fault/timing angle: none
 Required faults and enabling state: Snapshots that differ only in rows the
 renderer drops, bytes past the render cap, rows past the memory budget, the
 order of the `CURRENT_WORK` rows, the presence and order of the
 `NAMED_FILES` rows, the last-change clause of a `NAMED_FILES` line, or the
-input order of two rows of one id.
+input order of two rows of one id in two categories.
 Confidence: high -
 [evidence](evidence/uo-composition-revision-digests-exactly-the-rendered-rows.md).
 read at `crates/daemon/src/canonical_memory.rs:56-85`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:1347`);
+(`crates/daemon/src/canonical_memory.rs:1348`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1643`);
+(`crates/daemon/src/canonical_memory.rs:1644`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1660`);
+(`crates/daemon/src/canonical_memory.rs:1661`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1682`);
+(`crates/daemon/src/canonical_memory.rs:1683`);
 `the_revision_reads_the_current_work_section_in_the_supplied_order`
-(`crates/daemon/src/canonical_memory.rs:1609`);
+(`crates/daemon/src/canonical_memory.rs:1610`);
 `the_revision_reads_the_named_files_in_the_supplied_order`
-(`crates/daemon/src/canonical_memory.rs:1548`);
+(`crates/daemon/src/canonical_memory.rs:1549`);
 `the_revision_leaves_out_a_named_files_last_change`
-(`crates/daemon/src/canonical_memory.rs:1757`);
+(`crates/daemon/src/canonical_memory.rs:1758`);
 `rows_of_one_id_enter_the_revision_in_category_order`
-(`crates/daemon/src/canonical_memory.rs:1804`). Status: unaudited.
+(`crates/daemon/src/canonical_memory.rs:1805`). Status: unaudited.
 Impact: A spurious revision change can request an unnecessary HARD fold. If
-the project, session, harness, role, and served IDs are unchanged, the serve
-replays its existing receipt instead of inserting another record. A
-last-change clause inside the digest would fold a session's m0 at each edit
-of a listed file.
+the project, session, harness, role, and served IDs are unchanged and an
+earlier serve wrote its receipt, the serve replays that receipt instead of
+inserting another record. A last-change clause inside the digest would fold
+a session's m0 at each edit of a listed file.
 Open questions:
 - The `DefaultHasher` output is unspecified across toolchain releases; #1154
   resolves OQ3-12 by keying the record on `served_set_digest` and storing the
@@ -296,7 +297,7 @@ commit.
 Confidence: high -
 [evidence](evidence/uo-known-as-of-is-the-tip-bound-read-sequence.md).
 `read_project_memory` captures the tip and passes it as the requested snapshot
-(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:240`)); the route
+(`read_project_memory` (`crates/daemon/src/canonical_memory.rs:241`)); the route
 returns `known_as_of` from the visible read
 (`crates/daemon/src/kernel_routes/read.rs:544`).
 Existing check:
@@ -1114,9 +1115,9 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `a_dispute_between_folds_records_the_next_served_set_without_it`
 (`crates/daemon/src/use_outcome_writer_tests.rs:528`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:1309`);
+(`crates/daemon/src/canonical_memory.rs:1310`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1682`);
+(`crates/daemon/src/canonical_memory.rs:1683`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`

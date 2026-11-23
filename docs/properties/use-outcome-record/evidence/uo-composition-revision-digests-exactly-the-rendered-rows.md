@@ -21,7 +21,7 @@ revision.
   `CURRENT_WORK` rows in the supplied order (`crates/daemon/src/canonical_memory.rs:56-85`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:819`)).
+  (`crates/daemon/src/canonical_memory.rs:820`)).
 - The spec cited the `fn` lines of the first four tests named under Existing
   check, and the production code was not cited. The fifth covers the order
   of the `CURRENT_WORK` rows, the sixth the `NAMED_FILES` rows and how
@@ -35,21 +35,21 @@ revision.
   categories, rows of one id in category order, then the `CURRENT_WORK` rows
   in the supplied order.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1347`);
+  (`crates/daemon/src/canonical_memory.rs:1348`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1643`);
+  (`crates/daemon/src/canonical_memory.rs:1644`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1660`);
+  (`crates/daemon/src/canonical_memory.rs:1661`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1682`);
+  (`crates/daemon/src/canonical_memory.rs:1683`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1609`);
+  (`crates/daemon/src/canonical_memory.rs:1610`);
   `the_revision_reads_the_named_files_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1548`);
+  (`crates/daemon/src/canonical_memory.rs:1549`);
   `the_revision_leaves_out_a_named_files_last_change`
-  (`crates/daemon/src/canonical_memory.rs:1757`);
+  (`crates/daemon/src/canonical_memory.rs:1758`);
   `rows_of_one_id_enter_the_revision_in_category_order`
-  (`crates/daemon/src/canonical_memory.rs:1804`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1805`). Status: unaudited.
 
 ## Failure scenario
 
@@ -71,7 +71,7 @@ Required faults and enabling state: Snapshots that differ only in rows the
 renderer drops, bytes past the render cap, rows past the memory budget, the
 order of the `CURRENT_WORK` rows, the presence and order of the
 `NAMED_FILES` rows, the last-change clause of a `NAMED_FILES` line, or the
-input order of two rows of one id.
+input order of two rows of one id in two categories.
 
 ## Investigation log
 

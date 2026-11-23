@@ -24,7 +24,7 @@ the link between a marker and its test is the Observed column.
 | Record | Required faults and enabling state |
 | --- | --- |
 | `uo-served-rows-are-the-frozen-m0-rows-between-hard-folds` | A session with a HARD fold over a Canonical composition, then a Kernel commit that changes the visible rows, then a non-HARD pass. |
-| `uo-composition-revision-digests-exactly-the-rendered-rows` | Snapshots that differ only in rows the renderer drops, bytes past the render cap, rows past the memory budget, the order of the `CURRENT_WORK` rows, the presence and order of the `NAMED_FILES` rows, the last-change clause of a `NAMED_FILES` line, or the input order of two rows of one id. |
+| `uo-composition-revision-digests-exactly-the-rendered-rows` | Snapshots that differ only in rows the renderer drops, bytes past the render cap, rows past the memory budget, the order of the `CURRENT_WORK` rows, the presence and order of the `NAMED_FILES` rows, the last-change clause of a `NAMED_FILES` line, or the input order of two rows of one id in two categories. |
 | `uo-composition-freeze-persists-at-every-hard-fold-site` | A HARD fold on each engine, a pressure refold on the folding engine, and a CAS conflict inside one pass. |
 | `uo-subagent-pass-serves-no-composition-under-eidnara-folds` | A route with `eidnara_folds` (compaction on, a model chain) and a subagent request; the same request under native authority. |
 | `uo-known-as-of-is-the-tip-bound-read-sequence` | A Canonical read with a concurrent Kernel commit. |
