@@ -17,13 +17,19 @@ fn provider_label(rule_id: &str) -> Option<(&'static str, &'static str)> {
         "magic-slack-token" => ("slack_token", "<SLACK_TOKEN_REDACTED>"),
         "magic-google-api-key" => ("google_api_key", "<GOOGLE_API_KEY_REDACTED>"),
         "magic-bearer-token" => ("bearer", "<REDACTED:bearer>"),
+        "magic-jwt" => ("jwt", "<JWT_REDACTED>"),
+        _ => return None,
+    })
+}
+
+fn form_label(rule_id: &str) -> Option<(&'static str, &'static str)> {
+    Some(match rule_id {
         "magic-value-basic-authorization" => ("basic", "<REDACTED:basic>"),
         "magic-value-url-userinfo" => ("url_password", "<REDACTED:url_password>"),
         "magic-value-password-assignment"
         | "magic-value-client-attached"
         | "magic-value-client-option" => ("password", "<REDACTED:password>"),
         "magic-value-private-key-body" => ("private_key", "<REDACTED:private_key>"),
-        "magic-jwt" => ("jwt", "<JWT_REDACTED>"),
         _ => return None,
     })
 }
@@ -45,7 +51,9 @@ const KEYED_RULE_IDS: &[&str] = &[
 
 #[cfg(test)]
 fn is_known_rule(rule_id: &str) -> bool {
-    provider_label(rule_id).is_some() || KEYED_RULE_IDS.contains(&rule_id)
+    provider_label(rule_id).is_some()
+        || form_label(rule_id).is_some()
+        || KEYED_RULE_IDS.contains(&rule_id)
 }
 
 /// Precedence among findings that cover overlapping bytes; the lowest value wins.
@@ -187,6 +195,15 @@ fn describe(
             start,
             end,
             specificity: PROVIDER_PRECEDENCE,
+            secret_type: secret_type.to_owned(),
+            replacement: replacement.to_owned(),
+        });
+    }
+    if let Some((secret_type, replacement)) = form_label(rule_id) {
+        return Ok(Replacement {
+            start,
+            end,
+            specificity: GENERIC_PRECEDENCE,
             secret_type: secret_type.to_owned(),
             replacement: replacement.to_owned(),
         });
@@ -415,11 +432,19 @@ mod tests {
             assert_persistable_label(secret_type);
         }
         assert_eq!(
-            providers, 16,
+            providers, 10,
             "provider label count changed; re-check the shape"
         );
         // The key-derived fallback label takes the same column.
         assert_persistable_label("secret");
+        let forms: Vec<_> = overlay_rule_names()
+            .into_iter()
+            .filter_map(form_label)
+            .collect();
+        assert_eq!(forms.len(), 6);
+        for (secret_type, _) in forms {
+            assert_persistable_label(secret_type);
+        }
     }
 
     fn assert_persistable_label(label: &str) {

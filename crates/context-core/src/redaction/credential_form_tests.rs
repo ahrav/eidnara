@@ -384,6 +384,95 @@ fn a_word_with_a_quote_a_backslash_or_a_dollar_sign_is_replaced_whole() {
 }
 
 #[test]
+fn a_gate_reads_the_text_the_word_reader_delimits() {
+    let chosen = chosen();
+    let (head, tail) = chosen.split_at(3);
+    for value in [
+        format!("\"{head}\\n{tail}\""),
+        format!("{head}\",{tail}"),
+        format!("1433;database=sales;{chosen}"),
+        format!("[{chosen}>"),
+        format!("{{{chosen}]"),
+    ] {
+        assert_redacts(
+            &format!("deploy --password {value} --yes"),
+            &value,
+            PASSWORD,
+        );
+    }
+    for line_break in ["\\n", "\\r\\n", "\\u000a", "\\u000D"] {
+        let lines = format!("PGPASSWORD={head}{line_break}DBPASSWORD={chosen} psql");
+        assert_eq!(
+            redact_durable_text(&lines).text,
+            format!("PGPASSWORD={PASSWORD}{line_break}DBPASSWORD={PASSWORD} psql")
+        );
+        let field = format!("token: {chosen} {line_break}next: 1");
+        assert_redacts(&field, &chosen, "<REDACTED:token>");
+    }
+    let twice = format!("user: bob\\\\npassword: {chosen}\\\\nhost: db");
+    let word = format!("{chosen}\\\\nhost:");
+    assert_redacts(&twice, &word, PASSWORD);
+    assert_redacts(
+        &format!("{{\"stdout\":\"user: bob\\npassword: {chosen} \\nhost: db\"}}"),
+        &chosen,
+        PASSWORD,
+    );
+    assert_exact(&format!(
+        "{{\"stdout\": \"password: {chosen}\", \"exit_code\": 0}}"
+    ));
+    assert_exact("{\"content\":\"    token: u64,\"}");
+    assert_exact("token: \"\\n\"");
+    for (input, value) in [
+        (
+            format!("mysqldump -uroot -p{chosen}>${{BACKUP_DIR}}/app.sql"),
+            format!("{chosen}>${{BACKUP_DIR}}/app.sql"),
+        ),
+        (
+            format!("mysql -uroot -p{chosen}<insert_users.sql"),
+            format!("{chosen}<insert_users.sql"),
+        ),
+        (
+            format!("PGPASSWORD={chosen}&&./example.sh"),
+            format!("{chosen}&&./example.sh"),
+        ),
+        (
+            format!("deploy --password {chosen}\\texample.org"),
+            format!("{chosen}\\texample.org"),
+        ),
+        (
+            format!("deploy --password 12;{chosen} now"),
+            format!("12;{chosen}"),
+        ),
+    ] {
+        assert_redacts(&input, &value, PASSWORD);
+    }
+    for input in [
+        "deploy --password ${PASS}>out now",
+        "mysql -uroot -p$MYSQL_PWD<in.sql",
+        "deploy --password changeme;x9 now",
+        "PGPASSWORD=changeme&&./run9.sh",
+    ] {
+        assert_exact(input);
+    }
+    for quoted in [format!("\"[{chosen}>\""), format!("\"{{{chosen}}}\"")] {
+        assert_redacts(&format!("password: {quoted}"), &quoted, PASSWORD);
+    }
+    let bracketed = format!("<{chosen}>");
+    assert_redacts(
+        &format!("deploy --password {bracketed} --yes"),
+        &bracketed,
+        PASSWORD,
+    );
+    for input in [
+        "deploy --password 1433;database=sales;encrypt=true --yes",
+        "deploy --password <a{b}> --yes",
+    ] {
+        assert_exact(input);
+    }
+    assert_redacts(&format!("x\\ntoken: {chosen}"), &chosen, "<REDACTED:token>");
+}
+
+#[test]
 fn a_name_that_ends_in_password_joined_to_its_prefix_is_a_password_key() {
     let chosen = chosen();
     for (input, value) in [
@@ -393,10 +482,7 @@ fn a_name_that_ends_in_password_joined_to_its_prefix_is_a_password_key() {
             chosen.clone(),
         ),
         (format!("mypassword={chosen}"), chosen.clone()),
-        (
-            format!("x\\nPGPASSWORD={chosen}\\npsql"),
-            format!("{chosen}\\npsql"),
-        ),
+        (format!("x\\nPGPASSWORD={chosen}\\npsql"), chosen.clone()),
         (
             format!("PGPASSWORD=\"{chosen} two\" psql"),
             format!("\"{chosen} two\""),
@@ -508,6 +594,11 @@ fn basic_authorization_credentials_are_redacted() {
     assert_exact(&format!("x\\NAuthorization: Basic {basic}"));
     assert_redacts(
         &format!("Authorization: Basic\nAuthorization: Basic {basic}"),
+        &basic,
+        "<REDACTED:basic>",
+    );
+    assert_redacts(
+        &format!("Authorization: Basic Authorization: Basic {basic}"),
         &basic,
         "<REDACTED:basic>",
     );
@@ -683,6 +774,16 @@ fn private_key_body_lines_are_redacted_under_a_header_without_a_footer() {
         "<REDACTED:private_key>",
     );
     assert_exact(&lines(5));
+    let indented = |blanks: usize| format!("{header}\n{}{line}\n", " ".repeat(blanks));
+    assert_redacts(&indented(256), &line, "<REDACTED:private_key>");
+    assert_exact(&indented(257));
+    let last = |blanks: usize| format!("{header}\n{line}\n{short}{}\n", " ".repeat(blanks));
+    assert_redacts(
+        &last(256),
+        &format!("{line}\n{short}"),
+        "<REDACTED:private_key>",
+    );
+    assert_redacts(&last(257), &line, "<REDACTED:private_key>");
     assert_exact(&format!("{header}\n...\n"));
     assert_exact(&format!("{header}\nthe key body goes here\n"));
     let followed = format!("{header}\n{line}\nplain text follows\n");
@@ -720,10 +821,60 @@ fn a_finding_of_an_added_rule_merges_with_the_finding_it_overlaps() {
             "<REDACTED:api_key>",
             ["magic-anthropic-api-key", "magic-value-field"],
         ),
+        (
+            format!("deploy --token {chosen}\\nDB_PASSWORD={issued} now"),
+            format!("{chosen}\\nDB_PASSWORD={issued}"),
+            "<REDACTED:token>",
+            ["magic-keyed-assignment", "magic-value-option"],
+        ),
+        (
+            format!("token: {chosen}\\nDB_PASSWORD={issued}"),
+            format!("{chosen}\\nDB_PASSWORD={issued}"),
+            "<REDACTED:token>",
+            ["magic-keyed-assignment", "magic-value-field"],
+        ),
     ] {
         assert_redacts(&input, &value, placeholder);
         let findings = redactor().unwrap().scanner.scan(&input).unwrap().findings;
         for rule in rules {
+            assert!(
+                findings.iter().any(|finding| finding.rule_id == rule),
+                "{rule} on {input:?}: {findings:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_vendor_token_in_an_added_form_keeps_its_vendor_label() {
+    let issued = issued();
+    let vendor = format!("sk-ant-api03-{issued}{issued}");
+    for (input, rule) in [
+        (
+            format!(
+                "git clone {}",
+                url("https", "alice", &vendor, "example.org/r.git")
+            ),
+            "magic-value-url-userinfo",
+        ),
+        (
+            format!("PGPASSWORD={vendor} psql"),
+            "magic-value-password-assignment",
+        ),
+        (
+            format!("sshpass -p {vendor} ssh host"),
+            "magic-value-client-option",
+        ),
+    ] {
+        let redaction = redact_durable_text(&input);
+        assert_eq!(
+            redaction.text,
+            input.replacen(&vendor, "<ANTHROPIC_API_KEY_REDACTED>", 1)
+        );
+        assert_eq!(redaction.detections.len(), 1, "{input:?}");
+        assert_eq!(redaction.detections[0].secret_type, "anthropic_api_key");
+        let findings = redactor().unwrap().scanner.scan(&input).unwrap().findings;
+        for rule in ["magic-anthropic-api-key", rule] {
             assert!(
                 findings.iter().any(|finding| finding.rule_id == rule),
                 "{rule} on {input:?}: {findings:?}"
@@ -906,6 +1057,54 @@ fn a_header_without_a_value_leaves_the_next_header_to_its_own_match_in_every_win
 }
 
 #[test]
+fn headers_without_a_value_on_one_line_leave_the_last_header_to_its_own_match_in_every_window() {
+    let basic = basic_credentials();
+    let empty = "Authorization: Basic ";
+    for headers in [1023usize, 1024] {
+        let line = format!("{}{empty}{basic}", empty.repeat(headers));
+        let alone = redact_durable_text(&line);
+        assert_eq!(alone.text, line.replacen(&basic, "<REDACTED:basic>", 1));
+        for into_line in [0usize, 7, 10 * 1024 + 3, 10 * 1024 + 4] {
+            let start = MAX_REDACTABLE_BYTES - WINDOW_OVERLAP_BYTES - into_line;
+            let (text, at) = text_with_line_at(start, &line, 2 * MAX_REDACTABLE_BYTES);
+            assert_eq!(at, start);
+            let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+            assert_eq!(windowed.text, text.replacen(&basic, "<REDACTED:basic>", 1));
+            assert_eq!(windowed.detections.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn a_key_body_before_a_long_blank_run_is_replaced_the_same_in_every_window() {
+    let (header, line) = (private_key_header(), private_key_body_line());
+    let blanks = " ".repeat(18 * 1024);
+    for block in [
+        format!("{header}\n{line}{blanks}\nSaved to disk"),
+        format!("{header}\n{line}\n{blanks}Saved to disk"),
+    ] {
+        let alone = redact_durable_text(&block);
+        assert_eq!(
+            alone.text,
+            block.replacen(&line, "<REDACTED:private_key>", 1)
+        );
+        let cut = block.find("Saved").unwrap() + 2;
+        for past_the_edge in [0usize, 1, 13] {
+            let start = MAX_REDACTABLE_BYTES - cut - past_the_edge;
+            let (text, at) = text_with_line_at(start, &block, 2 * MAX_REDACTABLE_BYTES);
+            assert_eq!(at, start);
+            let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+            assert_eq!(
+                windowed.text,
+                text.replacen(&line, "<REDACTED:private_key>", 1)
+            );
+            assert_eq!(windowed.detections.len(), 1);
+            assert_eq!(detect_windowed_durable_text(&text), Ok(true));
+        }
+    }
+}
+
+#[test]
 fn a_field_inside_a_quoted_field_word_is_replaced_the_same_in_every_window() {
     let chosen = chosen();
     let line = format!(
@@ -975,6 +1174,30 @@ fn adversarial_inputs(total: usize) -> Vec<(&'static str, String)> {
             format!("{}token: x1 y", filled("a.", total - 16)),
         ),
         ("suffix keys", filled("apassword=", total)),
+        (
+            "suffix keys with escaped blanks",
+            filled("PGPASSWORD=$X\\ ", total),
+        ),
+        (
+            "suffix keys on serialized lines",
+            filled("PGPASSWORD=$X\\n", total),
+        ),
+        (
+            "suffix keys after unicode escapes",
+            filled("aPASSWORD=\\u0041", total),
+        ),
+        (
+            "private key header lines",
+            format!(
+                "{}\n{}",
+                private_key_header(),
+                filled("Name: value\n", total - 64)
+            ),
+        ),
+        (
+            "headers on one line",
+            filled("Authorization: Basic Authorization ", total),
+        ),
         (
             "digits before a long word",
             filled(&["password=", "1234a "].concat(), total),

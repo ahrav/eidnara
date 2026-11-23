@@ -68,7 +68,10 @@ fn the_text_of_a_word_is_the_word_without_what_surrounds_the_value() {
         ),
         ("Zx9kq7\\nuser:", bare("Zx9kq7")),
         ("Zx9kq7\\r\\nuser:", bare("Zx9kq7")),
-        ("\"Zx9kq7\\nmore\"", bare("Zx9kq7")),
+        ("\"Zx9kq7\\nmore\"", literal("Zx9kq7\\nmore")),
+        ("\"hunter\\n9x!\" next", literal("hunter\\n9x!")),
+        ("Ab\\\\\\\",Zx9!", bare("Ab\\\\\\\",Zx9!")),
+        ("ab\",cd9", bare("ab\",cd9")),
         ("\"true\"\\nuser=\"bob\"", literal("true")),
         ("Zx9kq7\\\\nuser:", bare("Zx9kq7\\\\nuser:")),
         ("Zx9kq7\\u000Auser:", bare("Zx9kq7")),
@@ -121,6 +124,8 @@ fn placeholder_shapes_are_closed() {
         "/path/to/secrets7.txt",
         "https://example.org/settings/tokens7",
         "1433;database=sales",
+        "1433;database=sales;encrypt=true;",
+        "<a{b}>",
         "id=npm7,src=.npmrc",
         "",
     ] {
@@ -162,6 +167,14 @@ fn placeholder_shapes_are_closed() {
         "<a>Zx9!kq7",
         "[Zx9]!kq7",
         "12;ab!9",
+        "1433;database=sales;Zx9!kq7",
+        "1433;",
+        "[Zx9!>",
+        "{Zx9!kq7]",
+        "<a[b>]",
+        "<Zx9!kq7>",
+        "{a:b}",
+        "id=npm7,Zx9!kq7",
     ] {
         assert!(!is_placeholder_shape(text.as_bytes()), "{text:?}");
     }
@@ -456,7 +469,7 @@ fn read(input: &str) -> Word {
         read: 0,
         allowance: usize::MAX,
     };
-    let word = read_word(&mut reader).unwrap();
+    let word = read_word(&mut reader, false).unwrap();
     assert!(reader.read >= word.end, "{input:?}");
     word
 }
@@ -570,6 +583,11 @@ fn digits_are_reported_when_they_are_the_whole_assigned_word() {
         "password={};x9",
         "password=\"{} abcd\"",
         "password='{}-abcd'",
+        "password=\"{}'",
+        "password='{}\"abcd",
+        "{\\\"password\\\":\\\"{}\"abcd",
+        "password={}\\ abcd",
+        "password={}\\abcd",
         "password={}.5",
         "password={}-abcd",
         "password:{}",
@@ -582,6 +600,83 @@ fn digits_are_reported_when_they_are_the_whole_assigned_word() {
 }
 
 #[test]
+fn a_password_assignment_on_the_next_serialized_line_has_its_own_match() {
+    let chosen = chosen();
+    let values = |input: &str| -> Vec<String> {
+        word_findings(input)
+            .into_iter()
+            .map(|finding| input[finding.value_span.start()..finding.value_span.end()].to_owned())
+            .collect()
+    };
+    for line_break in ["\\n", "\\r\\n", "\\u000a", "\\u000D"] {
+        let reference = format!("PGPASSWORD=$PGPASS{line_break}PGPASSWORD={chosen} psql");
+        assert_eq!(
+            values(&reference),
+            std::slice::from_ref(&chosen),
+            "{reference:?}"
+        );
+        let first = ["one", "9!"].concat();
+        let both = format!("PGPASSWORD={first}{line_break}PGPASSWORD={chosen} psql");
+        assert_eq!(values(&both), [first, chosen.clone()], "{both:?}");
+    }
+    let literal_pair = format!("PGPASSWORD={chosen}\\\\nine psql");
+    assert_eq!(values(&literal_pair), [format!("{chosen}\\\\nine")]);
+    let escaped_blank = format!("PGPASSWORD=$PGPASS\\ PGPASSWORD={chosen} psql");
+    assert_eq!(values(&escaped_blank), Vec::<String>::new());
+    let one_word = format!("PGPASSWORD=$PGPASS;PGPASSWORD={chosen} psql");
+    assert_eq!(values(&one_word), Vec::<String>::new());
+}
+
+#[test]
+fn an_open_section_fails_the_scan_closed_past_the_match_bound_and_opens_a_bare_word_below_it() {
+    for end in ["", "\n"] {
+        for (length, aborts) in [
+            (MAX_MATCH_BYTES - 1, false),
+            (MAX_MATCH_BYTES, false),
+            (MAX_MATCH_BYTES + 1, true),
+        ] {
+            let open = format!("\"a {}{end}", "b".repeat(length - 3));
+            assert_eq!(open.len(), length + end.len());
+            let mut reader = WordReader {
+                input: &open,
+                at: 0,
+                read: 0,
+                allowance: usize::MAX,
+            };
+            match read_word(&mut reader, false) {
+                Err(Abort::Match) => assert!(aborts, "{length}{end:?}"),
+                Ok(word) => {
+                    assert!(!aborts, "{length}{end:?}");
+                    assert_eq!((word.start, word.end), (0, 2));
+                }
+                Err(_) => panic!("{length}{end:?}"),
+            }
+        }
+    }
+    let multibyte = format!("\"a {}\u{e9}", "b".repeat(MAX_MATCH_BYTES - 3));
+    let mut reader = WordReader {
+        input: &multibyte,
+        at: 0,
+        read: 0,
+        allowance: usize::MAX,
+    };
+    assert!(matches!(read_word(&mut reader, false), Err(Abort::Match)));
+}
+
+#[test]
+fn a_word_past_the_match_bound_fails_the_scan_closed() {
+    let long = "a".repeat(MAX_MATCH_BYTES + 2);
+    let mut reader = WordReader {
+        input: &long,
+        at: 0,
+        read: 0,
+        allowance: usize::MAX,
+    };
+    assert!(matches!(read_word(&mut reader, false), Err(Abort::Match)));
+    assert!(reader.read <= MAX_MATCH_BYTES + 1);
+}
+
+#[test]
 fn a_section_still_open_past_the_match_bound_fails_the_scan_closed() {
     let open = format!("\"{}", "a ".repeat(MAX_MATCH_BYTES));
     let mut reader = WordReader {
@@ -590,7 +685,7 @@ fn a_section_still_open_past_the_match_bound_fails_the_scan_closed() {
         read: 0,
         allowance: usize::MAX,
     };
-    assert!(matches!(read_word(&mut reader), Err(Abort::Match)));
+    assert!(matches!(read_word(&mut reader, false), Err(Abort::Match)));
     let closed = format!("\"{}\"", "a ".repeat(MAX_MATCH_BYTES / 2 - 8));
     assert_eq!(read(&closed).end, closed.len());
     let report = {
@@ -628,7 +723,7 @@ fn the_word_reader_stops_at_the_work_budget_and_charges_what_it_read() {
         );
         (outcome, work)
     };
-    let read = word.len() + blanks.len();
+    let read = 2 * word.len() + blanks.len();
     let (outcome, work) = read_with(read);
     let found = outcome.unwrap().unwrap();
     assert_eq!(
@@ -676,8 +771,29 @@ const ENDS: [&str; 12] = [
     " '",
 ];
 
+const ADMITTED_PARTS: [&str; 10] = ["kq7", "9", "!", "=", "$", "\\ ", "\\\\", "@", "%", "+"];
+const LINE_ENDS: [&str; 4] = ["", "\n", "\r\n", "\t# note"];
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(6_000))]
+
+    #[test]
+    fn a_word_built_of_admitted_parts_is_reported_from_its_first_byte_to_its_last(
+        lead in 0..LEADS.len(),
+        parts in proptest::collection::vec(0..ADMITTED_PARTS.len(), 0..10),
+        end in 0..LINE_ENDS.len(),
+    ) {
+        let word: String = std::iter::once("Zx9!")
+            .chain(parts.iter().map(|&part| ADMITTED_PARTS[part]))
+            .collect();
+        let input = [LEADS[lead], &word, LINE_ENDS[end]].concat();
+        let spans: Vec<(usize, usize)> = word_findings(&input)
+            .into_iter()
+            .map(|finding| (finding.value_span.start(), finding.value_span.end()))
+            .collect();
+        let start = LEADS[lead].len();
+        assert_eq!(spans, [(start, start + word.len())], "{input:?}");
+    }
 
     #[test]
     fn the_word_reader_agrees_with_the_word_patterns_on_generated_text(
@@ -706,8 +822,15 @@ proptest::proptest! {
         let findings = word_findings(&input);
         for finding in &findings {
             let (start, end) = (finding.value_span.start(), finding.value_span.end());
-            let word = WORD_PATTERNS.1.find(&input[start..]).unwrap();
-            assert_eq!(start + word.end(), end, "{} on {input:?}", finding.rule_id);
+            let word = WORD_PATTERNS.1.find(&input[start..]).unwrap().end();
+            let expected = if finding.rule_id == "magic-value-password-assignment" {
+                let sections = WORD_PATTERNS.0.find(&input[start..]).unwrap().end();
+                let plain = &input.as_bytes()[start + sections..start + word];
+                sections + serialized_line_break(plain).unwrap_or(plain.len())
+            } else {
+                word
+            };
+            assert_eq!(start + expected, end, "{} on {input:?}", finding.rule_id);
         }
         let mut at = cut % (input.len() + 1);
         while !input.is_char_boundary(at) {

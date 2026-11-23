@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "db256fb7413080de4e2df07c53ef8b48435d40d81acc18bc074d2b76dca4240b";
+    "c2a96877c1e17084de10a80c0417f72b27c38e1956a872b4aac45c979a91067b";
 
 const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -153,6 +153,9 @@ pub(crate) enum CredentialForm {
     /// The word a named client reads as its password option: `-pWORD`, `-p WORD`.
     ClientPassword,
     ClientPasswordOption,
+    DigitsQuoted,
+    BasicAuthorization,
+    PrivateKeyBody,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -218,7 +221,6 @@ pub(crate) enum OfflineValidationKind {
     SentryOrgToken,
     PypiToken,
     SlackToken,
-    BasicCredentials,
 }
 
 /// Compiled declaration and its prepared candidate filters.
@@ -1129,11 +1131,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "b87cc4807cd3c092b8a1f0678a90b7ee5c0afae3272dcf2deab5e88b7627757b",
+                "35d5079a7a3b2fd465f351a038197cc6ea6a7c215e028d1cf4ef3494ea0292f7",
             ),
             (
                 ScanProfile::Comprehensive,
-                "8039d58c4f6fed8733a6dad7ca81eae6692f5d0f089388bde08eab2d3d934980",
+                "8d5fe9d974e934881523b8c5997c4a8ac35534eee2e434a9ae5ed198a51afa3a",
             ),
         ] {
             let digest = rules
