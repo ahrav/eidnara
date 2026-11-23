@@ -108,15 +108,15 @@ export function reviewClassifierWork(response: unknown): ReviewClassifierWork | 
  * Answers the daemon's stage-1 classifier work for each project a session is open on. One loop
  * per project root asks `memory.review.classify.next` for work every few seconds, runs the
  * classifier through `execute`, and returns the answers or one failure code with
- * `memory.review.classify.submit`. The daemon reads each `next` call as the sign that this
- * project's harness has a classifier, so a harness that cannot call one starts no loop and the
+ * `memory.review.classify.submit`. The daemon reads each `next` call it answers `work` or
+ * `ready` as the sign that this project's harness has a classifier, so a harness that cannot call one starts no loop and the
  * chat model decides. A `disabled` reply ends the loop: the project names no classifier, or
  * another one.
  */
 export function createReviewClassifierPump(
     client: Pick<RustModeModuleClient, "call">,
     execute: ReviewClassifierExecutor,
-    options: { retryDelayMs?: number; pollIntervalMs?: number } = {},
+    options: { retryDelayMs?: number; pollIntervalMs?: number; settleGraceMs?: number } = {},
 ): ReviewClassifierPump {
     interface Loop {
         scope: ReviewClassifierScope;
@@ -127,6 +127,7 @@ export function createReviewClassifierPump(
     const loops = new Map<string, Loop>();
     const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
     const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
+    const settleGraceMs = options.settleGraceMs ?? SETTLE_GRACE_MS;
 
     /** Settles after `ms`, or at once when the pump closes. */
     const pause = (ms: number) =>
@@ -156,7 +157,7 @@ export function createReviewClassifierPump(
             outcome = {
                 answers: await withTimeout(
                     execute(work, controller.signal),
-                    work.maxDurationMs + SETTLE_GRACE_MS,
+                    work.maxDurationMs + settleGraceMs,
                     "memory review classifier call",
                 ),
             };

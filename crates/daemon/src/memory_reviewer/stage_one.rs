@@ -488,7 +488,6 @@ pub(super) mod tests {
         )
     }
 
-    /// The state text carries the memory, its source and the later references in one fixed member order, and writes a reference without a time as `null`.
     /// The worker's log names each decider by these two words, and a report splits results on them.
     #[test]
     fn a_decider_is_logged_by_its_kind_and_model() {
@@ -505,6 +504,7 @@ pub(super) mod tests {
         );
     }
 
+    /// The state text carries the memory, its source and the later references in one fixed member order, and writes a reference without a time as `null`.
     #[test]
     fn the_state_text_keeps_one_member_order() {
         let state = ReviewState {

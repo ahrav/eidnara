@@ -40,6 +40,9 @@ describe("piHasReviewClassifier", () => {
             piHasReviewClassifier(context({ find: () => undefined }), "typesafe/jev-latest"),
         ).toBe(false);
         expect(piHasReviewClassifier(context(undefined), "typesafe/jev-latest")).toBe(false);
+        // A registry that cannot report a configured credential is one without a classifier.
+        const { hasConfiguredAuth: _unused, ...unreported } = registry({});
+        expect(piHasReviewClassifier(context(unreported), "typesafe/jev-latest")).toBe(false);
         // A classifier the registry lists without a credential leaves the chat model to decide.
         const listed = { ...registry({}), hasConfiguredAuth: () => false };
         expect(piHasReviewClassifier(context(listed), "typesafe/jev-latest")).toBe(false);

@@ -160,6 +160,21 @@ describe("createReviewClassifierPump", () => {
         expect(submitted?.body.error).toBe("provider_unavailable");
     });
 
+    it("bounds a classifier call that ignores its abort signal and goes on to the next call", async () => {
+        const fake = daemon([work({ max_duration_ms: 5 }), { state: "disabled" }]);
+        const pump = createReviewClassifierPump(fake.client, () => new Promise(() => undefined), {
+            settleGraceMs: 5,
+        });
+        pump.start(SCOPE);
+        await pump.idle();
+        expect(fake.calls.map((call) => call.method)).toEqual([
+            "memory.review.classify.next",
+            "memory.review.classify.submit",
+            "memory.review.classify.next",
+        ]);
+        expect(fake.calls[1]?.body.error).toBe("provider_unavailable");
+    });
+
     it("reports answers once, and a submit the daemon does not receive is left to the review's wait", async () => {
         const methods: string[] = [];
         const client = {
@@ -245,7 +260,9 @@ describe("createReviewClassifierPump", () => {
         pump.start(SCOPE);
         pump.start({ ...SCOPE, projectRoot: "/work/other" });
         await new Promise((resolve) => setTimeout(resolve, 15));
-        const roots = fake.calls.slice(-3).map((call) => call.body.project_root);
+        // The first root's loop made its one call before the session moved on.
+        const roots = fake.calls.slice(2).map((call) => call.body.project_root);
+        expect(roots.length).toBeGreaterThan(0);
         expect(new Set(roots)).toEqual(new Set(["/work/other"]));
         await pump.close();
     });

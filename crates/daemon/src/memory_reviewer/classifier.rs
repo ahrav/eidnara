@@ -23,6 +23,11 @@ use super::stage_one::{
 pub const CLASSIFY_WAIT: Duration = Duration::from_secs(20);
 #[cfg(test)]
 pub const CLASSIFY_WAIT: Duration = Duration::from_secs(2);
+/// A request that ends without an answer after a wait of at least this long shows that the project's harness left: a harness asks for work every two seconds and answers within [`MAX_CLASSIFY_DURATION_MS`].
+#[cfg(not(test))]
+pub const ABSENCE_WAIT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+pub const ABSENCE_WAIT: Duration = Duration::from_millis(200);
 /// How long after a pull a project's harness counts as answering classifier work. A harness pulls every few seconds, so the window spans many pulls.
 pub const PRESENCE_WINDOW: Duration = Duration::from_secs(120);
 /// The longest classifier call a work response allows the harness.
@@ -275,7 +280,7 @@ impl ClassifierExchange {
             .is_some_and(|at| now.saturating_duration_since(*at) <= PRESENCE_WINDOW)
     }
 
-    /// Parks `request` for the project's harness and waits up to `wait` for its answers. A request that waits its whole time while no harness pulls it ends [`ClassifyError::Unpulled`]. The project's presence ends when a request waited unpulled for at least half of [`CLASSIFY_WAIT`], which spans several of a harness's calls, and when the harness reports `cancelled`, which it does as it closes; the chat model decides the attempts that follow until a harness calls again.
+    /// Parks `request` for the project's harness and waits up to `wait` for its answers. A request that waits its whole time while no harness pulls it ends [`ClassifyError::Unpulled`]. The project's presence ends when a request waited [`ABSENCE_WAIT`] or longer and got no answer, and when the harness reports `cancelled`, which it does as it closes; the chat model decides the attempts that follow until a harness calls again.
     pub async fn classify(
         &self,
         project: &str,
@@ -317,15 +322,15 @@ impl ClassifierExchange {
             .position(|parked| parked.id == id)
             .and_then(|at| inner.parked.remove(at))
             .is_some_and(|parked| parked.lease.is_some());
-        let unpulled = outcome == Err(ClassifyError::Unanswered) && !pulled;
+        let silent = outcome == Err(ClassifyError::Unanswered);
         let closing =
             matches!(&outcome, Err(ClassifyError::Harness(code)) if code == HARNESS_CANCELLED);
-        if (unpulled && wait >= CLASSIFY_WAIT / 2) || closing {
+        if (silent && wait >= ABSENCE_WAIT) || closing {
             inner
                 .pulls
                 .remove(&(project.to_string(), classifier.to_string()));
         }
-        if unpulled {
+        if silent && !pulled {
             return Err(ClassifyError::Unpulled);
         }
         outcome
@@ -619,7 +624,7 @@ mod tests {
         );
     }
 
-    /// A harness counts as present for [`PRESENCE_WINDOW`] after a pull, and a request no harness pulled ends the presence at once.
+    /// A harness counts as present for [`PRESENCE_WINDOW`] after a pull. A request that waits unpulled for [`ABSENCE_WAIT`] ends the presence, and a shorter wait keeps it.
     #[tokio::test]
     async fn presence_lasts_the_window_after_a_pull_and_ends_at_an_unpulled_request() {
         let exchange = ClassifierExchange::default();
@@ -643,10 +648,7 @@ mod tests {
             Err(ClassifyError::Unpulled)
         );
         assert!(exchange.present("project", "c/m"));
-        assert_eq!(
-            unpulled(CLASSIFY_WAIT / 2).await,
-            Err(ClassifyError::Unpulled)
-        );
+        assert_eq!(unpulled(ABSENCE_WAIT).await, Err(ClassifyError::Unpulled));
         assert!(!exchange.present("project", "c/m"));
         assert_eq!(
             exchange.next("project", "c/m"),
@@ -656,7 +658,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn presence_outlasts_a_pulled_request_that_fails_and_ends_at_a_cancelled_one() {
+    async fn presence_outlasts_a_failed_request_and_ends_at_a_silent_or_cancelled_one() {
         let exchange = Arc::new(ClassifierExchange::default());
         let classify = |wait: Duration| {
             let exchange = Arc::clone(&exchange);
@@ -672,7 +674,7 @@ mod tests {
                     .await
             })
         };
-        let run = classify(Duration::from_millis(200));
+        let run = classify(ABSENCE_WAIT / 2);
         let work = pull(&exchange, "project", "c/m").await;
         assert_eq!(run.await.unwrap(), Err(ClassifyError::Unanswered));
         assert!(exchange.present("project", "c/m"));
@@ -680,6 +682,11 @@ mod tests {
             !exchange.submit("project", &work.lease, Ok(json!({}))),
             "the review stopped waiting"
         );
+        // A harness that pulled a request and stayed silent for the whole of a long wait has left.
+        let run = classify(ABSENCE_WAIT);
+        pull(&exchange, "project", "c/m").await;
+        assert_eq!(run.await.unwrap(), Err(ClassifyError::Unanswered));
+        assert!(!exchange.present("project", "c/m"));
         let run = classify(Duration::from_secs(5));
         let work = pull(&exchange, "project", "c/m").await;
         assert!(exchange.submit(
