@@ -2574,11 +2574,7 @@ async fn a_sentence_that_holds_quotation_marks_is_delivered_when_its_speaker_is_
         assert_eq!(rows[0].3["quote"], statement, "{statement:?}");
         let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
             .expect("the statement is delivered to a later session");
-        let delivered = stated(statement).replace('"', "&quot;");
-        assert!(
-            block.contains(&stated(statement)) || block.contains(&delivered),
-            "{statement:?}: {block}"
-        );
+        assert!(block.contains(&stated(statement)), "{statement:?}: {block}");
     }
 }
 
