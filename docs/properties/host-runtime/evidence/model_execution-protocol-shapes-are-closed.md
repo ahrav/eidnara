@@ -140,7 +140,7 @@ would close what remains:
 
 ### Q: Does a rejected request leave any supervisor state?
 
-- Sources examined: `mod.rs:202-216`; `tests/model_execution_protocol.rs:673-710`.
+- Sources examined: `mod.rs:202-216`; `tests/model_execution_protocol.rs:1271-1313` (`malformed_requests_over_the_host_create_no_run_state`).
 - Findings: the parse at `mod.rs:213` precedes every `self.supervisor` call,
   so a `schema_violation` return cannot have admitted, subscribed, or
   cancelled anything. The host-level test confirms `metrics()` is unchanged
