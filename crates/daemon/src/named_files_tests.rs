@@ -1281,7 +1281,7 @@ async fn a_pi_turn_served_over_the_routes_is_recorded_and_delivered() {
     settle(&handler).await;
     assert!(stored_records(&handler, &project).is_empty());
 
-    // A window that holds one row id twice is refused before any of it is read.
+    // A window that holds one row id twice is observed and then refused.
     let mut repeated = pi_turn(true);
     repeated.push(repeated[2].clone());
     let refused = serve_pi(&handler, WRITER, "writer", &repeated).await;
@@ -1543,7 +1543,7 @@ async fn an_edit_of_a_listed_file_changes_its_line_and_leaves_the_revision() {
 /// A block that lists a file gives the minute each statement of the user was first recorded,
 /// from the commit log. A row of another writer whose text opens the same way, and the facts
 /// of a block that lists no file, stay as stored. The read that serves a summarizer no pass
-/// read serves holds every statement as stored.
+/// read serves gives no statement such a time.
 #[tokio::test]
 async fn a_block_that_lists_a_file_dates_the_users_statements() {
     let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
@@ -1582,11 +1582,11 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
             stored[0].clone(),
             (
                 "mem-tabs".to_owned(),
-                format!("User stated: {tabs} (recorded {})", minute(tabs_seq))
+                format!("User stated: {tabs} [{}]", minute(tabs_seq))
             ),
             (
                 "mem-width".to_owned(),
-                format!("User stated: {width} (recorded {})", minute(width_seq))
+                format!("User stated: {width} [{}]", minute(width_seq))
             ),
         ]
     );
@@ -1676,15 +1676,15 @@ async fn a_statement_is_dated_by_the_commit_that_first_recorded_it() {
     let line_of = |id: &str| line(&response, id);
     assert_eq!(
         line_of("mem-tabs"),
-        format!("User stated: {tabs} (recorded 2026-03-01T09:30Z)")
+        format!("User stated: {tabs} [2026-03-01T09:30Z]")
     );
     assert_eq!(
         line_of("mem-width"),
-        format!("User stated: {width} (recorded 2026-03-01T11:30Z)")
+        format!("User stated: {width} [2026-03-01T11:30Z]")
     );
     assert_eq!(
         line_of("mem-settled"),
-        "User stated: Squash merges. (recorded 2026-03-01T09:30Z)"
+        "User stated: Squash merges. [2026-03-01T09:30Z]"
     );
     assert_eq!(line_of("mem-late"), "User stated: Pin versions.");
     assert_eq!(line_of("mem-marked"), marked);
@@ -1696,7 +1696,7 @@ async fn a_statement_is_dated_by_the_commit_that_first_recorded_it() {
     assert_eq!(line(&response, "mem-marked"), marked);
     assert_eq!(
         line(&response, "mem-late"),
-        "User stated: Pin versions. (recorded 2026-03-01T09:30Z)"
+        "User stated: Pin versions. [2026-03-01T09:30Z]"
     );
 }
 

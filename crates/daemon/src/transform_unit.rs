@@ -206,7 +206,7 @@ impl Drop for PageApplyGuard {
 }
 
 /// The cap matches the serving runtime's worker count rather than the blocking pool's much larger limit.
-/// Permits cover executing units and their store-lock waits, but not async history_summarizer waits.
+/// Permits cover executing units, their store-lock waits, and a first unit's half-second wait for the named-file history reader, but not async history_summarizer waits.
 pub(crate) const TRANSFORM_UNITS_AT_ONCE: usize = 4;
 
 pub(crate) const TRANSFORM_WAITERS_AT_MOST: usize = 12;

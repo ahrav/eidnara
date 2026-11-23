@@ -233,23 +233,27 @@ they enter the selected rows, the served ids, and the revision, and their
 charge of up to an eighth of the budget can displace lasting facts. The
 pass's work on them runs in this order. It looks for a regular file at the
 paths of the first 32 recorded files. It samples up to eight of those that
-exist, the candidates: each one's status, at most 256 KiB and one byte of
-it, and its status again, a second time when a write crossed the first, of
-which it hashes at most 256 KiB. When a sample holds a blob it waits up to
-one second for the daemon's history reader, the one thread that reads the
-repository's HEAD for each such pass and walks up to 256 parents of a file
-whose answer it does not keep for that HEAD. When a candidate exists and
-the read serves a statement of the user, it reads the commit times of
-those statements in one statement. The budget then trims the candidates:
-it charges a line up to its last-change clause and then one fixed clause,
-and admits the longest leading run that fits the element's share. The
-sampling, the wait, and the time query therefore run on the candidates
-before the trim. The readings fill the last-change clause of a line and
-the `recorded` mark of a statement, which the revision and the charge
-leave out, so a paired-store comparison that holds named-file rows also
-holds equal the listed files' bytes and modification times, the
-repository's HEAD and history, and the commit log's times, or compares
-the lines up to those two decorations.
+exist: each one's status and, for a file of at most 256 KiB, its bytes and
+one byte more and its status again, a second time when the two statuses or
+the byte count disagree, of which it hashes at most 256 KiB. When a sample
+holds a blob and the history reader's queue admits the pass's job, the
+pass waits up to half a second for that one thread, which, for a job it
+takes up before the pass stops waiting, reads the repository's HEAD and
+work tree and walks up to 256 parents of each file whose answer it does
+not keep for that HEAD; a full queue costs no wait and no read. When at
+least one sample gives a line and the read serves a statement of the user,
+the pass reads the commit times of those statements in one statement. The
+budget then trims the lines: it charges a line up to its last-change
+clause and then one fixed clause, and admits the longest leading run that
+fits the element's share. The sampling, the wait, and the time query
+therefore run before the trim. The last-change clause of a `NAMED_FILES`
+line is outside the revision. The time that ends a statement is part of
+the statement's line, of its charge, and of the revision. A paired-store
+comparison that holds named-file rows therefore holds equal the commit
+log's times of the served statements, and either holds equal the listed
+files' bytes and modification times, the repository's HEAD and history,
+and the history reader's answer within the wait, or compares each
+`NAMED_FILES` line up to its last-change clause.
 Compare snapshot metadata to each store's own pinned tip, not across tips.
 Fault/timing angle: An early SQL limit or changed predicate admits noise into
 the bounded set or removes candidates the baseline keeps.
@@ -808,7 +812,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8786
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L507
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L508
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522

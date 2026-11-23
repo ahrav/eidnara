@@ -314,8 +314,9 @@ fn read_at_tip(
                 crate::named_files::delivered(&store, project, session_id, response.known_as_of)?;
             // The flag covers both reads the composition selects from.
             response.truncated |= cut_short;
-            // A block that lists a file dates the user's statements, so a
-            // reader can order a statement and a file's last change.
+            // A read that finds a file to list dates the user's statements,
+            // before the budget trims its lines, so a reader can order a
+            // statement and a file's last change.
             if !lines.is_empty() {
                 statements = crate::named_files::user_statements(&response);
             }

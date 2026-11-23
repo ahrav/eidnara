@@ -1521,8 +1521,8 @@ id the codec makes, subject to the tool pairing rule of Section 7.10. The `bash`
 path the command line names in a comment, or after a `cd`, matches as the
 same path elsewhere in the line does. A file the
 turn also edits is used the same way. When the pass's transform has
-succeeded, the first eight observed paths that the session has not
-recorded, that are regular files beneath
+succeeded, the first eight observed paths that the daemon does not hold as
+recorded for the session, that are regular files beneath
 the project root, reached through no symbolic link or mount point, and that
 the Kernel's durable-text redaction leaves as written, are offered to a
 tracked background write that the reply does not wait for, which takes
@@ -1535,7 +1535,9 @@ session: one labeled decision of kind `named_file_use` in the Kernel domain
 Its id derives from the project, the session, and the path, so a second
 write replays the first and leaves its time. A session records 64 distinct
 paths at most while the daemon holds its recorded paths, which it does for
-the 256 sessions that recorded a path last. At most four passes' records
+the 256 sessions that recorded a path last and until it restarts; a path
+the store already holds for the session then takes one of a pass's eight
+places once more, and its write replays. At most four passes' records
 are written at once, a write that waits for its turn among them. A write
 first takes the gate that capture's publications and `session.delete`
 take. Once it holds the gate, the paths of the pass share one five-second
@@ -1580,13 +1582,18 @@ its bounds cut short marks the composition truncated. A line is
 the date being the UTC day of `used_ms`; it carries no id, and the record's
 id is no handle of `eidnara_memory`. The clause after `; last changed` says
 when the file last changed, as the composing pass reads it. The pass reads
-the file through one descriptor: its status, its bytes when it holds at
-most 256 KiB, with one byte more that shows a file that grew, and its
-status again; a reading that a write crossed is taken once more. A file
+the file through one descriptor: its status and, when it holds at most
+256 KiB, its bytes, with one byte more that shows a file that grew, and
+its status again; a larger file is read no further than its first status.
+A reading whose two statuses differ in inode, link count, size, or
+modification or change time, or whose bytes are not as many as the status
+states, is taken once more; a write that leaves all of those as they were
+goes unseen. A file
 whose bytes no reading holds whole, one that does not open for reading or
-that a write crossed twice, keeps its line with the modification time of
+whose reading failed that comparison twice, keeps its line with the modification time of
 one status taken then, and a path that then names no regular file has no
-line. When the project root is the work tree of the SHA-1 Git repository
+line. These reads of the listed files have no deadline, as the pass's
+reads of the project's documents have none. When the project root is the work tree of the SHA-1 Git repository
 that opens there, HEAD names a commit, and the tree of that commit
 holds a regular or executable blob at the path that the file's bytes hash
 to, the clause is the committer time of the commit that gave the file
@@ -1619,33 +1626,42 @@ for verification, with the bounds and the file mappings they have there:
 a file of the repository that is truncated while it is mapped raises
 `SIGBUS` in the daemon, as it does during capture's read. What this reader
 bounds is the parents of a walk, the time it works for a pass, and the
-answers it keeps. A pass waits at most one second
-for its answer and then shows the files' modification times. The thread
-works for a pass while the pass waits: it takes up no job whose pass has
-stopped waiting, and it checks the time before each object it reads, so a
-walk the wait ends dates nothing. Four jobs wait in a queue beside the one
+answers it keeps. A pass waits at most half a second
+for its answer, in its first unit and holding that unit, and then shows
+the files' modification times. The thread takes up no job whose pass has
+stopped waiting. It works on a job until half a second after its pass
+stops waiting, so a walk that needs longer than the wait settles for the
+next pass: it checks that time before it opens the repository and before
+each object it reads, and gives each file's walk an equal share of the
+time left, so a walk that time ends dates nothing and leaves the files
+after it their own time. Four jobs wait in a queue beside the one
 the thread works on, and a pass that finds the queue full asks nothing. A
 repository that blocks or spins a read, such as one whose `HEAD` is a
-pipe, therefore costs the passes of the daemon that second each until the
-queue is full, and holds the one thread until the daemon stops. The thread
+pipe, therefore costs the passes of the daemon that half second each
+until the queue is full, and holds the one thread until the daemon stops;
+the daemon says so once on its standard error. For every job the thread
+reads HEAD and checks that the repository's work tree is the directory the
+pass opened. It
 keeps the answers that a HEAD settles, which are a commit time, a path
 HEAD holds other bytes or nothing for, and a walk the parent bound ended,
-for the path and the blob, for the 64 project roots asked about last and
-64 paths of each, while the root is the same directory at the same HEAD
-commit; an answer an unreadable object gave is read again. A pass at an
-unchanged HEAD therefore costs the thread its read of HEAD and no walk,
-and a HEAD that moved is read anew. The
+for the path and the blob, for the 64 project roots it answered at a HEAD
+commit last and 64 paths of each, while the root is the same directory at
+the same HEAD commit; an answer an unreadable object gave is read again. A
+job at an unchanged HEAD therefore costs the thread those two reads, and a
+walk for each path and blob it keeps no answer for, and a HEAD that moved
+is read anew. The
 block's revision reads a line up to `; last changed`, and the budget
 charges every line up to there and then for one fixed clause, the form of
 the most tokens, so an edit or a commit of a listed file changes neither
 the rows a budget admits nor the revision, and folds no m0; the line a
 session holds is the one its last composition read. When the read lists a
 file, each fact that capture stored as the user's statement ends with
-` (recorded <time>)`, the UTC minute of the commit that first recorded the
+` [<time>]`, the UTC minute of the commit that first recorded the
 statement, read from the commit log in one statement for the pass.
 Capture records a statement after the user made it, so
 the statement was made at that minute or before it, and a statement the
-user repeats later keeps the time of its first record. A
+user repeats later keeps the time of its first record; a time outside the
+years 0000 to 9999 reads `[at an unknown time]`. A
 statement shown with its contest already carries the day it was first
 recorded, as `stated <day>`, and takes no second mark, a statement whose
 commit the log holds no time for is shown as stored, the facts carry the
@@ -1653,8 +1669,7 @@ mark also when the budget then admits no line of the element, and
 `eidnara_search` shows no such mark. A summarizer
 that fires on a pass whose read serves it holds the facts as that read
 rendered them, the times and the contest marks included; a summarizer read
-that no pass read serves lists no file and so carries no such time, and
-shows a contested statement with its contest, as every read does. The
+that no pass read serves lists no file and so carries no such time. The
 daemon's clock dates a record and a committer's clock dates a commit, so
 two machines whose clocks disagree can order a record and a commit made
 within that disagreement the other way. The element is charged first, to an
@@ -1664,14 +1679,14 @@ selected against the rest of the budget, and the element is absent when no
 line fits. Its `note` says that a message of the user named the files, that
 the agent read them or named them in a command it ran, that the paths are relative
 to the project root, that each file existed when the block was composed,
-that memory holds none of their content, that a line ends with the file's
-last change, which is its last commit's time or, marked on disk, its
-modification time, that a `User stated` line that ends with a
-time was recorded then, at or after the user made it, and what
-the two times order: a statement made after a file's last change is newer
-than the file, and a file changed after a statement was recorded is newer
-than the statement in the lines changed since then, which the
-repository's history dates for a committed change. A pass that re-renders m0
+that memory holds none of their content, that a line ends with when the
+file last changed, which is its last commit's time or, marked on disk, its
+modification time, which a checkout also sets, that a `User stated` line
+that ends with a time in square brackets was recorded then, at or after
+the user made it, and what the times order: a statement made after a
+file's last change is newer than the file, and a file committed after a
+statement was recorded is newer than the statement in the lines changed
+since then. A pass that re-renders m0
 composes the element anew; a pass that serves the m0 of an earlier pass
 serves that pass's list. The block the summarizer's prompt carries holds no
 `NAMED_FILES` element: a summarizer that fires on a pass whose read serves it
@@ -1975,7 +1990,7 @@ This section specifies the `transform` method family on the Context route: the p
 
 #### 7.10.1 Per-session admission and `session_busy`
 
-The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. An emergency pass's waits share one `EMERGENCY_WAIT_BUDGET` (3 s), inside the plugins' 5 s transform deadline: a pass that waits on a live history summarizer run and then fires one inline waits at most that budget in total. A history summarizer run that outlasts the budget keeps running, and its publication folds on a later pass. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
+The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. An emergency pass's waits share one `EMERGENCY_WAIT_BUDGET` (3 s), inside the plugins' 5 s transform deadline: a pass that waits on a live history summarizer run and then fires one inline waits at most that budget in total. A pass whose read finds a file to list can also wait up to half a second in its first unit, holding that unit, for the named-file history reader of Section 7.9; that wait is outside the budget, and the two together leave 1.5 s of the deadline. A history summarizer run that outlasts the budget keeps running, and its publication folds on a later pass. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
 
 A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"session_busy"`, `"boundary_unknown"`); `session_busy` is not an error code and is not retried by the transport. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state. The status set may grow: a consumer MUST treat a response whose `status` it does not recognize as a declined pass in the same way.
 
