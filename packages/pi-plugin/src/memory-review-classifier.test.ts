@@ -22,6 +22,7 @@ function registry(result: unknown, calls: unknown[] = []) {
             type === "classifier" && provider === "typesafe" && id === "jev-latest"
                 ? { provider, id }
                 : undefined,
+        hasConfiguredAuth: () => true,
         classify: async (model: unknown, request: unknown) => {
             calls.push({ model, request });
             return result;
@@ -40,13 +41,8 @@ describe("piHasReviewClassifier", () => {
         ).toBe(false);
         expect(piHasReviewClassifier(context(undefined), "typesafe/jev-latest")).toBe(false);
         // A classifier the registry lists without a credential leaves the chat model to decide.
-        for (const [configured, expected] of [
-            [true, true],
-            [false, false],
-        ] as const) {
-            const listed = { ...registry({}), hasConfiguredAuth: () => configured };
-            expect(piHasReviewClassifier(context(listed), "typesafe/jev-latest")).toBe(expected);
-        }
+        const listed = { ...registry({}), hasConfiguredAuth: () => false };
+        expect(piHasReviewClassifier(context(listed), "typesafe/jev-latest")).toBe(false);
     });
 });
 

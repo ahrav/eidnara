@@ -489,6 +489,22 @@ pub(super) mod tests {
     }
 
     /// The state text carries the memory, its source and the later references in one fixed member order, and writes a reference without a time as `null`.
+    /// The worker's log names each decider by these two words, and a report splits results on them.
+    #[test]
+    fn a_decider_is_logged_by_its_kind_and_model() {
+        let chat = Decider::ChatModel("prov/small".to_string());
+        let classifier = Decider::Classifier("typesafe/jev-latest".to_string());
+        assert_eq!((chat.kind(), chat.model()), ("chat_model", "prov/small"));
+        assert_eq!(
+            (classifier.kind(), classifier.model()),
+            ("classifier", "typesafe/jev-latest")
+        );
+        assert_eq!(
+            (Decider::Host.kind(), Decider::Host.model()),
+            ("none", "none")
+        );
+    }
+
     #[test]
     fn the_state_text_keeps_one_member_order() {
         let state = ReviewState {

@@ -25,8 +25,13 @@ pub const CLASSIFY_WAIT: Duration = Duration::from_secs(20);
 pub const CLASSIFY_WAIT: Duration = Duration::from_secs(2);
 /// How long after a pull a project's harness counts as answering classifier work. A harness pulls every few seconds, so the window spans many pulls.
 pub const PRESENCE_WINDOW: Duration = Duration::from_secs(120);
+/// The longest classifier call a work response allows the harness.
 pub const MAX_CLASSIFY_DURATION_MS: u64 = 10_000;
+/// The requests the exchange parks at once; one past it is refused.
 pub const MAX_PARKED_REQUESTS: usize = 64;
+/// The failure code a harness submits for a classifier call it cancelled.
+pub const HARNESS_CANCELLED: &str = "cancelled";
+/// The probability at which a typed answer flags a review.
 pub const FLAG_THRESHOLD: f64 = 0.5;
 
 impl ReviewState {
@@ -270,7 +275,7 @@ impl ClassifierExchange {
             .is_some_and(|at| now.saturating_duration_since(*at) <= PRESENCE_WINDOW)
     }
 
-    /// Parks `request` for the project's harness and waits up to `wait` for its answers. A request that waits its whole time while no harness pulls it ends [`ClassifyError::Unpulled`] and ends the project's presence, so the chat model decides the attempts that follow.
+    /// Parks `request` for the project's harness and waits up to `wait` for its answers. A request that waits its whole time while no harness pulls it ends [`ClassifyError::Unpulled`]. The project's presence ends when a request waited unpulled for at least half of [`CLASSIFY_WAIT`], which spans several of a harness's calls, and when the harness reports `cancelled`, which it does as it closes; the chat model decides the attempts that follow until a harness calls again.
     pub async fn classify(
         &self,
         project: &str,
@@ -312,10 +317,15 @@ impl ClassifierExchange {
             .position(|parked| parked.id == id)
             .and_then(|at| inner.parked.remove(at))
             .is_some_and(|parked| parked.lease.is_some());
-        if outcome == Err(ClassifyError::Unanswered) && !pulled {
+        let unpulled = outcome == Err(ClassifyError::Unanswered) && !pulled;
+        let closing =
+            matches!(&outcome, Err(ClassifyError::Harness(code)) if code == HARNESS_CANCELLED);
+        if (unpulled && wait >= CLASSIFY_WAIT / 2) || closing {
             inner
                 .pulls
                 .remove(&(project.to_string(), classifier.to_string()));
+        }
+        if unpulled {
             return Err(ClassifyError::Unpulled);
         }
         outcome
@@ -624,16 +634,17 @@ mod tests {
         ));
         assert!(!exchange.present("project", "other/m"));
         assert!(!exchange.present("other", "c/m"));
+        let cancel = CancellationToken::new();
+        let unpulled =
+            |wait: Duration| exchange.classify("project", "c/m", "{}".to_string(), wait, &cancel);
+        // A wait cut short, as at a run's cutoff, is too brief to show that the harness left.
         assert_eq!(
-            exchange
-                .classify(
-                    "project",
-                    "c/m",
-                    "{}".to_string(),
-                    Duration::from_millis(20),
-                    &CancellationToken::new(),
-                )
-                .await,
+            unpulled(Duration::from_millis(20)).await,
+            Err(ClassifyError::Unpulled)
+        );
+        assert!(exchange.present("project", "c/m"));
+        assert_eq!(
+            unpulled(CLASSIFY_WAIT / 2).await,
             Err(ClassifyError::Unpulled)
         );
         assert!(!exchange.present("project", "c/m"));
@@ -645,7 +656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pulled_request_without_an_answer_or_with_a_failure_keeps_the_presence() {
+    async fn presence_outlasts_a_pulled_request_that_fails_and_ends_at_a_cancelled_one() {
         let exchange = Arc::new(ClassifierExchange::default());
         let classify = |wait: Duration| {
             let exchange = Arc::clone(&exchange);
@@ -680,6 +691,16 @@ mod tests {
             run.await.unwrap(),
             Err(ClassifyError::Harness("provider_unavailable".to_string()))
         );
+        assert!(exchange.present("project", "c/m"));
+        // A harness reports `cancelled` as it closes, which ends its presence.
+        let run = classify(Duration::from_secs(5));
+        let work = pull(&exchange, "project", "c/m").await;
+        assert!(exchange.submit("project", &work.lease, Err("cancelled".to_string())));
+        assert_eq!(
+            run.await.unwrap(),
+            Err(ClassifyError::Harness("cancelled".to_string()))
+        );
+        assert!(!exchange.present("project", "c/m"));
     }
 
     #[tokio::test]

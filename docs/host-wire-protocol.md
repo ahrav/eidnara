@@ -1848,7 +1848,8 @@ either method.
 
 A connected harness asks for work with the common envelope,
 `method: "memory.review.classify.next"`, and `classifier`, the reference it can
-call. The answer is immediate, so a harness asks again every few seconds.
+call; a body whose `classifier` is absent or not a string is `invalid_params`.
+The answer is immediate, so a harness asks again every few seconds.
 
 ```json
 {"method":"memory.review.classify.next","session_id":"session-1","project_root":"/workspace/project","classifier":"typesafe/jev-latest"}
@@ -1863,7 +1864,7 @@ The response `state` is one of:
 - `ready`: no request of this project waits.
 - `disabled`: the configuration the route loaded at its bind leaves the review
   switch off or without a model to name, names no classifier, or names another
-  one than `classifier`. A route bound after a change to the user tier answers
+  one than `classifier`, or the load refused the root's own configuration file. A route bound after a change to the user tier answers
   by the changed value. The check precedes the checks on `lease`, `answers`,
   and `error`, so a `submit` of such a project answers `disabled` whatever
   those fields hold.
@@ -1880,7 +1881,8 @@ them); each reference has `id`, `writer`, `time` (RFC 3339 or `null`), and
 `bool`), and `strongest` (type `choice` over the `id` of each `later` reference
 and then `none`); each question carries `type`, `instructions`, and `criteria`. Every text in the state is redacted source or memory text the
 configured model destination admits, and the daemon runs its render check over
-the assembled request before it parks it.
+the assembled request before it parks it. A parked request is handed out as it
+was admitted.
 
 The lease belongs to the project and names the request for as long as its
 review waits, which is at most 20 seconds from the moment the request was
@@ -1907,17 +1909,19 @@ neither; when `answers` is not an object or exceeds 16 KiB; or when `error` is
 outside the three codes. Answers the daemon cannot read as the four typed
 answers end that review attempt as failed.
 
-Each `next` call marks the project as having a classifier for 120 seconds. A
-stage-1 attempt of a project with no such mark is decided by the small chat
-model, as it is for a project that names no classifier, so a harness that
-cannot call a classifier makes no `next` call. A request that waits its 20
-seconds while no `next` call pulls it ends the mark: that attempt is spent, and
-the small chat model decides the attempts that follow until a harness calls
-`next` again. A harness that answers these
+Each `next` call answered `work` or `ready` marks the project as having that
+classifier for 120 seconds. A stage-1 attempt of a project with no such mark is
+decided by the small chat model, as it is for a project that names no
+classifier, so a harness that cannot call a classifier makes no `next` call. A
+request that waits unpulled spends its attempt, and the mark ends when that
+wait lasted ten seconds or more; a submitted `cancelled`, which a harness sends
+as it closes, ends the mark too. The small chat model then decides the attempts
+that follow until a harness calls `next` again. A harness that answers these
 methods sends the memory and the messages under review to the classifier's
 provider; the `request` text holds no `Secret`-class content. The Pi harness answers these methods when its model
-registry lists the named classifier with a configured credential (Pi 0.99.0 or
-later) and calls `next` every two seconds per project while a session is open;
+registry has the classifier surface with `hasConfiguredAuth` (Pi 1.6.0 has both)
+and reports a configured credential for the named classifier. It calls `next`
+every two seconds for the project its session is open on;
 an earlier Pi and the OpenCode harness make no call.
 
 ## 8. Host and handler lifecycle

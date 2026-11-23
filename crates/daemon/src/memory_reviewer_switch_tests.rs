@@ -328,8 +328,20 @@ impl Rig {
                 continue;
             }
             assert_eq!(work["classifier"], CLASSIFIER);
+            // The harness reads a work response by these forms.
+            assert_eq!(work["max_duration_ms"], 10_000);
+            let lease = work["lease"].as_str().unwrap();
+            assert!(
+                lease.len() == 32
+                    && lease
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')),
+                "{lease}"
+            );
             // The request travels as JSON text so its members keep their order.
-            let request: Value = serde_json::from_str(work["request"].as_str().unwrap()).unwrap();
+            let text = work["request"].as_str().unwrap();
+            assert!(text.starts_with(r#"{"state":{"memory":{"text":"#), "{text}");
+            let request: Value = serde_json::from_str(text).unwrap();
             let strongest = request["state"]["later"][0]["id"].clone();
             let submitted = self
                 .call(json!({
@@ -1461,7 +1473,48 @@ async fn a_failing_classifier_spends_one_job_and_the_rest_wait() {
     }
 }
 
-/// A harness that stops pulling leaves its project to the small chat model. The request no harness pulled spends one attempt and ends the project's presence, and the run's next attempt asks the chat model, so the review is decided in the same run.
+/// A stage-1 request of the small chat model that ends without an answer spends one attempt of its job. The project's other reviews stay queued for a later pass, the review model is asked nothing, and both statements stay delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failing_small_chat_model_spends_one_job_and_the_rest_wait() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the formatter instead of the linter before every commit.",
+    )
+    .await;
+    {
+        let mut results = rig.state.await_results.lock().unwrap();
+        for _ in 0..4 {
+            results.push_back(Err(HistorySummarizerProducerError::RunFailed {
+                run_id: "run".to_string(),
+                detail: "provider unavailable".to_string(),
+                classification: None,
+                class_field_present: false,
+            }));
+        }
+    }
+    assert_eq!(rig.drain().await, 1, "one job ended");
+    let attempts = rig.attempts();
+    assert!((1..=4).contains(&attempts.len()), "{}", attempts.len());
+    assert!(
+        attempts.iter().all(|attempt| attempt.model == SMALL),
+        "the review model was not asked"
+    );
+    let ready = rig
+        .store
+        .ready_memory_reviewer_jobs(&rig.project.to_string_lossy(), 16, crate::now_ms())
+        .unwrap();
+    assert_eq!(ready.len(), 1, "the other review waits");
+    for statement in [THURSDAY, LINTER] {
+        assert!(rig.block().await.contains(&stated(statement)));
+    }
+}
+
+/// A harness that stops pulling leaves its project to the small chat model. The request that waits unpulled spends one attempt and ends the project's presence, and the run's next attempt asks the chat model, so the review is decided in the same run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_harness_that_stops_pulling_hands_the_review_to_the_small_chat_model() {
     let rig = Rig::classified(ReviewApply::Apply).await;
@@ -1496,6 +1549,40 @@ async fn a_harness_that_stops_pulling_hands_the_review_to_the_small_chat_model()
         attempts[0].terminal,
         Some((MemoryReviewerAttemptTerminal::Failed, _))
     ));
+    assert!(!rig.block().await.contains(THURSDAY));
+}
+
+/// A classifier request that fails leaves the stage-1 default as it stood. With no stage-1 model named, the request no harness pulled is followed by a request to the default derived from the review model's name, and the review model writes the proposal only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_classifier_request_leaves_stage_one_with_the_derived_default() {
+    const REVIEWER: &str = "test/claude-opus-9";
+    let rig = Rig::open_with(DaemonConfig {
+        memory_reviewer: MemoryReviewerConfig {
+            enabled: true,
+            model: Some(REVIEWER.to_string()),
+            stage1_model: None,
+            apply: ReviewApply::Apply,
+            classifier: Some(CLASSIFIER.to_string()),
+        },
+        ..switch_config(ReviewApply::Apply)
+    })
+    .await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    let idle = rig
+        .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+        .await;
+    assert_eq!(idle, json!({"state": "ready"}));
+    rig.answers_from(Some("claude-haiku-9"), &[FLAG]);
+    rig.answers_from(Some("claude-opus-9"), &[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    let asked: Vec<String> = rig
+        .attempts()
+        .into_iter()
+        .map(|attempt| attempt.model)
+        .collect();
+    assert_eq!(asked, ["test/claude-haiku-9", REVIEWER]);
     assert!(!rig.block().await.contains(THURSDAY));
 }
 

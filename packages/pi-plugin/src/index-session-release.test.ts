@@ -225,7 +225,11 @@ describe("Pi daemon transport across runtime teardown", () => {
             const ctx = {
                 ...captureContext({}),
                 modelRegistry: classifies
-                    ? { getModelOfType: () => ({}), classify: async () => ({}) }
+                    ? {
+                          getModelOfType: () => ({}),
+                          hasConfiguredAuth: () => true,
+                          classify: async () => ({}),
+                      }
                     : { find: () => undefined },
             };
             await sessionStart({ reason: "startup" }, ctx);

@@ -823,28 +823,33 @@ impl Disclosure<'_> {
         };
         let value = match answered {
             Ok(value) => value,
-            Err(ClassifyError::Cancelled) => {
-                return Err(self.end(
-                    attempt_index,
-                    MemoryReviewerAttemptTerminal::Cancelled,
-                    ResponseUsage::NONE,
-                    DisclosureRefusal::Cancelled,
-                ));
-            }
             Err(error) => {
-                return Err(self.end(
-                    attempt_index,
-                    MemoryReviewerAttemptTerminal::Failed,
-                    ResponseUsage::NONE,
-                    match error {
-                        ClassifyError::Unanswered => failed(SendError::Deadline, true),
-                        ClassifyError::Unpulled => failed(SendError::Deadline, false),
-                        ClassifyError::Full => failed(SendError::Transport, false),
-                        _ => failed(SendError::Transport, true),
-                    },
-                ));
+                let (terminal, refusal) = match error {
+                    ClassifyError::Cancelled => (
+                        MemoryReviewerAttemptTerminal::Cancelled,
+                        DisclosureRefusal::Cancelled,
+                    ),
+                    ClassifyError::Unanswered => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Deadline, true),
+                    ),
+                    ClassifyError::Unpulled => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Deadline, false),
+                    ),
+                    ClassifyError::Full => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Transport, false),
+                    ),
+                    ClassifyError::Harness(_) => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Transport, true),
+                    ),
+                };
+                return Err(self.end(attempt_index, terminal, ResponseUsage::NONE, refusal));
             }
         };
+        // The 16 KiB bound the wire sets on a harness's answers stands for this attempt's response allowance.
         let answer_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
         let usage = ResponseUsage {
             raw_response_bytes: u64::try_from(answer_bytes).ok(),

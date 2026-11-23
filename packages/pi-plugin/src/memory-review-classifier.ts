@@ -5,14 +5,14 @@ import {
 } from "@eidnara/opencode/shared/memory-review-classifier";
 
 /**
- * The classifier surface of Pi's model registry. Pi exposes it from 0.99.0; the Pi this package
- * is built against predates it, so the plugin reads it structurally and treats a registry
- * without it as a harness that has no classifier.
+ * The classifier surface of Pi's model registry, as Pi 1.6.0 has it. The Pi this package is
+ * built against predates it, so the plugin reads it structurally and treats a registry without
+ * it as a harness that has no classifier.
  */
 interface ClassifierRegistry {
     getModelOfType(type: "classifier", provider: string, id: string): unknown;
     /** Whether the user configured a credential for the model's provider. */
-    hasConfiguredAuth?(model: unknown): boolean;
+    hasConfiguredAuth(model: unknown): boolean;
     classify(
         model: unknown,
         context: { state: Record<string, unknown>; questions: Record<string, unknown> },
@@ -26,7 +26,9 @@ interface ClassifierRegistry {
 
 function classifierRegistry(ctx: ExtensionContext): ClassifierRegistry | undefined {
     const registry = ctx.modelRegistry as unknown as Partial<ClassifierRegistry> | undefined;
-    return typeof registry?.classify === "function" && typeof registry.getModelOfType === "function"
+    return typeof registry?.classify === "function" &&
+        typeof registry.getModelOfType === "function" &&
+        typeof registry.hasConfiguredAuth === "function"
         ? (registry as ClassifierRegistry)
         : undefined;
 }
@@ -42,7 +44,7 @@ export function piHasReviewClassifier(ctx: ExtensionContext, classifier: string)
             classifier.slice(0, separator),
             classifier.slice(separator + 1),
         );
-        return Boolean(model) && (registry.hasConfiguredAuth?.(model) ?? true);
+        return Boolean(model) && registry.hasConfiguredAuth(model);
     } catch {
         return false;
     }

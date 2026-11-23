@@ -2,13 +2,13 @@
 
 use serde_json::{Value, json};
 
-use super::classifier::MAX_CLASSIFY_DURATION_MS;
+use super::classifier::{HARNESS_CANCELLED, MAX_CLASSIFY_DURATION_MS};
 use crate::{HandlerCore, PreparedOutcome, RouteHandle, invalid_params_error, respond};
 
 pub(crate) const NEXT: &str = "memory.review.classify.next";
 pub(crate) const SUBMIT: &str = "memory.review.classify.submit";
 /// The failure codes a harness may submit in place of answers.
-const FAILURE_CODES: [&str; 3] = ["cancelled", "provider_unavailable", "model_failed"];
+const FAILURE_CODES: [&str; 3] = [HARNESS_CANCELLED, "provider_unavailable", "model_failed"];
 const MAX_LEASE_BYTES: usize = 64;
 /// The largest answers object a harness may submit: four typed answers with their probabilities.
 const MAX_ANSWERS_BYTES: usize = 16 * 1024;

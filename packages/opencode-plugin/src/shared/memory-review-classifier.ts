@@ -1,4 +1,5 @@
 import type { RustModeModuleClient } from "../hooks/context/transform-session-client";
+import { withTimeout } from "./with-timeout";
 
 /** One stage-1 request of a memory review, as the daemon hands it to the harness. */
 export interface ReviewClassifierWork {
@@ -30,7 +31,7 @@ export interface ReviewClassifierScope {
 }
 
 export interface ReviewClassifierPump {
-    /** Starts answering classifier work for `scope.projectRoot`; a later scope of the same root replaces the session the calls travel on. */
+    /** Starts answering classifier work for `scope.projectRoot`; a later scope of the same root replaces the session the calls travel on, and the session's loop of another root ends. */
     start(scope: ReviewClassifierScope): void;
     /** Ends each loop whose calls travel on `sessionId`, once its call in flight has ended. */
     stop(sessionId: string): void;
@@ -52,6 +53,8 @@ const CALL_TIMEOUT_MS = 10_000;
 const MAX_REQUEST_BYTES = 128 * 1024;
 /** The longest classifier call the harness makes, whatever the work states. */
 const MAX_DURATION_MS = 10_000;
+/** How long past its duration a classifier call may take to settle after its signal aborts. */
+const SETTLE_GRACE_MS = 2_000;
 const RETRY_DELAY_MS = 5_000;
 /** Consecutive failed `next` calls after which a loop ends; the next `start` begins another. */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -149,7 +152,14 @@ export function createReviewClassifierPump(
         }, work.maxDurationMs);
         let outcome: Record<string, unknown>;
         try {
-            outcome = { answers: await execute(work, controller.signal) };
+            if (closing.signal.aborted) throw new ReviewClassifierError("cancelled");
+            outcome = {
+                answers: await withTimeout(
+                    execute(work, controller.signal),
+                    work.maxDurationMs + SETTLE_GRACE_MS,
+                    "memory review classifier call",
+                ),
+            };
         } catch (error) {
             const code = closing.signal.aborted
                 ? "cancelled"
@@ -228,6 +238,14 @@ export function createReviewClassifierPump(
     return {
         start(scope) {
             if (closing.signal.aborted) return;
+            // A session answers for the project it is open on, so its loop of a root it left ends.
+            for (const loop of loops.values()) {
+                if (
+                    loop.scope.sessionId === scope.sessionId &&
+                    loop.scope.projectRoot !== scope.projectRoot
+                )
+                    loop.stopped = true;
+            }
             const running = loops.get(scope.projectRoot);
             if (running) {
                 running.scope = scope;

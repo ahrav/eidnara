@@ -938,7 +938,7 @@ impl Run<'_> {
             return Ok(Classified::Flagged);
         }
         let now_ms = || (coordinator.now_ms)();
-        let disclosure = |sender, approval| Disclosure {
+        let disclosure = |approval| Disclosure {
             store: &coordinator.store,
             ledger: &coordinator.ledger,
             project: &self.context.job.project,
@@ -955,7 +955,7 @@ impl Run<'_> {
                 let deadline = Instant::now()
                     .checked_add(Duration::from_millis(MEMORY_REVIEWER_ATTEMPT_MAX_MS as u64))
                     .map_or(cutoff, |attempt| attempt.min(cutoff));
-                disclosure(sender, Some(approval))
+                disclosure(Some(approval))
                     .screen(review, cancel, deadline)
                     .await
                     .map(|(answers, request)| {
@@ -977,7 +977,7 @@ impl Run<'_> {
                 let deadline = Instant::now()
                     .checked_add(route.wait)
                     .map_or(cutoff, |wait| wait.min(cutoff));
-                disclosure(&coordinator.sender, None)
+                disclosure(None)
                     .classify(route, review, request, cancel, deadline)
                     .await
                     .map(|(answers, request)| {

@@ -73,6 +73,9 @@ describe("reviewClassifierWork", () => {
             work({ request: JSON.stringify({ state: {} }) }),
             work({ request: { state: {}, questions: {} } }),
             work({ request: "{" }),
+            work({
+                request: JSON.stringify({ state: {}, questions: {}, pad: "x".repeat(128 * 1024) }),
+            }),
             work({ max_duration_ms: 0 }),
             null,
         ]) {
@@ -199,7 +202,10 @@ describe("createReviewClassifierPump", () => {
         };
         const inFlight = createReviewClassifierPump(client, async () => ({}));
         inFlight.start(SCOPE);
-        const paused = createReviewClassifierPump(daemon([{ state: "ready" }]).client, async () => ({}));
+        const paused = createReviewClassifierPump(
+            daemon([{ state: "ready" }]).client,
+            async () => ({}),
+        );
         paused.start(SCOPE);
         await new Promise((resolve) => setTimeout(resolve, 5));
         const started = Date.now();
@@ -208,23 +214,68 @@ describe("createReviewClassifierPump", () => {
     });
 
     it("stops the loops of a released session and starts again for the next one", async () => {
-        const fake = daemon(Array.from({ length: 200 }, () => ({ state: "ready" })));
+        const fake = daemon(Array.from({ length: 400 }, () => ({ state: "ready" })));
         const pump = createReviewClassifierPump(fake.client, async () => ({}), {
             pollIntervalMs: 1,
         });
         pump.start(SCOPE);
         pump.stop("another-session");
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        expect(fake.calls.length).toBeGreaterThan(0);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        expect(fake.calls.length).toBeGreaterThan(1);
         pump.stop(SCOPE.sessionId);
         await pump.idle();
         const settled = fake.calls.length;
         await new Promise((resolve) => setTimeout(resolve, 10));
         expect(fake.calls).toHaveLength(settled);
+        // A session that starts while the released one's loop is still stopping takes the loop over.
+        pump.start(SCOPE);
+        pump.stop(SCOPE.sessionId);
         pump.start({ ...SCOPE, sessionId: "s2" });
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        expect(fake.calls.length).toBeGreaterThan(settled + 1);
         expect(fake.calls.at(-1)?.body.session_id).toBe("s2");
         await pump.close();
+    });
+
+    it("ends a session's loop of the project root it left", async () => {
+        const fake = daemon(Array.from({ length: 400 }, () => ({ state: "ready" })));
+        const pump = createReviewClassifierPump(fake.client, async () => ({}), {
+            pollIntervalMs: 1,
+        });
+        pump.start(SCOPE);
+        pump.start({ ...SCOPE, projectRoot: "/work/other" });
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        const roots = fake.calls.slice(-3).map((call) => call.body.project_root);
+        expect(new Set(roots)).toEqual(new Set(["/work/other"]));
+        await pump.close();
+    });
+
+    it("answers work that arrives as the pump closes with cancelled, without a classifier call", async () => {
+        const methods: string[] = [];
+        const errors: unknown[] = [];
+        let pump: ReturnType<typeof createReviewClassifierPump> | undefined;
+        let closed: Promise<void> | undefined;
+        const client = {
+            call: async (args: { method: string; body: unknown }) => {
+                methods.push(args.method);
+                if (args.method === "memory.review.classify.submit") {
+                    errors.push((args.body as Record<string, unknown>).error);
+                    return { state: "processed" };
+                }
+                closed = pump?.close();
+                return work();
+            },
+        };
+        let executed = false;
+        pump = createReviewClassifierPump(client, async () => {
+            executed = true;
+            return {};
+        });
+        pump.start(SCOPE);
+        await pump.idle();
+        await closed;
+        expect(executed).toBe(false);
+        expect(errors).toEqual(["cancelled"]);
     });
 
     it("retries a failed next call and gives up after five in a row", async () => {
