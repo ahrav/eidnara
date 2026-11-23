@@ -21,12 +21,18 @@
 // The hook also owns where a run writes provider cache entries; see
 // `withoutConversationCacheMarkers`.
 //
-// The requested values arrive through two adapter-owned environment
-// variables set by host-runtime's Pi backend; they are plain bounded numbers,
-// never prompt or credential material.
+// The requested values arrive through adapter-owned environment
+// variables set by host-runtime's Pi backend; they are plain bounded numbers
+// and one flag, never prompt or credential material.
+//
+// The flag asks for the caller's system text as written. Pi appends the
+// current date and the working directory to a custom system prompt; a caller
+// whose evidence carries its own times sets the flag, and the hook gives the
+// model the custom prompt alone.
 
 const MAX_OUTPUT_TOKENS_ENV = "EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS";
 const TEMPERATURE_ENV = "EIDNARA_MODEL_EXECUTION_TEMPERATURE";
+const PLAIN_SYSTEM_ENV = "EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM";
 
 function requiredNumber(name) {
 	const raw = process.env[name];
@@ -85,6 +91,11 @@ function withoutConversationCacheMarkers(messages) {
 }
 
 export default function (pi) {
+	pi.on("before_agent_start", (event) => {
+		if (process.env[PLAIN_SYSTEM_ENV] !== "1") return undefined;
+		const written = event?.systemPromptOptions?.customPrompt;
+		return typeof written === "string" && written !== "" ? { systemPrompt: written } : undefined;
+	});
 	pi.on("before_provider_request", (event, ctx) => {
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
 		const requestedTemperature = process.env[TEMPERATURE_ENV] === undefined

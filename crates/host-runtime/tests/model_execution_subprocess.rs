@@ -41,8 +41,9 @@ use host_runtime::model_execution::opencode::{
 };
 use host_runtime::model_execution::pi::{
     EIDNARA_PI_SUBAGENT_ENV, MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV,
-    MODEL_EXECUTION_TEMPERATURE_ENV, PI_MODEL_EXECUTION_EXTENSION_BYTES,
-    PI_MODEL_EXECUTION_EXTENSION_FILE, PiBackend, PiRuntimeDescriptor, pi_model_ref,
+    MODEL_EXECUTION_PLAIN_SYSTEM_ENV, MODEL_EXECUTION_TEMPERATURE_ENV,
+    PI_MODEL_EXECUTION_EXTENSION_BYTES, PI_MODEL_EXECUTION_EXTENSION_FILE, PiBackend,
+    PiRuntimeDescriptor, pi_model_ref,
 };
 use host_runtime::model_execution::protocol::SendRequest;
 use host_runtime::model_execution::source_health::{
@@ -192,6 +193,14 @@ fn main() {
         (
             "pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt",
             pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt,
+        ),
+        (
+            "pi_model_execution_hook_sends_a_flagged_system_text_as_written",
+            pi_model_execution_hook_sends_a_flagged_system_text_as_written,
+        ),
+        (
+            "pi_plain_system_directive_becomes_a_flag",
+            pi_plain_system_directive_becomes_a_flag,
         ),
         (
             "success_transcripts_align_across_harnesses",
@@ -1974,6 +1983,7 @@ fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
                 .arg(&driver_path)
                 .env_remove(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV)
                 .env_remove(MODEL_EXECUTION_TEMPERATURE_ENV)
+                .env_remove(MODEL_EXECUTION_PLAIN_SYSTEM_ENV)
                 .envs(envs.iter().copied())
                 .output()
                 .ok()
@@ -1985,6 +1995,76 @@ fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("driver output")
+}
+
+/// A system text that opens with the plain-system directive reaches Pi with the directive removed and the flag set; a system text of any other shape sets no flag.
+fn pi_plain_system_directive_becomes_a_flag() {
+    use host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE;
+    for (system, written, flagged) in [
+        (
+            format!("{PLAIN_SYSTEM_DIRECTIVE}{SYSTEM_SENTINEL}"),
+            SYSTEM_SENTINEL.to_owned(),
+            true,
+        ),
+        (
+            SYSTEM_SENTINEL.to_owned(),
+            SYSTEM_SENTINEL.to_owned(),
+            false,
+        ),
+    ] {
+        let setup = RunSetup::new();
+        let transcript = write_transcript(
+            setup.scratch.path(),
+            "success.ndjson",
+            &pi_success_lines("hi", "stop"),
+        );
+        let backend = pi_backend(
+            &setup,
+            &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+            Vec::new(),
+            None,
+        );
+        let request = request(
+            setup.project.path(),
+            Harness::Pi,
+            "openai/gpt-5-test",
+            Some(&system),
+        );
+        let (terminal, _) = execute(&backend, request);
+        assert!(matches!(terminal, BackendTerminal::Completed { .. }));
+        assert_eq!(
+            fs::read(setup.out.path().join("system-prompt.copy")).expect("system copy"),
+            written.as_bytes()
+        );
+        assert_eq!(
+            setup
+                .env()
+                .get(MODEL_EXECUTION_PLAIN_SYSTEM_ENV)
+                .map(String::as_str),
+            flagged.then_some("1")
+        );
+    }
+}
+
+/// With the plain-system flag the hook replaces the system prompt Pi built with the caller's own text, so the date and working-directory lines Pi appends are absent; without the flag, or with no custom prompt, Pi's prompt stands.
+fn pi_model_execution_hook_sends_a_flagged_system_text_as_written() {
+    let driver = r#"let handler;
+hook({ on(name, fn) { if (name === "before_agent_start") handler = fn; } });
+const built = "Review the memory.\nCurrent date: 2026-03-01\nCurrent working directory: /state/cwd";
+console.log(JSON.stringify([
+  handler({ systemPrompt: built, systemPromptOptions: { customPrompt: "Review the memory." } }) ?? null,
+  handler({ systemPrompt: built, systemPromptOptions: {} }) ?? null,
+]));"#;
+    let flagged = run_hook_driver(driver, &[(MODEL_EXECUTION_PLAIN_SYSTEM_ENV, "1")]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(flagged.trim()).expect("json"),
+        serde_json::json!([{ "systemPrompt": "Review the memory." }, null])
+    );
+    let unflagged = run_hook_driver(driver, &[]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(unflagged.trim()).expect("json"),
+        serde_json::json!([null, null])
+    );
 }
 
 /// The hook removes cache markers from user messages and keeps the system prompt's marker, in the Bedrock Converse, Anthropic Messages, and OpenAI-completions payload shapes.
@@ -4087,7 +4167,7 @@ fn pi_auto_retry_supersedes_the_failed_attempts_terminal() {
         .iter()
         .filter_map(|event| match event {
             BackendEvent::AssistantText { text, .. } => Some(text.as_str()),
-            BackendEvent::HarnessDispatch { .. } => None,
+            BackendEvent::HarnessDispatch { .. } | BackendEvent::AnsweringModel { .. } => None,
         })
         .collect();
     assert_eq!(
