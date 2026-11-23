@@ -154,6 +154,28 @@ describe("Pi id alignment", () => {
         messages[0] = { ...messages[0], timestamp: 1 };
         expect(idsOf(messages, manager)).toEqual([undefined, two]);
     });
+
+    it("names a tool result by the entry that answers the same tool call", () => {
+        const manager = SessionManager.inMemory("/project");
+        manager.appendMessage(user("run both"));
+        const at = clock++;
+        const result = (toolCallId: string) => ({
+            role: "toolResult" as const,
+            toolCallId,
+            toolName: "bash",
+            content: [{ type: "text" as const, text: toolCallId }],
+            isError: false,
+            timestamp: at,
+        });
+        const first = manager.appendMessage(result("call-a"));
+        const second = manager.appendMessage(result("call-b"));
+        const messages = agentMessages(manager);
+        expect(idsOf(messages, manager).slice(1)).toEqual([first, second]);
+        // Two results of one millisecond that reach the handler in the other order take no
+        // entry's id: each slot's entry answers another call.
+        const swapped = [messages[0] as Json, messages[2] as Json, messages[1] as Json];
+        expect(idsOf(swapped, manager)).toEqual([undefined, undefined, undefined]);
+    });
 });
 
 function syntheticBranch(count: number): {

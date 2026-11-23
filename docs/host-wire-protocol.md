@@ -1699,12 +1699,19 @@ call's id is Pi's native tool call id, the id of the call as Pi gives it,
 which the window's block keeps beside its own id when that is the native id's
 first part; it pairs a result with its call and stands in the fact's
 rationale. A provider can give the calls of two turns one id, and each result
-is then its own execution under its own entry. A call and a result count when
-the Pi row carries the id itself, as a string with a character other than
-whitespace: the Pi codec gives a call without an `id` or `callId` a
-synthesized id and a result row without a `toolCallId` the id `tool`, which
-name no execution, so such a call is answered by no result and such a result
-changes no fact and settles no call.
+is then its own execution under its own entry. The daemon reads the ids from
+the request's native rows, which stand one for each message of the window in
+order: a call counts when the `toolCall` part at its place in its message's
+row carries the call's id itself, as its `id` when that is a string and else
+as its `callId`, and a result counts when its row carries the id itself as
+its `toolCallId`, each a string with a character other than whitespace. The
+Pi codec gives a call part without an id a synthesized id and a result row
+without a `toolCallId` the id `tool`, which name no execution, so such a call
+is answered by no result and such a result changes no fact and settles no
+call. A window names no execution, and its pass hands off nothing, when the
+request carries no native rows, when the rows and the messages differ in
+number, when a message's id is another than its row's `id`, and when two
+messages share an id.
 
 The handler reads the window as the request carries it, before the pass
 resolves it, as the capture checkpoint does. A pass considers the last 1,024
@@ -1724,11 +1731,14 @@ has one such task at a time and the daemon eight: a pass that finds its
 session's task running, or eight tasks running, hands off nothing, and so does
 a pass while the Kernel is not ready. A result that a pass leaves unjudged is
 judged by a later pass of the session whose window still carries the call and
-its result. A result is paired with the call it answers in the tool turn under
-way: a command call of the assistant message before it, with no message of
-another role between them, so a result that arrives after its call's turn has
-closed is paired with no call. A result under an id that two tool calls or two
-tool results of its turn carry is left out, since the id names neither alone.
+its result. A result is paired with the call it answers in its tool turn: a
+command call of the assistant message before it, with no message of another
+role between them. A tool turn begins at an assistant message and ends at the
+next message that is neither the assistant's nor a tool's, so a result that
+arrives after its call's turn has ended is paired with no call and shares no
+id with that turn. A result under an id that two tool calls or two tool
+results of its turn carry is left out, since the id names neither alone, and
+takes no place among the 1,024 results a pass considers.
 A daemon that shuts down ends a task before its next result, ends
 the task's wait for the capture publication gate and for the Kernel, and
 starts no task that was handed off and not yet running.
@@ -1764,16 +1774,19 @@ mark reports no failure, whatever its text holds: a status line, a status the
 command line echoes, a failure line, a test runner's or a build's summary, and
 a shell's report of a missing program state no failure. A Pi result row that
 carries no boolean error mark is read as unmarked. The daemon follows the mark
-the harness set. Pi 0.80, the release this daemon's Pi plugin is built
-against, marks a command whose process ends with a numeric nonzero status, one
-it aborted, and one it timed out; a process that ends with no exit code, as
-one ended by a signal outside Pi does, leaves its result unmarked. Such a
+and reads the text that Pi emits for the result. In Pi 0.80, the release this
+daemon's Pi plugin is built against, the built-in shell tool marks a command
+whose process ends with a numeric nonzero status, one it aborted, and one it
+timed out; a process that ends with no exit code, as one ended by a signal
+outside Pi does, leaves its result unmarked. An extension's `tool_result`
+handler runs after the tool and can change the mark and the text; the daemon
+reads the result as it stands after those handlers. An unmarked
 result writes no fact and, as an unmarked result of its command line, resolves
 a live, unresolved fact that it follows.
 
 A fact states what the harness reports of the result and claims no more of
-the command. Pi's shell tool ends the result of a command that exited with a
-nonzero status with the line `Command exited with code <n>`. The daemon reads
+the command. Pi's built-in shell tool ends the result of a command that exited
+with a nonzero status with the line `Command exited with code <n>`. The daemon reads
 the last non-empty line of a marked result, trimmed: when the whole line is
 those words and one to ten ASCII digits, a nonzero number is the fact's exit
 code, which is the code that line states. A marked result that ends in any
@@ -1805,17 +1818,21 @@ several lines share once, at its first line. Each line of a marked result is
 read as a line of an output block: it states an error when it is a failure
 line by that reading, when it completes one (the line right after a failure
 line that ends with `:`, or one that begins with `-->` or `at `, and that is
-no code fence line), when it holds `error`, `errors`, `failed`, `failure`,
-`fatal`, `panic`, `panicked`, `exception`, or `traceback` as a word in any
-letter case, when it holds a type name that ends in `Error` or `Exception`, or
-when it holds `command not found`. These readings choose lines of a result the
+no code fence line), when one of its runs of letters and digits is `error`,
+`errors`, `failed`, `failure`, `fatal`, `panic`, `panicked`, `exception`, or
+`traceback` in any letter case or ends in `Error` or `Exception` after a
+letter or digit (so `error_count` holds the run `error`), or when it holds
+`command not found`. These readings choose lines of a result the
 harness marked and decide no failure. A line is judged as trimmed: an empty
 line, a line with a control character other than a tab, and a line with U+2028
-or U+2029 are left out. A line that holds the call's command line as a JSON
-string is left out too. Pi's report of a call whose arguments it refused lists
-the arguments that way, so the fact shows the arguments of its command in no
-line that copies the call; a program's own output can repeat an argument, and
-such a line is kept under the redactor's rule like any other. With a finding
+or U+2029 are left out. Pi answers a call whose arguments its schema refuses
+with a report that begins `Validation failed for tool` and lists the call's
+arguments, as JSON, after the line `Received arguments:`. Of such a result
+the fact reads the part before that line: the chosen lines, the path, and the
+error come from the lines that state what Pi refused, and the arguments stay
+in the tool result. Every other result is read whole; a program's own output
+can repeat an argument, and such a line is kept under the redactor's rule
+like any other. The redactor judges the whole text of every result. With a finding
 the fact keeps no line of the output and says that the text is withheld and
 that it stands in the result of its tool call in its session while that
 session's history holds it; Pi keeps the end of a long output there and the
@@ -1826,9 +1843,10 @@ around it, of ASCII letters, digits, and `_`, `.`, `/`, `-` with a file
 extension of one to five letters and digits, at least one a letter, and with a
 directory, a position (`:` or `(`, a digit, and then digits, `:`, `,`, and
 `)`), or a test's name (`::`, then letters, digits, `_`, and `:`); an error is
-a type name that ends in `Error` or `Exception`, or a code of one to four
-ASCII capitals and two to six digits (`E0308`, `TS2307`); each is at most 96
-bytes. Both are read by shape and are what the line names, with no claim that
+a word, read as a run of letters and digits of any script, `_`, and `.`
+without the dots at its ends, that is a type name ending in `Error` or
+`Exception` after a first letter, or a code of one to four ASCII capitals and
+two to six digits (`E0308`, `TS2307`); each is at most 96 bytes. Both are read by shape and are what the line names, with no claim that
 they caused the failure: a host with a port has the shape of a file with a
 line, and the name of a digest such as `SHA256` the shape of a code. With a
 finding the path and the error come from error lines that hold no finding.
@@ -1959,22 +1977,25 @@ commit that writes a fact is logged under the recorder's own producer name and
 a key that ends in the fact's id, and an execution whose commit the Kernel's
 log holds writes nothing, so a window sent again, also after a restart, writes
 nothing for it, and a later turn that uses a call's id again is judged as the
-execution it is. An id that the Kernel
-already holds for a row of another writer leaves that call's failure
-unwritten: the Kernel refuses the commit, the daemon reports the refusal on
-stderr, and the call is settled. The Kernel bars the supersession of a fact
+execution it is. A fact's id is new to the Kernel when its commit writes: the
+commit looks the id up under the Kernel's writer, on a new lineage and in
+place of a live fact alike, and an id that a row of another writer holds
+leaves that row as it is and the call's result unwritten; the daemon reports
+it on stderr, and the call is settled. The Kernel bars the supersession of a fact
 that a disposition has rejected, contradicted, or quarantined, which are the
 dispositions that hide it from `explicit_search`: a later result of that
 command writes nothing and its call is settled, so the hidden text reaches no
 new fact. `tool_failure` and every `tool_failure:<text>` are reserved as a
 `source_id`. A host `kernel.commit` whose `insert_decision` or
 `insert_observation` names one answers `invalid:invalid_input`, unless the
-Kernel answers the commit from the receipt of an earlier one. One whose
-`supersede_decision` names one, replaces a fact on one, or folds into a fact
-on one answers `invalid:admission_policy` once it has found the replaced fact
-in the bound project; a replaced fact that is missing or stands in another
-project, and a fact to fold into that stands in another project, answer
-`invalid:not_found` as on any `source_id`. A
+Kernel answers the commit from the receipt of an earlier one. A
+`supersede_decision` is checked in this order. A replaced fact that is
+missing or stands in another project answers `invalid:not_found`, as on any
+`source_id`. Next, a replaced fact on a reserved `source_id`, and a request
+that names one for its successor, answer `invalid:admission_policy`. Then the
+fact to fold into is looked up: one that stands in another project answers
+`invalid:not_found`, and a live one of the bound project on a reserved
+`source_id` answers `invalid:admission_policy`. A
 `kernel.artifact.ingest.begin` whose `source_id` is one answers
 `invalid:invalid_input`. The MemoryReviewer forms no proposal that targets a
 fact on one. Retiring a fact and recording a disposition on it stay open.
@@ -1986,13 +2007,20 @@ newest one's text as it stood while live, the log for that fact's commit, and
 the session's count, and commits. The waits for a Kernel connection of one
 judgment end at one 5 s deadline, its reads of the log and of the lineage stop
 at that deadline between steps of their statements, and a daemon shutdown ends
-them the same way. A judgment belongs to one Kernel history, which it reads
-ahead of its other reads, and its commit requires that history under the
-Kernel's writer: a restore that installs another history between the reads and
-the commit leaves the judgment's fact unwritten and its call unlearned, and
-the daemon gives up its memo of judged calls under the new history, so the
-session's next pass judges the window's results against the history the Kernel
-holds. `session.delete` holds the same gate and retires the
+them the same way. The daemon's memo of judged calls stands in one Kernel
+history. A pass compares that history with the one the Kernel holds before
+the memo filters its window, and gives the memo's calls up when a restore has
+installed another, so the pass hands the window's results off again. A
+judgment reads the Kernel's history ahead of its other reads, and its commit
+requires that history under the Kernel's writer: a restore that installs
+another history between the reads and the commit leaves the judgment's fact
+unwritten and its call unlearned, and the daemon gives up its memo of judged
+calls. A task judges under one history, the one its pass filtered the window
+under or the first one it reads, and ends when the Kernel holds another, so
+the session's next pass judges the window's results, in window order, against
+the history the Kernel holds. A commit that the Kernel answers from the
+receipt of an earlier commit of the same execution writes nothing and settles
+the call: the history the Kernel holds has that execution's commit. `session.delete` holds the same gate and retires the
 session's place in the daemon's memo of judged calls before it changes either
 store and again as it releases the gate, in one step with respect to a pass's
 handoff, so a task handed off before a `session.delete` of its session, or
@@ -2008,15 +2036,17 @@ executions, by project, for each of 256 sessions, and a full session entry gives
 call it learned first; a session past the 256 takes the place of the oldest
 session that runs no task, whose results are judged again on its next request,
 where the Kernel's log stops a second write of a call that wrote a fact. A
-busy or failing Kernel, a fact another writer changed under the judgment, and
-a read that names a commit past the Kernel's tip end the task with the call
-unlearned; any other refusal of the Kernel settles the call. A result that
+Kernel history that cannot be read, a busy or failing Kernel, a fact another
+writer changed under the judgment, and a read that names a commit past the
+Kernel's tip end the task with the call unlearned; any other refusal of the
+Kernel to a judgment settles the call. A result that
 writes nothing for a reason an operator can act on is reported on stderr by a
 fixed sentence that holds no text of the result: a tool name or an id that the
 redactor refuses or that holds a control character, U+2028, or U+2029, a
 command line or a composed fact that the redactor refuses, a newest decision
 the recorder did not write, two decisions that
-share the greatest revision of a `source_id`, and a refusal of the Kernel. A
+share the greatest revision of a `source_id`, a fact's id that another row
+holds, and a refusal of the Kernel. A
 panic of the task is reported through the daemon's redacting panic boundary
 with the gate released, and its call stays unjudged.
 

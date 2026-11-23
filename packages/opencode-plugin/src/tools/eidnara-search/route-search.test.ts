@@ -1098,12 +1098,14 @@ describe("eidnara_search through the fused route", () => {
                 summary,
                 rationale,
                 source_id: "tool_failure:0f3a5c7e9b1d2f4a6c8e0b2d4f6a8c0e",
+                // A resolved fact takes the place of the failed one, at revision 2 or later.
+                source_revision: 2,
                 labeled: true,
             });
             kernel.routeReply = () =>
                 fallback
                     ? { kind: "terminal", terminal: "disabled" }
-                    : fused([{ object: id(1), labeled: true }]);
+                    : fused([{ object: id(1), revision: 2, labeled: true }]);
             const execution = await run({ query: "cargo test failed" });
             if (execution.status !== "complete") throw new Error(execution.text);
             expect(execution.prePack.map((result) => result.objectId)).toEqual([id(1)]);

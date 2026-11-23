@@ -4919,58 +4919,55 @@ fn passed_run(call: &'static str, command: &'static str, at_ms: i64) -> Run {
     }
 }
 
-/// A transform request whose window holds one user message and, for each
-/// run, the assistant's tool call and the tool's result.
-fn command_request(session: &str, runs: &[Run]) -> Value {
-    let mut messages = vec![ck("m-user", 1, "Run the suite.")];
+/// The Pi rows of a window that holds one user message and, for each run,
+/// the assistant's tool call and the tool's result.
+fn command_rows(runs: &[Run]) -> Vec<Value> {
+    let mut rows = vec![json!({ "id": "m-user", "message": {
+        "role": "user", "content": [{ "type": "text", "text": "Run the suite." }], "timestamp": 1,
+    } })];
     for (index, run) in runs.iter().enumerate() {
-        let ordinal = 2 + 2 * index as u64;
-        let message = |role: &str, ordinal: u64, block: Value| IngressMessage {
-            mid: format!("m-{ordinal}"),
-            ordinal,
-            ck: serde_json::from_value(json!({
-                "role": role,
-                "content": [{ "kind": block }],
-                "meta": { "harness_id": format!("m-{ordinal}"), "created_at_ms": run.at_ms },
-            }))
-            .unwrap(),
-        };
-        messages.push(message(
-            "assistant",
-            ordinal,
-            json!({ "type": "tool_call", "id": run.call, "name": "bash", "input": { "command": run.command } }),
-        ));
-        let output = if run.flagged { "error_text" } else { "text" };
-        messages.push(message(
-            "tool",
-            ordinal + 1,
-            json!({
-                "type": "tool_result", "id": run.call, "tool_name": "bash",
-                "output": { "kind": { "type": output, "text": run.output } },
-            }),
-        ));
+        let ordinal = 2 + 2 * index;
+        rows.push(json!({ "id": format!("m-{ordinal}"), "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall", "id": run.call, "name": "bash",
+                "arguments": { "command": run.command },
+            }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": run.at_ms,
+        } }));
+        rows.push(json!({ "id": result_entry(index), "message": {
+            "role": "toolResult", "toolCallId": run.call, "toolName": "bash",
+            "content": [{ "type": "text", "text": run.output }], "isError": run.flagged,
+            "timestamp": run.at_ms,
+        } }));
     }
-    let mut request = request_with_usage(messages, 1_000, 200_000);
-    request["session_id"] = json!(session);
-    request
+    rows
 }
 
 /// The id of the session entry that holds the result of the run at `index`
-/// in a window [`command_request`] builds.
+/// in a window of [`command_rows`].
 fn result_entry(index: usize) -> String {
     format!("m-{}", 3 + 2 * index)
 }
 
-/// `request` as the window of a Pi session, which the transform handler
-/// derives from the session's native rows.
-fn window_of(request: Value) -> TransformRequest {
+/// The window of a Pi session as the transform handler derives it from the
+/// session's native rows, which the request carries beside it.
+fn native_window(session: &str, rows: Vec<Value>) -> TransformRequest {
+    let native: Vec<Arc<Value>> = rows.into_iter().map(Arc::new).collect();
+    let mut request = request_with_usage(Vec::new(), 1_000, 200_000);
+    request["session_id"] = json!(session);
     let mut window: TransformRequest = serde_json::from_value(request).unwrap();
     window.serializer_profile = "pi".to_owned();
+    window.messages = crate::codec::pi::derive_pi_window(&native)
+        .unwrap()
+        .into_iter()
+        .collect();
+    window.native_messages = Some(native);
     window
 }
 
 fn command_window(session: &str, runs: &[Run]) -> TransformRequest {
-    window_of(command_request(session, runs))
+    native_window(session, command_rows(runs))
 }
 
 /// The configuration under which a failed command is recorded: memory
@@ -5375,15 +5372,16 @@ async fn a_failure_is_recorded_only_under_the_source_capture_consent_of_a_primar
     ));
     assert!(handler.failure_checkpoint(&opencode, &window).is_none());
     // A file read that returns an error carries a path and no command.
-    let request = || command_request("s1", &[failed_run("call-1", "cargo test -p api", 1_000)]);
-    let mut read = request();
-    read["messages"][1]["ck"]["content"][0]["kind"]["input"] = json!({ "path": "src/render.rs" });
-    assert!(handler.failure_checkpoint(&on, &window_of(read)).is_none());
+    let rows = || command_rows(&[failed_run("call-1", "cargo test -p api", 1_000)]);
+    let mut read = rows();
+    read[1]["message"]["content"][0]["arguments"] = json!({ "path": "src/render.rs" });
+    let read = native_window("s1", read);
+    assert!(handler.failure_checkpoint(&on, &read).is_none());
     // A result without a creation time has no place among the command's
     // runs: its call is settled and writes nothing.
-    let mut untimed = request();
-    untimed["messages"][2]["ck"]["meta"]["created_at_ms"] = Value::Null;
-    let untimed = window_of(untimed);
+    let mut untimed = rows();
+    untimed[2]["message"]["timestamp"] = Value::Null;
+    let untimed = native_window("s1", untimed);
     assert_eq!(record_window(&handler, &project, "s1", &untimed).await, 0);
     assert_eq!(handler.failure_memo.lock().unwrap().calls_for_test("s1"), 1);
     assert!(
@@ -6053,18 +6051,6 @@ async fn a_marked_result_the_harness_ended_itself_takes_the_record_s_place() {
     assert_eq!(rationale["state"], "resolved");
 }
 
-/// A Pi window as the transform handler derives it from native rows.
-fn native_window(session: &str, rows: Vec<Value>) -> TransformRequest {
-    let native: Vec<Arc<Value>> = rows.into_iter().map(Arc::new).collect();
-    let mut window = command_window(session, &[]);
-    window.messages = crate::codec::pi::derive_pi_window(&native)
-        .unwrap()
-        .into_iter()
-        .collect();
-    window.native_messages = Some(native);
-    window
-}
-
 /// The Pi row of an assistant message that calls `bash` with `command`.
 fn pi_call_row(row: &str, call: Option<&str>, command: &str, at_ms: i64) -> Value {
     let mut part =
@@ -6269,9 +6255,9 @@ async fn a_fact_the_redactor_refuses_as_composed_is_left_unwritten() {
     let tool = format!("run {}=", ["api_", "tok", "en"].concat());
     assert!(kernel::exact_text_refusal(&tool).is_none());
     let window = |call: &'static str, tool: &str| {
-        let mut request = command_request("s1", &[failed_run(call, "cargo test -p api", 1_000)]);
-        request["messages"][1]["ck"]["content"][0]["kind"]["name"] = json!(tool);
-        window_of(request)
+        let mut rows = command_rows(&[failed_run(call, "cargo test -p api", 1_000)]);
+        rows[1]["message"]["content"][0]["name"] = json!(tool);
+        native_window("s1", rows)
     };
     let tip = kernel.tip().unwrap();
     assert_eq!(
@@ -6298,17 +6284,18 @@ async fn a_fact_the_redactor_refuses_as_composed_is_left_unwritten() {
 }
 
 /// Pi answers a call whose arguments its schema refuses with a report that
-/// lists the arguments, the command line among them. The result is marked
-/// and is recorded with the report's own lines; the line that copies the
-/// command line is left out, so an argument the redactor has no rule for
-/// reaches neither the fact's text nor its rationale.
+/// lists the arguments after the line `Received arguments:`. The result is
+/// marked and is recorded with the lines that state what was refused; the
+/// arguments are left out, so an argument the redactor has no rule for
+/// reaches neither the fact's text nor its rationale, and no argument
+/// names the fact's path or error.
 #[tokio::test]
-async fn a_refused_call_s_report_reaches_a_fact_without_the_command_line() {
+async fn a_refused_call_s_report_reaches_a_fact_without_the_call_s_arguments() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
     let unruled = ["-p", "hunter", "2-fixture"].concat();
     let command: &'static str = format!("deploy /srv/app/config.yaml {unruled}").leak();
     let report: &'static str = format!(
-        "Validation failed for tool \"bash\":\n  - timeout: must be number\n\nReceived arguments:\n{{\n  \"timeout\": \"soon\",\n  \"command\": {}\n}}",
+        "Validation failed for tool \"bash\":\n  - timeout: must be number\n\nReceived arguments:\n{{\n  \"timeout\": \"TypeError at src/check.ts:10 failed\",\n  \"command\": {}\n}}",
         json!(command)
     )
     .leak();
@@ -6330,14 +6317,21 @@ async fn a_refused_call_s_report_reaches_a_fact_without_the_command_line() {
         .remove(0);
     assert_eq!(
         rows[0].0,
-        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the harness marked the result as an error.\nCommand: deploy /srv/app/config.yaml [arguments left out]\nOutput lines:\n> Validation failed for tool \"bash\":\n> \"timeout\": \"soon\",\n> }"
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the harness marked the result as an error.\nCommand: deploy /srv/app/config.yaml [arguments left out]\nOutput lines:\n> Validation failed for tool \"bash\":\n> - timeout: must be number"
     );
     for text in [rows[0].0.clone(), rationale.to_string()] {
-        assert!(!text.contains(&unruled), "{text}");
+        assert!(
+            !text.contains(&unruled) && !text.contains("TypeError"),
+            "{text}"
+        );
     }
     assert_eq!(
-        (rationale.get("exit_code"), rationale.get("path")),
-        (None, None)
+        (
+            rationale.get("exit_code"),
+            rationale.get("path"),
+            rationale.get("error")
+        ),
+        (None, None, None)
     );
 }
 
@@ -6355,6 +6349,7 @@ async fn a_judgment_whose_reads_a_restore_replaced_writes_nothing_and_is_judged_
     let runs = [
         failed_run("call-1", "cargo test -p api", 1_000),
         failed_run("call-2", "cargo test -p api", 2_000),
+        failed_run("call-3", "npm run deploy", 3_000),
     ];
     assert_eq!(
         record_failures(&handler, &project, "s1", &runs[..1]).await,
@@ -6398,29 +6393,95 @@ async fn a_judgment_whose_reads_a_restore_replaced_writes_nothing_and_is_judged_
         0,
         "the judgment that read the replaced history writes nothing"
     );
-    assert_eq!(restores.load(Ordering::SeqCst), 1);
-    assert!(!handler.failure_memo.lock().unwrap().has_seen_for_test(
-        scope.digest(),
-        "s1",
-        (&result_entry(1), "call-2")
-    ));
+    assert_eq!(
+        restores.load(Ordering::SeqCst),
+        1,
+        "the pass ended at the restore, ahead of the third result's commit"
+    );
+    // The memo gave up the calls it judged under the replaced history, and
+    // learned neither the call the restore interrupted nor the one after.
+    for (index, call) in [(0, "call-1"), (1, "call-2"), (2, "call-3")] {
+        assert!(
+            !handler.failure_memo.lock().unwrap().has_seen_for_test(
+                scope.digest(),
+                "s1",
+                (&result_entry(index), call)
+            ),
+            "{call}"
+        );
+    }
     let live = served_memory_rows(&handler, (SECOND, "s2"), &project).await;
     assert_eq!(live.len(), 1, "{live:?}");
     assert_eq!(live[0]["object"]["object_id"], first, "the restored record");
-    // The next pass judges the call against the history the Kernel holds.
-    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 1);
-    assert_eq!(restores.load(Ordering::SeqCst), 2, "the commit was reached");
-    let live = served_memory_rows(&handler, (SECOND, "s2"), &project).await;
-    assert_eq!(live.len(), 1, "{live:?}");
-    assert_eq!(live[0]["object"]["source_revision"], 2);
-    let rationale = memory_rationales(&handler, (SECOND, "s2"), &project)
-        .await
-        .remove(0);
+    // The next pass judges the window's calls against the history the
+    // Kernel holds: the first has its receipt there, and the two after it
+    // reach their commits.
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 2);
     assert_eq!(
-        (&rationale["state"], &rationale["call"]),
-        (&json!("failed"), &json!("call-2"))
+        restores.load(Ordering::SeqCst),
+        3,
+        "both commits were reached"
     );
+    let mut rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    rationales.sort_by_key(|rationale| rationale["at_ms"].as_i64());
+    let calls: Vec<_> = rationales
+        .iter()
+        .map(|rationale| (&rationale["state"], &rationale["call"]))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            (&json!("failed"), &json!("call-2")),
+            (&json!("failed"), &json!("call-3"))
+        ]
+    );
+    let live = served_memory_rows(&handler, (SECOND, "s2"), &project).await;
+    let revisions: Vec<_> = live
+        .iter()
+        .filter(|row| row["object"]["object_id"] != first)
+        .map(|row| row["object"]["source_revision"].as_i64())
+        .collect();
+    assert_eq!(revisions.len(), 2, "{live:?}");
+    assert!(revisions.contains(&Some(2)), "the first command's lineage");
     // The first call's receipt stands in the restored history.
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+}
+
+/// The memo's judged calls stand in one Kernel history. A restore installs
+/// another, in which a fact the memo's call wrote is absent. The next pass
+/// over the same window hands its results off again and writes the fact.
+#[tokio::test]
+async fn a_window_judged_before_a_restore_is_handed_off_again_after_it() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let backups = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        backups.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let backup = kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backups.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let runs = [failed_run("call-1", "cargo test -p api", 1_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 1);
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+    kernel.restore(&backup.destination_path).unwrap();
+    assert!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty(),
+        "the restored history holds no fact"
+    );
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &runs).await,
+        1,
+        "the window is judged against the restored history"
+    );
     assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
 }
 
@@ -6461,45 +6522,15 @@ async fn results_of_one_window_are_judged_in_window_order_and_by_their_own_entri
     // A call that two results answer is left out too, in either order of a
     // passing and a marked result: the pass hands off no result of it.
     let binding = failure_binding(&project, "pi", "s1");
-    let message = |mid: &str, role: &str, block: Value, at_ms: i64| {
-        Arc::new(IngressMessage {
-            mid: mid.into(),
-            ordinal: 9,
-            ck: serde_json::from_value(json!({
-                "role": role,
-                "content": [{ "kind": block }],
-                "meta": { "harness_id": mid, "created_at_ms": at_ms },
-            }))
-            .unwrap(),
-        })
-    };
-    let result = |mid: &str, id: &str, marked: bool, at_ms: i64| {
-        let (kind, text) = match marked {
-            true => ("error_text", PANIC_OUTPUT),
-            false => ("text", "test result: ok."),
-        };
-        message(
-            mid,
-            "tool",
-            json!({
-                "type": "tool_result", "id": id, "tool_name": "bash",
-                "output": { "kind": { "type": kind, "text": text } },
-            }),
-            at_ms,
-        )
-    };
     for (call, marked_first) in [("call-twice-a", false), ("call-twice-b", true)] {
-        let mut window = command_window("s1", &[]);
-        window.messages.0.extend([
-            message(
-                "m-call",
-                "assistant",
-                json!({ "type": "tool_call", "id": call, "name": "bash", "input": { "command": "npm run deploy" } }),
-                4_000,
-            ),
-            result("m-first", call, marked_first, 4_100),
-            result("m-second", call, !marked_first, 4_200),
-        ]);
+        let window = native_window(
+            "s1",
+            vec![
+                pi_call_row("m-call", Some(call), "npm run deploy", 4_000),
+                pi_result_row("m-first", Some(call), marked_first, 4_100),
+                pi_result_row("m-second", Some(call), !marked_first, 4_200),
+            ],
+        );
         assert!(
             handler.failure_checkpoint(&binding, &window).is_none(),
             "{call}"
@@ -6509,22 +6540,17 @@ async fn results_of_one_window_are_judged_in_window_order_and_by_their_own_entri
     // call of the turn under way: a user message, or the assistant's next
     // message, stands between them.
     for (call, between) in [("call-late-a", "user"), ("call-late-b", "assistant")] {
-        let mut window = command_window("s1", &[]);
-        window.messages.0.extend([
-            message(
-                "m-call",
-                "assistant",
-                json!({ "type": "tool_call", "id": call, "name": "bash", "input": { "command": "npm run deploy" } }),
-                4_000,
-            ),
-            message(
-                "m-between",
-                between,
-                json!({ "type": "text", "text": "Go on." }),
-                4_050,
-            ),
-            result("m-late", call, true, 4_100),
-        ]);
+        let window = native_window(
+            "s1",
+            vec![
+                pi_call_row("m-call", Some(call), "npm run deploy", 4_000),
+                json!({ "id": "m-between", "message": {
+                    "role": between, "content": [{ "type": "text", "text": "Go on." }],
+                    "usage": {}, "stopReason": "stop", "timestamp": 4_050,
+                } }),
+                pi_result_row("m-late", Some(call), true, 4_100),
+            ],
+        );
         assert!(
             handler.failure_checkpoint(&binding, &window).is_none(),
             "{call}"
@@ -6536,9 +6562,32 @@ async fn results_of_one_window_are_judged_in_window_order_and_by_their_own_entri
             .len(),
         2
     );
+    // Two turns whose result rows share one entry id and one call id would
+    // be one execution: such a window names none.
+    let repeated = native_window(
+        "s1",
+        vec![
+            pi_call_row("m-first-call", Some("call_0"), "npm run deploy", 4_000),
+            pi_result_row("m-result", Some("call_0"), true, 4_100),
+            pi_call_row("m-second-call", Some("call_0"), "npm run deploy", 4_200),
+            pi_result_row("m-result", Some("call_0"), false, 4_300),
+        ],
+    );
+    assert!(handler.failure_checkpoint(&binding, &repeated).is_none());
+    // A window that reaches the daemon without its native rows names no
+    // execution either.
+    let once = [failed_run("call-once", "npm run deploy", 5_000)];
+    let mut bare = command_window("s1", &once);
+    bare.native_messages = None;
+    assert!(handler.failure_checkpoint(&binding, &bare).is_none());
+    assert_eq!(
+        memory_rationales(&handler, (SECOND, "s2"), &project)
+            .await
+            .len(),
+        2
+    );
     // The positive control: the same marked result as the one answer of
     // its call, right after it, is recorded.
-    let once = [failed_run("call-once", "npm run deploy", 5_000)];
     assert_eq!(record_failures(&handler, &project, "s1", &once).await, 1);
 }
 
@@ -6561,7 +6610,7 @@ async fn a_result_past_the_bytes_read_is_settled_unread_and_the_results_after_it
             "usage": {}, "stopReason": "toolUse", "timestamp": at
         } })
     };
-    let native: Vec<Arc<Value>> = [
+    let native: Vec<Value> = [
         json!({ "id": "1a2b3c4d", "message": {
             "role": "user", "content": [{ "type": "text", "text": "Build it." }], "timestamp": 900
         } }),
@@ -6578,14 +6627,8 @@ async fn a_result_past_the_bytes_read_is_settled_unread_and_the_results_after_it
             "timestamp": 1_300
         } }),
     ]
-    .into_iter()
-    .map(Arc::new)
-    .collect();
-    let mut window = command_window("s1", &[]);
-    window.messages = crate::codec::pi::derive_pi_window(&native)
-        .unwrap()
-        .into_iter()
-        .collect();
+    .into();
+    let window = native_window("s1", native);
     assert_eq!(record_window(&handler, &project, "s1", &window).await, 1);
     let mut states: Vec<(String, String)> = memory_rationales(&handler, (SECOND, "s2"), &project)
         .await
@@ -6667,15 +6710,7 @@ async fn executions_that_share_the_first_part_of_a_native_call_id_are_judged_apa
             "timestamp": at
         } })
     };
-    let window = |rows: Vec<Value>| {
-        let native: Vec<Arc<Value>> = rows.into_iter().map(Arc::new).collect();
-        let mut window = command_window("s1", &[]);
-        window.messages = crate::codec::pi::derive_pi_window(&native)
-            .unwrap()
-            .into_iter()
-            .collect();
-        window
-    };
+    let window = |rows: Vec<Value>| native_window("s1", rows);
     let user = json!({ "id": "1a2b3c4d", "message": {
         "role": "user", "content": [{ "type": "text", "text": "Run the suite." }], "timestamp": 900
     } });
@@ -6756,12 +6791,12 @@ async fn bind_pi_session(handler: &Handler, channel: u16, session: &str) {
 
 /// The recorder judges a result under the capture publication gate, which
 /// `session.delete` takes too. The test pauses a judgment at a hook under
-/// the gate, ahead of its Kernel reads and its commit, and observes that
-/// the gate is held there and that a delete of the session has not
-/// finished while the hook blocks. Once the hook returns, a second hook
-/// between the judgment's reads and its commit observes the gate still
-/// held and the delete unfinished, so the commit stands ahead of the
-/// delete's sweep. The judgment then writes its record, the delete
+/// the gate, after its read of the Kernel history and ahead of its reads of
+/// the log and the lineage and its commit, and observes that the gate is
+/// held there and that a delete of the session has not finished while the
+/// hook blocks. Once the hook returns, a second hook between the
+/// judgment's reads and its commit observes the gate still held and the
+/// delete unfinished. The judgment then writes its record, the delete
 /// completes, and the record stands.
 #[tokio::test]
 async fn a_result_is_judged_under_the_capture_publication_gate() {

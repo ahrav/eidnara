@@ -310,7 +310,7 @@ tool-authored metadata such as `state.metadata.exit`. Contract literals stay
 with the readers that parse them. Every vocabulary literal lives in
 `crates/daemon/src/tool_vocabulary.rs` behind typed queries (`classify`,
 `tier`, `path_arg`, `display_arg`, `diff_keys`, `exit_code`,
-`truncated_flag`, `command_line`), and that module is the one literal site:
+`truncated_flag`), and that module is the one literal site:
 `scripts/forbid-tool-literals.sh` fails CI when a distinctive tool name or
 argument key appears elsewhere in daemon production source. A name no table
 describes classifies as `Unknown`. Selection never drops, deduplicates, or

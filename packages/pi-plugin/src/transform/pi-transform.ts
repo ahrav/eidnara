@@ -31,7 +31,8 @@ function rowEntry(id: string): { entryId: string; role?: string } | undefined {
  * The id of the message `entry` contributes to Pi's context when `message` is that message,
  * `null` when it is another, and `undefined` when the entry contributes none. A live custom
  * message is stamped before its entry is written, so custom and branch summary messages match
- * by content rather than by timestamp.
+ * by content rather than by timestamp. The tool results of one batch can share a millisecond,
+ * so a tool result matches the entry that answers the same tool call.
  */
 function entryIdFor(entry: SessionEntry, message: Json): string | null | undefined {
     const record = entry as unknown as Json;
@@ -39,9 +40,11 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
         case "message": {
             const own = record.message as Json | undefined;
             if (!own) return undefined;
-            return own.role === message.role && own.timestamp === message.timestamp
-                ? entry.id
-                : null;
+            const same =
+                own.role === message.role &&
+                own.timestamp === message.timestamp &&
+                (own.role !== "toolResult" || own.toolCallId === message.toolCallId);
+            return same ? entry.id : null;
         }
         case "custom_message":
             return message.role === "custom" &&

@@ -228,16 +228,3 @@ pub(crate) const TABLED_NAMES: &[&[&str]] = &[
     T2_TOOLS,
     &[EXIT_CODE_TOOL, TODO_TOOL],
 ];
-
-/// Command-line keys in precedence order.
-const COMMAND_LINE_KEYS: &[&str] = &["command", "cmd"];
-
-/// The command line a call carries, for a shell tool of any name: the value of the first of
-/// `command` and `cmd` that is a string with a character other than whitespace. An array of
-/// strings is the arguments of one program and no command line.
-pub(crate) fn command_line(input: &Value) -> Option<&str> {
-    COMMAND_LINE_KEYS
-        .iter()
-        .filter_map(|key| input.get(*key)?.as_str())
-        .find(|text| !text.trim().is_empty())
-}
