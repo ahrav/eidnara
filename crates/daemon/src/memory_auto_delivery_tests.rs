@@ -5093,7 +5093,7 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
     assert_eq!(visibility, "labeled");
     assert_eq!(
         record,
-        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 101.\nCommand: cargo test [arguments left out]\nFailing path: src/render.rs:9:5\nOutput lines:\n> test renders ... FAILED\n> thread 'renders' panicked at src/render.rs:9:5:\n> width is zero\n> Command exited with code 101"
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command exited with code 101.\nCommand: cargo test [arguments left out]\nFailing path: src/render.rs:9:5\nOutput lines:\n> test renders ... FAILED\n> thread 'renders' panicked at src/render.rs:9:5:\n> width is zero\n> Command exited with code 101"
     );
     let row = &served_memory_rows(&handler, (SECOND, "s2"), &project).await[0];
     assert_eq!(row["decision"]["decision_kind"], "TOOL_FAILURE");
@@ -5118,7 +5118,6 @@ async fn a_failed_command_is_recorded_for_search_replaced_by_its_next_failure_an
             "command": "cargo test [arguments left out]",
             "digest": digest,
             "state": "failed",
-            "evidence": "tool_status",
             "output_text": "kept",
             "exit_code": 101,
             "path": "src/render.rs:9:5",
@@ -5426,11 +5425,11 @@ async fn a_record_holds_no_credential_of_its_command_or_its_output() {
     }
     let withheld = rows
         .iter()
-        .find(|(record, _)| record.contains("exit code 1."))
+        .find(|(record, _)| record.contains("exited with code 1."))
         .unwrap();
     assert_eq!(
         withheld.0,
-        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 1.\nCommand: deploy [arguments left out]\nFailing path: src/deploy.rs:14:9\nError: E0308\nOutput text withheld: the redactor found credential-shaped content in the output. The whole output stands in the result of tool call call-1 of session s1 while that session's history holds it."
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command exited with code 1.\nCommand: deploy [arguments left out]\nFailing path: src/deploy.rs:14:9\nError: E0308\nOutput text withheld: the redactor found credential-shaped content in the output. The whole output stands in the result of tool call call-1 of session s1 while that session's history holds it."
     );
     let rationale = rationales
         .iter()
@@ -5441,7 +5440,7 @@ async fn a_record_holds_no_credential_of_its_command_or_its_output() {
     // The positive control: an output without a finding keeps its lines.
     let kept = rows
         .iter()
-        .find(|(record, _)| record.contains("exit code 2."))
+        .find(|(record, _)| record.contains("exited with code 2."))
         .unwrap();
     assert!(
         kept.0.ends_with(
@@ -5464,87 +5463,96 @@ async fn a_record_holds_no_credential_of_its_command_or_its_output() {
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert!(
         rows.iter()
-            .all(|(record, _)| !record.contains("exit code 2.")),
+            .all(|(record, _)| !record.contains("exited with code 2.")),
         "{rows:?}"
     );
 }
 
-/// A record states the exit status the tool reports for its command line.
-/// A command line whose final labeled `echo` prints its exit status reports
-/// by that number: a nonzero one is recorded and a later zero resolves it.
-/// A failure that a pipe or a list hides from the tool writes no record,
-/// whatever the output holds, and a status of 0 is a pass.
+/// The harness's error mark alone records a failure. A result without the
+/// mark writes no record, whatever its output states: a status the command
+/// line echoes, a status line, a failure behind a pipe or a list, a shell's
+/// report, and failure lines a search printed. The same command line under
+/// the mark is recorded, and its next unmarked result resolves the record.
 #[tokio::test]
-async fn a_printed_exit_status_is_recorded_and_a_hidden_failure_writes_no_record() {
+async fn a_result_without_the_harness_s_mark_writes_no_record_whatever_its_output_states() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
-    let unmarked = |call: &'static str, command: &'static str, output: &'static str, at_ms| Run {
+    let run = |call: &'static str, command: &'static str, output: &'static str, at_ms| Run {
         call,
         command,
         output,
         flagged: false,
         at_ms,
     };
+    const ECHOED: &str = "cargo build -p api; echo \"exit=$?\"";
     const BUILD: &str = "error: could not compile `api`\nwarning: build failed";
     let runs = [
-        unmarked(
+        run(
             "call-1",
-            "cargo build -p api; echo \"exit=$?\"",
+            ECHOED,
             "error: could not compile `api`\nexit=101",
             1_000,
         ),
-        // The tool reports the status of `tail`, of `tee`, and of `true`.
-        unmarked(
+        run(
             "call-2",
             "cargo build -p web 2>&1 | tail -n 40",
             BUILD,
             2_000,
         ),
-        unmarked(
+        run(
             "call-3",
             "pnpm typecheck 2>&1 | tee check.log",
             "bash: line 1: pnpm: command not found",
             3_000,
         ),
-        unmarked("call-4", "cargo build -p cli || true", BUILD, 4_000),
-        // A search through a log prints failure lines and passes.
-        unmarked("call-5", "grep -rn error: logs/build.log", BUILD, 5_000),
+        run("call-4", "cargo build -p cli || true", BUILD, 4_000),
+        run("call-5", "grep -rn error: logs/build.log", BUILD, 5_000),
+        run(
+            "call-6",
+            "pnpm build",
+            "ELIFECYCLE Command failed with exit code 1.\n\nCommand exited with code 1",
+            6_000,
+        ),
     ];
-    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 1);
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+    assert_eq!(
+        memory_rationales(&handler, (SECOND, "s2"), &project).await,
+        Vec::<Value>::new()
+    );
+    assert_eq!(handler.failure_memo.lock().unwrap().calls_for_test("s1"), 6);
+    // The positive control: the first command line under the mark.
+    let marked = Run {
+        flagged: true,
+        ..run(
+            "call-7",
+            ECHOED,
+            "error: could not compile `api`\nexit=101\n\nCommand exited with code 101",
+            7_000,
+        )
+    };
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[marked]).await,
+        1
+    );
     let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
     assert_eq!(rationales.len(), 1, "{rationales:?}");
     assert_eq!(
         (
             &rationales[0]["call"],
-            &rationales[0]["evidence"],
+            &rationales[0]["state"],
             &rationales[0]["exit_code"]
         ),
-        (&json!("call-1"), &json!("printed_status"), &json!(101))
+        (&json!("call-7"), &json!("failed"), &json!(101))
     );
     let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
     assert!(
         rows[0].0.contains(
-            ": the command failed: its command line printed exit status 101.\nCommand: cargo build [arguments left out]\n"
+            ": the command exited with code 101.\nCommand: cargo build [arguments left out]\n"
         ),
         "{rows:?}"
     );
-    // A run whose last line is no line of the echo changes nothing, and
-    // the run that prints a zero resolves the record.
-    let unread = unmarked(
-        "call-6",
-        "cargo build -p api; echo \"exit=$?\"",
-        "exit=0\nwarning: trailing output",
-        6_000,
-    );
-    assert_eq!(
-        record_failures(&handler, &project, "s1", &[unread]).await,
-        0
-    );
-    let passed = unmarked(
-        "call-7",
-        "cargo build -p api; echo \"exit=$?\"",
-        "Finished `dev` profile\nexit=0",
-        7_000,
-    );
+    // An unmarked result of that command line resolves the record, also
+    // when its output prints a nonzero number.
+    let passed = run("call-8", ECHOED, "warning: unused import\nexit=3", 8_000);
     assert_eq!(
         record_failures(&handler, &project, "s1", &[passed]).await,
         1
@@ -5553,7 +5561,7 @@ async fn a_printed_exit_status_is_recorded_and_a_hidden_failure_writes_no_record
     assert_eq!(rationales.len(), 1, "{rationales:?}");
     assert_eq!(
         (&rationales[0]["state"], &rationales[0]["resolved_call"]),
-        (&json!("resolved"), &json!("call-7"))
+        (&json!("resolved"), &json!("call-8"))
     );
 }
 
@@ -5614,7 +5622,7 @@ async fn a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writ
     assert_eq!(rows[0].1, "labeled");
     assert!(
         rows[0].0.starts_with(
-            "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command failed with exit code 101.\nCommand: cargo test [arguments left out]\n"
+            "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the command exited with code 101.\nCommand: cargo test [arguments left out]\n"
         ),
         "{rows:?}"
     );
@@ -5815,37 +5823,51 @@ async fn a_pass_hands_off_its_bound_of_the_last_results_that_its_memo_holds() {
     assert_eq!(handler.failure_memo.lock().unwrap().active_for_test(), 0);
 }
 
-/// A pass copies at most 8 MiB of commands and outputs for its task. Results
-/// of 64 KiB each fill that after 127 of them, so the pass hands off those
-/// and leaves the later ones, a small one included, for the next pass.
+/// A pass copies at most 8 MiB of command lines and marked outputs for its
+/// task. Marked results of 64 KiB each fill that after 127 of them, so the
+/// pass hands off those and leaves the later ones, a small one included,
+/// for the next pass. The text of an unmarked result is left in the window,
+/// so one pass settles the same number of unmarked results of that size.
 #[tokio::test]
 async fn a_pass_copies_its_bound_of_bytes_and_the_next_pass_judges_the_rest() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
     let output: &'static str = "x".repeat(64 * 1024).leak();
-    let mut runs: Vec<Run> = (0..130)
-        .map(|index| Run {
-            call: format!("call-{index}").leak(),
-            command: "ls src",
-            output,
-            flagged: false,
-            at_ms: 1_000 + index,
-        })
-        .collect();
-    runs.push(passed_run("call-small", "ls src", 2_000));
+    let window = |flagged: bool| {
+        let mut runs: Vec<Run> = (0..130)
+            .map(|index| Run {
+                call: format!("call-{index}").leak(),
+                command: "ls src",
+                output,
+                flagged,
+                at_ms: 1_000 + index,
+            })
+            .collect();
+        runs.push(passed_run("call-small", "ls src", 2_000));
+        runs
+    };
     let scope = kernel_routes::ProjectBinding::new(&project);
-    let seen = |call: &str| {
+    let seen = |session: &str, call: &str| {
         let memo = handler.failure_memo.lock().unwrap();
         (
-            memo.calls_for_test("s1"),
-            memo.has_seen_for_test(scope.digest(), "s1", call),
+            memo.calls_for_test(session),
+            memo.has_seen_for_test(scope.digest(), session, call),
         )
     };
-    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
-    assert_eq!(seen("call-126"), (127, true));
-    assert_eq!(seen("call-127"), (127, false));
-    assert_eq!(seen("call-small"), (127, false));
-    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
-    assert_eq!(seen("call-small"), (131, true));
+    let unmarked = window(false);
+    assert_eq!(
+        record_failures(&handler, &project, "s0", &unmarked).await,
+        0
+    );
+    assert_eq!(seen("s0", "call-small"), (131, true));
+    // The marked results write the session's 64 records, each in place of
+    // the one before it.
+    let marked = window(true);
+    assert_eq!(record_failures(&handler, &project, "s1", &marked).await, 64);
+    assert_eq!(seen("s1", "call-126"), (127, true));
+    assert_eq!(seen("s1", "call-127"), (127, false));
+    assert_eq!(seen("s1", "call-small"), (127, false));
+    assert_eq!(record_failures(&handler, &project, "s1", &marked).await, 0);
+    assert_eq!(seen("s1", "call-small"), (131, true));
 }
 
 /// Another writer retires a command's record. The retired row stays the
@@ -5960,17 +5982,17 @@ async fn a_rejected_record_is_superseded_by_no_later_run_of_its_command() {
     assert_eq!(record_failures(&handler, &project, "s1", &other).await, 1);
 }
 
-/// Pi marks a tool call it blocked, did not find, or refused the arguments
-/// of as an error, and one whose command it aborted or timed out. None of
-/// them ran to its own outcome, so none changes the command's record, and
-/// each call is settled.
+/// Pi marks the result of a call it refused and of a command it aborted or
+/// timed out as an error, as it marks a nonzero exit. Each is a marked
+/// result of its command line: it takes the record's place with the lines
+/// the harness wrote and no exit code, and the next unmarked result
+/// resolves it.
 #[tokio::test]
-async fn a_call_the_harness_refused_or_ended_changes_no_record_of_its_command() {
+async fn a_marked_result_the_harness_ended_itself_takes_the_record_s_place() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
     let failed = [failed_run("call-1", "cargo test -p api", 1_000)];
     assert_eq!(record_failures(&handler, &project, "s1", &failed).await, 1);
-    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
-    let refused = |call: &'static str, output: &'static str, at_ms: i64| Run {
+    let marked = |call: &'static str, output: &'static str, at_ms: i64| Run {
         call,
         command: "cargo test -p api",
         output,
@@ -5978,38 +6000,35 @@ async fn a_call_the_harness_refused_or_ended_changes_no_record_of_its_command() 
         at_ms,
     };
     let runs = [
-        refused("call-2", "Tool execution was blocked", 2_000),
-        refused("call-3", "Tool bash not found", 2_100),
-        refused(
-            "call-4",
-            "Validation failed for tool \"bash\":\n  - command: must be string",
-            2_200,
-        ),
-        refused(
-            "call-5",
-            "test renders ... FAILED\n\nCommand aborted",
-            2_300,
-        ),
-        refused(
-            "call-6",
+        marked("call-2", "Tool execution was blocked", 2_000),
+        marked(
+            "call-3",
             "error: build failed\n\nCommand timed out after 120 seconds",
-            2_400,
+            2_100,
         ),
     ];
-    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
-    assert_eq!(
-        explicit_search(&handler, (SECOND, "s2"), &project).await,
-        rows
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 2);
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(
+        rows[0].0.ends_with(
+            ": the harness marked the result as an error.\nCommand: cargo test [arguments left out]\nOutput lines:\n> error: build failed\n> Command timed out after 120 seconds"
+        ),
+        "{rows:?}"
     );
-    assert_eq!(handler.failure_memo.lock().unwrap().calls_for_test("s1"), 6);
-    // The positive control: a marked failure of the command takes the
-    // record's place.
-    let again = [refused(
-        "call-7",
-        "error: build failed\n\nCommand exited with code 1",
-        3_000,
-    )];
-    assert_eq!(record_failures(&handler, &project, "s1", &again).await, 1);
+    let rationale = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .remove(0);
+    assert_eq!(
+        (&rationale["call"], rationale.get("exit_code")),
+        (&json!("call-3"), None)
+    );
+    let passed = [passed_run("call-4", "cargo test -p api", 3_000)];
+    assert_eq!(record_failures(&handler, &project, "s1", &passed).await, 1);
+    let rationale = memory_rationales(&handler, (SECOND, "s2"), &project)
+        .await
+        .remove(0);
+    assert_eq!(rationale["state"], "resolved");
 }
 
 /// The results of one command in one window are judged in the order they

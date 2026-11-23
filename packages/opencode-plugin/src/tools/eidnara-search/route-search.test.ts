@@ -1055,7 +1055,7 @@ describe("eidnara_search through the fused route", () => {
     it("serves a failed command's record with its category, label, and text on the route and on the fallback", async () => {
         const bytes = (text: string) => new TextEncoder().encode(text).length;
         const outcome =
-            "Tool failure recorded from the result of bash at 2026-03-02T10:15:00.000Z: the command failed with exit code 101.";
+            "Tool failure recorded from the result of bash at 2026-03-02T10:15:00.000Z: the command exited with code 101.";
         const resolved = " Resolved: a later run of this command reported no failure.";
         const closing = "test result: FAILED. 1 passed; 1 failed";
         const summary = [
@@ -1073,7 +1073,6 @@ describe("eidnara_search through the fused route", () => {
             call: "call-1",
             command: "cargo test [arguments left out]",
             digest: "0f3a5c7e9b1d2f4a6c8e0b2d4f6a8c0e",
-            evidence: "tool_status",
             exit_code: 101,
             output_text: "kept",
             path: "src/render.rs:9:5",
