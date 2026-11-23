@@ -385,6 +385,14 @@ pub fn sweep_and_sample(
         }
     };
     let mut advanced = swept_jobs + swept_selections > 0;
+    // Jobs settled a retention window ago give their rows and their quota charge back, so review capacity follows the work of the last window.
+    match store.retire_settled_memory_reviewer_jobs(now_ms) {
+        Ok(retired) => advanced |= retired > 0,
+        Err(error) => {
+            eprintln!("daemon: memory_reviewer retirement sweep failed: {error}");
+            return Some(unavailable(advanced));
+        }
+    }
     if let Some(kernel) = kernel {
         if cancelled() {
             return None;

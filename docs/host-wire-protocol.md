@@ -650,17 +650,17 @@ payload, a reason string, or a project.
 | `selections_frozen`, `selections_enqueued`, `selections_expired`, `selections_failed_slot` | unsigned integer | Memory Classifier selection pages by state |
 | `attempts_attempted`, `attempts_acknowledged`, `attempts_failed`, `attempts_cancelled`, `attempts_unknown`, `attempts_not_dispatched`, `attempts_open` | unsigned integer | model attempts consumed, by terminal kind; `acknowledged` is a complete provider response, `open` has no terminal yet |
 | `receipts_in_progress`, `receipts_complete` | unsigned integer | execution receipts by state |
-| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | permanent receipt charges, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
+| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | receipt charges of jobs and frozen selection pages the store still holds, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
 | `nonadmissions`, `sessions_with_reservation` | unsigned integer | producer-owned History Summarizer nonadmissions summed over sessions, and sessions whose producer state records a MemoryReviewer reservation |
 | `latest_nonadmission_memory_reviewer_unavailable`, `latest_nonadmission_capacity_full`, `latest_nonadmission_evidence_unavailable`, `latest_nonadmission_fact_set_rejected`, `latest_nonadmission_subject_refused` | unsigned integer | sessions whose latest nonadmission carries each closed code |
 
 The same integer rules as `kernel` apply: every counter MUST be no greater
 than 2^53; a larger, negative, non-integer, or `null` counter is dropped to
 absent, never reported as `null`; unknown fields are dropped; fields are
-additive. Permanent receipt charges never shrink within a store incarnation,
-so `metadata_headroom_bytes` reaching zero means new review work is refused
-until a new incarnation; it is a safety ceiling, not a measured service
-lifetime.
+additive. A job keeps its receipt charge until the retirement sweep deletes
+it, ninety days after its queue deadline, so `metadata_headroom_bytes`
+reaching zero means new review work is refused until older jobs retire; the
+quota bounds the review work of one ninety-day window.
 
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of

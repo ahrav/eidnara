@@ -706,7 +706,7 @@ CREATE TABLE memory_reviewer_receipts (
             CHECK ((terminal_kind IS 'abstained') = (abstained_reason IS NOT NULL))
         );
 
--- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.
+-- A receipt stays until its job is retired, after the job's review window and retention have passed; the expiry sweep reads only the in-progress ones by deadline.
 CREATE INDEX idx_memory_reviewer_receipts_state
             ON memory_reviewer_receipts(state, run_deadline_ms);
 
@@ -736,8 +736,11 @@ CREATE TABLE memory_reviewer_attempts (
             CHECK (terminal_kind IS NOT NULL OR (raw_response_bytes IS NULL AND decoded_text_bytes IS NULL))
         );
 
+-- A completed receipt is deleted only with its job, by the retirement sweep. An in-progress
+-- receipt is the fence of a run that may still dispatch and settle, so it refuses every delete.
 CREATE TRIGGER memory_reviewer_receipts_no_delete BEFORE DELETE ON memory_reviewer_receipts
-BEGIN SELECT RAISE(ABORT, 'memory_reviewer receipts survive for the store incarnation'); END;
+WHEN OLD.state <> 'complete'
+BEGIN SELECT RAISE(ABORT, 'an in-progress memory_reviewer receipt stays until it completes'); END;
 
 CREATE TRIGGER memory_reviewer_receipts_deadlines_immutable
 BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation, authority_context_store
@@ -751,8 +754,14 @@ BEGIN
     SELECT reject_transaction_text(COALESCE(NEW.selected_candidate_id, ''));
 END;
 
+-- An attempt counts against its job's allowance for as long as the job can run, which is
+-- while its receipt is in progress. The retirement sweep deletes the attempts of a completed
+-- receipt together with the receipt and the job.
 CREATE TRIGGER memory_reviewer_attempts_no_delete BEFORE DELETE ON memory_reviewer_attempts
-BEGIN SELECT RAISE(ABORT, 'a committed memory_reviewer attempt stays consumed'); END;
+WHEN EXISTS(SELECT 1 FROM memory_reviewer_receipts r
+             WHERE r.project = OLD.project AND r.causal_identity = OLD.causal_identity
+               AND r.state <> 'complete')
+BEGIN SELECT RAISE(ABORT, 'a committed memory_reviewer attempt stays consumed while its receipt is in progress'); END;
 
 CREATE TRIGGER memory_reviewer_attempts_marker_immutable
 BEFORE UPDATE OF generation, attempt_index, body_digest, request_bytes, provider, model,
