@@ -1962,4 +1962,31 @@ mod bounds_tests {
             "docs/a.md (used"
         );
     }
+
+    /// A line's last-change clause is the UTC minute of the commit that
+    /// gave the file its bytes, the same form with `on disk` for a time the
+    /// file system holds, and words with no time for a history the read
+    /// did not follow to that commit.
+    #[test]
+    fn a_last_change_clause_has_three_forms() {
+        use changes::LastChange;
+        // 2026-03-01T09:30:59.999Z.
+        let at_ms = 1_772_357_459_999;
+        assert_eq!(
+            last_change(LastChange::Committed(at_ms)),
+            "2026-03-01T09:30Z"
+        );
+        assert_eq!(
+            last_change(LastChange::OnDisk(at_ms)),
+            "2026-03-01T09:30Z on disk"
+        );
+        assert_eq!(
+            last_change(LastChange::HistoryUnread),
+            "at a time the read history does not show"
+        );
+        assert_eq!(
+            last_change(LastChange::Committed(i64::MAX)),
+            "an unknown time"
+        );
+    }
 }

@@ -107,6 +107,14 @@ impl Memo {
         (*held == blob).then_some(*at_ms)
     }
 
+    /// Makes the held root `root` the root asked about last.
+    fn touch(&mut self, root: &Path) {
+        if let Some(at) = self.order.iter().position(|held| held == root) {
+            let root = self.order.remove(at).expect("a position of the order");
+            self.order.push_back(root);
+        }
+    }
+
     /// Holds that the commit that gave `path` the bytes `blob` has the
     /// time `at_ms`, and makes `root` the root asked about last. A root at
     /// its file bound starts anew.
@@ -171,11 +179,15 @@ impl History {
     /// answer for in that time, and for every file when the queue is full.
     fn ask(&self, root: &Path, files: &[(&str, gix::ObjectId)]) -> Vec<Option<Found>> {
         let mut found: Vec<Option<Found>> = {
-            let memo = self.memo();
-            files
+            let mut memo = self.memo();
+            let found: Vec<Option<Found>> = files
                 .iter()
                 .map(|(path, blob)| memo.held(root, path, *blob).map(Found::Committed))
-                .collect()
+                .collect();
+            if found.iter().any(Option::is_some) {
+                memo.touch(root);
+            }
+            found
         };
         let asked: Vec<usize> = (0..files.len())
             .filter(|index| found[*index].is_none())
@@ -931,24 +943,27 @@ mod tests {
             memo.hold(Path::new(&format!("/r{index}")), "a.md", id(1), 5);
         }
         memo.hold(Path::new("/r0"), "b.md", id(2), 6);
+        // A root a pass read an answer of is asked about last as well.
+        memo.touch(Path::new("/r1"));
         memo.hold(Path::new("/r64"), "a.md", id(1), 5);
         assert_eq!((memo.roots.len(), memo.order.len()), (64, 64));
         assert_eq!(memo.held(Path::new("/r0"), "a.md", id(1)), Some(5));
         assert_eq!(memo.held(Path::new("/r0"), "b.md", id(2)), Some(6));
         assert_eq!(memo.held(Path::new("/r0"), "a.md", id(2)), None);
-        assert_eq!(memo.held(Path::new("/r1"), "a.md", id(1)), None);
+        assert_eq!(memo.held(Path::new("/r1"), "a.md", id(1)), Some(5));
+        assert_eq!(memo.held(Path::new("/r2"), "a.md", id(1)), None);
         // A path's new blob takes the place of its old one.
         memo.hold(Path::new("/r0"), "a.md", id(3), 7);
         assert_eq!(memo.held(Path::new("/r0"), "a.md", id(1)), None);
         assert_eq!(memo.held(Path::new("/r0"), "a.md", id(3)), Some(7));
         // The 65th path of a root starts the root anew.
         for index in 1..64 {
-            memo.hold(Path::new("/r2"), &format!("f{index}.md"), id(1), 5);
+            memo.hold(Path::new("/r3"), &format!("f{index}.md"), id(1), 5);
         }
-        assert_eq!(memo.roots[Path::new("/r2")].len(), 64);
-        memo.hold(Path::new("/r2"), "f1.md", id(4), 8);
-        assert_eq!(memo.roots[Path::new("/r2")].len(), 64);
-        memo.hold(Path::new("/r2"), "one-more.md", id(1), 5);
-        assert_eq!(memo.roots[Path::new("/r2")].len(), 1);
+        assert_eq!(memo.roots[Path::new("/r3")].len(), 64);
+        memo.hold(Path::new("/r3"), "f1.md", id(4), 8);
+        assert_eq!(memo.roots[Path::new("/r3")].len(), 64);
+        memo.hold(Path::new("/r3"), "one-more.md", id(1), 5);
+        assert_eq!(memo.roots[Path::new("/r3")].len(), 1);
     }
 }

@@ -1509,6 +1509,18 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
     let tabs = "Indent with tabs.";
     let width = "Wrap lines at 100 columns.";
     let tabs_seq = store_statement(&handler, &project, ("mem-tabs", "s1", tabs), true);
+    // The second statement is recorded two hours after the first, so each line's minute
+    // names its own commit.
+    struct Stepped(i64);
+    impl Drop for Stepped {
+        fn drop(&mut self) {
+            kernel::test_clock::step(-self.0);
+        }
+    }
+    let _stepped = {
+        kernel::test_clock::step(7_200_000);
+        Stepped(7_200_000)
+    };
     let width_seq = store_statement(&handler, &project, ("mem-width", "s2", width), true);
     store_statement(
         &handler,
@@ -1534,6 +1546,7 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
             .format("%Y-%m-%dT%H:%MZ")
             .to_string()
     };
+    assert_ne!(minute(tabs_seq), minute(width_seq));
     assert_eq!(
         delivered_facts(&handler, &project, "reader"),
         [
