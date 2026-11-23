@@ -93,8 +93,13 @@ pub(crate) fn evaluate(
                         }
                         match evaluate_candidate_spans(rules, rule, spans, input, &mut work, limits)
                         {
-                            Ok(Some(finding)) => findings.push(finding),
-                            Ok(None) => {}
+                            Ok(finding) => {
+                                if rule.resumes_at_value {
+                                    cursor =
+                                        resume_after(rule, bytes, spans, finding.as_ref(), cursor);
+                                }
+                                findings.extend(finding);
+                            }
                             Err(Abort::Work) => {
                                 limits_hit = Some(LimitExhausted::Work);
                                 break 'rules;
@@ -111,10 +116,11 @@ pub(crate) fn evaluate(
             }
             continue;
         }
-        if rule.line_tail.is_some() {
-            // A rejected candidate of a line-shaped rule resumes the search at its value:
-            // `API_TOKEN=` above `DB_PASSWORD= value` holds an assignment that is read with
-            // its own key. Each resumed search starts past the previous one, so the walk ends.
+        if rule.resumes_at_value {
+            // `API_TOKEN=` above `DB_PASSWORD= value` holds an assignment that is read with its
+            // own key, so the search resumes inside a candidate where `resume_after` says.
+            // Each resumed search starts past the previous one, so the walk ends, and the
+            // bytes a resumed search reads again are charged.
             let mut at = 0;
             while let Some(captures) = rule.regex.captures_at(bytes, at) {
                 if candidates >= limits.max_candidates {
@@ -122,20 +128,22 @@ pub(crate) fn evaluate(
                     break 'rules;
                 }
                 candidates += 1;
-                let full_end = captures.get(0).map_or(bytes.len(), |full| full.end());
-                let mut resume = full_end;
+                let match_end = captures.get(0).map_or(bytes.len(), |full| full.end());
+                let mut resume = match_end;
                 let outcome = candidate_spans(rule, &captures, input).and_then(|spans| {
                     let Some(spans) = spans else { return Ok(None) };
                     let finding =
                         evaluate_candidate_spans(rules, rule, spans, input, &mut work, limits)?;
-                    if finding.is_none() {
-                        resume = spans.value.start();
-                    }
+                    resume = resume_after(rule, bytes, spans, finding.as_ref(), match_end);
                     Ok(finding)
                 });
-                match outcome {
-                    Ok(Some(finding)) => findings.push(finding),
-                    Ok(None) => {}
+                let charged = add_work(
+                    &mut work,
+                    match_end.saturating_sub(resume),
+                    limits.max_work_bytes,
+                );
+                match outcome.and_then(|finding| charged.map(|()| finding)) {
+                    Ok(finding) => findings.extend(finding),
                     Err(Abort::Work) => {
                         limits_hit = Some(LimitExhausted::Work);
                         break 'rules;
@@ -195,6 +203,73 @@ pub(crate) fn evaluate(
         work_bytes: work,
         limits_hit,
     })
+}
+
+/// Where a rule that resumes its search continues after a candidate whose match ends at
+/// `match_end`.
+///
+/// A line-shaped rule (the detached assignment and the field):
+/// - a rejected candidate resumes at its value, which may be an assignment of its own
+///   (`DB_PASSWORD= value` below an empty `API_TOKEN=`);
+/// - a finding cut short of the match, at an escaped line break, resumes at the cut, where
+///   the next serialized line starts;
+/// - a finding whose value ends in one `=` (`clientSecret=`) resumes at that value, so the
+///   word is also read as a key.
+///
+/// The assignment rule resumes at the value of a candidate whose key stands after an empty
+/// assignment (`db.password =` above `keycloak.url = https://sso/auth?client_secret=VALUE`):
+/// the value may hold the assignment that carries the credential.
+fn resume_after(
+    rule: &Rule,
+    bytes: &[u8],
+    spans: CandidateSpans,
+    finding: Option<&Finding>,
+    match_end: usize,
+) -> usize {
+    if rule.line_tail.is_none() {
+        let key_start = spans.key.map_or(spans.full.start(), |key| key.start());
+        return if follows_an_empty_assignment(bytes, key_start) {
+            spans.value.start()
+        } else {
+            match_end
+        };
+    }
+    let Some(finding) = finding else {
+        return spans.value.start();
+    };
+    if finding.full_span.end() < match_end {
+        return finding.full_span.end();
+    }
+    let run = &bytes[spans.value.start()..spans.value.end()];
+    if run.len() > 1 && run.ends_with(b"=") && !run.ends_with(b"==") {
+        spans.value.start()
+    } else {
+        match_end
+    }
+}
+
+/// Whether the word at `word_start` stands where the value of an assignment would: after a
+/// secret-shaped key, one `=`, and a gap that detaches a value (blanks after an `=` that
+/// follows its key directly, or a line break). The walk back reads at most
+/// `MAX_CONTINUATION_BYTES` of separators.
+fn follows_an_empty_assignment(bytes: &[u8], word_start: usize) -> bool {
+    let gap_len = bytes[..word_start]
+        .iter()
+        .rev()
+        .take(MAX_CONTINUATION_BYTES)
+        .take_while(|byte| is_rule_space_byte(**byte))
+        .count();
+    let gap_start = word_start - gap_len;
+    let Some(equals) = gap_start.checked_sub(1).filter(|at| bytes[*at] == b'=') else {
+        return false;
+    };
+    let Some(&before) = equals.checked_sub(1).and_then(|at| bytes.get(at)) else {
+        return false;
+    };
+    let gap = &bytes[gap_start..word_start];
+    let detached = gap.iter().any(|byte| matches!(byte, b'\n' | b'\r'))
+        || (!gap.is_empty() && is_key_byte(before));
+    before != b'=' && detached && assignment_key(bytes, equals, 0).is_some()
 }
 
 /// `MAX_MATCH_BYTES` skips only the candidate's window; scanning continues and
@@ -868,12 +943,12 @@ fn continued_past_semicolons(
         }
         closed = segment_end;
     }
-    if end == start {
-        return Ok(spans);
-    }
     if closed == window_end && window_end < input.len() {
         // The tail is still open at the bound, so the value's extent is unknown and the scan fails closed.
         return Err(Abort::Match);
+    }
+    if end == start {
+        return Ok(spans);
     }
     let blanks_end = closed
         + bytes[closed..window_end]
@@ -881,7 +956,8 @@ fn continued_past_semicolons(
             .take_while(|byte| matches!(byte, b' ' | b'\t'))
             .count();
     let line_ends = match &bytes[blanks_end..window_end] {
-        [] => window_end == input.len(),
+        // The end of the input, or blanks that reach the bound of the walk.
+        [] => true,
         [b'\n' | b'\r', ..] | [b'\\', b'n' | b'r' | b'u', ..] => true,
         [b'#', ..] => blanks_end > closed,
         _ => false,
@@ -919,12 +995,32 @@ fn value_ends_its_line(
     add_work(work, rest.len(), limits.max_work_bytes)?;
     let after_blanks = rest.trim_start_matches(is_inline_rule_space);
     let attached = after_blanks.len() == rest.len();
-    Ok(match after_blanks.as_bytes().first() {
-        None | Some(b'\n' | b'\r' | b'\\') => true,
-        Some(b'#') => !attached,
-        Some(b'"' | b'\'') => attached,
-        Some(_) => attached && tail == LineTail::Delimiter,
+    let delimited = tail == LineTail::Delimiter;
+    Ok(match after_blanks.as_bytes() {
+        [] | [b'\n' | b'\r', ..] => true,
+        [b'\\', after @ ..] => match after {
+            // A shell line continues, or serialized text writes its line break.
+            [] | [b'\n' | b'\r' | b'n' | b'r', ..] => true,
+            [b'u', b'0', b'0', b'0', b'a' | b'd', ..] => true,
+            // Serialized text escapes the quote that closes the string.
+            [b'"' | b'\'', after @ ..] => closes_a_string(after),
+            _ => false,
+        },
+        [b'#', ..] => !attached,
+        [b'"' | b'\'', after @ ..] => {
+            (attached && delimited) || ((attached || delimited) && closes_a_string(after))
+        }
+        [b'`' | b')' | b']' | b'}' | b'>' | b';' | b'|' | b'&', ..] => delimited,
+        _ => attached && delimited,
     })
+}
+
+/// Whether the text after a quote lets the quote close a string: a letter or a digit after
+/// it puts the quote inside a word (`Pa55'word9`).
+fn closes_a_string(after_quote: &[u8]) -> bool {
+    after_quote
+        .first()
+        .is_none_or(|byte| !(is_word_byte(*byte) || !byte.is_ascii()))
 }
 
 /// The separator class less the line feed and the carriage return, for text of any encoding.
@@ -994,28 +1090,47 @@ enum EscapedKey {
 /// or `\t`, or the `u000a`, `u000d`, or `u0009` of the form canonical JSON writes.
 fn key_after_escape(input: &str, key: TextSpan) -> Result<EscapedKey, ScanError> {
     let bytes = input.as_bytes();
-    if key.start() == 0 || bytes[key.start() - 1] != b'\\' {
+    // An odd run of backslashes ends in one that escapes the key's first letter; an even run
+    // is escaped backslashes (`C:\\\\name`). A run that reaches the bound reads as no escape.
+    let backslashes = bytes[..key.start()]
+        .iter()
+        .rev()
+        .take(MAX_ESCAPE_RUN_BYTES)
+        .take_while(|byte| **byte == b'\\')
+        .count();
+    if backslashes % 2 == 0 || backslashes == MAX_ESCAPE_RUN_BYTES {
         return Ok(EscapedKey::Absent);
     }
     let name = &bytes[key.start()..key.end()];
-    let escape_len = match name {
-        [b'u', b'0', b'0', b'0', b'a' | b'A' | b'd' | b'D' | b'9', ..] => 5,
-        [b'n' | b'r' | b't', ..] => 1,
+    let (escape_len, line_break) = match name {
+        [b'u', b'0', b'0', b'0', b'a' | b'A' | b'd' | b'D', ..] => (5, true),
+        [b'u', b'0', b'0', b'0', b'9', ..] => (5, false),
+        [b'n' | b'r', ..] => (1, true),
+        [b't', ..] => (1, false),
         _ => return Ok(EscapedKey::Absent),
     };
     let after = &name[escape_len..];
+    // The public marker applies after a line break, where the name starts a line as
+    // `public_key=` does; after a tab the key is read as written.
     if key_tokens(after).any(|token| {
         NON_SECRET_KEY_MARKERS
             .iter()
             .any(|marker| token.eq_ignore_ascii_case(marker))
     }) {
-        return Ok(EscapedKey::Public);
+        return Ok(if line_break {
+            EscapedKey::Public
+        } else {
+            EscapedKey::Absent
+        });
     }
     if !has_secret_key_token(after) {
         return Ok(EscapedKey::Absent);
     }
     TextSpan::new(input, key.start() + escape_len, key.end()).map(EscapedKey::Secret)
 }
+
+/// Longest run of backslashes read before a key to tell an escape from an escaped backslash.
+const MAX_ESCAPE_RUN_BYTES: usize = 64;
 
 /// `--no-password` switches the prompt off and takes no value, so the word after it is the
 /// next argument.
@@ -1057,7 +1172,8 @@ fn is_assignment(value: &[u8]) -> bool {
         return false;
     }
     match value.get(name_end + 1) {
-        None => is_single_case_name(name),
+        // A `;` joins further text to the word, which leaves the word itself ending in `=`.
+        None | Some(b';') => is_single_case_name(name),
         Some(next) => *next != b'=',
     }
 }
@@ -1068,12 +1184,11 @@ fn is_punctuation(value: &[u8]) -> bool {
         .any(|byte| byte.is_ascii_alphanumeric() || !byte.is_ascii())
 }
 
-/// `URL`, `api_key`, `NEXT_URL`: letters of one case, digits, and `_`, starting with a letter.
+/// `URL`, `api_key`, `db.password`, `x-api-key`: letters of one case, digits, and the
+/// punctuation of a key name.
 fn is_single_case_name(name: &[u8]) -> bool {
-    name.first().is_some_and(u8::is_ascii_alphabetic)
-        && name
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    !name.is_empty()
+        && name.iter().copied().all(is_key_byte)
         && !(name.iter().any(u8::is_ascii_uppercase) && name.iter().any(u8::is_ascii_lowercase))
 }
 
@@ -2554,6 +2669,7 @@ mod tests {
         push_table(&mut encoded, &[PASSWORD_SUFFIX]);
         encoded.extend_from_slice(&(MIN_PIN_DIGITS as u64).to_le_bytes());
         encoded.extend_from_slice(&(MAX_CONTINUATION_BYTES as u64).to_le_bytes());
+        encoded.extend_from_slice(&(MAX_ESCAPE_RUN_BYTES as u64).to_le_bytes());
         push_table(&mut encoded, NON_NULL_SCALAR_TYPES);
         encoded.extend_from_slice(&(MAX_MATCH_BYTES as u64).to_le_bytes());
         encoded.extend_from_slice(&(MAX_RADIX_SCALAR_DIGITS as u64).to_le_bytes());
@@ -2563,7 +2679,7 @@ mod tests {
         encoded.extend_from_slice(&DEFAULT_CHAR_CLASS.min_window_len.to_le_bytes());
         assert_eq!(
             crate::rules::digest_hex(&encoded),
-            "1ac5730ab5736193fd3f38fe6d09e48066e7bc39a5f7ade94b1afc9d1c73ed02",
+            "1f21913e0613ef2909accfa2c83aca9b713e0f0128179ff95882bc8b5d2a1712",
             "evaluator constants changed: bump REVISION.semantic_digest_version and re-pin"
         );
     }
@@ -3559,17 +3675,29 @@ mod tests {
             (" \t\n", true, true),
             ("  # note", true, true),
             ("\\n", true, true),
+            ("\\u000a", true, true),
             (" \\\n", true, true),
             ("\"", true, true),
             ("'", true, true),
+            ("\" next", true, true),
+            ("\\\"}", true, true),
+            // A quote before a letter stands inside a word; the assignment rule ends its run there.
+            ("'word9", true, false),
+            ("\\word9", false, false),
+            ("\\\"word9", false, false),
             (")", true, false),
             (";", true, false),
             ("|cat", true, false),
             ("&x", true, false),
+            // Blanks, then the delimiter that closes the text around the value.
+            (" \"", true, false),
+            (" )", true, false),
+            (" ;", true, false),
+            (" | cat", true, false),
+            // Blanks, then another word.
             (" next", false, false),
             ("\t--flag", false, false),
-            (" \"", false, false),
-            (" )", false, false),
+            (" \"quoted\"", false, false),
             ("\u{a0}next", false, false),
         ] {
             let input = format!("v{rest}");
@@ -3621,6 +3749,9 @@ mod tests {
             "api.key=x",
             "_a=1",
             "a=b=c",
+            "db.password=",
+            "x-api-key=",
+            "FOO=;bar",
             "#comment7",
             "}",
             "[section]",
@@ -3633,6 +3764,8 @@ mod tests {
             "QUJDRDEyMzQ1Ng==",
             "q7Lm-2Xv_9Rt4Kp=",
             "p@ss=w0rd",
+            "Xy7Kp2Lm9Qa=;tail9",
+            "clientSecret=",
             "9a=b",
             "hunter-two",
             "Url=",
@@ -3712,6 +3845,105 @@ mod tests {
         assert!(report.is_complete());
         assert!(report.findings.is_empty());
         assert!(report.candidates_evaluated <= 1000 * 2);
+    }
+
+    /// The assignment rule resumes inside the value of a key that stands after an empty
+    /// assignment, on both of its paths: the hand-coded one for ASCII text and the pattern
+    /// for text of another script.
+    #[test]
+    fn the_assignment_rule_resumes_inside_a_value_on_both_paths() {
+        let rules = RuleSet::from_embedded().unwrap();
+        for (input, values) in [
+            (
+                "db.password =\nkeycloak.url = https://sso.internal/auth?client_secret=hunter2",
+                vec!["hunter2"],
+            ),
+            (
+                "API_TOKEN=\nself.token = api_token = hunter2",
+                vec!["api_token", "hunter2"],
+            ),
+            (
+                "API_TOKEN= v1x9\\nDB_PASSWORD= hunter2",
+                vec!["v1x9", "hunter2"],
+            ),
+            // Standing alone, a value under a key of another kind is one candidate.
+            (
+                "keycloak.url = https://sso.internal/auth?client_secret=hunter2",
+                vec![],
+            ),
+        ] {
+            for input in [input.to_owned(), format!("\u{e9} {input}")] {
+                let report = evaluate(
+                    &rules,
+                    ScanProfile::Conservative,
+                    ScanLimits::default(),
+                    [0u8; 32],
+                    &input,
+                )
+                .unwrap();
+                assert!(report.is_complete(), "{input:?}");
+                assert_eq!(rule_values(&input, &report.findings), values, "{input:?}");
+            }
+        }
+    }
+
+    /// A resumed search reads the value of one candidate again and resumes once per empty
+    /// assignment, so a long run of `name=` pairs below one costs two candidates.
+    #[test]
+    fn a_resumed_search_reads_one_value_again() {
+        let rules = RuleSet::from_embedded().unwrap();
+        let line = format!("a_key=\n{}\n", "monkey=".repeat(4000));
+        let ascii = line.repeat(12);
+        for input in [ascii.clone(), format!("\u{e9}\n{ascii}")] {
+            let report = evaluate(
+                &rules,
+                ScanProfile::Conservative,
+                ScanLimits::default(),
+                [0u8; 32],
+                &input,
+            )
+            .unwrap();
+            assert!(report.is_complete());
+            assert!(report.findings.is_empty());
+            assert!(report.candidates_evaluated <= 12 * 4);
+            assert!(report.work_bytes <= 32 * input.len());
+        }
+    }
+
+    /// At the bound of its walk the continuation reads blanks as the end of the line and
+    /// fails the scan closed on text that is still open.
+    #[test]
+    fn a_continuation_at_its_bound_ends_the_line_or_fails_closed() {
+        let blanks = " ".repeat(2 * MAX_CONTINUATION_BYTES);
+        let input = format!("password=ab;cd{blanks}next");
+        let mut work = 0usize;
+        let continued = continued_past_semicolons(
+            &input,
+            assignment_spans(&input),
+            &mut work,
+            ScanLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            &input[continued.reported.start()..continued.reported.end()],
+            "ab;cd"
+        );
+        let closers = "}".repeat(2 * MAX_CONTINUATION_BYTES);
+        for input in [
+            format!("password=ab;{closers}Z9"),
+            format!("password=ab;cd;{closers}Z9"),
+        ] {
+            let mut work = 0usize;
+            assert!(matches!(
+                continued_past_semicolons(
+                    &input,
+                    assignment_spans(&input),
+                    &mut work,
+                    ScanLimits::default()
+                ),
+                Err(Abort::Match)
+            ));
+        }
     }
 
     /// Serialized text writes a line break as `\n`, and the key pattern reads the letter as

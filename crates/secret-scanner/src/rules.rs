@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "18c699a510c9c44ffbc5c9d3168252f082fcc891423f7f388877eb8952c8c69e";
+    "25b40dad64b8634d0ab7d5bc587e83dd60395ee8c3c520a107167a2fb8550a13";
 
 pub(crate) const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -229,6 +229,8 @@ pub(crate) struct Rule {
     pub structural_value_gate: bool,
     /// The rule reports an unquoted value by the text that follows it on its line.
     pub line_tail: Option<LineTail>,
+    /// The search resumes inside a candidate's value where `resume_after` reads a key of its own.
+    pub resumes_at_value: bool,
     /// `-p` followed by a port mapping belongs to another program on the line.
     pub port_mapping_gate: bool,
     /// A bare field value that spells a built-in non-null type is a schema declaration.
@@ -690,6 +692,7 @@ pub(crate) fn compile_rule(
     );
     let negated_switch_gate = declaration.name == "magic-option-value";
     let structural_value_gate = declaration.name == "magic-detached-assignment";
+    let declaration_name_resumes = declaration.name == "magic-keyed-assignment";
     let line_tail = match declaration.name.as_str() {
         "magic-detached-assignment" => Some(LineTail::Delimiter),
         "magic-field-value" => Some(LineTail::ClosingQuote),
@@ -715,6 +718,7 @@ pub(crate) fn compile_rule(
         negated_switch_gate,
         structural_value_gate,
         line_tail,
+        resumes_at_value: line_tail.is_some() || declaration_name_resumes,
         port_mapping_gate,
         type_annotation_gate,
         encoded_declaration,
@@ -1151,11 +1155,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "ca3324c7df8e53ae57d784eab487b569a6f5856b2f93a2a4b0e50c774bbc07d4",
+                "72ac21f9c5a445bca267f22282cf919d188fdb122d868c4cb5bd329eb5a6be66",
             ),
             (
                 ScanProfile::Comprehensive,
-                "36ef9c45afddea188da383240f50be63244b9cf461fdc19b8fc9844329b7d9a9",
+                "4791aaad1cb1931f0c584e7d789bc0356c39454e881cc93051f8046a271d8035",
             ),
         ] {
             let digest = rules

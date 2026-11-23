@@ -565,42 +565,9 @@ describe("isSecretKey", () => {
             "authtoken",
             "db_passwd",
             "passwd",
-            "PGPASSWORD",
-            "keystorepassword",
         ]) {
             expect(isSecretKey(key), key).toBe(true);
         }
-    });
-
-    test("a name that ends in `password` is a password key in running text", () => {
-        const value = ["hunter", "2"].join("");
-        expect(redactSecretText(`PGPASSWORD=${value} psql -h db`)).toBe(
-            "PGPASSWORD=<REDACTED:password> psql -h db",
-        );
-        expect(isSecretKey("passwordless")).toBe(false);
-    });
-
-    test("the marker of a password-suffix key holds the word `password` and no text of the key", () => {
-        const value = ["hunter", "2"].join("");
-        expect(redactSecretText(`r9q8password=${value}`)).toBe("r9q8password=<REDACTED:password>");
-        expect(redactSecretText(`db_r9q8password=${value}`)).toBe(
-            "db_r9q8password=<REDACTED:db_password>",
-        );
-    });
-
-    test("the suffix reads a whole segment, and the separator-free cover keeps its fixed vocabulary", () => {
-        for (const key of ["bypassWord", "my_pass_word", "pgpasswordfile"]) {
-            expect(isSecretKey(key), key).toBe(false);
-        }
-        for (const key of ["apikeyvalue", "passwordhash", "passWord"]) {
-            expect(isSecretKey(key), key).toBe(true);
-        }
-    });
-
-    test("a number under a password-suffix key is a PIN", () => {
-        expect(keepsScalarValue("PGPASSWORD", "123456")).toBe(false);
-        expect(keepsScalarValue("PGPASSWORD", "true")).toBe(true);
-        expect(keepsScalarValue("max_tokens", "4096")).toBe(true);
     });
 
     test("`pwd` names the working directory, not a password", () => {

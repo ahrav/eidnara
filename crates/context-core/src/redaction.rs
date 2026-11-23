@@ -2422,6 +2422,10 @@ mod credential_form_tests {
             ("API_TOKEN=\n", ">"),
             ("token= ", " \\\n  --flag"),
             ("password=\t", "\t\n"),
+            // Blanks stand between the value and the delimiter that closes the text around it.
+            ("(password= ", " )"),
+            ("msg=\"password= ", " \""),
+            ("password= ", " ;"),
         ] {
             let label = if before.contains("TOKEN") || before.contains("token") {
                 if before.contains("API") {
@@ -2628,5 +2632,152 @@ mod credential_form_tests {
         };
         assert_redacts(&command(256), &chosen, "<REDACTED:password>");
         assert_exact(&command(257));
+    }
+
+    /// Below an empty assignment a value that holds an assignment is read again from that
+    /// assignment's key, and so is the line after a key line that ends in `=`.
+    #[test]
+    fn an_assignment_held_in_a_value_is_read_with_its_own_key() {
+        let (issued, chosen) = (issued(), chosen());
+        for (input, placeholder) in [
+            (
+                format!(
+                    "db.password =\nkeycloak.url = https://sso.internal/auth?client_secret={chosen}"
+                ),
+                "<REDACTED:client_secret>",
+            ),
+            (
+                format!("API_TOKEN=\nDB_PASSWORD=\ndb.password=\n{chosen}\n"),
+                "<REDACTED:db_password>",
+            ),
+            (
+                format!("API_TOKEN=\nx-api-key=\n{chosen}\n"),
+                "<REDACTED:x_api_key>",
+            ),
+        ] {
+            assert_redacts(&input, &chosen, placeholder);
+        }
+        // The same reading on the pattern path, which text of another script selects.
+        assert_redacts(
+            &format!(
+                "\u{e9}t\u{e9}\ndb.password =\nkeycloak.url = https://sso.internal/auth?client_secret={chosen}"
+            ),
+            &chosen,
+            "<REDACTED:client_secret>",
+        );
+        // Standing alone, the value under a key of another kind is one candidate, as on `main`.
+        assert_exact(&format!(
+            "keycloak.url = https://sso.internal/auth?client_secret={chosen}"
+        ));
+        // A value that is the next key is reported, and so is the value that key holds.
+        for input in [
+            format!("API_TOKEN=\nself.token = api_token = {chosen}"),
+            format!("API_TOKEN=\nclientSecret=\n{chosen}\n"),
+        ] {
+            let redaction = redact_durable_text(&input);
+            assert!(!redaction.text.contains(&chosen), "{input:?}");
+            assert_eq!(
+                reject_secret_text(&input).unwrap_err().kind(),
+                RedactionErrorKind::SecretDetected
+            );
+        }
+        // Two detached assignments on adjacent serialized lines keep the escape between them.
+        let input = format!("API_TOKEN= {issued}\\nDB_PASSWORD= {chosen}");
+        assert_eq!(
+            redact_durable_text(&input).text,
+            "API_TOKEN= <REDACTED:api_token>\\nDB_PASSWORD= <REDACTED:db_password>"
+        );
+    }
+
+    /// A bare field value that holds a backslash or a quote inside a word is left unreported
+    /// whole; a quote that closes the string around the field ends the value.
+    #[test]
+    fn a_bare_field_value_is_reported_whole_or_left_as_written() {
+        let issued = issued();
+        let (head, rest) = ("Pa55", "word9");
+        for input in [
+            format!("password: {head}\\{rest}"),
+            format!("password: {head}'{rest}"),
+            format!("db_password: {head}\"{rest}"),
+        ] {
+            let redaction = redact_durable_text(&input);
+            assert!(
+                !redaction.text.contains("<REDACTED:password>")
+                    && !redaction.text.contains("<REDACTED:db_password>"),
+                "{input:?}"
+            );
+        }
+        for (before, after) in [
+            ("curl -H \"X-Api-Key: ", "\" https://api.internal/v1"),
+            ("curl -H 'X-Api-Key: ", "'"),
+            (
+                "{\"cmd\": \"curl -H \\\"X-Api-Key: ",
+                "\\\" https://api.internal/v1\"}",
+            ),
+        ] {
+            assert_redacts(
+                &format!("{before}{issued}{after}"),
+                &issued,
+                "<REDACTED:x_api_key>",
+            );
+        }
+    }
+
+    /// A `$` inside a bare option or client value is part of the shell word, and a value
+    /// that opens with `$` is a reference.
+    #[test]
+    fn a_dollar_sign_inside_a_bare_option_value_is_part_of_the_value() {
+        let value = ["Q7r9", "$%v9"].concat();
+        for (before, after) in [
+            ("deploy --password ", " --verbose"),
+            ("mysql -uroot -p", " app"),
+            ("sshpass -p ", " ssh deploy@host"),
+            ("docker login -u bob -p", " registry.io"),
+        ] {
+            assert_redacts(
+                &format!("{before}{value}{after}"),
+                &value,
+                "<REDACTED:password>",
+            );
+        }
+        assert_exact("deploy --password $DEPLOY_PASSWORD --verbose");
+        assert_exact("mysql -uroot -p$MYSQL_PWD app");
+    }
+
+    /// The `-p` of a named client is read inside the client's own command: a line break, real
+    /// or serialized, ends it.
+    #[test]
+    fn a_client_option_search_ends_at_the_line_of_its_command() {
+        for input in [
+            "mysql app\\nssh -p2222 host",
+            "mysql app\rssh -p2222 host",
+            "docker login registry\\nssh -p 2222 host",
+            "docker login registry\\r\\nssh -p 2222 host",
+            "docker login registry\rssh -p 2222 host",
+        ] {
+            assert_exact(input);
+        }
+        let chosen = chosen();
+        assert_redacts(
+            &format!("out\\ndocker login -u bob --tls -p {chosen} registry.io"),
+            &chosen,
+            "<REDACTED:password>",
+        );
+    }
+
+    /// Blanks at the end of a private-key body line stay inside the reported body, and the
+    /// lines after it are reported with it.
+    #[test]
+    fn a_private_key_body_line_with_trailing_blanks_keeps_the_lines_after_it() {
+        let first = private_key_body_line();
+        let second: String = first.chars().rev().collect();
+        for separator in ["  \n", "\t\r\n", " \\n"] {
+            let body = format!("{first}{separator}{second}");
+            assert_redacts(
+                &format!("{}\n{body}  \nnext line", private_key_header()),
+                &body,
+                "<REDACTED:private_key>",
+            );
+        }
     }
 }
