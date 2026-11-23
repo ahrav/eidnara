@@ -337,7 +337,7 @@ Open questions: None.
 ### p2-new-anchor-row-decodes-on-write
 
 Type: safety
-Reachability: default-production - every memory-capture publish of a job with a readable frozen HEAD that writes a new capture decision calls `Envelope::insert_anchor` (`crates/daemon/src/memory_capture.rs:4724-4726`), added by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
+Reachability: default-production - every memory-capture publish of a job with a readable frozen HEAD that writes a fact from its extraction, a fact that supersedes a target included, calls `Envelope::insert_anchor` once, before the job's first such fact (`crates/daemon/src/memory_capture.rs:4724-4726`); a publish whose memories all skip as duplicates makes no call, whether it writes no decision or writes a settled or contested revision, and every contested, settled, or ended revision names the `anchor_id` of the row it supersedes, which can be absent (`:4231`), added by U3 ([#1135](https://github.com/ahrav/eidnara/issues/1135))
 Status: active
 Exercised: yes - `every_anchor_kind_commits_a_row_the_engine_decodes_and_a_decision_can_reference` writes all seven kinds; `invalid_anchors_are_refused_as_invalid_input_with_a_typed_cause` refuses the required faults
 Guarantee: Every `anchors` row committed through `insert_anchor` decodes with `AnchorCondition::decode`, holds values only in the columns its kind owns, carries a lowercase hex oid for git kinds, and fits within `MAX_OBJECT_PAYLOAD_BYTES`.

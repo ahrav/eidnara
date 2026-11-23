@@ -1303,8 +1303,8 @@ async fn a_statement_that_replaced_the_users_own_words_carries_no_days() {
         );
         let (_, rationale) = stored(&handler, &project, &stated(TUESDAY));
         assert_eq!(
-            rationale.get("replaces_observation"),
-            None,
+            (&rationale["quote"], rationale.get("replaces_observation")),
+            (&json!(TUESDAY), None),
             "{earlier}: {rationale}"
         );
     }
@@ -1538,9 +1538,9 @@ async fn a_replacement_verdict_is_per_quotation_and_its_record_per_fact() {
     )
     .unwrap();
     let kind_of = |id: &str| read.decisions[id].decision_kind.clone();
-    // What each stored fact holds, by what the test made of it: the two
-    // rule facts of the first quotation name a report, the naming fact
-    // names none, and the second quotation replaced the user's statement.
+    // The first quotation's configuration fact and rule fact each name a
+    // report, so its verdict spans both categories, and its naming fact
+    // names none. The second quotation replaced the user's statement.
     let replaced_a_report = |kind: &str, summary: &str| {
         matches!(kind, "PROJECT_RULES" | "CONFIG_VALUES") && summary == stated(TUESDAY)
     };
@@ -1639,8 +1639,8 @@ async fn a_cut_quotation_that_replaced_a_report_holds_no_record() {
     let (_, summary, _, rationale) = &rows[0];
     assert_eq!(*summary, stated(clause));
     assert_eq!(
-        rationale.get("replaces_observation"),
-        None,
+        (&rationale["quote"], rationale.get("replaces_observation")),
+        (&json!(clause), None),
         "{summary}: {rationale}"
     );
     assert_eq!(
@@ -1689,8 +1689,8 @@ async fn a_statement_stored_with_appended_lines_holds_no_record() {
     let (_, summary, _, rationale) = &rows[0];
     assert_eq!(*summary, with_lines);
     assert_eq!(
-        rationale.get("replaces_observation"),
-        None,
+        (&rationale["quote"], rationale.get("replaces_observation")),
+        (&json!(failed), None),
         "{summary}: {rationale}"
     );
     assert_eq!(
@@ -1731,6 +1731,8 @@ async fn a_label_the_user_typed_is_part_of_the_quotation() {
         )
         .await;
         let (echo_seq, _) = stored(&handler, &project, &format!("Assistant reported: {echo}"));
+        let replaced = [stated(THURSDAY), format!("Assistant reported: {echo}")]
+            .map(|summary| memory_id(&handler, &project, &summary));
         capture(
             &handler,
             SECOND,
@@ -1766,20 +1768,24 @@ async fn a_label_the_user_typed_is_part_of_the_quotation() {
             2,
             "{case}: the statement and its echo are retired: {rows:?}"
         );
+        // Each fact is stored as the label and its quotation as quoted, the
+        // typed label and the leading space included, and each predecessor's
+        // successor is the fact of the proposal that named it.
+        let mut summaries: Vec<&str> = rows.iter().map(|row| row.1.as_str()).collect();
+        summaries.sort_unstable();
+        let mut expected = [stated(echo_quote), stated(&labeled)];
+        expected.sort_unstable();
+        assert_eq!(summaries, expected, "{case}");
+        assert_eq!(
+            successor_summaries(&handler, &project, &replaced),
+            [stated(&labeled), stated(echo_quote)],
+            "{case}"
+        );
         let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
             .expect("the correction is delivered");
         let recorded_day = commit_day(&handler, echo_seq);
         for (id, summary, stated_seq, rationale) in &rows {
-            // The fact of the labeled sentence is stored as the label and
-            // the quotation, so it is the user's statement and reaches the
-            // record's gate.
             let of_plain_paragraph = !split && *summary == stated(TUESDAY);
-            if !of_plain_paragraph {
-                assert!(
-                    summary.starts_with("User stated:") && summary.ends_with(&labeled),
-                    "{case}: {summary}"
-                );
-            }
             let (record, line) = if of_plain_paragraph {
                 (
                     Some(json!({"recorded_seq": echo_seq})),
@@ -1799,12 +1805,6 @@ async fn a_label_the_user_typed_is_part_of_the_quotation() {
             assert!(
                 block.lines().any(|delivered| delivered == line),
                 "{case}: {line}: {block}"
-            );
-        }
-        if !split {
-            assert!(
-                rows.iter().any(|row| row.1 == stated(TUESDAY)),
-                "{case}: {rows:?}"
             );
         }
     }
@@ -9542,7 +9542,11 @@ async fn a_statement_retired_as_a_further_target_takes_its_restated_note_with_it
     // The correction names the user's own statement as a further target, so
     // it replaces the user's words and is delivered as stated.
     let (_, rationale) = stored(&handler, &project, &stated(TUESDAY));
-    assert_eq!(rationale.get("replaces_observation"), None, "{rationale}");
+    assert_eq!(
+        (&rationale["quote"], rationale.get("replaces_observation")),
+        (&json!(TUESDAY), None),
+        "{rationale}"
+    );
     let block = project_memory_block(&serve(&handler, THIRD, "s3").await)
         .expect("the correction is delivered");
     assert!(
@@ -10051,5 +10055,91 @@ async fn a_widened_statement_takes_the_approved_copy_of_its_own_delivery_class()
             (&first, &second.0)
         };
         the_rule_outlives_the_plan(&handler, &project, (rule, plan), done, &case).await;
+    }
+}
+
+/// The stored text of the live memory that replaced each of `replaced`, in
+/// order, read from the supersede link of each retired row.
+fn successor_summaries(handler: &Handler, project: &Path, replaced: &[String]) -> Vec<String> {
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let (_, states) = kernel.object_states(replaced).unwrap();
+    let rows = memory_rows(handler, project);
+    states
+        .iter()
+        .map(|state| {
+            let successor = state
+                .as_ref()
+                .and_then(|state| state.object.superseded_by.as_deref())
+                .unwrap_or_else(|| panic!("each of {replaced:?} is replaced: {states:?}"));
+            let row = rows.iter().find(|row| row.0 == successor);
+            row.unwrap_or_else(|| panic!("{successor} is live: {rows:?}"))
+                .1
+                .clone()
+        })
+        .collect()
+}
+
+/// The record's gate reads whether the stored text is the user's statement
+/// alone, whatever the statement's class and approval. A whole one-sentence
+/// message of class `status` that replaces an assistant's report is stored
+/// labeled, as the label and the quotation, and holds the record of the
+/// report's commit. The same quotation stored with the failure lines that
+/// follow it in its message holds no record. The same message and quotation
+/// with no class is the user's whole statement: capture approves it, stores
+/// the quotation alone, and it holds the record.
+#[tokio::test]
+async fn a_labeled_statement_that_replaced_a_report_holds_the_record() {
+    let passed = "The staging deploy passed after the rollback.";
+    let failed = "FAILED the staging deploy again after the rollback.";
+    let logged = format!("{failed} It broke.\nat the registry step.");
+    let with_lines = format!("{}\n{logged}", stated(failed));
+    let logged = logged.as_str();
+    for (message, class, summary, visibility, recorded) in [
+        (failed, Some("status"), stated(failed), "labeled", true),
+        (logged, Some("status"), with_lines, "labeled", false),
+        (logged, None, stated(failed), "visible", true),
+    ] {
+        let case = format!("{message:?}, class {class:?}");
+        let (handler, _store, _dir, project) = delivery_handler(capture_config()).await;
+        capture(
+            &handler,
+            FIRST,
+            "s1",
+            &[("m1", "assistant", passed)],
+            |text, _| vec![fact(text)],
+        )
+        .await;
+        let (report_seq, _) = stored(&handler, &project, &format!("Assistant reported: {passed}"));
+        capture(
+            &handler,
+            SECOND,
+            "s2",
+            &[("m2", "user", message)],
+            |_, existing| {
+                let targets = ids_containing(existing, "staging deploy passed");
+                assert_eq!(targets.len(), 1, "{case}: {existing:?}");
+                vec![Extracted {
+                    replaces: targets,
+                    lifetime: class,
+                    ..fact(failed)
+                }]
+            },
+        )
+        .await;
+        let rows = memory_rows(&handler, &project);
+        assert_eq!(rows.len(), 1, "{case}: the report is retired: {rows:?}");
+        let (_, stored_text, _, rationale) = &rows[0];
+        assert_eq!(*stored_text, summary, "{case}");
+        assert_eq!(rationale["quote"], failed, "{case}: {rationale}");
+        assert_eq!(
+            rationale.get("replaces_observation").cloned(),
+            recorded.then(|| json!({"recorded_seq": report_seq})),
+            "{case}: {rationale}"
+        );
+        assert_eq!(
+            explicit_search(&handler, (THIRD, "s3"), &project).await,
+            [(summary, visibility.to_string())],
+            "{case}"
+        );
     }
 }
