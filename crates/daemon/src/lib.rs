@@ -25028,7 +25028,7 @@ mod tests {
         assert_eq!(work["state"], "work");
         let prompt: Value = serde_json::from_str(work["prompt"].as_str().unwrap()).unwrap();
         let output = json!({"version":1,"decisions":prompt["messages"].as_array().unwrap().iter().map(|message| json!({
-            "message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":"Production uses port 4321.","quote":"Use port 4321 for staging."}]
+            "message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":"Production uses port 4321.","quote":"Use port 4321 for staging.","speaker":"user"}]
         })).collect::<Vec<_>>()});
         let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
         assert_eq!(
@@ -25193,7 +25193,7 @@ mod tests {
             );
             let output = json!({"version":1,"decisions":messages.iter().map(|message| {
                 let text = message["text"].as_str().unwrap();
-                json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":text,"quote":text}]})
+                json!({"message_id":message["id"],"memories":[{"category":"CONFIG_VALUES","content":text,"quote":text,"speaker":"user"}]})
             }).collect::<Vec<_>>()});
             let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
             assert_eq!(
@@ -25264,10 +25264,10 @@ mod tests {
             .pending_memory_captures(&key, "pi", now_ms())
             .unwrap()
             .remove(0);
-        let legacy = json!({"version":2,"model":"custom-native/model","existing":[],"memories":[{
+        let legacy = json!({"version":3,"model":"custom-native/model","existing":[],"memories":[{
             "category":"CONFIG_VALUES",
             "content":"User stated: Use port 4321 for staging.",
-            "quote":"Use port 4321 for staging.",
+            "quote":"Use port 4321 for staging.","speaker":"user",
         }]})
         .to_string();
         store
@@ -25350,7 +25350,7 @@ mod tests {
         );
         assert_eq!(second["state"], "work");
         assert_ne!(first["lease"], second["lease"]);
-        let text = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
+        let text = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging.","speaker":"user"}]}]}).to_string();
         let mut submit = json!({"method":"memory.capture.submit","session_id":"ses","lease":first["lease"],"model":first["model"],"output":text});
         assert_eq!(
             tool_body(
@@ -25684,7 +25684,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":3,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
@@ -25839,7 +25839,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":3,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
@@ -26027,7 +26027,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":3,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
@@ -26553,7 +26553,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, quote)| {
-                json!({"category":"CONFIG_VALUES","content":format!("Fact {index}."),"quote":quote})
+                json!({"category":"CONFIG_VALUES","content":format!("Fact {index}."),"quote":quote,"speaker":"user"})
             })
             .collect();
         let output =
@@ -26621,7 +26621,7 @@ mod tests {
         );
         assert_eq!(work["state"], "work");
         assert_eq!(work["model"], "custom-native/password=hunter-two");
-        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging."}]}]}).to_string();
+        let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[{"category":"CONFIG_VALUES","content":"Port 4321.","quote":"Use port 4321 for staging.","speaker":"user"}]}]}).to_string();
         let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
         assert_eq!(
             tool_body(
@@ -26745,7 +26745,7 @@ mod tests {
             .prepare_memory_capture(
                 project_key,
                 &frozen.job_id,
-                &json!({"version":2,"model":"custom-native/model","existing":[],"memories":[]})
+                &json!({"version":3,"model":"custom-native/model","existing":[],"memories":[]})
                     .to_string(),
             )
             .unwrap();
@@ -26890,8 +26890,8 @@ mod tests {
         );
         assert_eq!(work["state"], "work");
         let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[
-            {"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging."},
-            {"category":"CONFIG_VALUES","content":"The staging port is 4321.","quote":"Use port 4321 for staging."}
+            {"category":"CONFIG_VALUES","content":"Staging uses port 4321.","quote":"Use port 4321 for staging.","speaker":"user"},
+            {"category":"CONFIG_VALUES","content":"The staging port is 4321.","quote":"Use port 4321 for staging.","speaker":"user"}
         ]}]})
         .to_string();
         let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output});
@@ -45245,7 +45245,7 @@ mod tests {
         );
         assert_eq!(work["state"], "work");
         let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[
-            {"category":"CONSTRAINTS","content":"PR 812 fails CI after the rebase.","quote":framing}
+            {"category":"CONSTRAINTS","content":"PR 812 fails CI after the rebase.","quote":framing,"speaker":"user"}
         ]}]});
         let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
         assert_eq!(
@@ -45298,7 +45298,7 @@ mod tests {
         );
         assert_eq!(work["state"], "work");
         let output = json!({"version":1,"decisions":[{"message_id":"source_1","memories":[
-            {"category":"CONSTRAINTS","content":"PR 812's release job fails.","quote":framing}
+            {"category":"CONSTRAINTS","content":"PR 812's release job fails.","quote":framing,"speaker":"user"}
         ]}]});
         let submission = json!({"method":"memory.capture.submit","session_id":"ses","lease":work["lease"],"model":work["model"],"output":output.to_string()});
         assert_eq!(
