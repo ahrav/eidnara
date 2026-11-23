@@ -165,19 +165,20 @@ read at `crates/daemon/src/canonical_memory.rs:56-79`; the revision is a
 `DefaultHasher` `u64`, which is why #1154 keys the record by a separate
 served-set digest.
 Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-(`crates/daemon/src/canonical_memory.rs:1333`);
+(`crates/daemon/src/canonical_memory.rs:1329`);
 `rows_the_renderer_drops_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1629`);
+(`crates/daemon/src/canonical_memory.rs:1625`);
 `bytes_past_the_render_cap_do_not_move_the_revision`
-(`crates/daemon/src/canonical_memory.rs:1646`);
+(`crates/daemon/src/canonical_memory.rs:1642`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1668`);
+(`crates/daemon/src/canonical_memory.rs:1664`);
 `the_revision_reads_the_current_work_section_in_the_supplied_order`
-(`crates/daemon/src/canonical_memory.rs:1595`);
+(`crates/daemon/src/canonical_memory.rs:1591`);
 `the_revision_reads_the_named_files_in_the_supplied_order`
-(`crates/daemon/src/canonical_memory.rs:1534`). Status: unaudited.
-Impact: A revision that moved without a byte change would record a second serve
-of the same rows.
+(`crates/daemon/src/canonical_memory.rs:1530`). Status: unaudited.
+Impact: A revision that moved without a byte change would request a HARD fold
+over unchanged bytes. The serve of an equal served set replays its receipt
+whatever the revision.
 Open questions:
 - The `DefaultHasher` output is unspecified across toolchain releases; #1154
   resolves OQ3-12 by keying the record on `served_set_digest` and storing the
@@ -1103,9 +1104,9 @@ Existing check: `a_hard_fold_records_its_frozen_composition_once_per_served_set`
 `a_dispute_between_folds_records_the_next_served_set_without_it`
 (`crates/daemon/src/use_outcome_writer_tests.rs:528`);
 `the_served_set_digest_names_the_rendered_ids_and_not_their_bytes`
-(`crates/daemon/src/canonical_memory.rs:1295`);
+(`crates/daemon/src/canonical_memory.rs:1291`);
 `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-(`crates/daemon/src/canonical_memory.rs:1668`);
+(`crates/daemon/src/canonical_memory.rs:1664`);
 `a_fold_whose_boundary_read_fails_after_its_commit_records_its_serve`
 (`crates/daemon/src/use_outcome_writer_tests.rs:1191`); Kernel half:
 `duplicate_and_malformed_serves_are_refused_without_rows`

@@ -22,9 +22,10 @@ references that moved are updated. The `tool_outcome.rs` rows, the `lib.rs`
 references, and the counts were re-checked when the summarizer digest gained
 its whole-output form, which adds the one literal `; output="`, and again
 when the stored transcript gained its scanned digest, which adds one
-occurrence of `\n`, and again when the vocabulary gained the operands of
-Pi's `read` and `bash` calls, which adds one occurrence each of `read`,
-`path`, and `command`.
+occurrence of `\n`. When the vocabulary gained the operands of Pi's `read`
+and `bash` calls, the three occurrences it adds, one each of `read`, `path`,
+and `command` in `tool_vocabulary.rs`, were added to the rows and the
+counts; the other rows were left as they were.
 
 The extraction finds 257 distinct string literals at 900 occurrences.
 156 of them name a field, a tool, an argument key, or a discriminator

@@ -174,8 +174,11 @@ Guarantee: Selection optimization preserves the canonical memory result for
 the same valid store state, requested snapshot, project, and budget. The
 pass's read also selects the `named-files` domain: its rows enter the
 selected rows, the served ids, and the revision as the `NAMED_FILES` element,
-so the comparison with the fixed baseline, which holds no such element, runs
-on a store that holds no record of that domain.
+so the comparison with the fixed baseline, which holds no such element and no
+closing sentence, runs on a store that holds no record of that domain and
+compares the selected rows under one frame charge; the delivered block's
+closing sentence and its charge are pinned by the renderer's and the packer's
+tests.
 Check: `always` - With every registered outbox consumer inside the serving
 thresholds, where the fixed baseline's lag gate and the current reader agree,
 compare the ordered selected rows, rendered memory bytes, revision, truncation
@@ -786,7 +789,7 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L8786
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L216-L491
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L216-L487
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522

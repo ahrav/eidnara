@@ -19,7 +19,7 @@ revision.
   categories, then the `CURRENT_WORK` rows in the supplied order (`crates/daemon/src/canonical_memory.rs:56-79`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:805`)).
+  (`crates/daemon/src/canonical_memory.rs:801`)).
 - The spec cited the `fn` lines of the first four tests named under Existing
   check, and the production code was not cited. The fifth covers the order
   of the `CURRENT_WORK` rows, and the sixth the `NAMED_FILES` rows and how
@@ -31,17 +31,17 @@ revision.
   sorted by object id across their categories, then the `CURRENT_WORK` rows
   in the supplied order.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1333`);
+  (`crates/daemon/src/canonical_memory.rs:1329`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1629`);
+  (`crates/daemon/src/canonical_memory.rs:1625`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1646`);
+  (`crates/daemon/src/canonical_memory.rs:1642`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1668`);
+  (`crates/daemon/src/canonical_memory.rs:1664`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1595`);
+  (`crates/daemon/src/canonical_memory.rs:1591`);
   `the_revision_reads_the_named_files_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1534`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1530`). Status: unaudited.
 
 ## Failure scenario
 
