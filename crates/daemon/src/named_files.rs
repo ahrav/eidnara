@@ -339,6 +339,9 @@ impl Answers {
     }
 }
 
+/// The namespace the Pi codec keeps a block's own fields under.
+const PI_EXTRAS: &str = "pi";
+
 /// The id Pi gave a call or a result. The codec shortens an id that holds
 /// an item suffix to the part before its `|` and keeps the id as Pi wrote
 /// it beside the block; a block that holds no such id carries Pi's id as
@@ -347,7 +350,7 @@ impl Answers {
 fn pi_id<'b>(block: &'b crate::wire::WireBlock, id: &'b str) -> &'b str {
     block
         .provider_extras
-        .get(crate::codec::pi::HARNESS)
+        .get(PI_EXTRAS)
         .and_then(|extras| extras.get("nativeToolCallId"))
         .and_then(Value::as_str)
         .unwrap_or(id)

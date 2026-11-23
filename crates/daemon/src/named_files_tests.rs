@@ -1670,3 +1670,30 @@ async fn an_absolute_path_under_the_root_is_recorded_relative_to_it() {
     assert_eq!(stored_paths(&handler, &project), [NOTES]);
     assert_eq!(delivered_paths(&handler, &project, "reader"), [NOTES]);
 }
+
+/// The `bash` match is one of spelling: a command whose only mention of the named file is in
+/// a comment records the file, and the element a later session is delivered says what that
+/// establishes, that the agent read the file or named it in a command it ran.
+#[tokio::test]
+async fn a_file_named_in_a_commands_comment_is_recorded_and_the_note_says_named() {
+    let (handler, _dir, project) = project_with(&[("tools/check.sh", "exit 0\n")]).await;
+    let said = "Run tools/check.sh before you finish.";
+    let ran = shell("a1", 2, "echo done # tools/check.sh runs in CI");
+    assert_eq!(turn(&handler, &project, "s1", said, ran), 1);
+    let binding = session_binding(&project, "reader");
+    let read = canonical_memory::read_project_memory(
+        &handler.kernel,
+        &binding.kernel_project,
+        "reader",
+        binding.config.memory_budget_tokens,
+    );
+    let block = memory_render::render_delivered_memory_block(read.rows());
+    assert!(
+        block.contains("the agent then read or named in a command it ran, most used first."),
+        "{block}"
+    );
+    assert!(
+        block.contains("\ntools/check.sh (the agent used it in 1 earlier session, last on "),
+        "{block}"
+    );
+}
