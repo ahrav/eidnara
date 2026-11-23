@@ -40,11 +40,11 @@ export interface PiPassFieldsArgs {
 }
 
 /**
- * `cwd` as a path beneath `projectRoot`, with `/` separators and empty for the root itself; the
- * daemon resolves the relative paths of a turn's tool calls against it. Both directories are
- * taken at their physical paths, so a working directory reached through a symbolic link names
- * the directory the tools work in. `undefined` for a working directory outside the root and
- * for a directory that cannot be resolved.
+ * `cwd` as a path beneath `projectRoot`, with `/` separators and empty for the root itself. The
+ * daemon records named files for a session whose value is empty: there a relative path of a
+ * tool call names the project file of that path. Both directories are taken at their physical
+ * paths, so a working directory that is a symbolic link to the root is the root. `undefined`
+ * for a working directory outside the root and for a directory that cannot be resolved.
  */
 export function projectRelativeDirectory(projectRoot: string, cwd: string): string | undefined {
     let beneath: string;

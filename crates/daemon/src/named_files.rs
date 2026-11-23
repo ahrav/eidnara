@@ -7,8 +7,9 @@
 //! the session, and the time of the pass that showed the use, and holds none
 //! of the file's content.
 //!
-//! Each admitted transform pass of a primary Pi session shows the turn in
-//! progress: the last message the user typed and the tool calls after it.
+//! Each admitted transform pass of a primary Pi session at the project root
+//! shows the turn in progress: the last message the user typed and the tool
+//! calls after it.
 //! The daemon reads the paths the message names and the calls use from that
 //! window alone, keeps no state of the turn, and records each such path once
 //! for the session when the path names a regular file of the project.
@@ -34,31 +35,38 @@ use crate::{HandlerCore, SessionBinding};
 
 /// The domain of the use records. The daemon alone writes and changes its
 /// rows: `kernel.commit` refuses an operation that names the domain, one of
-/// its rows, or an id under [`ID_PREFIXES`]. The daemon's memory reads select
+/// its rows, or a reserved id ([`is_reserved_id`]), and artifact ingest
+/// refuses an artifact that names the domain or a reserved id. The daemon's memory reads select
 /// the `memory` domain and the search projection publishes none of these
 /// rows, so the capture extractor and `eidnara_search` see none of them.
 pub(crate) const DOMAIN_ID: &str = "named-files";
 /// The object id the Kernel gives the domain's own row.
-pub(crate) const DOMAIN_OBJECT_ID: &str = "domain:named-files";
+const DOMAIN_OBJECT_ID: &str = "domain:named-files";
 /// The prefixes of a record's object id and decision id.
-pub(crate) const ID_PREFIXES: [&str; 2] = ["nfu_", "dnf_"];
+const ID_PREFIXES: [&str; 2] = ["nfu_", "dnf_"];
 const SOURCE_ID: &str = "named_file_use";
 /// The recorder's own source kind. `kernel.commit` derives a caller's
-/// classes from a closed list of source kinds that holds no such value, so a
-/// row that carries it was written here.
-const SOURCE_KIND: &str = "named_file_recorder";
+/// classes from a closed list of source kinds that holds no such value, and
+/// artifact ingest refuses it, so a row that carries it was written here.
+pub(crate) const SOURCE_KIND: &str = "named_file_recorder";
+
+/// Whether `id` is an id the recorder derives: a record's object id or
+/// decision id, or the object id of its domain. `kernel.commit` and artifact
+/// ingest refuse a caller's row under one, which would keep the recorder's
+/// own write of that id from committing.
+pub(crate) fn is_reserved_id(id: &str) -> bool {
+    id == DOMAIN_OBJECT_ID || ID_PREFIXES.iter().any(|prefix| id.starts_with(prefix))
+}
 const DECISION_KIND: &str = "named_file_use";
 
 /// Paths one pass hands to a record.
 const MAX_PASS_FILES: usize = 8;
 /// Distinct path words of one user message that are matched against calls.
 const MAX_NAMES_CHECKED: usize = 32;
-/// Bytes of one user message that are read for path words.
+/// Bytes of text a user message holds at most when it is read for path words.
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// A recorded path, in bytes.
 const MAX_PATH_BYTES: usize = 256;
-/// A path word or path argument, in bytes, before it is resolved.
-const MAX_WORD_BYTES: usize = 4 * 1024;
 /// Path words of one command line that are read.
 const MAX_COMMAND_WORDS: usize = 256;
 /// Sessions whose recorded paths the memo holds.
@@ -106,7 +114,7 @@ impl NamedFileMemo {
 
     /// How many more distinct paths the session may record.
     fn room(&self, owner: &Owner) -> usize {
-        MAX_SESSION_FILES - self.sessions.get(owner).map_or(0, HashSet::len)
+        MAX_SESSION_FILES.saturating_sub(self.sessions.get(owner).map_or(0, HashSet::len))
     }
 
     /// Holds that the session recorded `path`, and makes the session the
@@ -181,7 +189,8 @@ fn is_path_char(ch: char) -> bool {
 
 /// Whether `path` is a project-relative path the recorder writes and the
 /// element lists: at most [`MAX_PATH_BYTES`] of ASCII letters, digits, and
-/// `._-/+@`, which the confined-path check admits.
+/// `._-/+@`, which the confined-path check admits. The check admits no `.`
+/// or `..` component, so a recordable path is its own lexical form.
 fn is_recordable(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= MAX_PATH_BYTES
@@ -189,152 +198,63 @@ fn is_recordable(path: &str) -> bool {
         && crate::confined_path::check(path).is_ok()
 }
 
-/// The session's working directory, as its components beneath the project
-/// root.
-struct Base<'a> {
-    root: &'a Path,
-    components: Vec<&'a str>,
+/// `raw` as a recordable path of the project, for a session whose working
+/// directory is the project root: a relative path without its leading `./`
+/// marks, or an absolute path beneath `root` as `root` is spelled. A path
+/// with a `.` or `..` component past those marks names no file here.
+fn project_path(root: &Path, raw: &str) -> Option<String> {
+    let mut rest = match raw.strip_prefix('/') {
+        Some(_) => Path::new(raw).strip_prefix(root).ok()?.to_str()?,
+        None => raw,
+    };
+    while let Some(after) = rest.strip_prefix("./") {
+        rest = after;
+    }
+    is_recordable(rest).then(|| rest.to_owned())
 }
 
-impl<'a> Base<'a> {
-    /// `None` for a working directory that is no recordable path beneath
-    /// the root; the empty directory is the root.
-    fn new(root: &'a Path, working_directory: &'a str) -> Option<Self> {
-        let components = if working_directory.is_empty() {
-            Vec::new()
-        } else if is_recordable(working_directory) {
-            working_directory.split('/').collect()
-        } else {
-            return None;
-        };
-        Some(Self { root, components })
-    }
-
-    /// `raw` as a recordable path beneath the project root. A relative path
-    /// is read from the working directory, where Pi resolves it; an
-    /// absolute path beneath the root is taken relative to the root. `.`
-    /// and `..` components are resolved, and a path that leaves the root
-    /// names no file.
-    fn resolve(&self, raw: &str) -> Option<String> {
-        if raw.len() > MAX_WORD_BYTES || !raw.chars().all(is_path_char) {
-            return None;
-        }
-        let (mut components, rest) = match raw.strip_prefix('/') {
-            Some(_) => (
-                Vec::new(),
-                Path::new(raw).strip_prefix(self.root).ok()?.to_str()?,
-            ),
-            None => (self.components.clone(), raw),
-        };
-        for component in rest.split('/') {
-            match component {
-                "" | "." => {}
-                ".." => {
-                    components.pop()?;
-                }
-                name => components.push(name),
-            }
-        }
-        let bytes = components.iter().map(|name| name.len()).sum::<usize>() + components.len();
-        if bytes > MAX_PATH_BYTES + 1 {
-            return None;
-        }
-        let path = components.join("/");
-        is_recordable(&path).then_some(path)
-    }
-}
-
-/// The runs of path characters in `text` that hold a `.` or a `/` once the
-/// periods that end them are dropped.
-fn path_words(text: &str) -> impl Iterator<Item = &str> {
+/// The runs of path characters in `text`.
+fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|ch| !is_path_char(ch))
-        .map(|word| word.trim_end_matches('.'))
-        .filter(|word| word.contains(['.', '/']))
 }
 
-/// The text parts of `message`, joined by line breaks as Pi joins them, cut
-/// at [`MAX_MESSAGE_BYTES`]. A run of path characters that the cut divides
-/// is left out whole, so the text holds no shortened path.
-fn message_text(message: &crate::wire::IngressMessage) -> String {
-    let mut text = String::new();
-    for block in message.ck.content() {
-        let BlockKind::Text { text: part } = block.kind() else {
-            continue;
-        };
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        let room = MAX_MESSAGE_BYTES.saturating_sub(text.len());
-        if part.len() <= room {
-            text.push_str(part);
-            continue;
-        }
-        let cut = part.floor_char_boundary(room);
-        let mut kept = &part[..cut];
-        if part[cut..].starts_with(is_path_char) {
-            kept = kept.trim_end_matches(is_path_char);
-        }
-        text.push_str(kept);
-        break;
-    }
-    text
+/// Whether `word` holds a `.` or a `/`, as a path does.
+fn is_path_word(word: &&str) -> bool {
+    word.contains(['.', '/'])
 }
 
-/// The lines of `text` that the message's sender wrote. The lines of a code
-/// fence are the sender's, tag lines among them. Outside a fence, a line
-/// that holds one opening tag alone opens a block another writer generated,
-/// such as a hint a plugin appends: the block runs through the last line of
-/// the text that closes the tag, or to the end of the text when no line
-/// does. A line that holds a closing tag alone is left out as well. Capture
-/// reads a message's fences and tag blocks the same way.
-fn own_lines(text: &str) -> Vec<&str> {
-    use crate::memory_capture::{fence_opener, tag_name};
-    let lines: Vec<&str> = text.lines().collect();
-    let mut last_closer: HashMap<&str, usize> = HashMap::new();
-    for (index, line) in lines.iter().enumerate() {
-        if let Some((name, true)) = tag_name(line) {
-            last_closer.insert(name, index);
-        }
+/// The project paths a message names. The message's text parts are read
+/// when they hold at most [`MAX_MESSAGE_BYTES`] together, each through the
+/// line before its first line that holds a tag alone: a block another
+/// writer appends to a message, such as a hint, opens with such a line.
+/// A path word is a run of path characters that holds a `.` or a `/` once
+/// the periods that end it are dropped. Each of the first
+/// [`MAX_NAMES_CHECKED`] distinct path words names a path as written and,
+/// for a word that opens with Pi's file-reference mark `@`, without the
+/// mark.
+fn named_paths(root: &Path, message: &crate::wire::IngressMessage) -> Vec<String> {
+    let parts: Vec<&str> = message
+        .ck
+        .content()
+        .iter()
+        .filter_map(|block| match block.kind() {
+            BlockKind::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    if parts.iter().map(|part| part.len()).sum::<usize>() > MAX_MESSAGE_BYTES {
+        return Vec::new();
     }
-    let mut kept = Vec::with_capacity(lines.len());
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index].trim();
-        if let Some(fence) = fence_opener(line) {
-            let end = (index + 1..lines.len())
-                .find(|&next| {
-                    let next = lines[next].trim();
-                    next.len() >= fence.len() && next.chars().all(|ch| fence.starts_with(ch))
-                })
-                .unwrap_or(lines.len() - 1);
-            kept.extend_from_slice(&lines[index..=end]);
-            index = end + 1;
-        } else if let Some((name, closing)) = tag_name(line) {
-            index = match last_closer
-                .get(name)
-                .filter(|closer| !closing && **closer > index)
-            {
-                Some(closer) => closer + 1,
-                None if closing => index + 1,
-                None => lines.len(),
-            };
-        } else {
-            kept.push(lines[index]);
-            index += 1;
-        }
-    }
-    kept
-}
-
-/// The project paths a message names: for each of the first
-/// [`MAX_NAMES_CHECKED`] distinct path words of the lines its sender wrote,
-/// the word as written and, for a word that opens with Pi's file-reference
-/// mark `@`, the word without it.
-fn named_paths(base: &Base<'_>, message: &crate::wire::IngressMessage) -> Vec<String> {
-    let text = message_text(message);
+    let words = parts.iter().flat_map(|part| {
+        part.lines()
+            .take_while(|line| crate::memory_capture::tag_name(line).is_none())
+            .flat_map(words)
+            .map(|word| word.trim_end_matches('.'))
+            .filter(is_path_word)
+    });
     let mut seen: HashSet<&str> = HashSet::new();
     let mut named = Vec::new();
-    for word in own_lines(&text).into_iter().flat_map(path_words) {
+    for word in words {
         if seen.len() == MAX_NAMES_CHECKED {
             break;
         }
@@ -342,7 +262,7 @@ fn named_paths(base: &Base<'_>, message: &crate::wire::IngressMessage) -> Vec<St
             continue;
         }
         for spelling in std::iter::once(word).chain(word.strip_prefix('@')) {
-            if let Some(path) = base.resolve(spelling)
+            if let Some(path) = project_path(root, spelling)
                 && !named.contains(&path)
             {
                 named.push(path);
@@ -354,11 +274,14 @@ fn named_paths(base: &Base<'_>, message: &crate::wire::IngressMessage) -> Vec<St
 
 /// The files of `named` that the calls of `messages` used. A call of Pi's
 /// `read` uses the file its path argument names, which Pi opens without
-/// one leading `@`; a call of Pi's `bash` uses the files its command line's
-/// first [`MAX_COMMAND_WORDS`] path words name as written. A call counts
-/// when `messages` hold its result and the result is no error.
+/// one leading `@`; a call of Pi's `bash` uses the files that the first
+/// [`MAX_COMMAND_WORDS`] runs of path characters with a `.` or a `/` in its
+/// command line name as written.
+/// A call counts when its id is the id of no other call of `messages` and
+/// of one result, and that result is text, JSON, or content that carries
+/// no error.
 fn used_by_calls(
-    base: &Base<'_>,
+    root: &Path,
     messages: &[Arc<crate::wire::IngressMessage>],
     named: &[String],
 ) -> Vec<String> {
@@ -368,24 +291,25 @@ fn used_by_calls(
             .flat_map(|message| message.ck.content())
             .map(|block| block.kind())
     };
-    let answered: HashSet<&str> = blocks()
-        .filter_map(|block| match block {
-            BlockKind::ToolResult { id, output, .. }
-                if !matches!(
+    // For each call id: how many calls carry it, how many results answer
+    // it, and whether a result that answers it reports success.
+    let mut ids: HashMap<&str, (usize, usize, bool)> = HashMap::new();
+    for block in blocks() {
+        match block {
+            BlockKind::ToolCall { id, .. } => ids.entry(id.as_str()).or_default().0 += 1,
+            BlockKind::ToolResult { id, output, .. } => {
+                let entry = ids.entry(id.as_str()).or_default();
+                entry.1 += 1;
+                entry.2 = matches!(
                     output.kind,
-                    OutputKind::ErrorText { .. }
-                        | OutputKind::ErrorJson { .. }
-                        | OutputKind::ErrorContent { .. }
-                        | OutputKind::ExecutionDenied { .. }
-                ) =>
-            {
-                Some(id.as_str())
+                    OutputKind::Text { .. } | OutputKind::Json { .. } | OutputKind::Content { .. }
+                );
             }
-            _ => None,
-        })
-        .collect();
+            _ => {}
+        }
+    }
     let named_file = |raw: &str| {
-        let path = base.resolve(raw)?;
+        let path = project_path(root, raw)?;
         named.iter().find(|file| **file == path)
     };
     let mut used: Vec<&String> = Vec::new();
@@ -396,14 +320,15 @@ fn used_by_calls(
         else {
             continue;
         };
-        if !answered.contains(id.as_str()) {
+        if ids.get(id.as_str()) != Some(&(1, 1, true)) {
             continue;
         }
         let files: Vec<&String> = match tool_vocabulary::pi_operand(name, input) {
             Some(PiOperand::Read(path)) => named_file(path.strip_prefix('@').unwrap_or(path))
                 .into_iter()
                 .collect(),
-            Some(PiOperand::Command(line)) => path_words(line)
+            Some(PiOperand::Command(line)) => words(line)
+                .filter(is_path_word)
                 .take(MAX_COMMAND_WORDS)
                 .filter_map(named_file)
                 .collect(),
@@ -533,6 +458,28 @@ pub(crate) fn record(
     used_ms: i64,
     deadline: Instant,
 ) -> Result<(), kernel::KernelError> {
+    record_as(
+        kernel,
+        project,
+        session,
+        path,
+        used_ms,
+        deadline,
+        SOURCE_KIND,
+    )
+}
+
+/// [`record`] with the row's source kind as a parameter, so a test can
+/// place a row of another writer's kind in the domain.
+fn record_as(
+    kernel: &kernel::KernelStore,
+    project: &ProjectBinding,
+    session: &str,
+    path: &str,
+    used_ms: i64,
+    deadline: Instant,
+    source_kind: &str,
+) -> Result<(), kernel::KernelError> {
     let identity = digest(&[project.digest(), session, path]);
     let object_id = format!("{}{}", ID_PREFIXES[0], &identity[..32]);
     let intent = kernel::CommitIntent {
@@ -569,7 +516,7 @@ pub(crate) fn record(
                 summary: path.to_owned(),
                 rationale: rationale(session, used_ms),
             },
-            source_kind: SOURCE_KIND.into(),
+            source_kind: source_kind.into(),
             source_id: SOURCE_ID.into(),
             source_revision: 1,
             sensitivity: kernel::Sensitivity::Normal,
@@ -591,6 +538,37 @@ impl NamedFiles {
 
     fn owner(project: &ProjectBinding, session: &str) -> Owner {
         (project.digest().to_owned(), session.to_owned())
+    }
+
+    /// Writes the record that `session` used `path` as a row of another
+    /// writer's source kind.
+    #[cfg(test)]
+    pub(crate) fn record_of_another_kind_for_test(
+        kernel: &kernel::KernelStore,
+        project: &ProjectBinding,
+        session: &str,
+        path: &str,
+    ) {
+        let deadline = Instant::now() + COMMIT_WAIT;
+        record_as(
+            kernel,
+            project,
+            session,
+            path,
+            1_000,
+            deadline,
+            "repository",
+        )
+        .unwrap();
+    }
+
+    /// Takes every place `session` has in `project`.
+    #[cfg(test)]
+    pub(crate) fn fill_session_for_test(&self, project: &ProjectBinding, session: &str) {
+        let owner = Self::owner(project, session);
+        for index in 0..MAX_SESSION_FILES {
+            self.memo().record(&owner, &format!("filled/{index}.rs"));
+        }
     }
 
     /// Forgets the paths `session` recorded and counts one deletion. The
@@ -617,17 +595,23 @@ impl NamedFiles {
             return None;
         }
         let owner = Self::owner(project, session);
-        let room = {
+        // The paths another pass recorded since the observation take none
+        // of the session's places.
+        let (room, unrecorded) = {
             let memo = self.memo();
             if memo.deletes != observed.deletes {
                 return None;
             }
-            memo.room(&owner).min(MAX_PASS_FILES)
+            let unrecorded: Vec<&String> = observed
+                .paths
+                .iter()
+                .filter(|path| !memo.recorded(&owner, path))
+                .collect();
+            (memo.room(&owner).min(MAX_PASS_FILES), unrecorded)
         };
         let root = open_root(project.root())?;
-        let paths: Vec<String> = observed
-            .paths
-            .iter()
+        let paths: Vec<String> = unrecorded
+            .into_iter()
             .filter(|path| is_stored_as_written(path) && is_project_file(root.as_fd(), path))
             .take(room)
             .cloned()
@@ -652,14 +636,12 @@ impl NamedFiles {
 
 impl HandlerCore {
     /// What the submitted window of a primary Pi session whose
-    /// configuration permits memory capture shows: the project paths that
-    /// one of the last two messages the user typed names and that a call of
-    /// that message's turn used, except the paths the session has recorded.
-    /// A message's turn is the rows after it, up to the next message the
-    /// user typed. The session's working directory comes with the request;
-    /// a request without one, or with one that is no path beneath the
-    /// project root, shows nothing. Reads the window and the memo and
-    /// changes nothing.
+    /// configuration permits memory capture and whose working directory is
+    /// the project root shows: the project paths that the last message the
+    /// user typed names and that a call after it used, except the paths the
+    /// session has recorded. The rows before that message can be another
+    /// session's, which a fork copies, so they show nothing. Reads the
+    /// window and the memo and changes nothing.
     pub(crate) fn observe_named_files(
         &self,
         binding: &SessionBinding,
@@ -668,6 +650,7 @@ impl HandlerCore {
         if request.is_subagent
             || binding.harness != "pi"
             || !crate::memory_capture::capture_enabled(binding)
+            || request.working_directory.as_deref() != Some("")
         {
             return None;
         }
@@ -675,11 +658,10 @@ impl HandlerCore {
             request.serializer_profile == "pi" && rows.len() == request.messages.len()
         })?;
         let project = &binding.kernel_project;
-        let base = Base::new(project.root(), request.working_directory.as_deref()?)?;
         // Read before the window, so a deletion that lands while the pass
         // runs is seen when the record is taken and when it is written.
         let deletes = self.named_files.memo().deletes;
-        let typed = |index: &usize| {
+        let opener = (0..request.messages.len()).rev().find(|index| {
             let message = &request.messages[*index].ck;
             message.role == "user"
                 && native[*index]
@@ -688,29 +670,16 @@ impl HandlerCore {
                     == Some("user")
                 && !message.meta.synthetic
                 && !message.meta.summary
-        };
-        let mut openers = (0..request.messages.len()).rev().filter(typed);
-        let last = openers.next()?;
-        let turns = [
-            openers.next().map(|earlier| (earlier, last)),
-            Some((last, request.messages.len())),
-        ];
-        let mut paths: Vec<String> = Vec::new();
-        for (opener, end) in turns.into_iter().flatten() {
-            let calls = &request.messages[opener + 1..end];
-            if calls.is_empty() {
-                continue;
-            }
-            let named = named_paths(&base, &request.messages[opener]);
-            if named.is_empty() {
-                continue;
-            }
-            for path in used_by_calls(&base, calls, &named) {
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
-            }
+        })?;
+        let calls = &request.messages[opener + 1..];
+        if calls.is_empty() {
+            return None;
         }
+        let named = named_paths(project.root(), &request.messages[opener]);
+        if named.is_empty() {
+            return None;
+        }
+        let mut paths = used_by_calls(project.root(), calls, &named);
         let owner = NamedFiles::owner(project, &binding.session);
         {
             let memo = self.named_files.memo();
@@ -886,19 +855,24 @@ mod bounds_tests {
         message("user", vec![BlockKind::Text { text: text.into() }])
     }
 
-    /// A call of `name` and the result the tool answered it with.
-    fn answered(name: &str, input: Value, output: OutputKind) -> Arc<crate::wire::IngressMessage> {
+    /// A call of `name` under `id` and the result the tool answered it with.
+    fn answered_as(
+        id: &str,
+        name: &str,
+        input: Value,
+        output: OutputKind,
+    ) -> Arc<crate::wire::IngressMessage> {
         Arc::new(message(
             "assistant",
             vec![
                 BlockKind::ToolCall {
-                    id: "call-1".to_owned(),
+                    id: id.to_owned(),
                     name: name.to_owned(),
                     input,
                     provider_executed: false,
                 },
                 BlockKind::ToolResult {
-                    id: "call-1".to_owned(),
+                    id: id.to_owned(),
                     tool_name: name.to_owned(),
                     output: memory_store::ToolOutput::bare(output),
                     provider_executed: false,
@@ -907,90 +881,76 @@ mod bounds_tests {
         ))
     }
 
+    fn answered(name: &str, input: Value, output: OutputKind) -> Arc<crate::wire::IngressMessage> {
+        answered_as("call-1", name, input, output)
+    }
+
     fn call(name: &str, input: Value) -> Arc<crate::wire::IngressMessage> {
         answered(name, input, OutputKind::Text { text: "ok".into() })
     }
 
     const ROOT: &str = "/work/project";
 
-    fn at_root() -> Base<'static> {
-        Base::new(Path::new(ROOT), "").unwrap()
+    fn root() -> &'static Path {
+        Path::new(ROOT)
     }
 
-    /// A path is held relative to the project root. A relative path is read
-    /// from the session's working directory, an absolute path beneath the
-    /// root is taken relative to it, and `.` and `..` are resolved. The
-    /// resolved path is at most 256 bytes, whatever the length of the word
-    /// that names it, and quotation marks are no part of a path.
+    /// A path is held relative to the project root: a relative path without
+    /// its leading `./` marks, or an absolute path beneath the root. A path
+    /// with a `.` or `..` component past those marks, a path of the Git
+    /// store, a path past 256 bytes, and a word with another character name
+    /// no file.
     #[test]
-    fn a_path_is_resolved_from_the_working_directory_within_256_bytes() {
-        let base = at_root();
-        let resolved = |raw: &str| base.resolve(raw);
-        assert_eq!(resolved("docs/a.md").as_deref(), Some("docs/a.md"));
-        assert_eq!(resolved("./docs/./a.md").as_deref(), Some("docs/a.md"));
-        assert_eq!(resolved("docs/../README.md").as_deref(), Some("README.md"));
+    fn a_path_is_a_plain_path_beneath_the_root_within_256_bytes() {
+        let path = |raw: &str| project_path(root(), raw);
+        assert_eq!(path("docs/a.md").as_deref(), Some("docs/a.md"));
+        assert_eq!(path("./docs/a.md").as_deref(), Some("docs/a.md"));
         assert_eq!(
-            resolved("/work/project/docs/a.md").as_deref(),
+            path("././tools/check.sh").as_deref(),
+            Some("tools/check.sh")
+        );
+        assert_eq!(
+            path("/work/project/docs/a.md").as_deref(),
             Some("docs/a.md")
         );
-        assert_eq!(resolved("/work/other/docs/a.md"), None);
-        assert_eq!(resolved("../project/docs/a.md"), None);
-        assert_eq!(resolved(".git/config"), None);
-        assert_eq!(resolved("docs/a b.md"), None);
-        assert_eq!(resolved("\"docs/a.md\""), None);
-        assert_eq!(resolved("."), None);
-
-        let nested = Base::new(Path::new(ROOT), "packages/app").unwrap();
-        assert_eq!(
-            nested.resolve("README.md").as_deref(),
-            Some("packages/app/README.md")
-        );
-        assert_eq!(
-            nested.resolve("../../README.md").as_deref(),
-            Some("README.md")
-        );
-        assert_eq!(nested.resolve("../../../README.md"), None);
-        assert_eq!(
-            nested.resolve("/work/project/README.md").as_deref(),
-            Some("README.md")
-        );
-        for refused in ["../elsewhere", "/work/project", "docs/a b", ".git"] {
-            assert!(Base::new(Path::new(ROOT), refused).is_none(), "{refused}");
+        for refused in [
+            "docs/./a.md",
+            "docs/../README.md",
+            "../project/docs/a.md",
+            "/work/other/docs/a.md",
+            "/work/project/../project/docs/a.md",
+            "/work/project",
+            ".git/config",
+            "docs/a b.md",
+            "\"docs/a.md\"",
+            "docs//a.md",
+            "docs/",
+            ".",
+            "./",
+            "",
+        ] {
+            assert_eq!(path(refused), None, "{refused:?}");
         }
-        assert!(Base::new(Path::new(ROOT), &"d/".repeat(128)).is_none());
-
         let longest = format!("{}/{}.md", "a".repeat(100), "b".repeat(152));
         assert_eq!(longest.len(), 256);
-        assert_eq!(resolved(&longest), Some(longest.clone()));
-        assert_eq!(resolved(&format!("{longest}x")), None);
-        // An absolute spelling of 270 bytes resolves to the 256-byte path,
-        // and a relative one resolves against the directory's own bytes.
-        assert_eq!(
-            resolved(&format!("{ROOT}/{longest}")),
-            Some(longest.clone())
-        );
-        let in_d = Base::new(Path::new(ROOT), "d").unwrap();
-        assert_eq!(
-            in_d.resolve(&longest[..254]).map(|path| path.len()),
-            Some(256)
-        );
-        assert_eq!(in_d.resolve(&longest[..255]), None);
-        assert_eq!(resolved(&"a/".repeat(MAX_WORD_BYTES)), None);
+        assert_eq!(path(&longest), Some(longest.clone()));
+        assert_eq!(path(&format!("./{longest}")), Some(longest.clone()));
+        assert_eq!(path(&format!("{ROOT}/{longest}")), Some(longest.clone()));
+        assert_eq!(path(&format!("{longest}x")), None);
     }
 
     /// A message's path words are its runs of path characters that hold a
-    /// `.` or a `/` once their closing periods are dropped. The first 32
-    /// distinct words are read, whatever they resolve to; a repeated word
+    /// `.` or a `/` once the periods that end them are dropped. The first
+    /// 32 distinct words are read, whatever they name; a repeated word
     /// takes no second place.
     #[test]
     fn the_first_32_distinct_path_words_of_a_message_are_read() {
         assert_eq!(
-            path_words("Read docs/a.md. Then run `tools/check.sh`, twice.").collect::<Vec<_>>(),
-            ["docs/a.md", "tools/check.sh"]
-        );
-        assert_eq!(
-            path_words("Done. Fine... v1.2").collect::<Vec<_>>(),
-            ["v1.2"]
+            named_paths(
+                root(),
+                &user("Read docs/a.md. Then run `./tools/check.sh`, twice... v1.2 is out.")
+            ),
+            ["docs/a.md", "tools/check.sh", "v1.2"]
         );
         let refused: Vec<String> = (0..30).map(|index| format!("../out-{index}.md")).collect();
         // Thirty refused words, one of them twice, then docs/a.md as the
@@ -1001,65 +961,76 @@ mod bounds_tests {
             refused.join(" ")
         );
         assert_eq!(
-            named_paths(&at_root(), &user(&text)),
+            named_paths(root(), &user(&text)),
             ["docs/a.md", "docs/b.md"]
         );
     }
 
-    /// The words come from the lines the sender wrote. A block that a
-    /// tag-only line opens runs through the last line that closes the tag,
-    /// or to the end of the text; a code fence is the sender's, a tag line
-    /// inside it too; and the parts of a message are read as one text.
+    /// Each text part of a message is read through the line before its
+    /// first line that holds a tag alone, where a block another writer
+    /// appended opens. A tag inside a line is the sender's text.
     #[test]
-    fn path_words_come_from_the_senders_own_lines() {
-        let text = "Follow docs/a.md.\n```\n<note>\ntools/check.sh\n```\n\
-                    <context-hint>\nSee docs/hinted.md.\n</context-hint>\n\
-                    docs/between.md\n</context-hint>\n\
-                    Then docs/b.md.\n</stray>\n<unclosed>\ndocs/after.md";
+    fn a_text_part_is_read_up_to_its_first_tag_line() {
+        let text = "Follow docs/a.md and <b>docs/b.md</b>.\n```\ntools/check.sh\n```\n\
+                    <context-hint>\nSee docs/hinted.md.\n</context-hint>\nThen docs/after.md.";
         assert_eq!(
-            named_paths(&at_root(), &user(text)),
-            ["docs/a.md", "tools/check.sh", "docs/b.md"]
+            named_paths(root(), &user(text)),
+            ["docs/a.md", "docs/b.md", "tools/check.sh"]
         );
-        // A block another writer generated, split over two text parts.
+        // A closing tag alone on a line ends the read as well, and an open
+        // fence holds a later block no longer than its first tag line.
+        assert_eq!(
+            named_paths(
+                root(),
+                &user("docs/a.md\n</stray>\ndocs/b.md\n```\ndocs/c.md\n<aug>\ndocs/d.md")
+            ),
+            ["docs/a.md"]
+        );
+        // Each part is read on its own: a block that ends the first part
+        // leaves the second part's lines the sender's.
         let parts = message(
             "user",
             vec![
                 BlockKind::Text {
-                    text: "Follow docs/a.md.\n<context-hint>".into(),
+                    text: "Follow docs/a.md.\n<context-hint>\ndocs/hinted.md".into(),
                 },
                 BlockKind::Text {
-                    text: "See docs/hinted.md.\n</context-hint>\nThen docs/b.md.".into(),
+                    text: "Then docs/b.md.".into(),
                 },
             ],
         );
-        assert_eq!(named_paths(&at_root(), &parts), ["docs/a.md", "docs/b.md"]);
+        assert_eq!(named_paths(root(), &parts), ["docs/a.md", "docs/b.md"]);
     }
 
-    /// A message is read through its first 64 KiB, and a path word the
-    /// bound divides is left out whole.
+    /// A message whose text parts hold more than 64 KiB together names no
+    /// file; one of exactly 64 KiB is read whole.
     #[test]
-    fn a_path_word_the_message_bound_divides_is_left_out() {
-        let filler = "x ".repeat(MAX_MESSAGE_BYTES / 2 - 8);
-        assert_eq!(filler.len(), MAX_MESSAGE_BYTES - 16);
-        // The bound falls inside `docs/divided.md`.
-        let divided = format!("docs/a.md {filler}docs/divided.md docs/past.md");
-        assert_eq!(named_paths(&at_root(), &user(&divided)), ["docs/a.md"]);
-        // The bound falls right after `docs/whole.md`, before a space.
-        let whole = format!("{filler}   docs/whole.md docs/past.md");
-        assert_eq!(
-            &whole[..MAX_MESSAGE_BYTES][MAX_MESSAGE_BYTES - 13..],
-            "docs/whole.md"
+    fn a_message_past_64_kib_of_text_names_no_file() {
+        let filler = "x ".repeat(MAX_MESSAGE_BYTES / 2 - 5);
+        let whole = format!("{filler}docs/a.md ");
+        assert_eq!(whole.len(), MAX_MESSAGE_BYTES);
+        assert_eq!(named_paths(root(), &user(&whole)), ["docs/a.md"]);
+        assert!(named_paths(root(), &user(&format!("{whole} "))).is_empty());
+        let parts = message(
+            "user",
+            vec![
+                BlockKind::Text { text: whole },
+                BlockKind::Text {
+                    text: String::new(),
+                },
+                BlockKind::Text { text: "x".into() },
+            ],
         );
-        assert_eq!(named_paths(&at_root(), &user(&whole)), ["docs/whole.md"]);
+        assert!(named_paths(root(), &parts).is_empty());
     }
 
     /// A word that opens with Pi's `@` names the path as written and the
     /// path without the mark. Pi's `read` opens its path argument without
-    /// one leading `@`, and a command line names a path as written.
+    /// one leading `@`, and a command line names a path as written, periods
+    /// included.
     #[test]
     fn a_pi_file_reference_names_the_file_pi_opens() {
-        let base = at_root();
-        let named = named_paths(&base, &user("See @docs/a.md and @scope/pkg.json."));
+        let named = named_paths(root(), &user("See @docs/a.md and @scope/pkg.json."));
         assert_eq!(
             named,
             [
@@ -1070,7 +1041,7 @@ mod bounds_tests {
             ]
         );
         let used =
-            |message: Arc<crate::wire::IngressMessage>| used_by_calls(&base, &[message], &named);
+            |message: Arc<crate::wire::IngressMessage>| used_by_calls(root(), &[message], &named);
         assert_eq!(
             used(call("read", json!({"path": "@docs/a.md"}))),
             ["docs/a.md"]
@@ -1083,15 +1054,16 @@ mod bounds_tests {
             used(call("bash", json!({"command": "cat @scope/pkg.json"}))),
             ["@scope/pkg.json"]
         );
+        assert!(used(call("bash", json!({"command": "cat docs/a.md."}))).is_empty());
+        assert!(used(call("bash", json!({"command": "cat x/../docs/a.md"}))).is_empty());
     }
 
     /// Pi's `read` uses the file its path names, and Pi's `bash` the files
     /// the first 256 path words of its command line name. A call of another
-    /// tool, a call whose result is an error, and a call with no result in
-    /// the window use nothing.
+    /// tool, a call whose result is an error of any kind, and a call with
+    /// no result in the window use nothing.
     #[test]
     fn a_read_or_a_command_that_was_answered_uses_a_file() {
-        let base = at_root();
         let named = ["docs/a.md".to_owned(), "docs/b.md".to_owned()];
         let command = |filler: usize| {
             let words: Vec<String> = (0..filler).map(|index| format!("f{index}.txt")).collect();
@@ -1100,41 +1072,47 @@ mod bounds_tests {
                 json!({"command": format!("cat {} docs/a.md", words.join(" "))}),
             )
         };
-        assert_eq!(used_by_calls(&base, &[command(255)], &named), ["docs/a.md"]);
-        assert!(used_by_calls(&base, &[command(256)], &named).is_empty());
+        assert_eq!(
+            used_by_calls(root(), &[command(255)], &named),
+            ["docs/a.md"]
+        );
+        assert!(used_by_calls(root(), &[command(256)], &named).is_empty());
         assert_eq!(
             used_by_calls(
-                &base,
+                root(),
                 &[
-                    call("read", json!({"path": "docs/b.md"})),
-                    call(
+                    answered_as(
+                        "call-1",
                         "read",
-                        json!({"path": "docs/a.md", "filePath": "docs/c.md"})
+                        json!({"path": "docs/b.md"}),
+                        OutputKind::Json { value: json!({}) }
+                    ),
+                    answered_as(
+                        "call-2",
+                        "read",
+                        json!({"path": "./docs/a.md", "filePath": "docs/c.md"}),
+                        OutputKind::Content { blocks: Vec::new() }
                     ),
                 ],
                 &named
             ),
             ["docs/b.md", "docs/a.md"]
         );
+        let failed = |output: OutputKind| answered("read", json!({"path": "docs/a.md"}), output);
         for unused in [
             call(
                 "edit",
                 json!({"path": "docs/a.md", "oldText": "a", "newText": "b"}),
             ),
             call("ls", json!({"path": "docs/a.md"})),
+            call("Read", json!({"path": "docs/a.md"})),
             call("read", json!({"filePath": "docs/a.md"})),
-            answered(
-                "read",
-                json!({"path": "docs/a.md"}),
-                OutputKind::ErrorText {
-                    text: "no such file".into(),
-                },
-            ),
-            answered(
-                "bash",
-                json!({"command": "cat docs/a.md"}),
-                OutputKind::ExecutionDenied { reason: None },
-            ),
+            failed(OutputKind::ErrorText {
+                text: "no such file".into(),
+            }),
+            failed(OutputKind::ErrorJson { value: json!({}) }),
+            failed(OutputKind::ErrorContent { blocks: Vec::new() }),
+            failed(OutputKind::ExecutionDenied { reason: None }),
             Arc::new(message(
                 "assistant",
                 vec![BlockKind::ToolCall {
@@ -1146,19 +1124,39 @@ mod bounds_tests {
             )),
         ] {
             assert!(
-                used_by_calls(&base, std::slice::from_ref(&unused), &named).is_empty(),
+                used_by_calls(root(), std::slice::from_ref(&unused), &named).is_empty(),
                 "{unused:?}"
             );
         }
-        let nested = Base::new(Path::new(ROOT), "docs").unwrap();
-        assert!(
-            used_by_calls(
-                &nested,
-                &[call("read", json!({"path": "docs/a.md"}))],
-                &named
+    }
+
+    /// A call counts when its id is one call's and one result's. Two calls
+    /// under one id, of which one failed, use nothing: the window does not
+    /// say which result answers which call.
+    #[test]
+    fn calls_that_share_an_id_use_nothing() {
+        let named = ["docs/a.md".to_owned(), "docs/b.md".to_owned()];
+        let failed = answered_as(
+            "call-1",
+            "read",
+            json!({"path": "docs/a.md"}),
+            OutputKind::ErrorText {
+                text: "no such file".into(),
+            },
+        );
+        let read_b = |id: &str| {
+            answered_as(
+                id,
+                "read",
+                json!({"path": "docs/b.md"}),
+                OutputKind::Text { text: "ok".into() },
             )
-            .is_empty(),
-            "the argument is read from the working directory"
+        };
+        assert!(used_by_calls(root(), &[failed.clone(), read_b("call-1")], &named).is_empty());
+        assert!(used_by_calls(root(), &[read_b("call-1"), failed.clone()], &named).is_empty());
+        assert_eq!(
+            used_by_calls(root(), &[failed, read_b("call-2")], &named),
+            ["docs/b.md"]
         );
     }
 
@@ -1178,6 +1176,11 @@ mod bounds_tests {
         assert!(memo.recorded(&owner("s256"), "docs/a.md"));
         assert_eq!(memo.room(&owner("s0")), 62);
         assert_eq!(memo.room(&owner("s1")), 64);
+        // A session past its places has none left.
+        for index in 0..70 {
+            memo.record(&owner("s0"), &format!("src/{index}.rs"));
+        }
+        assert_eq!(memo.room(&owner("s0")), 0);
     }
 
     /// A session's paths are held for each project, and a deletion forgets
@@ -1208,9 +1211,12 @@ mod bounds_tests {
     fn a_pass_takes_one_of_four_write_slots_and_eight_paths() {
         let names: Vec<String> = (0..10).map(|index| format!("docs/g{index}.md")).collect();
         let on_disk: Vec<&str> = names.iter().map(String::as_str).collect();
-        let (_dir, project) = project(&on_disk);
-        let files = NamedFiles::default();
         let secret = "keys/sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGH12345678.txt".to_owned();
+        let mut on_disk: Vec<&str> = on_disk;
+        on_disk.push(&secret);
+        let (dir, project) = project(&on_disk);
+        assert!(dir.path().join(&secret).is_file());
+        let files = NamedFiles::default();
         assert!(!is_stored_as_written(&secret));
         assert!(
             files
@@ -1254,5 +1260,11 @@ mod bounds_tests {
         }
         let record = files.keep(&project, "s", &observed, 7).unwrap();
         assert_eq!(record.paths, names[..2]);
+        drop(record);
+        // A path another pass recorded since the observation takes none of
+        // the places.
+        files.memo().record(&session_owner, &names[0]);
+        let record = files.keep(&project, "s", &observed, 7).unwrap();
+        assert_eq!(record.paths, names[1..2]);
     }
 }

@@ -3518,7 +3518,7 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
-    /// The project files the submitted window showed in use, recorded once the pass has its response.
+    /// The project files the submitted window showed in use, recorded once the pass's transform has succeeded.
     named_files: Option<named_files::Observed>,
     /// `use_outcome_settled` records this pass's serve-write handoff to a Ready Kernel, regardless of outcome. If the Kernel is
     /// not Ready, `use_outcome_settled` remains clear so a rerun can retry.
@@ -9691,7 +9691,7 @@ impl HandlerCore {
         // Resolve first (spec D2): every consumer of the pass reads the cut window and the
         // ordinals the daemon derived for it.
         // The submitted window shows the turn in progress; resolution cuts it. The observation is
-        // kept with the pass and applied once the pass has its response.
+        // kept with the pass and its record is started once the pass's transform has succeeded.
         let named_files = self.observe_named_files(&binding, &parsed);
         // The observation holds what the directory was read for, so the request, and every
         // snapshot and lease made of it, carries the directory no further.

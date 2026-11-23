@@ -628,6 +628,15 @@ impl HandlerCore {
             ));
         };
         let artifact = parsed.request;
+        // The named-file recorder alone writes its domain, its ids, and its
+        // source kind; an artifact under one would occupy a record's id or
+        // pass as a record.
+        if crate::named_files::is_reserved_id(&artifact.object_id)
+            || artifact.domain_id == crate::named_files::DOMAIN_ID
+            || artifact.source_kind == crate::named_files::SOURCE_KIND
+        {
+            return state_only(KernelOutcome::invalid(InvalidReason::InvalidInput));
+        }
         let upload = Upload {
             upload_id: parsed.upload_id.clone(),
             generation: 0,

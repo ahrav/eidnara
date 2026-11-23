@@ -286,31 +286,27 @@ fn read_at_tip(
         Ok(tip) => tip,
         Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     };
-    match read_other_sessions(
-        &store,
-        project,
-        &[Some(session_id)],
-        tip,
-        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
-    ) {
-        Ok(mut response) => match show_contests(&store, project, &mut response).and_then(|()| {
-            if named_files {
-                crate::named_files::delivered(&store, project, session_id, response.known_as_of)
-            } else {
-                Ok((Vec::new(), false))
-            }
-        }) {
-            Ok((named_files, cut_short)) => {
-                // The flag covers both reads the composition selects from.
-                response.truncated |= cut_short;
-                CanonicalMemoryRead::Available(injectable_snapshot(
-                    response,
-                    named_files,
-                    memory_budget_tokens,
-                ))
-            }
-            Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
-        },
+    let read = || -> Result<CanonicalMemorySnapshot, kernel::KernelError> {
+        let mut response = read_other_sessions(
+            &store,
+            project,
+            &[Some(session_id)],
+            tip,
+            (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+        )?;
+        show_contests(&store, project, &mut response)?;
+        let mut files = Vec::new();
+        if named_files {
+            let (lines, cut_short) =
+                crate::named_files::delivered(&store, project, session_id, response.known_as_of)?;
+            // The flag covers both reads the composition selects from.
+            response.truncated |= cut_short;
+            files = lines;
+        }
+        Ok(injectable_snapshot(response, files, memory_budget_tokens))
+    };
+    match read() {
+        Ok(snapshot) => CanonicalMemoryRead::Available(snapshot),
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
 }

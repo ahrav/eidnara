@@ -113,26 +113,6 @@ pub(crate) fn push_category_open(out: &mut String, category: &str) {
     out.push('>');
 }
 
-/// Sort rank of a category the block renders. [`NAMED_FILES_SECTION`] ranks first. A positive
-/// category ranks after it by its index in [`MEMORY_CATEGORY_ORDER`], and the other positive
-/// categories share the rank after those. [`CURRENT_WORK_SECTION`] ranks last. `None` marks a
-/// category the native surfaces drop.
-///
-/// [`MEMORY_CATEGORY_ORDER`] is a prefix of [`POSITIVE_MEMORY_CATEGORIES`], so one index serves
-/// both lists.
-fn memory_category_rank(category: &str) -> Option<usize> {
-    if category == NAMED_FILES_SECTION {
-        return Some(0);
-    }
-    if category == CURRENT_WORK_SECTION {
-        return Some(MEMORY_CATEGORY_ORDER.len() + 2);
-    }
-    let position = POSITIVE_MEMORY_CATEGORIES
-        .iter()
-        .position(|positive| *positive == category)?;
-    Some(position.min(MEMORY_CATEGORY_ORDER.len()) + 1)
-}
-
 /// The sections that render before the facts, and the ones that render after them. Their rows
 /// render, and enter the block's revision, in the order the caller supplies: the caller ranks
 /// them by use or by recency.
@@ -141,6 +121,29 @@ pub(crate) const SECTIONS_AFTER_FACTS: &[&str] = &[CURRENT_WORK_SECTION];
 
 pub(crate) fn keeps_supplied_order(category: &str) -> bool {
     SECTIONS_BEFORE_FACTS.contains(&category) || SECTIONS_AFTER_FACTS.contains(&category)
+}
+
+/// The rank the positive categories outside [`MEMORY_CATEGORY_ORDER`] share.
+const OTHER_POSITIVE_RANK: usize = SECTIONS_BEFORE_FACTS.len() + MEMORY_CATEGORY_ORDER.len();
+
+/// Sort rank of a category the block renders. The sections of [`SECTIONS_BEFORE_FACTS`] rank
+/// first, in the list's order. A positive category ranks after them by its index in
+/// [`MEMORY_CATEGORY_ORDER`], and the other positive categories share
+/// [`OTHER_POSITIVE_RANK`]. The sections of [`SECTIONS_AFTER_FACTS`] rank last, in the list's
+/// order. `None` marks a category the native surfaces drop.
+///
+/// [`MEMORY_CATEGORY_ORDER`] is a prefix of [`POSITIVE_MEMORY_CATEGORIES`], so one index serves
+/// both lists.
+fn memory_category_rank(category: &str) -> Option<usize> {
+    let position = |list: &[&str]| list.iter().position(|listed| *listed == category);
+    if let Some(before) = position(SECTIONS_BEFORE_FACTS) {
+        return Some(before);
+    }
+    if let Some(after) = position(SECTIONS_AFTER_FACTS) {
+        return Some(OTHER_POSITIVE_RANK + 1 + after);
+    }
+    let fact = position(&POSITIVE_MEMORY_CATEGORIES)?;
+    Some(SECTIONS_BEFORE_FACTS.len() + fact.min(MEMORY_CATEGORY_ORDER.len()))
 }
 
 /// Ranked categories sort by rank, the rest by name after them, and ties by object id.
@@ -153,7 +156,7 @@ fn memory_render_order(
     left_rank
         .cmp(right_rank)
         .then_with(|| {
-            if *left_rank == MEMORY_CATEGORY_ORDER.len() + 1 {
+            if *left_rank == OTHER_POSITIVE_RANK {
                 left.category.cmp(&right.category)
             } else {
                 Ordering::Equal

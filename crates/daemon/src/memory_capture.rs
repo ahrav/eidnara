@@ -3336,7 +3336,7 @@ fn is_indented_code(line: &str) -> bool {
 }
 
 /// The run of backticks or tildes, three or more long, that opens a code fence.
-pub(crate) fn fence_opener(line: &str) -> Option<&str> {
+fn fence_opener(line: &str) -> Option<&str> {
     let marker = line.chars().next().filter(|ch| matches!(ch, '`' | '~'))?;
     let run = &line[..line.find(|ch| ch != marker).unwrap_or(line.len())];
     (run.len() >= 3).then_some(run)

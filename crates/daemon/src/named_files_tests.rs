@@ -382,11 +382,11 @@ async fn a_session_records_each_path_once_over_its_turns() {
     );
 }
 
-/// A file is used by a call of the turn of the message that names it: the rows after the
-/// message, up to the next message the user typed. The last two typed messages are read, so
-/// a call that a pass first shows together with the user's next message still counts.
+/// A file is used by a call that follows the last message the user typed, when that message
+/// names the file. The rows before that message show nothing: a fork copies its parent's rows
+/// into a session of another id.
 #[tokio::test]
-async fn a_call_uses_a_file_its_own_turns_message_names() {
+async fn a_call_uses_a_file_the_last_typed_message_names() {
     let (handler, _dir, project) =
         project_with(&[(NOTES, BODY), ("docs/plan.md", "Plan.\n")]).await;
     let names_plan = "Now look at docs/plan.md.";
@@ -409,36 +409,36 @@ async fn a_call_uses_a_file_its_own_turns_message_names() {
     messages.extend(read("a1", 3, NOTES));
     assert_eq!(pass(&handler, &binding, &window("s2", &messages)), 0);
 
-    // An edit in an earlier turn leaves a later turn's read as it is.
+    // A file the turn reads and then edits is used: the record says the file was read.
     let binding = session_binding(&project, "s3");
     let mut messages = vec![ck("s3-u1", 1, names_plan)];
+    messages.extend(read("a1", 2, "docs/plan.md"));
     messages.extend(answered(
-        "a1",
-        2,
+        "a2",
+        3,
         "edit",
         json!({ "path": "docs/plan.md", "oldText": "Plan", "newText": "Plans" }),
     ));
-    messages.push(ck("s3-u2", 3, names_plan));
-    messages.extend(read("a2", 4, "docs/plan.md"));
     assert_eq!(pass(&handler, &binding, &window("s3", &messages)), 1);
 
-    // One pass first shows a turn's read together with the user's next message.
-    let binding = session_binding(&project, "s4");
-    let mut messages = vec![ck("s4-u1", 1, &said)];
+    // A fork's first pass shows its parent's last turn before the message typed in the
+    // fork, and records none of the parent's uses under the fork's id.
+    let fork = session_binding(&project, "s4");
+    let mut messages = vec![ck("s0-u1", 1, &said)];
     messages.extend(read("a1", 2, NOTES));
-    messages.push(ck("s4-u2", 3, "Thanks."));
-    assert_eq!(pass(&handler, &binding, &window("s4", &messages)), 1);
-    // A turn before the last two is read no longer.
-    let binding = session_binding(&project, "s5");
-    messages.push(ck("s5-u3", 4, "One more thing."));
-    assert_eq!(pass(&handler, &binding, &window("s5", &messages)), 0);
+    messages.push(ck("s4-u1", 3, "Thanks."));
+    assert_eq!(pass(&handler, &fork, &window("s4", &messages)), 0);
+    assert_eq!(
+        stored_paths(&handler, &project),
+        ["docs/plan.md", "docs/plan.md"]
+    );
 }
 
-/// A relative path is read from the session's working directory, so a session that works in
-/// a package records the package's file and leaves the root's file of the same name alone. A
-/// request that carries no working directory records nothing.
+/// A session records files while its working directory is the project root, where a
+/// relative path names the file of that path. A request that carries no working directory,
+/// or the directory of a package, records nothing.
 #[tokio::test]
-async fn a_relative_path_is_read_from_the_sessions_working_directory() {
+async fn a_session_records_files_at_the_project_root() {
     let (handler, _dir, project) = project_with(&[
         ("README.md", "# Root\n"),
         ("packages/app/README.md", "# App\n"),
@@ -448,24 +448,13 @@ async fn a_relative_path_is_read_from_the_sessions_working_directory() {
     let mut messages = vec![ck("s1-u1", 1, "Follow README.md.")];
     messages.extend(read("a1", 2, "README.md"));
     let mut request = window("s1", &messages);
-    request.working_directory = None;
-    assert_eq!(pass(&handler, &binding, &request), 0);
-    request.working_directory = Some("../elsewhere".to_string());
-    assert_eq!(pass(&handler, &binding, &request), 0);
-    request.working_directory = Some("packages/app".to_string());
+    for elsewhere in [None, Some("packages/app"), Some("../elsewhere"), Some(".")] {
+        request.working_directory = elsewhere.map(str::to_owned);
+        assert_eq!(pass(&handler, &binding, &request), 0, "{elsewhere:?}");
+    }
+    request.working_directory = Some(String::new());
     assert_eq!(pass(&handler, &binding, &request), 1);
-    assert_eq!(stored_paths(&handler, &project), ["packages/app/README.md"]);
-
-    let binding = session_binding(&project, "s2");
-    let mut messages = vec![ck("s2-u1", 1, "Follow ../../README.md.")];
-    messages.extend(shell("a1", 2, "cat ../../README.md"));
-    let mut request = window("s2", &messages);
-    request.working_directory = Some("packages/app".to_string());
-    assert_eq!(pass(&handler, &binding, &request), 1);
-    assert_eq!(
-        stored_paths(&handler, &project),
-        ["README.md", "packages/app/README.md"]
-    );
+    assert_eq!(stored_paths(&handler, &project), ["README.md"]);
 }
 
 /// A session's recorded paths are held for each project a route binds it to: one session id
@@ -504,7 +493,8 @@ async fn a_path_outside_the_project_and_a_link_are_left_out() {
 
     let elsewhere = outside.join("outside.md");
     let said = format!(
-        "See {}, linked.md, linked-dir/outside.md, ../outside/outside.md and .git/config.",
+        "See {}, linked.md, linked-dir/outside.md, ../outside/outside.md, docs/../linked.md \
+         and .git/config.",
         elsewhere.display()
     );
     let calls = [
@@ -512,6 +502,7 @@ async fn a_path_outside_the_project_and_a_link_are_left_out() {
         read("a2", 3, "linked.md"),
         read("a3", 4, "linked-dir/outside.md"),
         shell("a4", 5, "cat ../outside/outside.md .git/config"),
+        read("a5", 6, "docs/../linked.md"),
     ]
     .into_iter()
     .flatten();
@@ -654,6 +645,16 @@ async fn a_record_needs_a_primary_pi_session_with_capture_and_a_typed_message() 
     messages.extend(read("a2", 5, "docs/plan.md"));
     assert_eq!(pass(&handler, &binding, &window("typed", &messages)), 1);
     assert_eq!(stored_paths(&handler, &project), [NOTES]);
+
+    // A row of the user role that Pi's own row gives another role is no typed message.
+    let binding = session_binding(&project, "custom");
+    let mut messages = vec![ck("custom-u1", 1, &said)];
+    messages.extend(read("a1", 2, NOTES));
+    let mut request = window("custom", &messages);
+    request.native_messages.as_mut().unwrap()[0] = Arc::new(
+        json!({"id": "custom-u1", "message": {"role": "custom", "content": said.as_str()}}),
+    );
+    assert_eq!(pass(&handler, &binding, &request), 0);
     assert_eq!(play(&session_binding(&project, "control"), false), 1);
 }
 
@@ -723,6 +724,38 @@ async fn a_pass_observed_before_a_deletion_writes_no_record() {
     assert_eq!(write(&handler, record), 1);
 }
 
+/// Two records taken of one observation before either is written: the first write records
+/// the path, and the second finds the path recorded under the gate and writes nothing. A
+/// record taken while the session had a place writes nothing once the places are taken.
+#[tokio::test]
+async fn a_write_rechecks_the_sessions_paths_and_places_under_the_gate() {
+    let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    let binding = session_binding(&project, "s1");
+    let said = format!("Read {NOTES} first.");
+    let mut messages = vec![ck("s1-u1", 1, &said)];
+    messages.extend(read("a1", 2, NOTES));
+    let observed = handler
+        .observe_named_files(&binding, &window("s1", &messages))
+        .expect("the window shows a use");
+    let keep = |session: &str| {
+        handler
+            .named_files
+            .keep(&binding.kernel_project, session, &observed, now_ms())
+            .expect("the file exists")
+    };
+    let (first, second) = (keep("s1"), keep("s1"));
+    assert_eq!(write(&handler, first), 1);
+    assert_eq!(write(&handler, second), 0);
+    assert_eq!(stored_paths(&handler, &project), [NOTES]);
+
+    let late = keep("s2");
+    handler
+        .named_files
+        .fill_session_for_test(&binding.kernel_project, "s2");
+    assert_eq!(write(&handler, late), 0);
+    assert_eq!(stored_paths(&handler, &project), [NOTES]);
+}
+
 /// A session's second write of a path replays the first: the domain holds one row for the
 /// session and the path, with the first write's time.
 #[tokio::test]
@@ -747,11 +780,13 @@ async fn a_second_write_of_a_path_leaves_the_first_record() {
 }
 
 /// A caller of `kernel.commit` changes no named-file record and takes none of the recorder's
-/// ids: an insert into the domain, an insert or a successor under a record's id prefixes or
-/// the domain's object id, a replacement, a retirement, and a disposition of a record are
-/// each refused as invalid input, and the record stays as the daemon wrote it.
+/// ids: an insert into the domain, a decision, an observation, or a successor under a
+/// record's id prefixes or the domain's object id, a replacement, a retirement, and a
+/// disposition of a record are each refused as invalid input, and the record stays as the
+/// daemon wrote it. Artifact ingest refuses an artifact under one of the ids, in the domain,
+/// or with the recorder's source kind, and stages nothing for it.
 #[tokio::test]
-async fn a_kernel_commit_caller_changes_no_named_file_record() {
+async fn a_kernel_caller_changes_no_named_file_record() {
     let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
     handler.bind_route(test_route(WRITER), session_binding(&project, "writer"));
     let said = format!("Read {NOTES} first.");
@@ -786,6 +821,21 @@ async fn a_kernel_commit_caller_changes_no_named_file_record() {
             "source_id": "memory-lineage",
             "source_revision": revision,
         })
+    };
+    let observation = |object_id: &str, observation_id: &str| {
+        json!({"op": "insert_observation", "spec": {
+            "observation_id": observation_id,
+            "object_id": object_id,
+            "domain_id": "memory",
+            "observation_kind": "code_present",
+            "payload": {"summary": "code present", "classification": "code_present"},
+            "observed_at": 1,
+            "dependencies": [
+                {"dependency_object_id": "mem-first", "dependency_kind": "implements"}
+            ],
+            "source_id": "memory-lineage",
+            "source_revision": 1,
+        }})
     };
     let commit = |key: &'static str, operation: Value| {
         let request = kernel_route_fixtures::commit_request(
@@ -833,6 +883,28 @@ async fn a_kernel_commit_caller_changes_no_named_file_record() {
             json!({"op": "insert_decision",
                    "spec": spec("domain:named-files", "dec-forged", "memory", 1)}),
         ),
+        (
+            "successor-object-prefix",
+            json!({"op": "supersede_decision", "replaced_object_id": "mem-first",
+                   "spec": spec("nfu_forged", "dec-forged", "memory", 2)}),
+        ),
+        (
+            "successor-decision-prefix",
+            json!({"op": "supersede_decision", "replaced_object_id": "mem-first",
+                   "spec": spec("mem-second", "dnf_forged", "memory", 2)}),
+        ),
+        (
+            "observation-object-prefix",
+            observation("nfu_forged", "observation-forged"),
+        ),
+        (
+            "observation-id-prefix",
+            observation("observation-object-forged", "dnf_forged"),
+        ),
+        (
+            "observation-domain-object",
+            observation("domain:named-files", "observation-forged"),
+        ),
         // An ordinary memory folded into its live successor, with the spec naming the
         // domain: the domain check alone refuses it.
         (
@@ -863,6 +935,34 @@ async fn a_kernel_commit_caller_changes_no_named_file_record() {
             "{key}: {refused}"
         );
     }
+    // The same observation under ordinary ids commits.
+    let observed = commit(
+        "observation-ordinary",
+        observation("observation-object-1", "observation-1"),
+    )
+    .await;
+    assert_eq!(observed["state"]["kind"], "available", "{observed}");
+    for (upload, field, value) in [
+        ("ingest-object-prefix", "object_id", "nfu_forged"),
+        ("ingest-domain-object", "object_id", "domain:named-files"),
+        ("ingest-domain", "domain_id", "named-files"),
+        ("ingest-source-kind", "source_kind", "named_file_recorder"),
+    ] {
+        let mut begin =
+            kernel_route_fixtures::ingest_begin_request(&project, "writer", upload, b"text", 1);
+        begin["request"][field] = json!(value);
+        let refused = tool_body(
+            handler
+                .dispatch_value_for_test(test_route(WRITER), begin)
+                .await,
+        );
+        assert_eq!(refused["state"]["kind"], "invalid", "{upload}: {refused}");
+        assert_eq!(
+            refused["state"]["reason"], "invalid_input",
+            "{upload}: {refused}"
+        );
+    }
+    assert_eq!(handler.staging_budget_for_test(), (0, 0));
     // The same fold with the memory domain commits.
     let folded = commit(
         "fold-in-memory",
@@ -873,6 +973,97 @@ async fn a_kernel_commit_caller_changes_no_named_file_record() {
     assert_eq!(folded["state"]["kind"], "available", "{folded}");
     assert_eq!(stored_records(&handler, &project), before);
     assert_eq!(delivered_paths(&handler, &project, "reader"), [NOTES]);
+}
+
+/// The element counts the rows that carry the recorder's source kind. A row of the domain
+/// under another source kind, with a record's kind, source id, and rationale, is no record.
+#[tokio::test]
+async fn the_element_lists_only_rows_of_the_recorders_source_kind() {
+    let (handler, _dir, project) =
+        project_with(&[(NOTES, BODY), ("docs/plan.md", "Plan.\n")]).await;
+    let store = handler.kernel.kernel_store().unwrap();
+    let binding = session_binding(&project, "reader");
+    named_files::NamedFiles::record_of_another_kind_for_test(
+        &store,
+        &binding.kernel_project,
+        "s1",
+        "docs/plan.md",
+    );
+    assert_eq!(stored_paths(&handler, &project), ["docs/plan.md"]);
+    assert!(delivered_lines(&handler, &project, "reader").is_empty());
+    named_files::record(
+        &store,
+        &binding.kernel_project,
+        "s1",
+        NOTES,
+        1_000,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+    assert_eq!(delivered_paths(&handler, &project, "reader"), [NOTES]);
+}
+
+/// A summarizer firing composes its prompt's block from the project's facts, whether the
+/// pass read a block for its messages or the firing reads its own: the prompt holds the
+/// project's rule and no named file, while the pass's own read lists the file.
+#[tokio::test(flavor = "current_thread")]
+async fn a_summarizer_prompt_holds_the_facts_and_no_named_file() {
+    for auto_inject in [false, true] {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store_and_kernel(Arc::clone(&producer), default_test_config()).await;
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        std::fs::write(project.join(NOTES), BODY).unwrap();
+        let kernel = handler.kernel.kernel_store().unwrap();
+        let session = binding(project.to_str().unwrap(), "ses");
+        named_files::record(
+            &kernel,
+            &session.kernel_project,
+            "s1",
+            NOTES,
+            1_000,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        kernel_route_fixtures::commit_verified_memory(
+            &kernel,
+            "rule",
+            "mem-rule",
+            &session.kernel_project.scope_id(),
+            "PROJECT_RULES",
+            "Keep the public contract.",
+        );
+        assert_eq!(delivered_paths(&handler, &project, "ses"), [NOTES]);
+        handler.bind_route(
+            test_route(7),
+            SessionBinding {
+                config: DaemonConfig {
+                    memory_auto_inject: auto_inject,
+                    ..default_test_config()
+                },
+                ..session
+            },
+        );
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        assert_eq!(
+            serde_json::to_string(&response["messages"])
+                .unwrap()
+                .contains("<NAMED_FILES note="),
+            auto_inject,
+            "{response}"
+        );
+        wait_for_count(&producer.starts, 1).await;
+        let prompt = producer.prompts.lock().unwrap()[0].clone();
+        assert!(
+            prompt.contains("mem-rule: Keep the public contract."),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("NAMED_FILES") && !prompt.contains(NOTES),
+            "{auto_inject}: {prompt}"
+        );
+    }
 }
 
 /// A summarizer read that no pass read serves selects the facts against the whole budget:
