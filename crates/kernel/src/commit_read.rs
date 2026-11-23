@@ -495,4 +495,32 @@ impl KernelStore {
         limit.check()?;
         Ok((commits, through, end.unwrap_or(PageEnd::Exhausted)))
     }
+
+    /// When each commit of `commit_seqs` was recorded, in milliseconds since
+    /// the Unix epoch by the writer's clock, keyed by sequence. A sequence
+    /// the log does not hold has no entry. One statement on one reader reads
+    /// every time, so the times are of one snapshot.
+    pub fn commits_recorded_at(
+        &self,
+        commit_seqs: &[i64],
+    ) -> Result<std::collections::HashMap<i64, i64>, KernelError> {
+        if commit_seqs.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let sequences =
+            serde_json::to_string(commit_seqs).map_err(|_| KernelError::InvalidInput)?;
+        let reader = self.lock_reader()?;
+        let mut statement = reader
+            .prepare_cached(
+                "SELECT commit_seq, recorded_at FROM commit_log
+                 WHERE commit_seq IN (SELECT value FROM json_each(?1))",
+            )
+            .map_err(map_sqlite)?;
+        let times = statement
+            .query_map([sequences], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(map_sqlite)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(map_sqlite)?;
+        Ok(times)
+    }
 }

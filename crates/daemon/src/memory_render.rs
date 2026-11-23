@@ -89,7 +89,7 @@ const CURRENT_WORK_NOTE: &str = "Work the user left open in earlier sessions, ne
 
 pub(crate) const NAMED_FILES_SECTION: &str = "NAMED_FILES";
 
-const NAMED_FILES_NOTE: &str = "Files of this project that a message of the user named in an earlier session and the agent then read or passed to a command, most used first. Paths are relative to the repository root, and each file existed when this block was composed. This memory records that they were used and holds none of their content: open a file for what it says.";
+const NAMED_FILES_NOTE: &str = "Files of this project that a message of the user named in an earlier session and the agent then read or named in a command it ran, most used first. Paths are relative to the repository root, and each file existed when this block was composed. This memory records that they were used and holds none of their content: open a file for what it says. Each line gives the file's last change as of that moment, and each User stated line below gives when it was stated: a statement made after a file's last change is newer than that file, and a file changed after a statement is newer than the statement in the lines changed since then, which the repository's history dates.";
 
 pub(crate) fn renders_in_block(category: &str) -> bool {
     memory_category_rank(category).is_some()
@@ -759,10 +759,15 @@ mod tests {
             row("nfu_1", NAMED_FILES_SECTION, "tools/check.sh (used less)"),
         ];
         let note = "Files of this project that a message of the user named in an earlier \
-                    session and the agent then read or passed to a command, most used first. \
-                    Paths are relative to the repository root, and each file existed when this \
-                    block was composed. This memory records that they were used and holds none \
-                    of their content: open a file for what it says.";
+                    session and the agent then read or named in a command it ran, most used \
+                    first. Paths are relative to the repository root, and each file existed \
+                    when this block was composed. This memory records that they were used and \
+                    holds none of their content: open a file for what it says. Each line gives \
+                    the file's last change as of that moment, and each User stated line below \
+                    gives when it was stated: a statement made after a file's last change is \
+                    newer than that file, and a file changed after a statement is newer than \
+                    the statement in the lines changed since then, which the repository's \
+                    history dates.";
         assert_eq!(
             render_memory_block(&rows, "project-memory"),
             format!(

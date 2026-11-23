@@ -77,11 +77,27 @@ fn session_binding(project: &Path, session: &str) -> SessionBinding {
     }
 }
 
-/// A Pi window of `session`, whose working directory is the project root.
+/// A Pi window of `session`, whose working directory is the project root. The Pi row of each
+/// tool result states whether its call failed, as Pi writes a result.
 fn window(session: &str, messages: &[IngressMessage]) -> TransformRequest {
     let mut request = capture_transform_request(messages);
     request.session_id = session.to_string();
     request.working_directory = Some(String::new());
+    let rows = request.native_messages.as_mut().unwrap();
+    for (message, row) in messages.iter().zip(rows) {
+        let Some(BlockKind::ToolResult { output, .. }) =
+            message.ck.content().first().map(|block| block.kind())
+        else {
+            continue;
+        };
+        let failed = !matches!(
+            output.kind,
+            OutputKind::Text { .. } | OutputKind::Json { .. } | OutputKind::Content { .. }
+        );
+        let result = &mut Arc::make_mut(row)["message"];
+        result["role"] = json!("toolResult");
+        result["isError"] = json!(failed);
+    }
     request
 }
 
@@ -203,6 +219,20 @@ fn delivered_lines(handler: &Handler, project: &Path, session: &str) -> Vec<Stri
     .filter(|row| row.category == memory_render::NAMED_FILES_SECTION)
     .map(|row| row.content.clone())
     .collect()
+}
+
+/// The last-change clause of the line of a file that shows its modification time: the UTC
+/// minute of the time the file system holds for `path`, and `on disk`.
+fn changed_on_disk(project: &Path, path: &str) -> String {
+    let modified: chrono::DateTime<chrono::Utc> = std::fs::metadata(project.join(path))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .into();
+    format!(
+        "; last changed {} on disk",
+        modified.format("%Y-%m-%dT%H:%MZ")
+    )
 }
 
 /// The paths the lines of [`delivered_lines`] hold, in order.
@@ -566,11 +596,17 @@ async fn the_element_orders_files_by_sessions_then_last_use_then_path() {
     let lines = delivered_lines(&handler, &project, "reader");
     assert_eq!(
         lines[0],
-        "docs/guide-02.md (the agent used it in 2 earlier sessions, last on 1970-01-07)"
+        format!(
+            "docs/guide-02.md (the agent used it in 2 earlier sessions, last on 1970-01-07{})",
+            changed_on_disk(&project, "docs/guide-02.md")
+        )
     );
     assert_eq!(
         lines[1],
-        "docs/guide-05.md (the agent used it in 1 earlier session, last on 1970-01-13)"
+        format!(
+            "docs/guide-05.md (the agent used it in 1 earlier session, last on 1970-01-13{})",
+            changed_on_disk(&project, "docs/guide-05.md")
+        )
     );
     // The reading session's own records are left out of its block.
     assert_eq!(
@@ -884,6 +920,10 @@ async fn a_kernel_caller_changes_no_named_file_record() {
                    "spec": spec("domain:named-files", "dec-forged", "memory", 1)}),
         ),
         (
+            "insert-domain-row-prefix",
+            json!({"op": "insert_decision", "spec": spec("nfd_0", "dec-forged", "memory", 1)}),
+        ),
+        (
             "successor-object-prefix",
             json!({"op": "supersede_decision", "replaced_object_id": "mem-first",
                    "spec": spec("nfu_forged", "dec-forged", "memory", 2)}),
@@ -945,9 +985,11 @@ async fn a_kernel_caller_changes_no_named_file_record() {
     for (upload, field, value) in [
         ("ingest-object-prefix", "object_id", "nfu_forged"),
         ("ingest-domain-object", "object_id", "domain:named-files"),
+        ("ingest-domain-row-prefix", "object_id", "nfd_3"),
         ("ingest-domain", "domain_id", "named-files"),
         ("ingest-source-kind", "source_kind", "named_file_recorder"),
         ("ingest-verifier-prefix", "object_id", "verattest:forged"),
+        ("ingest-witness-prefix", "object_id", "verwitnessobj:forged"),
         ("ingest-verifier-kind", "source_kind", "verifier"),
     ] {
         let mut begin =
@@ -1085,17 +1127,18 @@ async fn the_facts_only_read_holds_no_named_file_and_the_whole_budget_of_facts()
         Instant::now() + Duration::from_secs(5),
     )
     .unwrap();
-    for index in 0..80 {
+    for index in 0..200 {
         kernel_route_fixtures::commit_verified_memory(
             &store,
             &format!("fact-{index}"),
-            &format!("mem-fact-{index:02}"),
+            &format!("mem-fact-{index:03}"),
             &binding.kernel_project.scope_id(),
             "PROJECT_RULES",
             &format!("Rule {index:02}: every handler of the service logs its request id once."),
         );
     }
-    let budget = 1_000.0;
+    // An eighth of the budget holds the element's note and one line.
+    let budget = 2_000.0;
     let rows_of = |read: canonical_memory::CanonicalMemoryRead| -> (usize, Vec<String>) {
         let rows = read.rows();
         (
@@ -1122,7 +1165,7 @@ async fn the_facts_only_read_holds_no_named_file_and_the_whole_budget_of_facts()
     ));
     assert_eq!((files, no_files), (1, 0));
     assert!(
-        beside_the_element.len() < alone.len() && alone.len() < 80,
+        beside_the_element.len() < alone.len() && alone.len() < 200,
         "the element displaces a fact the facts-only read keeps: {} against {}",
         beside_the_element.len(),
         alone.len()
@@ -1241,4 +1284,389 @@ async fn a_pi_turn_served_over_the_routes_is_recorded_and_delivered() {
         "{served}"
     );
     assert!(!served.contains("Tag the release"), "{served}");
+}
+
+/// Stores a memory under `id` with the shape capture gives a statement of the user that
+/// session `session` made, or, with `captured` false, the same text as another writer's row.
+/// Returns the commit that recorded it.
+fn store_statement(
+    handler: &Handler,
+    project: &Path,
+    (id, session, text): (&str, &str, &str),
+    captured: bool,
+) -> i64 {
+    let store = handler.kernel.kernel_store().unwrap();
+    let bound = session_binding(project, session).kernel_project;
+    let scope = bound.scope_id();
+    store
+        .commit(kernel_route_fixtures::intent(id), |envelope| {
+            kernel_route_fixtures::ensure_domain(envelope, "memory")?;
+            let (mut ready, mut domains, mut refusal) = (false, HashSet::new(), None);
+            kernel_routes::commit::ensure_scope(
+                envelope,
+                &bound,
+                &mut ready,
+                &mut domains,
+                &mut refusal,
+            )?;
+            let summary = format!("{}: {text}", memory_capture::USER_STATED);
+            let mut spec =
+                kernel_route_fixtures::memory_decision_spec(id, &scope, "PROJECT_RULES", &summary);
+            if !captured {
+                envelope.insert_decision(spec)?;
+                kernel_route_fixtures::verify_decision(envelope, id)?;
+                return Ok(String::new());
+            }
+            spec.source_id = memory_capture::CAPTURE_SOURCE_ID.to_string();
+            spec.source_kind = "assistant".to_string();
+            spec.payload.rationale =
+                json!({"source": "memory_capture", "session": session, "quote": text}).to_string();
+            envelope.insert_decision(spec)?;
+            // The memory is approved as capture approves one: on a statement record
+            // admitted as explicit user text.
+            kernel_routes::commit::ensure_domain(envelope, "user-statements", &mut domains)?;
+            let statement = format!("stm_{id}");
+            let mut record = kernel_route_fixtures::decision_spec_in_domain(
+                &statement,
+                &scope,
+                "user-statements",
+                "adr_accepted",
+                &summary,
+            );
+            record.source_kind = "user".to_string();
+            envelope.insert_decision(record)?;
+            kernel_routes::commit::accept_statement(envelope, &statement)?;
+            kernel_routes::commit::admit_capture(envelope, id, Some(&statement))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    store.tip().unwrap()
+}
+
+/// The facts of the block a pass of `session` reads, each as its id and its line's text.
+fn delivered_facts(handler: &Handler, project: &Path, session: &str) -> Vec<(String, String)> {
+    let binding = session_binding(project, session);
+    let mut facts: Vec<(String, String)> = canonical_memory::read_project_memory(
+        &handler.kernel,
+        &binding.kernel_project,
+        session,
+        binding.config.memory_budget_tokens,
+    )
+    .rows()
+    .iter()
+    .filter(|row| row.category == "PROJECT_RULES")
+    .map(|row| (row.object_id.clone(), row.content.clone()))
+    .collect();
+    facts.sort();
+    facts
+}
+
+fn record_use(handler: &Handler, project: &Path, session: &str, path: &str) {
+    named_files::record(
+        &handler.kernel.kernel_store().unwrap(),
+        &session_binding(project, session).kernel_project,
+        session,
+        path,
+        86_400_000,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+}
+
+const USED: &str = "(the agent used it in 1 earlier session, last on 1970-01-02";
+
+/// A listed file that HEAD holds with the bytes on disk shows the minute of the commit that
+/// gave it those bytes, whatever later commits changed. A file edited since its commit, and a
+/// file HEAD does not hold, show the minute the file system holds for them, with `on disk`.
+#[tokio::test]
+async fn a_line_gives_the_files_last_commit_or_its_time_on_disk() {
+    use named_files::change_fixtures::{check_out, commit, repository_at};
+    let (handler, _dir, project) = project_with(&[]).await;
+    let repo = repository_at(&project);
+    // 2026-03-01T09:30:00Z and 2026-03-05T16:45:59Z.
+    let (first, second) = (1_772_357_400, 1_772_729_159);
+    let guide = ("docs/guide.md", "Wrap lines at 100 columns.\n");
+    let script = ("tools/check.sh", "exit 0\n");
+    let base = commit(&repo, first, &[], &[guide, script]);
+    let later = [guide, ("tools/check.sh", "exit 1\n"), ("README.md", "r\n")];
+    let tip = commit(&repo, second, &[base], &later);
+    check_out(&project, tip, &later);
+    std::fs::write(project.join("README.md"), "edited since its commit\n").unwrap();
+    std::fs::write(project.join("notes.txt"), "held by no commit\n").unwrap();
+    for path in ["docs/guide.md", "tools/check.sh", "README.md", "notes.txt"] {
+        record_use(&handler, &project, "s1", path);
+    }
+    assert_eq!(
+        delivered_lines(&handler, &project, "reader"),
+        [
+            format!(
+                "README.md {USED}{})",
+                changed_on_disk(&project, "README.md")
+            ),
+            format!("docs/guide.md {USED}; last changed 2026-03-01T09:30Z)"),
+            format!(
+                "notes.txt {USED}{})",
+                changed_on_disk(&project, "notes.txt")
+            ),
+            format!("tools/check.sh {USED}; last changed 2026-03-05T16:45Z)"),
+        ]
+    );
+}
+
+/// The block's revision reads a `NAMED_FILES` line up to its last-change clause: an edit of a
+/// listed file changes the line and leaves the revision, and a file that leaves the block
+/// changes the revision.
+#[tokio::test]
+async fn an_edit_of_a_listed_file_changes_its_line_and_leaves_the_revision() {
+    let (handler, _dir, project) =
+        project_with(&[(NOTES, BODY), ("docs/plan.md", "Plan.\n")]).await;
+    record_use(&handler, &project, "s1", NOTES);
+    record_use(&handler, &project, "s1", "docs/plan.md");
+    let binding = session_binding(&project, "reader");
+    let read = || {
+        let read = canonical_memory::read_project_memory(
+            &handler.kernel,
+            &binding.kernel_project,
+            "reader",
+            binding.config.memory_budget_tokens,
+        );
+        let lines: Vec<String> = read.rows().iter().map(|row| row.content.clone()).collect();
+        (read.revision().unwrap(), lines)
+    };
+    let (revision, lines) = read();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    // The file is written again with a modification time of 2001-09-09T01:46:40Z.
+    let earlier = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(project.join(NOTES))
+        .unwrap();
+    file.set_modified(earlier).unwrap();
+    drop(file);
+    let (edited_revision, edited) = read();
+    assert_eq!(
+        edited[1],
+        format!("{NOTES} {USED}; last changed 2001-09-09T01:46Z on disk)")
+    );
+    assert_ne!(edited[1], lines[1]);
+    assert_eq!(edited[0], lines[0]);
+    assert_eq!(edited_revision, revision);
+    std::fs::remove_file(project.join(NOTES)).unwrap();
+    let (removed_revision, removed) = read();
+    assert_eq!(removed, lines[..1]);
+    assert_ne!(removed_revision, revision);
+}
+
+/// A block that lists a file gives the minute each statement of the user was first recorded,
+/// from the commit log. A line another mark rewrote, a row of another writer whose text
+/// opens the same way, and the facts of a block that lists no file stay as stored, and so do
+/// the facts of the read that serves a summarizer no pass read serves.
+#[tokio::test]
+async fn a_block_that_lists_a_file_dates_the_users_statements() {
+    let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    let store = handler.kernel.kernel_store().unwrap();
+    let tabs = "Indent with tabs.";
+    let width = "Wrap lines at 100 columns.";
+    let tabs_seq = store_statement(&handler, &project, ("mem-tabs", "s1", tabs), true);
+    let width_seq = store_statement(&handler, &project, ("mem-width", "s2", width), true);
+    store_statement(
+        &handler,
+        &project,
+        ("mem-other", "s1", "Tag every release."),
+        false,
+    );
+    let stored = [
+        (
+            "mem-other".to_owned(),
+            "User stated: Tag every release.".to_owned(),
+        ),
+        ("mem-tabs".to_owned(), format!("User stated: {tabs}")),
+        ("mem-width".to_owned(), format!("User stated: {width}")),
+    ];
+    assert_eq!(delivered_facts(&handler, &project, "reader"), stored);
+
+    record_use(&handler, &project, "s1", NOTES);
+    let minute = |commit_seq: i64| {
+        let at = store.commit_recorded_at(commit_seq).unwrap().unwrap();
+        chrono::DateTime::from_timestamp_millis(at)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%MZ")
+            .to_string()
+    };
+    assert_eq!(
+        delivered_facts(&handler, &project, "reader"),
+        [
+            stored[0].clone(),
+            (
+                "mem-tabs".to_owned(),
+                format!("User stated: {tabs} (stated {})", minute(tabs_seq))
+            ),
+            (
+                "mem-width".to_owned(),
+                format!("User stated: {width} (stated {})", minute(width_seq))
+            ),
+        ]
+    );
+    // The session that made a statement is delivered neither it nor its time.
+    assert_eq!(
+        delivered_facts(&handler, &project, "s2")
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["mem-other", "mem-tabs"]
+    );
+    let binding = session_binding(&project, "reader");
+    let facts_alone = canonical_memory::read_project_facts(
+        &handler.kernel,
+        &binding.kernel_project,
+        "reader",
+        binding.config.memory_budget_tokens,
+    );
+    assert!(
+        facts_alone
+            .rows()
+            .iter()
+            .all(|row| !row.content.contains("(stated ")),
+        "{:?}",
+        facts_alone.rows()
+    );
+
+    // A line a mark rewrote after the statements were taken keeps the mark's text.
+    let mut response = canonical_memory::read_other_sessions(
+        &store,
+        &binding.kernel_project,
+        &[Some("reader")],
+        store.tip().unwrap(),
+        (1_000, 1 << 20),
+    )
+    .unwrap();
+    let statements = named_files::user_statements(&response);
+    let marked =
+        format!("User stated: {tabs} (stated 2026-01-05; contested 2026-02-01 by m: \"x\")");
+    response
+        .decisions
+        .get_mut("mem-tabs")
+        .unwrap()
+        .payload
+        .summary = marked.clone();
+    named_files::date_statements(&store, &mut response, &statements).unwrap();
+    assert_eq!(response.decisions["mem-tabs"].payload.summary, marked);
+    assert_eq!(
+        response.decisions["mem-width"].payload.summary,
+        format!("User stated: {width} (stated {})", minute(width_seq))
+    );
+    assert_eq!(
+        response.decisions["mem-other"].payload.summary,
+        "User stated: Tag every release."
+    );
+}
+
+/// The registry row under `id`, as its kind and its domain, when the registry holds one.
+fn registered(handler: &Handler, id: &str) -> Option<(String, String)> {
+    let store = handler.kernel.kernel_store().unwrap();
+    let (_, states) = store.object_states(&[id.to_owned()]).unwrap();
+    states[0].as_ref().map(|state| {
+        (
+            state.object.object_kind.clone(),
+            state.object.domain_id.clone(),
+        )
+    })
+}
+
+/// A store that holds another writer's row under the id `domain:named-files`, which a caller
+/// could store before the id was reserved, records a use all the same: the domain's row
+/// takes the first free id under `nfd_`, the older rows stay as they were, and a later
+/// session's block lists the file. A store that holds a row under every id the domain's row
+/// can take records nothing.
+#[tokio::test]
+async fn a_store_that_holds_a_row_under_the_domains_id_still_records() {
+    let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    let memory = Some(("decision".to_owned(), "memory".to_owned()));
+    for older in ["domain:named-files", "nfd_0"] {
+        store_statement(&handler, &project, (older, "s0", "An older row."), false);
+        assert_eq!(registered(&handler, older), memory);
+    }
+    assert_eq!(registered(&handler, "nfd_1"), None);
+    let said = format!("Read {NOTES} first.");
+    assert_eq!(
+        turn(&handler, &project, "s1", &said, read("a1", 2, NOTES)),
+        1
+    );
+    assert_eq!(stored_paths(&handler, &project), [NOTES]);
+    assert_eq!(delivered_paths(&handler, &project, "reader"), [NOTES]);
+    assert_eq!(
+        registered(&handler, "nfd_1"),
+        Some(("domain".to_owned(), "named-files".to_owned()))
+    );
+    for older in ["domain:named-files", "nfd_0"] {
+        assert_eq!(registered(&handler, older), memory, "{older}");
+    }
+    let facts = delivered_facts(&handler, &project, "reader");
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    // A second session's use is recorded in the domain the first registered.
+    assert_eq!(
+        turn(&handler, &project, "s2", &said, read("a1", 2, NOTES)),
+        1
+    );
+    assert_eq!(registered(&handler, "nfd_2"), None);
+
+    let (full, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    let taken = (0..8).map(|index| format!("nfd_{index}"));
+    for older in std::iter::once("domain:named-files".to_owned()).chain(taken) {
+        store_statement(&full, &project, (&older, "s0", "An older row."), false);
+    }
+    assert_eq!(turn(&full, &project, "s1", &said, read("a1", 2, NOTES)), 0);
+    assert!(stored_records(&full, &project).is_empty());
+}
+
+/// Over the routes: a Pi result whose row states no outcome shows no use. A result without
+/// `isError`, with the string `"false"`, with `true`, and with `false` beside a `content` that
+/// is no array each record nothing, and the result with the boolean `false` and a content
+/// array records its file.
+#[tokio::test]
+async fn a_pi_result_shows_a_use_when_its_row_states_success() {
+    let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    handler.bind_route(test_route(WRITER), session_binding(&project, "writer"));
+    let unknown: [fn(&mut Value); 4] = [
+        |result| {
+            result.as_object_mut().unwrap().remove("isError");
+        },
+        |result| result["isError"] = json!("false"),
+        |result| result["isError"] = json!(true),
+        |result| result["content"] = json!("the text of the file"),
+    ];
+    for (index, change) in unknown.into_iter().enumerate() {
+        let mut rows = pi_turn(true);
+        rows.truncate(3);
+        change(&mut rows[2]["message"]);
+        let served = serve_pi(&handler, WRITER, "writer", &rows).await.unwrap();
+        assert_eq!(served["status"], "ok", "{index}: {served}");
+        settle(&handler).await;
+        assert!(
+            stored_records(&handler, &project).is_empty(),
+            "result {index} records nothing"
+        );
+    }
+    let mut rows = pi_turn(true);
+    rows.truncate(3);
+    let served = serve_pi(&handler, WRITER, "writer", &rows).await.unwrap();
+    assert_eq!(served["status"], "ok", "{served}");
+    settle(&handler).await;
+    assert_eq!(stored_paths(&handler, &project), [NOTES]);
+}
+
+/// A message names a file by its absolute path under the project root, and a `read` of that
+/// absolute path uses it: the record holds the path relative to the root.
+#[tokio::test]
+async fn an_absolute_path_under_the_root_is_recorded_relative_to_it() {
+    let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    let absolute = project.join(NOTES);
+    let absolute = absolute.to_str().unwrap();
+    let said = format!("The release steps are in {absolute}.");
+    assert_eq!(
+        turn(&handler, &project, "s1", &said, read("a1", 2, absolute)),
+        1
+    );
+    assert_eq!(stored_paths(&handler, &project), [NOTES]);
+    assert_eq!(delivered_paths(&handler, &project, "reader"), [NOTES]);
 }

@@ -529,7 +529,7 @@ mod trim_memories_tests {
             let close = "</NAMED_FILES>\n";
             bytes(&block[start..block.find(close).expect("the element closes") + close.len()])
         };
-        let budget = 4_800.0;
+        let budget = 7_200.0;
         let kept = trim_block_to_budget(&files, &lasting, &[], budget, bytes);
         let named = kept
             .iter()
@@ -540,11 +540,11 @@ mod trim_memories_tests {
             "the eighth holds some of the files: {named}"
         );
         assert_eq!(kept[..named], files[..named], "a run from the first row");
-        assert!(element_tokens(&kept) as f64 <= 600.0, "an eighth of 4,800");
+        assert!(element_tokens(&kept) as f64 <= 900.0, "an eighth of 7,200");
         let mut longer = files[..=named].to_vec();
         longer.extend_from_slice(&kept[named..]);
         assert!(
-            element_tokens(&longer) as f64 > 600.0,
+            element_tokens(&longer) as f64 > 900.0,
             "the next file exceeds the eighth"
         );
         assert!(bytes(&render_delivered_memory_block(&kept)) as f64 <= budget);

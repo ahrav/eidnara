@@ -1020,3 +1020,26 @@ fn a_chunk_holds_a_payload_up_to_the_inline_size() {
         );
     }
 }
+
+/// The batch read returns the time of each commit the log holds, equal to the single read's, and
+/// no entry for a sequence the log does not hold or for an empty request.
+#[test]
+fn a_batch_of_commits_reports_the_time_each_was_recorded() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_with(directory.path(), 2, 0, 0);
+    let tip = store.tip().unwrap();
+    assert!(tip >= 2);
+    let mut asked: Vec<i64> = (1..=tip).collect();
+    asked.extend([tip, 0, tip + 1, -4]);
+    let times = store.commits_recorded_at(&asked).unwrap();
+    assert_eq!(times.len() as i64, tip);
+    for commit_seq in 1..=tip {
+        assert_eq!(
+            times.get(&commit_seq).copied(),
+            store.commit_recorded_at(commit_seq).unwrap(),
+            "commit {commit_seq}"
+        );
+    }
+    assert!(store.commits_recorded_at(&[]).unwrap().is_empty());
+    assert!(store.commits_recorded_at(&[tip + 1]).unwrap().is_empty());
+}

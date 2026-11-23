@@ -737,7 +737,7 @@ pub(crate) fn ensure_scope(
     Ok(())
 }
 
-const DOMAIN_SOURCE_KIND: &str = "kernel_route";
+pub(crate) const DOMAIN_SOURCE_KIND: &str = "kernel_route";
 
 /// What precedes a domain's id in the object id of the domain's own row.
 pub(crate) const DOMAIN_OBJECT_PREFIX: &str = "domain:";

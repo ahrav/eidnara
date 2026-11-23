@@ -76,7 +76,14 @@ impl CanonicalMemorySnapshot {
             .chain(in_sections(SECTIONS_AFTER_FACTS))
         {
             row.category.hash(&mut hasher);
-            render_memory_line(row).hash(&mut hasher);
+            let line = render_memory_line(row);
+            // A `NAMED_FILES` line enters the revision without its
+            // last-change clause, which reads the work tree.
+            if row.category == crate::memory_render::NAMED_FILES_SECTION {
+                crate::named_files::revised_part(&line).hash(&mut hasher);
+            } else {
+                line.hash(&mut hasher);
+            }
         }
         let served_set_digest =
             kernel::served_set_digest(rendered.iter().map(|row| row.object_id.as_str()));
@@ -163,13 +170,17 @@ impl ServedSet {
     }
 }
 
-/// The rows the block renders, in object-id order. The served-set digest derives from them, and the revision reads them with the `NAMED_FILES` and `CURRENT_WORK` rows in the supplied order.
+/// The rows the block renders, in object-id order, rows of one id in category order. The served-set digest derives from them, and the revision reads them with the `NAMED_FILES` and `CURRENT_WORK` rows in the supplied order.
 fn rendered_rows(rows: &[CanonicalMemory]) -> Vec<&CanonicalMemory> {
     let mut rendered: Vec<&CanonicalMemory> = rows
         .iter()
         .filter(|row| renders_in_block(&row.category))
         .collect();
-    rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+    rendered.sort_by(|left, right| {
+        left.object_id
+            .cmp(&right.object_id)
+            .then_with(|| left.category.cmp(&right.category))
+    });
     rendered
 }
 
@@ -294,15 +305,22 @@ fn read_at_tip(
             tip,
             (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
         )?;
-        show_contests(&store, project, &mut response)?;
         let mut files = Vec::new();
+        let mut statements = Vec::new();
         if named_files {
             let (lines, cut_short) =
                 crate::named_files::delivered(&store, project, session_id, response.known_as_of)?;
             // The flag covers both reads the composition selects from.
             response.truncated |= cut_short;
+            // A block that lists a file dates the user's statements, so a
+            // reader can order a statement and a file's last change.
+            if !lines.is_empty() {
+                statements = crate::named_files::user_statements(&response);
+            }
             files = lines;
         }
+        show_contests(&store, project, &mut response)?;
+        crate::named_files::date_statements(&store, &mut response, &statements)?;
         Ok(injectable_snapshot(response, files, memory_budget_tokens))
     };
     match read() {
@@ -1729,5 +1747,80 @@ mod tests {
         ));
         assert!(empty.rows().is_empty());
         assert_ne!(withheld.composition(), empty.composition());
+    }
+
+    /// The revision reads a `NAMED_FILES` line up to its last-change clause:
+    /// two blocks whose lines differ in that clause alone have one revision,
+    /// and a line that differs before the clause is another revision. A
+    /// fact's line enters whole, the same words included.
+    #[test]
+    fn the_revision_leaves_out_a_named_files_last_change() {
+        let block = |file: &str, fact: &str| {
+            CanonicalMemorySnapshot::new(
+                1,
+                false,
+                vec![
+                    CanonicalMemory {
+                        object_id: "nfu_a".to_string(),
+                        category: crate::memory_render::NAMED_FILES_SECTION.to_string(),
+                        content: file.to_string(),
+                    },
+                    CanonicalMemory {
+                        object_id: "rule".to_string(),
+                        category: "PROJECT_RULES".to_string(),
+                        content: fact.to_string(),
+                    },
+                ],
+            )
+        };
+        let used = "docs/guide.md (the agent used it in 1 earlier session, last on 2026-01-02";
+        let fact = "The guide moved; last changed 2026-03-01.";
+        let committed = block(&format!("{used}; last changed 2026-03-01T09:30Z)"), fact);
+        let edited = block(
+            &format!("{used}; last changed 2026-04-02T10:00Z on disk)"),
+            fact,
+        );
+        assert_ne!(committed.rows(), edited.rows());
+        assert_eq!(committed.revision(), edited.revision());
+        assert_eq!(committed.served_set_digest(), edited.served_set_digest());
+        let used_twice = used.replace("1 earlier session", "2 earlier sessions");
+        let again = block(
+            &format!("{used_twice}; last changed 2026-03-01T09:30Z)"),
+            fact,
+        );
+        assert_ne!(committed.revision(), again.revision());
+        let other_fact = block(
+            &format!("{used}; last changed 2026-03-01T09:30Z)"),
+            "The guide moved; last changed 2026-04-02.",
+        );
+        assert_ne!(committed.revision(), other_fact.revision());
+    }
+
+    /// Two rows of one id in two categories enter the revision in category
+    /// order, whichever the caller supplies first: the block renders the
+    /// same bytes for both orders, and the revision and the served set are
+    /// the same.
+    #[test]
+    fn rows_of_one_id_enter_the_revision_in_category_order() {
+        let row = |category: &str, content: &str| CanonicalMemory {
+            object_id: "mem_shared".to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let naming = row("NAMING", "Types are nouns.");
+        let rule = row("PROJECT_RULES", "Keep the public contract.");
+        let one = vec![naming.clone(), rule.clone()];
+        let other = vec![rule, naming];
+        assert_eq!(
+            crate::memory_render::render_delivered_memory_block(&one),
+            crate::memory_render::render_delivered_memory_block(&other)
+        );
+        let (one, other) = (
+            CanonicalMemorySnapshot::new(1, false, one),
+            CanonicalMemorySnapshot::new(1, false, other),
+        );
+        assert_eq!(one.revision(), other.revision());
+        assert_eq!(one.served_ids(), other.served_ids());
+        assert_eq!(one.served_set_digest(), other.served_set_digest());
     }
 }

@@ -9690,8 +9690,8 @@ impl HandlerCore {
         } = intake;
         // Resolve first (spec D2): every consumer of the pass reads the cut window and the
         // ordinals the daemon derived for it.
-        // The submitted window shows the turn in progress; resolution cuts it. The observation is
-        // kept with the pass and its record is started once the pass's transform has succeeded.
+        // The named-file observation reads the submitted window, which shows the turn in progress
+        // and which resolution cuts. Its record is started once the pass's transform has succeeded.
         let named_files = self.observe_named_files(&binding, &parsed);
         // The observation holds what the directory was read for, so the request, and every
         // snapshot and lease made of it, carries the directory no further.

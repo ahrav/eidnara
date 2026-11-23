@@ -31,7 +31,7 @@ use super::sidecar::{
 };
 use super::sidecar::{DecodeSidecar, DecodedHarnessMessages, HarnessMessageMeta};
 
-const HARNESS: &str = "pi";
+pub(crate) const HARNESS: &str = "pi";
 
 /// Prefix of every reserved row id. Pi entry ids are lowercase hexadecimal, optionally
 /// hyphenated, so no host id contains the `:` this prefix carries.

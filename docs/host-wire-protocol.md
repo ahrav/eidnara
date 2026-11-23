@@ -1470,23 +1470,33 @@ primary Pi session whose configuration permits memory capture, and whose
 request carries the empty `working_directory` (the session works in the
 project root), is observed before its window is resolved. The observation
 reads the last message of the user and the rows after it. A message of the
-user is a row that Pi gives the user role and that carries neither the
-synthetic nor the summary mark: a prompt the user types, a template the
-user invokes, or a prompt an extension sends in the user's name. The rows
+user is a row that Pi gives the user role: a prompt the user types, a
+template the user invokes, or a prompt an extension sends in the user's
+name; the daemon's own synthetic and summary rows, which another harness's
+window can hold under the user role, are none. The rows
 before that message show nothing, since a fork copies its parent's rows
 into a session of another id. A message whose text parts hold more than
-64 KiB together names no file. Each text part is read up to its first `<`
+64 KiB together names no file. A text part names files when it is text
+someone typed, by the test the summarizer's lift evidence applies to a user
+message: a part that opens with a marker the transform reads as injected
+by a plugin, such as `[SYSTEM DIRECTIVE:` or a whole `<system-reminder>`
+element, and the text the Pi codec gives a bash execution, name nothing
+and count toward the 64 KiB. A prompt an extension
+sends with no such marker reads as the user's. Each typed text part is read up to its first `<`
 that an ASCII letter or a `/` follows, where a tag opens: a block another
 writer adds to a message, such as an attached file or a hint, opens with a
 tag, so the text after it, the sender's included, names no file. From that
 text the daemon
 takes the runs of ASCII letters, digits, and `._-/+@` that hold a `.` or a
 `/` once the periods that end them are dropped, and reads the first 32
-distinct ones, each as written and, for a run that opens with Pi's
-file-reference mark `@`, without that character. A path is held relative to
+distinct ones, each as one path: the run as written, or, for a run that
+opens with Pi's file-reference mark `@`, the run without that one
+character, as Pi's `read` opens it, so `@docs/a.md` names `docs/a.md` and
+`@@scope/pkg.json` names `@scope/pkg.json`. A path is held relative to
 the project root: a relative path is taken without its leading `./` marks,
-an absolute path that opens with the root as the daemon spells it is taken
-relative to it, and the result names a file when it is at most 256 bytes of
+an absolute path that opens with the root as the daemon spells it and one
+`/`, which a root that ends with `/` supplies itself, as the root `/` does,
+is taken relative to it, and the result names a file when it is at most 256 bytes of
 those characters and passes the confined-path rules (at most 16 components,
 none of them empty, `.`, `..`, or `.git` or `.eidnara` in any letter case).
 The daemon normalizes nothing, and a `read` argument that holds another
@@ -1496,9 +1506,15 @@ A call after the message uses a named file when it is a call of Pi's `read`
 whose `path` argument, read without one leading `@` as Pi opens it, names
 the file, or a call of Pi's `bash` whose `command` names the file in one of
 its first 256 such runs, read as written with their periods, and when the
-call's id is the id of no other call after the message and of exactly one
-result, which follows the call and is text, JSON, or content that carries
-no error. A file the
+call's id, as Pi wrote it with its item suffix, is the id of no other call
+after the message and of exactly one
+result, which follows the call, is text, JSON, or content that carries
+no error, and whose Pi row states the outcome: its `isError` is the boolean
+`false` and its `content` is an array. A result whose row holds no
+`isError`, or one of another type, shows no use, while the window still
+renders it as Section 8 decodes it. The `bash` match is one of spelling: a
+path the command line names in a comment, or after a `cd`, matches as the
+same path elsewhere in the line does. A file the
 turn also edits is used the same way. When the pass's transform has
 succeeded, the first eight observed paths that the session has not
 recorded, that are regular files beneath
@@ -1516,17 +1532,28 @@ paths at most while the daemon holds its recorded paths, which it does for
 the 256 sessions that recorded a path last. At most four passes' records
 are written at once. A pass that finds four being written, a pass observed
 before a `session.delete` that its write follows, a session id the
-redaction would rewrite, and a write the Kernel refuses record nothing; a
+redaction would rewrite, a project root that cannot be opened, a Kernel
+that is unavailable, a daemon that is shutting down, and a write the Kernel
+refuses record nothing; a
 later pass that shows the same use is observed and written under the same
-rules. The records hold no text of a file. The daemon alone writes and
+rules. The records hold no text of a file. The domain's own row takes the
+id `domain:named-files`. In a store where another row holds that id, which
+a caller could write before the id was reserved, it takes the first of
+`nfd_0` to `nfd_7` that the registry holds no row for, live or invalidated;
+the older rows stay as they are, the records name the domain by
+`named-files` whichever id its row has, and a store that holds a row under
+every one of the nine ids refuses each named-file write. The daemon alone writes and
 changes the domain: a `kernel.commit` operation that names `named-files`,
-that writes a row under the id prefixes `nfu_` or `dnf_` or the id
+that writes a row under the id prefixes `nfu_`, `dnf_`, or `nfd_` or the id
 `domain:named-files`, or that replaces, retires, or marks one of the
 domain's rows, is refused as `invalid_input`, and so is a
 `kernel.artifact.ingest.begin` whose artifact's object id is one of those
-ids or an id under the verifier's prefixes, or whose artifact names the
+ids or an id under the attestation verifier's prefixes (`verattest:`,
+`verattestdec:`, `verwitness:`, `verwitnessobj:`), or whose artifact names the
 domain, the source kind `named_file_recorder`, or the verifier's source
-kind; a path leaves the element when its file does. The search projection publishes none of the records, so
+kind `verifier`; a path leaves the element a pass composes when its file
+does, and a pass that serves the m0 of an earlier pass serves that pass's
+element. The search projection publishes none of the records, so
 `eidnara_search` ranks none, and a `kernel.read` page returns them with
 `domain_id` `named-files`. A pass reads the newest records
 under the read's row and byte bounds, counts the ones the recorder wrote,
@@ -1536,16 +1563,49 @@ each, then by the last use, then by path, looks for the files of the first
 32, and lists up to eight that are regular files beneath the project root at
 that moment, so a path enters a block only while its file exists; a read
 its bounds cut short marks the composition truncated. A line is
-`<path> (the agent used it in <n> earlier session(s), last on <date>)`,
+`<path> (the agent used it in <n> earlier session(s), last on <date>; last changed <time>)`,
 the date being the UTC day of `used_ms`; it carries no id, and the record's
-id is no handle of `eidnara_memory`. The element is charged first, to an
+id is no handle of `eidnara_memory`. `<time>` is when the file last
+changed, as the composing pass reads it, as a UTC minute
+(`2026-03-01T09:30Z`). When the project root opens as a Git work tree, HEAD
+holds a regular or executable blob at the path, and the file's bytes (at
+most 256 KiB of them) hash to that blob, the time is the committer time of
+the commit that gave the file those bytes: the daemon walks from HEAD to
+the first parent that holds the same blob, as `git log` simplifies the
+history of one file, and stops at the commit none of whose parents holds
+it. A walk reads at most 256 parents; one that reaches that bound, or a
+parent it cannot read, as a shallow clone has, gives the committer time of
+the commit it stopped at, and the line reads `<time> or earlier`. The walk
+of a path is kept for the HEAD it was read at, for the 64 project roots
+read last and 64 paths of each. Any other file reads `<time> on disk`, the
+file's modification time: a file HEAD holds no blob for, a file edited
+since its commit, a larger file, a file whose checkout filters change its
+bytes, and a file of a project whose root opens as no work tree (a
+directory beneath a repository's root among them) or whose history cannot
+be read. The commit time is chosen over the modification time because a
+clone or a checkout writes the file anew and leaves the commit time as it
+is. The block's revision reads a line up to `; last changed`, so an edit or
+a commit of a listed file changes no revision and folds no m0; the line a
+session holds is the one its last composition read. When the element lists
+a file, each fact that capture stored as the user's statement ends with
+` (stated <time>)`, the UTC minute of the commit that first recorded the
+statement, read from the commit log in one statement for the pass; a
+statement shown with its contest already carries the day it was stated and
+takes no second mark, a statement whose commit the log holds no time for
+is shown as stored, and the summarizer's block and `eidnara_search` show
+no such mark. The element is charged first, to an
 eighth of `memory.injection_budget_tokens`: it holds the longest leading run
 of the lines that fits that share with its tags, the other facts are then
 selected against the rest of the budget, and the element is absent when no
 line fits. Its `note` says that a message of the user named the files, that
-the agent read them or passed them to a command, that the paths are relative
+the agent read them or named them in a command it ran, that the paths are relative
 to the repository root, that each file existed when the block was composed,
-and that memory holds none of their content. A pass that re-renders m0
+that memory holds none of their content, that each line gives the file's
+last change as of that moment and each `User stated` line the time it was
+stated, and which of the two is newer: a statement made after a file's
+last change is newer than the file, and a file changed after a statement is
+newer than the statement in the lines changed since then, which the
+repository's history dates. A pass that re-renders m0
 composes the element anew; a pass that serves the m0 of an earlier pass
 serves that pass's list. The block the summarizer's prompt carries holds no
 `NAMED_FILES` element: a summarizer that fires on a pass whose read serves it
@@ -1872,7 +1932,7 @@ Paging rule. A request may be split into pages that share one `transform_page_id
 
 #### 7.10.4 Outcomes and errors
 
-The daemon resolves a window against one snapshot of the session's coverage, without writing, before any other work of the pass except the named-file observation of Section 7.9, which reads the submitted window and writes nothing:
+The daemon resolves a window against one snapshot of the session's coverage, without writing to that coverage, before any work of the pass that reads the resolved window. Two steps of Section 7.9 read the submitted window before it: the source checkpoint, which can queue capture sources, and the named-file observation, which writes nothing:
 
 - The declared segment is the rendered boundary: the window is served as submitted.
 - The declared segment is older than the rendered boundary and the rendered boundary's message is in the window: the daemon slices the window at that message and serves the rest (a stale slice); the consumer's coordinates are unchanged (Section 7.10.5).
