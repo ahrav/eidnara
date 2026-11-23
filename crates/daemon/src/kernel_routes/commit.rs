@@ -753,18 +753,24 @@ pub(crate) fn ensure_domain(
     }
     if !envelope.domain_exists(domain_id)? {
         let object_id = format!("{DOMAIN_OBJECT_PREFIX}{domain_id}");
-        envelope.insert_domain(DomainSpec {
-            domain_id: domain_id.to_string(),
-            object_id: object_id.clone(),
-            name: domain_id.to_string(),
-            source_kind: DOMAIN_SOURCE_KIND.to_string(),
-            source_id: object_id,
-            source_revision: 1,
-            sensitivity: Sensitivity::Normal,
-        })?;
+        envelope.insert_domain(domain_spec(domain_id, object_id))?;
     }
     ready.insert(domain_id.to_string());
     Ok(())
+}
+
+/// The row of the domain `domain_id` under `object_id`, which is also the
+/// row's source id.
+pub(crate) fn domain_spec(domain_id: &str, object_id: String) -> DomainSpec {
+    DomainSpec {
+        domain_id: domain_id.to_string(),
+        object_id: object_id.clone(),
+        name: domain_id.to_string(),
+        source_kind: DOMAIN_SOURCE_KIND.to_string(),
+        source_id: object_id,
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+    }
 }
 
 /// The object, when its scope names the bound project by the same algebra

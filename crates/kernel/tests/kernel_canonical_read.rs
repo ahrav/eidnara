@@ -1027,8 +1027,21 @@ fn a_chunk_holds_a_payload_up_to_the_inline_size() {
 fn a_batch_of_commits_reports_the_time_each_was_recorded() {
     let directory = tempfile::tempdir().unwrap();
     let store = store_with(directory.path(), 2, 0, 0);
+    // A commit written some milliseconds after the others has a time of its own.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store
+        .commit(intent("later"), |envelope| {
+            envelope.insert_decision(decision("memory-later", MEMORY, "preference"))?;
+            envelope.record_admission(explicit("memory-later"))?;
+            Ok(String::new())
+        })
+        .unwrap();
     let tip = store.tip().unwrap();
     assert!(tip >= 2);
+    assert_ne!(
+        store.commit_recorded_at(1).unwrap(),
+        store.commit_recorded_at(tip).unwrap()
+    );
     let mut asked: Vec<i64> = (1..=tip).collect();
     asked.extend([tip, 0, tip + 1, -4]);
     let times = store.commits_recorded_at(&asked).unwrap();
