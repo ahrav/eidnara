@@ -385,13 +385,14 @@ pub fn sweep_and_sample(
         }
     };
     let mut advanced = swept_jobs + swept_selections > 0;
-    // Jobs settled a retention window ago give their rows and their quota charge back, so review capacity follows the work of the last window.
-    match store.retire_settled_memory_reviewer_jobs(now_ms) {
-        Ok(retired) => advanced |= retired > 0,
-        Err(error) => {
-            eprintln!("daemon: memory_reviewer retirement sweep failed: {error}");
-            return Some(unavailable(advanced));
-        }
+    if cancelled() {
+        return None;
+    }
+    // Jobs settled a retention window ago give their rows and their quota charge back, so review capacity follows the work of the last window. A sweep the store fails leaves those jobs for the next pass, and the Kernel's maintenance below still runs.
+    let retirement = store.retire_settled_memory_reviewer_jobs(now_ms);
+    match &retirement {
+        Ok(retired) => advanced |= *retired > 0,
+        Err(error) => eprintln!("daemon: memory_reviewer retirement sweep failed: {error}"),
     }
     if let Some(kernel) = kernel {
         if cancelled() {
@@ -420,6 +421,9 @@ pub fn sweep_and_sample(
         if !reconciled {
             return Some(unavailable(advanced));
         }
+    }
+    if retirement.is_err() {
+        return Some(unavailable(advanced));
     }
     if cancelled() {
         return None;
@@ -1051,6 +1055,65 @@ mod tests {
             (MAINTENANCE_PASSES_PER_SLICE, true),
             "the pass cap bounds a deep backlog"
         );
+    }
+
+    /// A lifecycle pass retires a job settled a retention window ago: the job's row leaves the store, its receipt charge returns to the quota the sample reports, and the pass counts as progress. A pass inside the window leaves the job.
+    #[test]
+    fn a_pass_retires_a_job_settled_a_retention_window_ago() {
+        use memory_store::memory_reviewer_jobs::{
+            MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES, MEMORY_REVIEWER_SETTLED_RETENTION_MS,
+        };
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            store_dir.path(),
+            "eidnara-memory_reviewer-lifecycle-test",
+        ))
+        .unwrap();
+        let t0 = crate::now_ms();
+        let memory_store::memory_reviewer_jobs::ReserveOutcome::Reserved(job) = store
+            .reserve_memory_reviewer_job("git:p", &producer(1), &inputs(1), t0)
+            .unwrap()
+        else {
+            panic!("fresh inputs reserve a job")
+        };
+        let expired_at = t0 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS;
+        let charged = |pass: &Pass| {
+            pass.block
+                .facts
+                .as_ref()
+                .expect("facts sampled")
+                .receipt_charge_bytes
+        };
+        let settled =
+            sweep_and_sample(&store, None, expired_at, None, &|| false).expect("not cancelled");
+        assert_eq!(
+            settled.block.swept_jobs, 1,
+            "the queue deadline closed the job"
+        );
+        assert_eq!(charged(&settled), MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES);
+        let retire_at = expired_at + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+        let early =
+            sweep_and_sample(&store, None, retire_at - 1, None, &|| false).expect("not cancelled");
+        assert!(!early.advanced);
+        assert!(
+            store
+                .lookup_memory_reviewer_job("git:p", &job.causal_identity)
+                .unwrap()
+                .is_some()
+        );
+        let pass =
+            sweep_and_sample(&store, None, retire_at, None, &|| false).expect("not cancelled");
+        assert!(pass.healthy);
+        assert!(pass.advanced, "retiring a settled job is progress");
+        assert_eq!(charged(&pass), 0, "the retired job returned its charge");
+        assert!(
+            store
+                .lookup_memory_reviewer_job("git:p", &job.causal_identity)
+                .unwrap()
+                .is_none()
+        );
+        // A pass cancelled before the retirement writes nothing.
+        assert!(sweep_and_sample(&store, None, retire_at, None, &|| true).is_none());
     }
 
     /// The sweep closes reserved work past its deadline with a recorded outcome, leaves live work alone, and the sample reports every count content-free; a staged review input past its deadline is abandoned by the Kernel's own maintenance in the same pass.

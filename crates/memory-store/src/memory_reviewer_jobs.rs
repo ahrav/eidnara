@@ -1,8 +1,8 @@
 //! MemoryReviewer review jobs and frozen Memory Classifier selections.
 //!
-//! A job row is a permanent receipt for the store incarnation. It is `Reserved` when a producer reserves its causal identity and worst-case allowance, `Ready` once the producer activates it with reference-only input, and `Terminal` with one content-free outcome afterwards; nothing deletes a row or reopens a terminal one. `(project, causal_identity)` deduplicates identical inputs across firings: the identity is a digest of the review target plus the fingerprint of question template, signals, required evidence with availability, and policy versions, so a new contradiction, newly available evidence, or a policy change permits exactly one new job at an unchanged target, while unrelated writes, clocks, and firing identifiers change nothing.
+//! A job row is the receipt of its review. It is `Reserved` when a producer reserves its causal identity and worst-case allowance, `Ready` once the producer activates it with reference-only input, and `Terminal` with one content-free outcome afterwards; a terminal row is never reopened, and the retirement sweep deletes it a retention window after its queue deadline. `(project, causal_identity)` deduplicates identical inputs across firings: the identity is a digest of the review target plus the fingerprint of question template, signals, required evidence with availability, and policy versions, so a new contradiction, newly available evidence, or a policy change permits exactly one new job at an unchanged target, while unrelated writes, clocks, and firing identifiers change nothing.
 //!
-//! Capacity counts `Reserved` and `Ready` rows: 64 per project, 256 per host. Metadata quota counts each row's receipt charge plus allowances for non-terminal rows and frozen pages: 64 MiB per project, 256 MiB per host. Terminal jobs and pages release allowances and drop inputs or references but retain receipt charges, which bounds cumulative admitted work for the incarnation. Exhaustion refuses new work without deletion. Queue deadlines are fixed at reservation.
+//! Capacity counts `Reserved` and `Ready` rows: 64 per project, 256 per host. Metadata quota counts each row's receipt charge plus allowances for non-terminal rows and frozen pages: 64 MiB per project, 256 MiB per host. Terminal jobs and pages release allowances and drop inputs or references. A terminal job keeps its receipt charge until the retirement sweep deletes it, so the quota bounds the jobs of one retention window; a terminal page keeps its charge for the store incarnation. Exhaustion refuses new work until jobs retire. Queue deadlines are fixed at reservation.
 //!
 //! Every write below composes with a caller's own fenced transaction through the `*_in_tx` primitives, so a producer can activate a job or enqueue a frozen page together with its own progress and commit both or neither.
 
@@ -40,11 +40,13 @@ pub const MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT: u64 = 64 * 1024 * 1024
 pub const MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST: u64 = 256 * 1024 * 1024;
 /// How long a settled job keeps its rows, measured from its queue deadline: ninety days. The window is far past the longest review hold (seven days) and the queue lifetime (one day), so every read, acceptance, takeover, and replay a settled job can still serve has ended when its rows go. Once they are gone the job's causal identity is free again, so a memory with unchanged evidence is reviewed once more at the next selection: each live memory is reviewed about once per window.
 pub const MEMORY_REVIEWER_SETTLED_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1_000;
+/// The job-family writes whose scan audit a job owns under its causal identity. The retirement sweep retires the owners of each for the jobs it deletes.
+const JOB_OPERATIONS: [&str; 3] = ["reserve", "activate", "rebind"];
 /// Settled jobs one retirement sweep deletes, so a sweep's write is bounded whatever the backlog.
 pub const MEMORY_REVIEWER_RETIREMENT_BATCH: usize = 256;
 /// Receipt charge every admitted job keeps until it is retired: the job row, its receipt, up to four attempt markers, and the scan-audit rows their caller text leaves, all sized at their byte bounds. Worst case: the job row (project 256, firing id 256, target 1024, template 256, digests 128) about 2 KiB; the receipt (project, authority store 256, claim id 200, candidate 256, digest 64, incarnations 64) about 1.3 KiB; four markers (project, provider 128, model 256, credential 256, digests 128) about 1 KiB each; the primary-key index entry each row repeats, about 2.5 KiB together; and the scan audit, roughly 2.6 KiB per dispatch (one batch, one domain owner, four field scans and owner copies with their indexes), about 1 KiB for the selection, and about 3 KiB for the reservation and activation identities, some 14 KiB in all. A terminal row keeps it until [`MemoryStore::retire_settled_memory_reviewer_jobs`] deletes the row [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] after its queue deadline, so the quota bounds the jobs of one retention window: `MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT / MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES` (2,048) jobs per project and four times that per host in any ninety days, after which reservation is refused until older jobs retire.
 pub const MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES: u64 = 32 * 1024;
-/// Permanent receipt charge each frozen page keeps once terminal: the compact row (project, slot id, and selection attempt at 256 bytes each, plus state and timestamps) and the primary-key index entry that repeats those keys, about 1.7 KiB at the bounds.
+/// Receipt charge each frozen page keeps for the store incarnation once terminal, which the retirement sweep leaves in place: the compact row (project, slot id, and selection attempt at 256 bytes each, plus state and timestamps) and the primary-key index entry that repeats those keys, about 1.7 KiB at the bounds.
 pub const FROZEN_PAGE_RECEIPT_CHARGE_BYTES: u64 = 4096;
 /// Worst-case temporary allowance a reservation prepays for its input, holds, manifest, and attempt metadata; released when the job is terminal.
 pub const MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES: u64 = 32 * 1024;
@@ -250,7 +252,7 @@ pub enum MemoryReviewerJobRefusal {
     ProjectSelectionCapacity,
     #[error("the host already has {MAX_FROZEN_SELECTIONS_PER_HOST} frozen selections")]
     HostSelectionCapacity,
-    #[error("the permanent metadata quota is exhausted for this store incarnation")]
+    #[error("the metadata quota is exhausted until settled jobs retire")]
     MetadataQuota,
     #[error("no row has this identity")]
     Missing,
@@ -858,7 +860,7 @@ pub fn rebind_reserved_memory_reviewer_job_in_tx(
         .ok_or_else(|| refuse(MemoryReviewerJobRefusal::Missing))
 }
 
-/// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay. A terminal row is never reopened, and a finish at or after the queue deadline is refused as expired so the permanent outcome does not depend on whether the sweep ran first.
+/// Records one terminal outcome for a non-terminal row, drops its input, and releases its allowance; the compact receipt and its charge stay until the row is retired. A terminal row is never reopened, and a finish at or after the queue deadline is refused as expired so the recorded outcome does not depend on whether the sweep ran first.
 pub fn finish_memory_reviewer_job_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -940,7 +942,7 @@ pub(crate) fn settle_memory_reviewer_reservation(
 ) -> Result<bool, MemoryReviewerJobError> {
     store.memory_reviewer_transaction(
         project,
-        "settle",
+        ("settle", None),
         |_| Ok(()),
         |conn| {
             if !crate::clear_memory_reviewer_reservation_tx(conn, session_id, expected)? {
@@ -1474,15 +1476,18 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// One fenced write: `prepare` records the identities the write carries so a detected secret refuses it, then `body` runs the transaction-local primitive.
+    /// One fenced write: `prepare` records the identities the write carries so a detected secret refuses it, then `body` runs the transaction-local primitive. `owner` names what owns the scan audit of the write's caller text beside the operation: a job's causal identity for a write about one job, so the retirement sweep retires that audit with the job.
     fn memory_reviewer_transaction<T>(
         &self,
         project: &str,
-        operation: &str,
+        (operation, owner): (&str, Option<&str>),
         prepare: impl FnOnce(&mut PreparedWrite) -> Result<(), MemoryStoreError>,
         body: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, MemoryReviewerJobError> {
-        let mut write = memory_reviewer_write(project, &["memory_reviewer", operation])?;
+        debug_assert!(owner.is_none() || JOB_OPERATIONS.contains(&operation));
+        let mut owner_parts = vec!["memory_reviewer", operation];
+        owner_parts.extend(owner);
+        let mut write = memory_reviewer_write(project, &owner_parts)?;
         prepare(&mut write)?;
         let refusal = std::cell::Cell::new(None);
         let result = write.execute(&self.inner, |coordinated| {
@@ -1502,9 +1507,11 @@ impl MemoryStore {
         inputs: &CausalInputs,
         now_ms: i64,
     ) -> Result<ReserveOutcome, MemoryReviewerJobError> {
+        // The audit of a reservation's caller text belongs to the job it reserves. Inputs outside their bounds name no job and are refused inside the write.
+        let causal_identity = inputs.causal_identity().ok();
         self.memory_reviewer_transaction(
             project,
-            "reserve",
+            ("reserve", causal_identity.as_deref()),
             |write| {
                 write.identity("producer", &producer.producer)?;
                 write.identity("firing_id", &producer.firing_id)?;
@@ -1531,7 +1538,7 @@ impl MemoryStore {
     ) -> Result<MemoryReviewerJob, MemoryReviewerJobError> {
         self.memory_reviewer_transaction(
             project,
-            "activate",
+            ("activate", Some(causal_identity)),
             |write| {
                 let MemoryReviewerJobInput {
                     subject,
@@ -1568,7 +1575,7 @@ impl MemoryStore {
     ) -> Result<MemoryReviewerJob, MemoryReviewerJobError> {
         self.memory_reviewer_transaction(
             project,
-            "rebind",
+            ("rebind", Some(causal_identity)),
             |write| {
                 write.identity("producer", &producer.producer)?;
                 write.identity("firing_id", &producer.firing_id)?;
@@ -1605,7 +1612,7 @@ impl MemoryStore {
         }
         self.memory_reviewer_transaction(
             project,
-            "finish",
+            ("finish", None),
             |_| Ok(()),
             |conn| {
                 let job =
@@ -1730,7 +1737,7 @@ impl MemoryStore {
             .map_err(MemoryReviewerJobError::Store)
     }
 
-    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its ledger writes own. The totals triggers return each job's charge to its project, so the quota bounds the jobs of one retention window. Returns the jobs retired.
+    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its own writes left: the reservation, activation and rebinds of the job, its ledger writes, and the completion's selection. The totals triggers return each job's charge to its project, so the quota bounds the jobs of one retention window. Returns the jobs retired.
     pub fn retire_settled_memory_reviewer_jobs(
         &self,
         now_ms: i64,
@@ -1766,17 +1773,27 @@ impl MemoryStore {
                         "DELETE FROM memory_reviewer_receipts WHERE project = ?1 AND causal_identity = ?2",
                     )?
                     .execute(params![project, causal_identity])?;
-                    for operation in crate::memory_reviewer_ledger::LEDGER_OPERATIONS {
+                    let jobs = DurableWriteFamily::MemoryReviewerJobs.owner_kind();
+                    let owners = JOB_OPERATIONS
+                        .iter()
+                        .map(|operation| (jobs, ["memory_reviewer", operation]))
+                        .chain(
+                            crate::memory_reviewer_ledger::LEDGER_OPERATIONS
+                                .iter()
+                                .map(|operation| (jobs, ["memory_reviewer-ledger", operation])),
+                        )
+                        // The completion records its selection inside the task lease's write, so that audit is owned under the lease ledger's kind.
+                        .chain(std::iter::once((
+                            crate::task_lease::LEDGER_FAMILY.owner_kind(),
+                            ["memory_reviewer-ledger", "complete"],
+                        )));
+                    for (owner_kind, [family, operation]) in owners {
                         retire_active_scan_domain_owner(
                             tx,
                             "project",
                             project,
-                            DurableWriteFamily::MemoryReviewerJobs.owner_kind(),
-                            &active_scan_owner_key(&[
-                                "memory_reviewer-ledger",
-                                operation,
-                                causal_identity,
-                            ]),
+                            owner_kind,
+                            &active_scan_owner_key(&[family, operation, causal_identity]),
                         )?;
                     }
                     tx.prepare_cached("DELETE FROM memory_reviewer_jobs WHERE job_id = ?1")?
@@ -1801,7 +1818,7 @@ impl MemoryStore {
     ) -> Result<FrozenSelection, MemoryReviewerJobError> {
         self.memory_reviewer_transaction(
             project,
-            "freeze",
+            ("freeze", None),
             |write| {
                 write.identity("slot_id", slot_id)?;
                 write.identity("selection_attempt", selection_attempt)?;
@@ -1859,7 +1876,7 @@ impl MemoryStore {
         }
         self.memory_reviewer_transaction(
             project,
-            "complete-selection",
+            ("complete-selection", None),
             |_| Ok(()),
             |conn| {
                 complete_frozen_selection_in_tx(

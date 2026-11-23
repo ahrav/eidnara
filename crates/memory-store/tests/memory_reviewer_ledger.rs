@@ -221,6 +221,32 @@ fn subject(candidate: &str) -> ReviewTarget {
     }
 }
 
+/// Reserves a job for `candidate` at `now_ms` and returns its causal identity.
+fn reserved_job_at(store: &MemoryStore, candidate: &str, now_ms: i64) -> String {
+    let producer = ProducerBinding {
+        producer: "history-summarizer".to_string(),
+        firing_id: format!("firing-{candidate}"),
+        ordinal: 0,
+    };
+    let inputs = CausalInputs {
+        target: subject(candidate),
+        question_template: "extracted_facts".to_string(),
+        signals: vec![],
+        required_evidence: vec![EvidenceAvailability {
+            evidence_id: "ev-1".to_string(),
+            available: true,
+        }],
+        policy_versions: BTreeMap::new(),
+    };
+    let ReserveOutcome::Reserved(job) = store
+        .reserve_memory_reviewer_job(PROJECT, &producer, &inputs, now_ms)
+        .unwrap()
+    else {
+        panic!("fresh inputs reserve")
+    };
+    job.causal_identity
+}
+
 fn ready_job(store: &MemoryStore, candidate: &str) -> String {
     let producer = ProducerBinding {
         producer: "history-summarizer".to_string(),
@@ -4098,4 +4124,237 @@ fn a_settled_job_is_retired_after_its_retention_window_and_its_charge_returns() 
 
     // The retired job's causal inputs are free: the same candidate reserves a job under the same identity.
     assert_eq!(ready_job(&fixture.store, "cand-1"), fixture.identity);
+}
+
+/// The two delete guards refuse a receipt in progress and the attempts of such a receipt, whatever statement asks, and admit both once the receipt is complete. So the retirement sweep is the only path that removes a settled job's rows, and no statement removes the fence of a run that may still dispatch.
+#[test]
+fn the_delete_guards_hold_a_receipt_in_progress_and_release_a_completed_one() {
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(begun) = fixture.begin(&claim, T0) else {
+        panic!("the first claim begins the receipt")
+    };
+    let DispatchOutcome::Handed { attempt_index, .. } =
+        fixture.dispatch(begun.generation, &claim, T0 + 1).unwrap()
+    else {
+        panic!("a fresh receipt hands its first attempt off")
+    };
+    let delete = |table: &str| {
+        fixture.store.execute_tag_sql_for_test(&format!(
+            "DELETE FROM {table} WHERE causal_identity = '{}'",
+            fixture.identity
+        ))
+    };
+    let receipts = || {
+        fixture
+            .store
+            .lookup_memory_reviewer_receipt(PROJECT, &fixture.identity)
+            .unwrap()
+            .is_some()
+    };
+    assert!(delete("memory_reviewer_attempts").is_err());
+    assert!(delete("memory_reviewer_receipts").is_err());
+    assert_eq!(fixture.attempts(), 1);
+    assert!(receipts());
+
+    fixture
+        .store
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            begun.generation,
+            &claim,
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            ResponseUsage {
+                raw_response_bytes: Some(10),
+                decoded_text_bytes: Some(10),
+            },
+            T0 + 2,
+        )
+        .unwrap();
+    assert!(
+        delete("memory_reviewer_attempts").is_err(),
+        "a finished attempt stays while its receipt is in progress"
+    );
+    complete(
+        &fixture,
+        &fixture.identity,
+        &claim,
+        "completion-1",
+        "worker-a",
+        begun.generation,
+        MemoryReviewerReceiptTerminal::Complete,
+        Some(&selection()),
+        T0 + 3,
+    )
+    .unwrap();
+    delete("memory_reviewer_attempts").unwrap();
+    delete("memory_reviewer_receipts").unwrap();
+    assert_eq!(fixture.attempts(), 0);
+    assert!(!receipts());
+}
+
+/// Retiring a job retires the scan audit its writes left: the reservation and activation of the job, its dispatch, and the receipt's copy of the selection its completion recorded. The task claim owns a second copy of the selection, which the claim's own retention retires. A store that settles and retires jobs holds the audit of the jobs it still has.
+#[test]
+fn a_retired_job_takes_the_scan_audit_of_its_writes_with_it() {
+    use memory_store::memory_reviewer_jobs::{
+        MEMORY_REVIEWER_QUEUE_LIFETIME_MS, MEMORY_REVIEWER_SETTLED_RETENTION_MS,
+    };
+    let fixture = Fixture::open();
+    let audit = || -> (Vec<String>, i64, i64) {
+        fixture
+            .store
+            .with_conn_for_test(|conn| {
+                let fields = conn
+                    .prepare("SELECT DISTINCT field_id FROM scan_owner_copies ORDER BY field_id")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                let owners =
+                    conn.query_row("SELECT COUNT(*) FROM scan_domain_owners", [], |row| {
+                        row.get(0)
+                    })?;
+                let scans =
+                    conn.query_row("SELECT COUNT(*) FROM field_scans", [], |row| row.get(0))?;
+                Ok((fields, owners, scans))
+            })
+            .unwrap()
+    };
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(begun) = fixture.begin(&claim, T0) else {
+        panic!("the first claim begins the receipt")
+    };
+    let DispatchOutcome::Handed { attempt_index, .. } =
+        fixture.dispatch(begun.generation, &claim, T0 + 1).unwrap()
+    else {
+        panic!("a fresh receipt hands its first attempt off")
+    };
+    fixture
+        .store
+        .finish_memory_reviewer_attempt(
+            PROJECT,
+            &fixture.identity,
+            begun.generation,
+            &claim,
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            ResponseUsage {
+                raw_response_bytes: Some(10),
+                decoded_text_bytes: Some(10),
+            },
+            T0 + 2,
+        )
+        .unwrap();
+    complete(
+        &fixture,
+        &fixture.identity,
+        &claim,
+        "completion-1",
+        "worker-a",
+        begun.generation,
+        MemoryReviewerReceiptTerminal::Complete,
+        Some(&selection()),
+        T0 + 3,
+    )
+    .unwrap();
+    // The text of the job's own rows: its producer and firing, and its marker.
+    const JOB_FIELDS: [&str; 5] = [
+        "credential_id",
+        "firing_id",
+        "model",
+        "producer",
+        "provider",
+    ];
+    let selection_copies = || -> i64 {
+        fixture
+            .store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM scan_owner_copies WHERE field_id = 'selected_candidate_id'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    };
+    let copies = selection_copies();
+    assert_eq!(
+        copies, 2,
+        "the receipt and the claim each own the selection's scan"
+    );
+    let (fields, owners, scans) = audit();
+    for field in JOB_FIELDS {
+        assert!(
+            fields.iter().any(|held| held == field),
+            "{field}: {fields:?}"
+        );
+    }
+    let retire_at = T0 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    assert_eq!(
+        fixture
+            .store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        1
+    );
+    let (left, owners_left, scans_left) = audit();
+    for field in JOB_FIELDS {
+        assert!(!left.iter().any(|held| held == field), "{field}: {left:?}");
+    }
+    assert_eq!(
+        selection_copies(),
+        1,
+        "the claim's copy stays for the claim's retention"
+    );
+    assert!(owners_left < owners, "{owners_left} of {owners} owners");
+    assert!(scans_left < scans, "{scans_left} of {scans} scans");
+}
+
+/// One retirement sweep deletes at most its batch, oldest queue deadline first, and the next sweep takes the rest.
+#[test]
+fn a_retirement_sweep_takes_one_batch_oldest_first() {
+    use memory_store::memory_reviewer_jobs::{
+        MEMORY_REVIEWER_QUEUE_LIFETIME_MS, MEMORY_REVIEWER_RETIREMENT_BATCH,
+        MEMORY_REVIEWER_SETTLED_RETENTION_MS,
+    };
+    let fixture = Fixture::open();
+    // The fixture's own job was reserved at T0; every job below is reserved later, in batches the queue's capacity admits, and closed by the expiry sweep.
+    let extra = MEMORY_REVIEWER_RETIREMENT_BATCH + 1;
+    let mut newest = String::new();
+    for index in 0..extra {
+        let at = T0 + 1 + index as i64;
+        newest = reserved_job_at(&fixture.store, &format!("cand-batch-{index}"), at);
+        fixture
+            .store
+            .expire_memory_reviewer_work(at + MEMORY_REVIEWER_QUEUE_LIFETIME_MS)
+            .unwrap();
+    }
+    let held = |identity: &str| {
+        fixture
+            .store
+            .lookup_memory_reviewer_job(PROJECT, identity)
+            .unwrap()
+            .is_some()
+    };
+    let retire_at = T0
+        + extra as i64
+        + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+        + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    assert_eq!(
+        fixture
+            .store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        MEMORY_REVIEWER_RETIREMENT_BATCH
+    );
+    assert!(!held(&fixture.identity), "the oldest job went first");
+    assert!(held(&newest), "the newest waits for the next sweep");
+    assert_eq!(
+        fixture
+            .store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        2
+    );
+    assert!(!held(&newest));
 }

@@ -38,7 +38,7 @@ pub const MEMORY_REVIEWER_MAX_REQUEST_BYTES: u64 = 256 * 1024;
 pub const MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES: u64 = 1024 * 1024;
 /// Decoded assistant text bytes one job may consume across every round, attempt, and generation.
 pub const MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES: u64 = 64 * 1024;
-/// Byte bounds of the marker's caller text. The schema bounds the same columns in characters; these keep every permanent marker inside the receipt charge whatever the encoding.
+/// Byte bounds of the marker's caller text. The schema bounds the same columns in characters; these keep every marker inside the receipt charge whatever the encoding.
 pub const MAX_PROVIDER_BYTES: usize = 128;
 pub const MAX_MODEL_BYTES: usize = 256;
 pub const MAX_CREDENTIAL_ID_BYTES: usize = 256;
@@ -1531,7 +1531,7 @@ impl MemoryStore {
                 {
                     return Ok(LeaseCompletion::Stale);
                 }
-                // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other MemoryReviewer identity, and the table trigger refuses it again. The receipt owns the scan beside the claim, so the evidence outlives the claim's retention window.
+                // The candidate id is caller text the receipt keeps until its job is retired; it is scanned like every other MemoryReviewer identity, and the table trigger refuses it again. The receipt owns the scan beside the claim, so the evidence outlives the claim's retention window.
                 if selection.is_some() {
                     coordinated.domain_owner(
                         "project",

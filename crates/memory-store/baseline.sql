@@ -467,10 +467,11 @@ CREATE INDEX idx_memory_classifier_attempts_project_dispatched
             ON memory_classifier_attempts(project, dispatched_at_ms);
 
 -- MemoryReviewer review work. `memory_reviewer_store_identity` holds the store's own durable
--- incarnation, written once at genesis; a replaced file gets a new one. Job rows
--- are permanent receipts for the incarnation: `state` moves reserved -> ready ->
--- terminal and nothing deletes a row. `(project, causal_identity)` is the causal
--- review identity, so identical inputs deduplicate onto one row across firings.
+-- incarnation, written once at genesis; a replaced file gets a new one. A job row
+-- is the receipt of its review: `state` moves reserved -> ready -> terminal, and
+-- the retirement sweep deletes a terminal row a retention window after its queue
+-- deadline. `(project, causal_identity)` is the causal review identity, so
+-- identical inputs deduplicate onto one row across firings while the row stands.
 CREATE TABLE memory_reviewer_store_identity (
             id INTEGER PRIMARY KEY CHECK (id = 0),
             database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
@@ -490,9 +491,10 @@ WHEN EXISTS (SELECT 1 FROM memory_reviewer_store_identity)
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
 -- `job_id` is the task id a MemoryReviewer claim persists; a declared integer key survives a
--- rebuild, where a hidden rowid may be renumbered.
+-- rebuild, where a hidden rowid may be renumbered. The key counts upward for the life of the
+-- file, so a claim that names a retired job names no later one.
 CREATE TABLE memory_reviewer_jobs (
-            job_id INTEGER PRIMARY KEY,
+            job_id INTEGER PRIMARY KEY AUTOINCREMENT,
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
             producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 64),
