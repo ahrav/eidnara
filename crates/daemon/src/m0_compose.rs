@@ -350,7 +350,7 @@ mod trim_memories_tests {
     }
 
     /// The loop the delegating implementation replaced, kept as the reference.
-    fn reference(
+    pub(super) fn reference(
         memories: &[CanonicalMemory],
         budget_tokens: f64,
         estimate_tokens: impl Fn(&str) -> usize + Copy,
@@ -1782,5 +1782,129 @@ mod correction_compose_tests {
         let plain_m0 = m0(&store, 60_000.0);
         assert_eq!(m0(&other, 60_000.0), plain_m0);
         assert!(!plain_m0.contains("[corrected"));
+    }
+}
+
+#[cfg(test)]
+mod charged_text_tests {
+    use std::cell::RefCell;
+
+    use super::trim_memories_tests::reference;
+    use super::*;
+
+    fn row(id: &str, category: &str, content: &str) -> CanonicalMemory {
+        CanonicalMemory {
+            object_id: id.to_owned(),
+            category: category.to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    /// The lines of `texts`, each with the line break that ends it, sorted.
+    fn lines_of<'t>(texts: impl IntoIterator<Item = &'t str>) -> Vec<&'t str> {
+        let mut lines: Vec<&str> = texts
+            .into_iter()
+            .flat_map(|text| text.split_inclusive('\n'))
+            .collect();
+        lines.sort_unstable();
+        lines
+    }
+
+    /// The exact-fit tests measure a charge by its length. This test reads
+    /// the text of each charge: the strings the packer hands the estimator
+    /// under a budget that admits every row are, line for line, the block
+    /// the renderer writes for the rows it kept, each line charged once. A
+    /// charged tag line spelled another way at the same length is a line the
+    /// block lacks. The reference packer's charges hold to the same block.
+    #[test]
+    fn every_charged_line_is_a_line_of_the_rendered_block() {
+        let lasting = [
+            row("mem_1", "ARCHITECTURE", "the retry limit is 3"),
+            row("mem_2", "NAMING", "handlers end in `_handler`"),
+            row("mem_3", "ARCHITECTURE", "releases are cut on Tuesday"),
+        ];
+        let work = [
+            row("mem_4", CURRENT_WORK_SECTION, "update docs/a.md"),
+            row("mem_5", CURRENT_WORK_SECTION, "rename the upload helper"),
+        ];
+        let files = [
+            row("nfu_1", NAMED_FILES_SECTION, "docs/guide.md (used most)"),
+            row("nfu_2", NAMED_FILES_SECTION, "tools/check.sh (used less)"),
+        ];
+        let charged = RefCell::new(Vec::<String>::new());
+        let record = |text: &str| {
+            charged.borrow_mut().push(text.to_owned());
+            text.len()
+        };
+
+        let kept = trim_block_to_budget(&files, &lasting, &work, 1e6, record);
+        assert_eq!(kept.len(), files.len() + lasting.len() + work.len());
+        let block = render_delivered_memory_block(&kept);
+        let mut production = charged.take();
+        // The frame is priced twice: when the packer computes the tokens the
+        // `NAMED_FILES` element may take, and as the block's own charge.
+        let frame = delivered_memory_frame();
+        let priced = production
+            .iter()
+            .position(|text| *text == frame)
+            .expect("the frame is priced for the element's room");
+        production.remove(priced);
+        assert_eq!(
+            lines_of(production.iter().map(String::as_str)),
+            lines_of([block.as_str()]),
+            "{production:?}"
+        );
+
+        // Each wrapper is one charge of two tag lines, and the block holds
+        // both lines as the charge spells them, the line break after the
+        // closing tag included.
+        let rendered = lines_of([block.as_str()]);
+        for category in ["ARCHITECTURE", "NAMING"] {
+            let wrapper = format!("<{category}>\n</{category}>\n");
+            assert_eq!(
+                production.iter().filter(|text| **text == wrapper).count(),
+                1,
+                "{category}: {production:?}"
+            );
+            for line in wrapper.split_inclusive('\n') {
+                assert!(rendered.contains(&line), "{line:?}: {block}");
+            }
+        }
+        for (opening, closing) in [
+            (
+                "<CURRENT_WORK note=\"Work the user left open",
+                "</CURRENT_WORK>\n",
+            ),
+            (
+                "<NAMED_FILES note=\"Files of this project",
+                "</NAMED_FILES>\n",
+            ),
+        ] {
+            let section: Vec<&String> = production
+                .iter()
+                .filter(|text| text.starts_with(&opening[..opening.find(' ').unwrap()]))
+                .collect();
+            assert_eq!(section.len(), 1, "{production:?}");
+            let tags: Vec<&str> = section[0].split_inclusive('\n').collect();
+            assert_eq!(tags.len(), 2, "{tags:?}");
+            assert!(
+                tags[0].starts_with(opening) && tags[0].ends_with("\">\n"),
+                "{tags:?}"
+            );
+            assert_eq!(tags[1], closing);
+            for line in tags {
+                assert!(rendered.contains(&line), "{line:?}: {block}");
+            }
+        }
+
+        let selected = reference(&lasting, 1e6, record);
+        assert_eq!(selected, lasting);
+        let block = render_delivered_memory_block(&selected);
+        let by_reference = charged.take();
+        assert_eq!(
+            lines_of(by_reference.iter().map(String::as_str)),
+            lines_of([block.as_str()]),
+            "{by_reference:?}"
+        );
     }
 }
