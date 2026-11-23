@@ -26,6 +26,10 @@ pub const HOST_CREDENTIAL_ID: &str = "host-model-execution";
 const OPENCODE_HARNESS: &str = "opencode";
 /// Every child session of a review request starts with this prefix.
 pub const CHILD_SESSION_PREFIX: &str = "eidnara-memory_reviewer:";
+/// The longest a request waits for its session's deletion before it returns.
+const DELETION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The time before an attempt's deadline at which a request stops waiting for its session's deletion, so the attempt's terminal is recorded inside the deadline.
+const DELETION_MARGIN: std::time::Duration = std::time::Duration::from_secs(1);
 /// The sampling value a request carries. The host omits it for a model whose provider refuses a temperature.
 const TEMPERATURE: f64 = 0.0;
 
@@ -68,10 +72,12 @@ impl ChildSession {
         }))
     }
 
-    /// Deletes the session and waits for the deletion until `deadline`.
+    /// Deletes the session and waits a short while for the deletion, always ending [`DELETION_MARGIN`] before `deadline`. The attempt's terminal is recorded after this returns and the ledger takes it only before the deadline, so a slow deletion is left to its own task.
     async fn end(mut self, deadline: Instant) {
         if let Some(deletion) = self.delete() {
-            let _ = tokio::time::timeout_at(deadline, deletion).await;
+            let until = (Instant::now() + DELETION_WAIT)
+                .min(deadline.checked_sub(DELETION_MARGIN).unwrap_or(deadline));
+            let _ = tokio::time::timeout_at(until, deletion).await;
         }
     }
 }

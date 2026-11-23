@@ -503,7 +503,7 @@ struct Run<'a> {
     later_evidence: Vec<String>,
     /// Set once a request to an unproven default stage-1 model failed: the review model answers the run's remaining stage-1 attempts.
     stage_one_by_review_model: bool,
-    /// The refusal of a later reference that counts as evidence and that the policy withheld from the model.
+    /// The refusal of a later reference that counts as evidence, that the store still holds, and that the run could not read.
     withheld_later: Option<RefusalCode>,
 }
 
@@ -799,15 +799,19 @@ impl Run<'_> {
                         self.push_labeled(broker, read.buffer);
                     }
                     Err(refusal) => {
-                        // A later reference the policy withholds from the model is evidence no decider read. A review left with none to read ends on that refusal, where a review whose evidence the store has retired is a keep.
-                        if fact.relation == Relation::Later
-                            && review.takes(fact.writer)
-                            && matches!(
-                                refusal.code,
-                                RefusalCode::PolicyBlocked | RefusalCode::RenderCheck
-                            )
-                        {
-                            self.withheld_later = Some(refusal.code);
+                        // A later reference that counts as evidence and was left unread is evidence no decider judged. A read the store failed ends the run unsettled, and a later pass reads again. A reference the store has retired is evidence that is gone. Any other refusal ends the review on that refusal.
+                        if fact.relation == Relation::Later && review.takes(fact.writer) {
+                            match refusal.code {
+                                RefusalCode::Store => {
+                                    return Err(InvestigationError::Store(
+                                        refusal.code.to_string(),
+                                    ));
+                                }
+                                RefusalCode::ExpectationChanged
+                                | RefusalCode::NotFound
+                                | RefusalCode::OriginRevoked => {}
+                                code => self.withheld_later = Some(code),
+                            }
                         }
                         refused(broker, &mut self.transcript, &refusal);
                     }
@@ -883,10 +887,11 @@ impl Run<'_> {
         let (Some(stage), Some(review)) = (&coordinator.stage_one, &self.review) else {
             return Ok(Classified::Flagged);
         };
+        // A decision on part of the evidence would read as a decision on all of it, so a review with an unread later reference ends on that reference's refusal.
+        if let Some(code) = self.withheld_later {
+            return Ok(Classified::Ended(RunResult::Refused(code)));
+        }
         if !review.has_eligible_later() {
-            if let Some(code) = self.withheld_later {
-                return Ok(Classified::Ended(RunResult::Refused(code)));
-            }
             self.decided_by_host(stage, Stage1::Keep);
             return Ok(Classified::Keep);
         }

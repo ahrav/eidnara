@@ -275,22 +275,24 @@ pub(crate) fn module_projects(
         }
         if let Ok(MemoriesAuthority::Module(authority)) = memories_authority_for_route(store, &root)
         {
-            projects
+            let owner_recorded =
+                authority.context_store_uuid != review_cycle::SWITCH_AUTHORITY_STORE;
+            let project = projects
                 .entry(authority.project.clone())
                 .or_insert(ProjectRoute {
                     project: authority.project,
                     authority_generation: authority.generation,
                     roots: Vec::new(),
                     review,
-                    recorded: authority.context_store_uuid != review_cycle::SWITCH_AUTHORITY_STORE
-                        && bound.contains(&binding.project_root),
-                })
-                .roots
-                .push(RootScope {
-                    project_root: binding.project_root.clone(),
-                    project_digest: binding.kernel_project.digest().to_string(),
-                    scope_id: binding.kernel_project.scope_id(),
+                    recorded: false,
                 });
+            // Any bound root of the project keeps it under the owner's record.
+            project.recorded |= owner_recorded && bound.contains(&binding.project_root);
+            project.roots.push(RootScope {
+                project_root: binding.project_root.clone(),
+                project_digest: binding.kernel_project.digest().to_string(),
+                scope_id: binding.kernel_project.scope_id(),
+            });
         }
     }
     projects.into_values().collect()
@@ -645,7 +647,7 @@ impl Worker {
                             project_digest: &root.project_digest,
                             ledger_project: &route.project,
                         },
-                        review_cycle::room(pending.len(), JOBS_PER_PASS.min(holds_left)),
+                        review_cycle::room(pending.len(), JOBS_PER_PASS, holds_left),
                         now,
                     )
                     .map_err(|error| error.to_string())?;
@@ -685,8 +687,9 @@ impl Worker {
                 {
                     break;
                 }
-                // A pass over many reviews outlasts one evaluation's lifetime; each run restates that a switched project is under review.
+                // A pass over many reviews outlasts one evaluation's lifetime, so each run restates that a switched project is under review and evaluates the owner's record again, which is what admits fact sets meanwhile.
                 self.status.set_switched_review(true);
+                let _ = self.gate_off_runtime(&kernel).await;
                 let job = Arc::new(job);
                 let outcome = self
                     .run_job(&coordinator, &kernel, &route, Arc::clone(&job), cancel)
@@ -715,6 +718,9 @@ impl Worker {
                         "daemon: memory_reviewer stage-1 default {} failed its first request; stage 1 uses the review model until the daemon restarts. Set memory_reviewer.stage1_model to a small model the host serves.",
                         switch.stage1_model.reference
                     );
+                }
+                // A derived default is proven by its first answer and replaced at its first refusal; the next run is built with what this one showed.
+                if switch.stage1_model.derived {
                     coordinator.stage_one = self.stage_one(
                         &producers,
                         &switch,

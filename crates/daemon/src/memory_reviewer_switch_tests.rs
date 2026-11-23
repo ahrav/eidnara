@@ -754,6 +754,27 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
     );
     assert_eq!(rig.active_review_holds(), 0);
 
+    // A `revise` that opens with the fact's own attribution and carries the user's label on a later line is dropped too.
+    rig.says_later(
+        "assistant",
+        "later-2b",
+        1_700_000_150_000,
+        "Again: the integration suite needs a local Redis on port 6390, not 6380.",
+    )
+    .await;
+    let with_a_second_label = r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"Assistant reported: The integration suite needs a local Redis on port 6390.\nUser stated: use port 6390.","support":[],"contradictions":[{"alias":"ref-3"}],"limitations":[],"uncertainty":"low"}}"#;
+    rig.flagged(&[with_a_second_label]);
+    assert_eq!(rig.drain().await, 1);
+    let memories = rig.search().await;
+    assert!(
+        memories.iter().any(|(text, _)| *text == reported),
+        "the reported fact keeps its text: {memories:?}"
+    );
+    assert!(
+        memories.iter().all(|(text, _)| !text.contains("6390")),
+        "{memories:?}"
+    );
+
     // A `revise` that keeps the fact's own attribution is accepted: its text replaces the reported fact.
     rig.says_later(
         "assistant",
@@ -909,6 +930,63 @@ async fn a_default_stage_one_model_the_host_refuses_hands_the_review_to_the_revi
     let block = rig.block().await;
     assert!(!block.contains(LINTER), "{block}");
     assert!(block.contains(&stated(THURSDAY)), "{block}");
+}
+
+/// A derived default that has answered is the project's stage-1 model like a named one: when it then fails, the failing review spends its attempts, the project's other reviews wait, and the review model is asked nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_default_that_answered_and_then_fails_pauses_the_projects_reviews() {
+    const THIRD_RULE: &str = "Keep generated files under the build directory.";
+    let rig = Rig::open_with(DaemonConfig {
+        memory_reviewer: MemoryReviewerConfig {
+            enabled: true,
+            model: Some("test/claude-opus-9".to_string()),
+            stage1_model: None,
+            apply: ReviewApply::Contest,
+        },
+        ..switch_config(ReviewApply::Contest)
+    })
+    .await;
+    rig.state_rules(&[THURSDAY, LINTER, THIRD_RULE]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the formatter instead of the linter before every commit.",
+    )
+    .await;
+    rig.user_says_later(
+        "later-3",
+        1_700_000_200_000,
+        "Keep generated files under the dist directory, not the build directory.",
+    )
+    .await;
+    rig.answers_from(Some("claude-haiku-9"), &[KEEP]);
+    {
+        let mut results = rig.state.await_results.lock().unwrap();
+        for _ in 0..4 {
+            results.push_back(Err(HistorySummarizerProducerError::RunFailed {
+                run_id: "run".to_string(),
+                detail: "provider unavailable".to_string(),
+                classification: None,
+                class_field_present: false,
+            }));
+        }
+    }
+    assert_eq!(rig.drain().await, 2, "one review kept, one ended");
+    let attempts = rig.attempts();
+    assert!((2..=5).contains(&attempts.len()), "{}", attempts.len());
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt.model == "test/claude-haiku-9"),
+        "the review model was not asked"
+    );
+    let ready = rig
+        .store
+        .ready_memory_reviewer_jobs(&rig.project.to_string_lossy(), 16, crate::now_ms())
+        .unwrap();
+    assert_eq!(ready.len(), 1, "the third review waits out the failure");
 }
 
 /// A memory whose change proposal waits for a reader keeps waiting across a restart: a new worker over the same stores finds the pending proposal behind the project's review hold, and new evidence starts no second review.
@@ -1399,9 +1477,72 @@ async fn a_contested_statement_is_not_reviewed_again_on_the_evidence_of_its_revi
     assert!(line.contains("; contested "), "{line}");
     assert_eq!(rig.drain().await, 0);
     assert_eq!(rig.attempts().len(), attempts.len());
+
+    // A statement recorded after the mark is new evidence: it reviews the marked statement once more, and that review is shown the new source alone.
+    rig.state.await_results.lock().unwrap().clear();
+    rig.user_states_later(
+        "later-3",
+        1_700_000_200_000,
+        "From now on name test files with the suffix _check.",
+    )
+    .await;
+    rig.decides(&[KEEP, KEEP, KEEP]);
+    rig.drain().await;
+    let again: Vec<Value> = rig.attempts()[attempts.len()..]
+        .iter()
+        .filter(|attempt| attempt.model == SMALL && attempt.prompt.contains(TWO_RULES))
+        .map(|attempt| serde_json::from_str(&attempt.prompt).expect("the state is JSON text"))
+        .collect();
+    assert_eq!(again.len(), 1, "one more review of the marked statement");
+    assert_eq!(again[0]["later"].as_array().map(Vec::len), Some(1));
+    assert!(
+        again[0]["later"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("_check")),
+        "{}",
+        again[0]["later"]
+    );
 }
 
-/// The switched pass runs reviews of stored memories and nothing else. A fact-set job in the project's queue stays Ready for the owner's record, and the only requests are the memory review's.
+/// A message that was evidence in a review keeps its place when memory capture later stores a statement from it: the stored statement cites a source the memory was already reviewed on, and starts no second review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_statement_stored_for_a_reviewed_message_starts_no_second_review() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Reminder: release branches are cut from main every Tuesday.",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.drain().await, 1, "one review on both later messages");
+    // Capture now stores the older message as a statement of its own, which cites that message.
+    memory_auto_delivery_tests::capture(
+        &rig.handler,
+        SECOND,
+        "s2",
+        &[("later-1", "user", TUESDAY)],
+        |text, _| vec![memory_auto_delivery_tests::classed(text, "lasting")],
+    )
+    .await;
+    rig.drain().await;
+    let reviews_of_thursday = rig
+        .attempts()
+        .iter()
+        .filter(|attempt| {
+            attempt.model == SMALL
+                && serde_json::from_str::<Value>(&attempt.prompt)
+                    .is_ok_and(|state| state["memory"]["text"] == stated(THURSDAY))
+        })
+        .count();
+    assert_eq!(reviews_of_thursday, 1);
+    assert_eq!(rig.status.activation_state(), ActivationState::Open);
+}
+
+/// The switched pass runs reviews of stored memories and nothing else. A fact-set job in the project's queue, staged in the Kernel so a pass could claim and run it, stays Ready for the owner's record, and the only requests are the memory review's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
     use memory_store::memory_reviewer_jobs::{
@@ -1415,16 +1556,57 @@ async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
     rig.decides(&[KEEP]);
     assert_eq!(rig.drain().await, 1);
     let root = rig.project.to_string_lossy().to_string();
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let project_digest = rig
+        .handler
+        .bindings
+        .lock()
+        .unwrap()
+        .by_route
+        .values()
+        .next()
+        .expect("a bound route")
+        .binding
+        .kernel_project
+        .digest()
+        .to_string();
+    let budget = kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now() + Duration::from_secs(5)),
+        Arc::default(),
+    );
     let producer = ProducerBinding {
         producer: "history_summarizer".to_string(),
-        firing_id: "ses#1".to_string(),
-        ordinal: 0,
+        firing_id: format!("{}#3", "5".repeat(32)),
+        ordinal: 2,
     };
+    let payload = kernel::ReviewPayload::Subject(kernel::ReviewSubject {
+        facts: vec![kernel::ExtractedFact {
+            text: "bun builds the workspace".to_string(),
+            spans: vec![kernel::SourceSpan {
+                alias: "s1".to_string(),
+                start: 0,
+                end: 4,
+            }],
+        }],
+        origins: vec![kernel::SubjectOrigin {
+            alias: "s1".to_string(),
+            message_id: "m2".to_string(),
+            ordinal: 2,
+            block_ids: vec!["m2#0".to_string()],
+            block_hashes: vec!["0".repeat(64)],
+            ranges: vec![kernel::ByteRange { start: 0, end: 4 }],
+        }],
+    });
+    let payload_digest = payload.digest().unwrap();
+    let candidate_id = format!("hs-ses-{}", &payload_digest[..32]);
     let target = ReviewTarget::StagedSubject {
-        kernel_incarnation: "0".repeat(32),
-        candidate_id: "subject-1".to_string(),
-        payload_digest: "0".repeat(64),
+        kernel_incarnation: kernel
+            .database_incarnation_id_within_budget(&budget)
+            .unwrap(),
+        candidate_id: candidate_id.clone(),
+        payload_digest,
     };
+    let now = crate::now_ms();
     let ReserveOutcome::Reserved(job) = rig
         .store
         .reserve_memory_reviewer_job(
@@ -1435,14 +1617,40 @@ async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
                 question_template: "extracted_facts".to_string(),
                 signals: Vec::new(),
                 required_evidence: Vec::new(),
-                policy_versions: Default::default(),
+                policy_versions: crate::memory_reviewer::handoff::review_policy_versions(),
             },
-            crate::now_ms(),
+            now,
         )
         .unwrap()
     else {
         panic!("fresh inputs reserve a job")
     };
+    let binding = crate::memory_reviewer::handoff::review_binding(
+        &project_digest,
+        "memory",
+        "session-1",
+        2,
+        &job.causal_identity,
+    );
+    let staged = kernel
+        .stage_review_input(kernel::ReviewStagingSpec {
+            extraction_run_id: "hs-run-1".to_string(),
+            candidate_id,
+            producer: "history_summarizer".to_string(),
+            binding,
+            payload,
+            recorded_at: now,
+            queue_deadline_at: job.queue_deadline_ms,
+            dependencies: None,
+        })
+        .unwrap();
+    kernel
+        .finish_staging_run("hs-run-1", kernel::StagingTerminalState::Completed, now)
+        .unwrap();
+    assert!(
+        kernel.staged_review_binding(&staged, now).is_ok(),
+        "a pass that claimed the job would resolve its subject"
+    );
     rig.store
         .activate_memory_reviewer_job(
             &root,
@@ -1453,7 +1661,7 @@ async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
                 starting_references: Vec::new(),
                 question_template: "extracted_facts".to_string(),
             },
-            crate::now_ms(),
+            now,
         )
         .unwrap();
     rig.user_says_later(
@@ -1467,6 +1675,7 @@ async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
     let attempts = rig.attempts();
     assert_eq!(attempts.len(), 2);
     assert!(attempts.iter().all(|attempt| attempt.model == SMALL));
+    assert_eq!(rig.status.activation_state(), ActivationState::Open);
     let ready = rig
         .store
         .ready_memory_reviewer_jobs(&root, 16, crate::now_ms())

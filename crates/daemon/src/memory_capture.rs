@@ -3953,6 +3953,14 @@ pub(crate) fn is_contested(decision: &kernel::DecisionRow) -> bool {
         && capture_rationale(decision).contested_by.is_some()
 }
 
+/// Whether `decision` is a statement the user settled after a contest: the
+/// settlement rewrote its row, which keeps the commit that first recorded the
+/// statement.
+pub(crate) fn is_settled(decision: &kernel::DecisionRow) -> bool {
+    let recorded = capture_rationale(decision);
+    recorded.stated_seq.is_some() && recorded.contested_by.is_none()
+}
+
 /// Whether `decision` records work the user left in progress.
 pub(crate) fn states_current_work(decision: &kernel::DecisionRow) -> bool {
     decision.payload.rationale.contains("current_work")
