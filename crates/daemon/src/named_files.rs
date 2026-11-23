@@ -1,19 +1,20 @@
 //! Project files a user's message named and the agent then used.
 //!
 //! A message the user sent names a file of the project, and a tool call of
-//! the same turn then reads the file or passes it to a command. A later
-//! session is delivered the file's path, in the `NAMED_FILES` element of its
-//! `<project-memory>` block, while the file exists. A record holds the path,
+//! the same turn then reads the file or names it in a command it runs. A
+//! later session is delivered the file's path, in the `NAMED_FILES` element
+//! of its `<project-memory>` block, when the file exists as the block is
+//! composed. A record holds the path,
 //! the session, and the time of the pass that showed the use, and holds none
 //! of the file's content. A delivered line also gives the time the file last
 //! changed ([`changes`]), and the `User stated` lines of a block that lists a
-//! file give the time each was stated ([`date_statements`]), so a reader can
-//! tell which of a statement and a file is the newer.
+//! file give the time memory recorded each ([`date_statements`]), so a
+//! reader can compare a statement and a file that disagree.
 //!
 //! Each admitted transform pass of a primary Pi session at the project root
 //! shows the turn in progress: the last message of the user and the tool
 //! calls after it. A message of the user is a row that Pi gives the user
-//! role and that carries neither the synthetic nor the summary mark: a
+//! role, the daemon's own synthetic and summary rows left out: a
 //! prompt the user types, a template the user invokes, or a prompt an
 //! extension sends in the user's name. A text part of it names files when it
 //! is text someone typed ([`crate::chunk_text::is_typed_text`]), the test
@@ -339,21 +340,49 @@ impl Answers {
     }
 }
 
-/// The namespace the Pi codec keeps a block's own fields under.
-const PI_EXTRAS: &str = "pi";
+/// The ids Pi wrote on the tool calls of an assistant row, in the order of
+/// its `toolCall` parts: a part's string `id`, else its string `callId`, as
+/// the codec reads them. `None` for a part that holds neither: the codec
+/// gives such a call an id of its own making, which pairs it with nothing
+/// here.
+fn call_ids(row: &Value) -> Vec<Option<&str>> {
+    let parts = row.pointer("/message/content").and_then(Value::as_array);
+    parts
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("toolCall"))
+        .map(|part| {
+            let id = |key| part.get(key).and_then(Value::as_str);
+            id("id").or_else(|| id("callId"))
+        })
+        .collect()
+}
 
-/// The id Pi gave a call or a result. The codec shortens an id that holds
-/// an item suffix to the part before its `|` and keeps the id as Pi wrote
-/// it beside the block; a block that holds no such id carries Pi's id as
-/// `id`. A call and a result pair by this id, so two calls that share the
-/// part before the `|` are two calls.
-fn pi_id<'b>(block: &'b crate::wire::WireBlock, id: &'b str) -> &'b str {
-    block
-        .provider_extras
-        .get(PI_EXTRAS)
-        .and_then(|extras| extras.get("nativeToolCallId"))
-        .and_then(Value::as_str)
-        .unwrap_or(id)
+/// The calls and results of `messages`, each with the id Pi wrote on its
+/// row: a call's own id, item suffix included, and a result's `toolCallId`.
+/// A call or a result whose row holds no such string, and the calls of a
+/// row whose `toolCall` parts are not one for each decoded call, are left
+/// out. `native` holds the Pi row of each message, in order.
+fn identified<'m>(
+    messages: &'m [Arc<crate::wire::IngressMessage>],
+    native: &'m [Arc<Value>],
+) -> Vec<(&'m str, &'m Value, &'m BlockKind)> {
+    let mut found = Vec::new();
+    for (message, row) in messages.iter().zip(native) {
+        let kinds = || message.ck.content().iter().map(|block| block.kind());
+        let calls = kinds().filter(|kind| matches!(kind, BlockKind::ToolCall { .. }));
+        let ids = call_ids(row);
+        if ids.len() == calls.clone().count() {
+            for (kind, id) in calls.zip(ids) {
+                found.extend(id.map(|id| (id, &**row, kind)));
+            }
+        }
+        let result = row.pointer("/message/toolCallId").and_then(Value::as_str);
+        for kind in kinds().filter(|kind| matches!(kind, BlockKind::ToolResult { .. })) {
+            found.extend(result.map(|id| (id, &**row, kind)));
+        }
+    }
+    found
 }
 
 /// Whether the Pi row of a tool result states that its call succeeded: its
@@ -371,12 +400,11 @@ fn states_success(row: &Value) -> bool {
 /// one leading `@`; a call of Pi's `bash` uses the files that the first
 /// [`MAX_COMMAND_WORDS`] runs of path characters with a `.` or a `/` in its
 /// command line name as written.
-/// A call counts when its id, as Pi wrote it ([`pi_id`]), is the id of no
-/// other call of `messages` and
-/// of one result, which follows the call, is text, JSON, or content that
-/// carries no error, and whose Pi row states its success
-/// ([`states_success`]). `native` holds the Pi row of each message of
-/// `messages`, in order.
+/// A call counts when the id Pi wrote on it ([`identified`]) is the id of
+/// no other call of `messages` and of one result, which follows the call,
+/// is text, JSON, or content that carries no error, and whose Pi row states
+/// its success ([`states_success`]). `native` holds the Pi row of each
+/// message of `messages`, in order.
 fn used_by_calls(
     root: &Path,
     messages: &[Arc<crate::wire::IngressMessage>],
@@ -386,27 +414,24 @@ fn used_by_calls(
     if native.len() != messages.len() {
         return Vec::new();
     }
+    let identified = identified(messages, native);
     let mut ids: HashMap<&str, Answers> = HashMap::new();
-    for (message, row) in messages.iter().zip(native) {
-        for block in message.ck.content() {
-            match block.kind() {
-                BlockKind::ToolCall { id, .. } => {
-                    ids.entry(pi_id(block, id)).or_default().calls += 1
-                }
-                BlockKind::ToolResult { id, output, .. } => {
-                    let answers = ids.entry(pi_id(block, id)).or_default();
-                    answers.result_first |= answers.calls == 0;
-                    answers.results += 1;
-                    answers.succeeded = states_success(row)
-                        && matches!(
-                            output.kind,
-                            OutputKind::Text { .. }
-                                | OutputKind::Json { .. }
-                                | OutputKind::Content { .. }
-                        );
-                }
-                _ => {}
+    for (id, row, kind) in &identified {
+        let answers = ids.entry(id).or_default();
+        match kind {
+            BlockKind::ToolCall { .. } => answers.calls += 1,
+            BlockKind::ToolResult { output, .. } => {
+                answers.result_first |= answers.calls == 0;
+                answers.results += 1;
+                answers.succeeded = states_success(row)
+                    && matches!(
+                        output.kind,
+                        OutputKind::Text { .. }
+                            | OutputKind::Json { .. }
+                            | OutputKind::Content { .. }
+                    );
             }
+            _ => {}
         }
     }
     let named_file = |raw: &str| {
@@ -414,17 +439,11 @@ fn used_by_calls(
         named.iter().find(|file| *file == path)
     };
     let mut used: Vec<&String> = Vec::new();
-    for block in messages.iter().flat_map(|message| message.ck.content()) {
-        let BlockKind::ToolCall {
-            id, name, input, ..
-        } = block.kind()
-        else {
+    for (id, _, kind) in &identified {
+        let BlockKind::ToolCall { name, input, .. } = kind else {
             continue;
         };
-        if !ids
-            .get(pi_id(block, id))
-            .is_some_and(Answers::is_one_answered_call)
-        {
+        if !ids.get(id).is_some_and(Answers::is_one_answered_call) {
             continue;
         }
         let files: Vec<&String> = match tool_vocabulary::pi_operand(name, input) {
@@ -458,30 +477,18 @@ fn open_root(root: &Path) -> Option<OwnedFd> {
     .ok()
 }
 
-/// The modification time, in milliseconds since the Unix epoch, of the
-/// regular file `relative` names beneath `root`, reached through no
-/// symbolic link. `None` for a path that names no such file.
-fn modified_ms(root: BorrowedFd<'_>, relative: &str) -> Option<i64> {
-    use rustix::fs::{FileType, OFlags};
-    crate::confined_path::check(relative).ok()?;
-    let stat = crate::confined_path::open_beneath(
-        root,
-        relative,
-        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-    )
-    .and_then(rustix::fs::fstat)
-    .ok()?;
-    (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile).then(|| {
-        stat.st_mtime
-            .saturating_mul(1_000)
-            .saturating_add(i64::try_from(stat.st_mtime_nsec / 1_000_000).unwrap_or(0))
-    })
-}
-
 /// Whether `relative` names a regular file beneath `root`, reached through
 /// no symbolic link.
 fn is_project_file(root: BorrowedFd<'_>, relative: &str) -> bool {
-    modified_ms(root, relative).is_some()
+    use rustix::fs::{FileType, OFlags};
+    crate::confined_path::check(relative).is_ok()
+        && crate::confined_path::open_beneath(
+            root,
+            relative,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        )
+        .and_then(rustix::fs::fstat)
+        .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
 }
 
 /// Whether the Kernel stores `text` as written: its durable-text redaction
@@ -594,10 +601,7 @@ pub(crate) fn record(
 /// name the domain by `named-files`, whichever id its row has. A store that
 /// holds a row under every one of those ids refuses the write with a
 /// conflict.
-fn ensure_own_domain(
-    envelope: &mut kernel::Envelope<'_>,
-    ready: &mut HashSet<String>,
-) -> Result<(), kernel::KernelError> {
+fn ensure_own_domain(envelope: &mut kernel::Envelope<'_>) -> Result<(), kernel::KernelError> {
     if !envelope.domain_exists(DOMAIN_ID)? {
         let preferred = format!("{}{DOMAIN_ID}", kernel_routes::commit::DOMAIN_OBJECT_PREFIX);
         let alternates = (0..DOMAIN_ROW_IDS).map(|index| format!("{DOMAIN_ROW_PREFIX}{index}"));
@@ -619,7 +623,6 @@ fn ensure_own_domain(
             sensitivity: kernel::Sensitivity::Normal,
         })?;
     }
-    ready.insert(DOMAIN_ID.to_owned());
     Ok(())
 }
 
@@ -649,7 +652,7 @@ fn record_as(
         let mut domains = HashSet::new();
         let mut ready = false;
         let mut refusal = None;
-        ensure_own_domain(envelope, &mut domains)?;
+        ensure_own_domain(envelope)?;
         kernel_routes::commit::ensure_scope(
             envelope,
             project,
@@ -954,33 +957,36 @@ pub(crate) fn delivered(
     let Some(root) = open_root(project.root()) else {
         return Ok((Vec::new(), read.truncated));
     };
-    let listed: Vec<(&str, File, i64)> = ordered
+    let listed: Vec<(&str, File)> = ordered
         .into_iter()
         .take(MAX_CHECKED)
-        .filter_map(|(path, file)| {
-            let modified = is_recordable(path).then(|| modified_ms(root.as_fd(), path))??;
-            Some((path, file, modified))
-        })
+        .filter(|(path, _)| is_recordable(path) && is_project_file(root.as_fd(), path))
         .take(MAX_DELIVERED)
         .collect();
-    let on_disk: Vec<(&str, i64)> = listed
-        .iter()
-        .map(|(path, _, modified)| (*path, *modified))
-        .collect();
-    let changed = changes::last_changes(project.root(), root.as_fd(), &on_disk);
+    let paths: Vec<&str> = listed.iter().map(|(path, _)| *path).collect();
+    let changed = changes::last_changes(
+        changes::History::shared(),
+        project.root(),
+        root.as_fd(),
+        &paths,
+    );
+    // A file that left between the two looks at it has no line: each
+    // change stays with its own path.
     let lines = listed
         .into_iter()
         .zip(changed)
-        .map(|((path, file, _), change)| CanonicalMemory {
-            object_id: file.id,
-            category: NAMED_FILES_SECTION.to_owned(),
-            content: format!(
-                "{path} (the agent used it in {} earlier session{}, last on {}{LAST_CHANGE_CLAUSE}{})",
-                file.sessions.len(),
-                if file.sessions.len() == 1 { "" } else { "s" },
-                day(file.last_ms),
-                last_change(change)
-            ),
+        .filter_map(|((path, file), change)| {
+            Some(CanonicalMemory {
+                object_id: file.id,
+                category: NAMED_FILES_SECTION.to_owned(),
+                content: format!(
+                    "{path} (the agent used it in {} earlier session{}, last on {}{LAST_CHANGE_CLAUSE}{})",
+                    file.sessions.len(),
+                    if file.sessions.len() == 1 { "" } else { "s" },
+                    day(file.last_ms),
+                    last_change(change?)
+                ),
+            })
         })
         .collect();
     Ok((lines, read.truncated))
@@ -1009,18 +1015,29 @@ fn minute(at_ms: i64) -> String {
 }
 
 /// The words of a line's last-change clause after [`LAST_CHANGE_CLAUSE`]:
-/// the minute of the commit that gave the file its bytes; that minute and
-/// `or earlier` for a history read as far as its bound; the minute of the
+/// the minute of the commit that gave the file its bytes; no time for a
+/// history the read did not follow to that commit; the minute of the
 /// file's modification time and `on disk` for a file whose bytes HEAD does
 /// not hold.
 fn last_change(change: changes::LastChange) -> String {
     use changes::LastChange;
     match change {
         LastChange::Committed(at_ms) => minute(at_ms),
-        LastChange::CommittedBy(at_ms) => format!("{} or earlier", minute(at_ms)),
+        LastChange::HistoryUnread => HISTORY_UNREAD.to_owned(),
         LastChange::OnDisk(at_ms) => format!("{} on disk", minute(at_ms)),
     }
 }
+
+/// What a line's last-change clause says of a file whose history the read
+/// did not follow to the commit that gave the file its bytes.
+const HISTORY_UNREAD: &str = "at a time the read history does not show";
+
+/// The clause the packer charges for every `NAMED_FILES` line, whatever
+/// the line's own clause holds: the form of the most tokens. The block's
+/// selection, and so its revision, then stays as it is when a file's last
+/// change does. `a_clause_costs_at_most_its_charge` pins that no clause
+/// costs more.
+pub(crate) const CHARGED_CLAUSE: &str = "; last changed 2888-08-28T18:58Z on disk)";
 
 /// A statement of the user that a read serves: its id, the commit that
 /// first recorded it, and the length of its stored text.
@@ -1058,13 +1075,17 @@ pub(crate) fn user_statements(response: &kernel_routes::read::ReadResponse) -> V
         .collect()
 }
 
-/// Appends ` (stated <minute>)` to the line of each of `statements` in
+/// Appends ` (recorded <minute>)` to the line of each of `statements` in
 /// `response`: the UTC minute of the commit that first recorded the
-/// statement, read from the store in one statement for the pass. A line
+/// statement, read from the store in one statement for the pass. Capture
+/// commits a statement when the turn it was made in has ended, so the
+/// statement was made at that minute or before it. A line
 /// another mark already rewrote, which is longer than the stored text, is
 /// left as that mark wrote it: a contest mark dates its statement itself.
 /// A statement whose commit the log holds no time for keeps its stored
-/// text. A failed read fails the pass.
+/// text. A failed read fails the pass. The rewritten lines are the pass's
+/// facts wherever the pass's read serves them: the block, and the
+/// summarizer prompt of a firing that read serves, as a contest mark is.
 pub(crate) fn date_statements(
     store: &kernel::KernelStore,
     response: &mut kernel_routes::read::ReadResponse,
@@ -1091,7 +1112,7 @@ pub(crate) fn date_statements(
             decision
                 .payload
                 .summary
-                .push_str(&format!(" (stated {})", minute(*at_ms)));
+                .push_str(&format!(" (recorded {})", minute(*at_ms)));
         }
     }
     Ok(())
@@ -1141,8 +1162,10 @@ mod bounds_tests {
         Arc::new(json!({ "message": message }))
     }
 
-    /// A call of `name` under `id`.
+    /// A call of `name` under `id`, which its Pi row holds as the id of its
+    /// one `toolCall` part.
     fn call_row(id: &str, name: &str, input: Value) -> Row {
+        let part = json!({ "type": "toolCall", "id": id, "name": name, "arguments": input });
         let block = BlockKind::ToolCall {
             id: id.to_owned(),
             name: name.to_owned(),
@@ -1151,18 +1174,22 @@ mod bounds_tests {
         };
         (
             Arc::new(message("assistant", vec![block])),
-            pi_row(json!({ "role": "assistant" })),
+            pi_row(json!({ "role": "assistant", "content": [part] })),
         )
     }
 
-    /// A result under `id` whose Pi row is `row`.
-    fn result_row(id: &str, output: OutputKind, row: Value) -> Row {
+    /// A result under `id` whose Pi row is `row`, which names the id as
+    /// its `toolCallId` unless it names one itself.
+    fn result_row(id: &str, output: OutputKind, mut row: Value) -> Row {
         let block = BlockKind::ToolResult {
             id: id.to_owned(),
             tool_name: "tool".to_owned(),
             output: memory_store::ToolOutput::bare(output),
             provider_executed: false,
         };
+        if row.get("toolCallId").is_none() {
+            row["toolCallId"] = json!(id);
+        }
         (Arc::new(message("tool", vec![block])), pi_row(row))
     }
 
@@ -1356,6 +1383,8 @@ mod bounds_tests {
             names("a.txt <3 b.txt <- c.txt <= d.txt < e.txt <"),
             ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]
         );
+        // A letter outside ASCII opens no tag.
+        assert_eq!(names("a.txt <\u{e9}t\u{e9}> b.txt"), ["a.txt", "b.txt"]);
         // Each part is read on its own: a block that ends the first part
         // leaves the second part's text the sender's.
         let parts = message(
@@ -1510,6 +1539,62 @@ mod bounds_tests {
                 read("00000001", "call-1", "docs/a.md"),
                 result("00000002", "call-1", false),
             ]),
+            ["docs/a.md"]
+        );
+
+        // A row that holds no id gets one of the codec's making, and that
+        // id pairs nothing: a result without a `toolCallId` decodes under
+        // the id `tool`, as a call Pi named `tool` does, and a call without
+        // an id decodes under an id the codec derives.
+        let without = |mut row: Value, key: &str| {
+            let message = row["message"].as_object_mut().unwrap();
+            match message
+                .get_mut("content")
+                .and_then(|parts| parts.get_mut(0))
+            {
+                Some(part) if key == "id" => {
+                    part.as_object_mut().unwrap().remove("id");
+                }
+                _ => {
+                    message.remove(key);
+                }
+            }
+            row
+        };
+        assert_eq!(
+            used(vec![
+                read("00000001", "tool", "docs/a.md"),
+                result("00000002", "tool", false),
+            ]),
+            ["docs/a.md"]
+        );
+        assert!(
+            used(vec![
+                read("00000001", "tool", "docs/a.md"),
+                without(result("00000002", "tool", false), "toolCallId"),
+            ])
+            .is_empty()
+        );
+        let mut numbered = result("00000002", "tool", false);
+        numbered["message"]["toolCallId"] = json!(7);
+        assert!(used(vec![read("00000001", "tool", "docs/a.md"), numbered]).is_empty());
+        let unnamed = without(read("00000001", "call-1", "docs/a.md"), "id");
+        let derived = {
+            let rows = vec![Arc::new(unnamed.clone())];
+            let decoded = crate::codec::pi::decode_pi_rows(&rows).unwrap().messages;
+            let Some(BlockKind::ToolCall { id, .. }) =
+                decoded[0].ck.content().first().map(|block| block.kind())
+            else {
+                panic!("the row decodes to a call");
+            };
+            id.clone()
+        };
+        assert!(used(vec![unnamed, result("00000002", &derived, false)]).is_empty());
+        // A `callId` names a call that holds no `id`.
+        let mut called = without(read("00000001", "call-1", "docs/a.md"), "id");
+        called["message"]["content"][0]["callId"] = json!("call-9");
+        assert_eq!(
+            used(vec![called, result("00000002", "call-9", false)]),
             ["docs/a.md"]
         );
     }
@@ -1712,6 +1797,18 @@ mod bounds_tests {
                 "{injected:?}"
             );
         }
+        // A part that names nothing counts toward the 65,536 bytes: with a
+        // typed part of 15 bytes, an injected part of 65,521 bytes fills
+        // the bound and one byte more passes it.
+        let typed = "Read docs/b.md.";
+        let marker = "[SYSTEM DIRECTIVE: REVIEW] ";
+        let injected = |bytes: usize| format!("{marker}{}", "x".repeat(bytes - marker.len()));
+        assert_eq!(typed.len(), 15);
+        assert_eq!(
+            named_paths(root(), &parts(&[&injected(65_521), typed])),
+            ["docs/b.md"]
+        );
+        assert!(named_paths(root(), &parts(&[&injected(65_522), typed])).is_empty());
     }
 
     /// The memo holds the 256 sessions that recorded a path last, and a
@@ -1820,5 +1917,49 @@ mod bounds_tests {
         files.memo().record(&session_owner, &names[0]);
         let record = files.keep(&project, "s", &observed, 7).unwrap();
         assert_eq!(record.paths, names[1..2]);
+    }
+
+    /// The packer charges every `NAMED_FILES` line for one fixed clause.
+    /// Under the estimator the budget uses, a line with any clause the
+    /// renderer writes costs at most the same line with the charged clause:
+    /// a commit time, the same time on disk, for minutes spread over three
+    /// centuries, and the clause of a history the read did not follow.
+    #[test]
+    fn a_clause_costs_at_most_its_charge() {
+        let tokens = |line: &str| crate::token_cache::cached_estimate_tokens(&format!("{line}\n"));
+        for prefix in [
+            "docs/guide.md (the agent used it in 1 earlier session, last on 2026-03-01",
+            "tools/lint/check_style.sh (the agent used it in 12 earlier sessions, last on 1999-12-31",
+        ] {
+            let charge = tokens(&format!("{prefix}{CHARGED_CLAUSE}"));
+            let costs = |change: changes::LastChange| {
+                tokens(&format!(
+                    "{prefix}{LAST_CHANGE_CLAUSE}{})",
+                    last_change(change)
+                ))
+            };
+            assert!(costs(changes::LastChange::HistoryUnread) <= charge);
+            // 20,011 minutes apart is a prime number of minutes, so the
+            // samples walk every minute, hour, day, and month digit.
+            let step = 20_011 * 60_000;
+            let mut at_ms = 0;
+            while at_ms < 9_500_000_000_000 {
+                for change in [
+                    changes::LastChange::Committed(at_ms),
+                    changes::LastChange::OnDisk(at_ms),
+                ] {
+                    assert!(
+                        costs(change) <= charge,
+                        "{change:?}: {} tokens against a charge of {charge}",
+                        costs(change)
+                    );
+                }
+                at_ms += step;
+            }
+        }
+        assert_eq!(
+            revised_part(&format!("docs/a.md (used{CHARGED_CLAUSE}")),
+            "docs/a.md (used"
+        );
     }
 }

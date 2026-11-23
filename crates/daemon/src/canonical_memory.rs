@@ -126,7 +126,8 @@ impl CanonicalMemorySnapshot {
     }
 
     /// Digest over the rendered inputs: two snapshots with equal digests
-    /// render identical block bytes.
+    /// render the same block apart from the last-change clauses of its
+    /// `NAMED_FILES` lines.
     pub fn revision(&self) -> u64 {
         self.revision
     }

@@ -124,6 +124,21 @@ pub(crate) const CURRENT_WORK_BUDGET_SHARE: f64 = 0.25;
 
 pub(crate) const NAMED_FILES_BUDGET_SHARE: f64 = 0.125;
 
+/// The text a section row is charged for: its rendered line and line break.
+/// A `NAMED_FILES` line is charged up to its last-change clause and then for
+/// [`crate::named_files::CHARGED_CLAUSE`], the clause of the most tokens, so
+/// a file's last change moves neither the rows a budget admits nor, with
+/// them, the block's revision.
+fn charged_line(memory: &CanonicalMemory) -> String {
+    let line = render_memory_line(memory);
+    if memory.category == NAMED_FILES_SECTION {
+        let stable = crate::named_files::revised_part(&line);
+        format!("{stable}{}\n", crate::named_files::CHARGED_CLAUSE)
+    } else {
+        line + "\n"
+    }
+}
+
 /// The rows of `rows`, in the supplied order, that fit `room` tokens with
 /// the opening and closing tags of `section`, and the tokens they cost.
 /// The prefix ends at the first row that exceeds the room.
@@ -141,7 +156,7 @@ fn section_prefix(
     };
     let mut kept = Vec::new();
     for memory in rows {
-        let cost = estimate_tokens(&(render_memory_line(memory) + "\n")) as u64;
+        let cost = estimate_tokens(&charged_line(memory)) as u64;
         let Some(rest) = left.checked_sub(cost) else {
             break;
         };
@@ -512,10 +527,15 @@ mod trim_memories_tests {
             .map(|id| CanonicalMemory {
                 object_id: format!("nfu-{id}"),
                 category: NAMED_FILES_SECTION.to_owned(),
-                content: format!("docs/guide-{id}.md (the agent used it in 1 earlier session)"),
+                // Each line ends with the clause the packer charges, so a
+                // line's charge is the bytes it renders.
+                content: format!(
+                    "docs/guide-{id}.md (the agent used it in 1 earlier session{}",
+                    crate::named_files::CHARGED_CLAUSE
+                ),
             })
             .collect();
-        let lasting: Vec<CanonicalMemory> = (0..120)
+        let lasting: Vec<CanonicalMemory> = (0..200)
             .map(|id| {
                 memory(
                     "ARCHITECTURE",
@@ -529,7 +549,7 @@ mod trim_memories_tests {
             let close = "</NAMED_FILES>\n";
             bytes(&block[start..block.find(close).expect("the element closes") + close.len()])
         };
-        let budget = 7_200.0;
+        let budget = 9_600.0;
         let kept = trim_block_to_budget(&files, &lasting, &[], budget, bytes);
         let named = kept
             .iter()
@@ -540,11 +560,14 @@ mod trim_memories_tests {
             "the eighth holds some of the files: {named}"
         );
         assert_eq!(kept[..named], files[..named], "a run from the first row");
-        assert!(element_tokens(&kept) as f64 <= 900.0, "an eighth of 7,200");
+        assert!(
+            element_tokens(&kept) as f64 <= 1_200.0,
+            "an eighth of 9,600"
+        );
         let mut longer = files[..=named].to_vec();
         longer.extend_from_slice(&kept[named..]);
         assert!(
-            element_tokens(&longer) as f64 > 900.0,
+            element_tokens(&longer) as f64 > 1_200.0,
             "the next file exceeds the eighth"
         );
         assert!(bytes(&render_delivered_memory_block(&kept)) as f64 <= budget);
@@ -581,22 +604,23 @@ mod trim_memories_tests {
         assert!(kept.iter().all(|row| row.category != NAMED_FILES_SECTION));
         assert_eq!(kept, trim_block_to_budget(&[], &lasting, &[], tight, bytes));
 
-        // An estimator that prices the element's tags at nothing: a line of
-        // 24 bytes fits the eighth and is kept only when the room after the
-        // block's frame holds it too.
+        // An estimator that prices the element's tags and the charged
+        // clause's time at nothing: a line of 24 bytes fits the eighth and
+        // is kept only when the room after the block's frame holds it too.
+        let clause = crate::named_files::CHARGED_CLAUSE;
         let tags_free = |text: &str| {
             if text.starts_with("<NAMED_FILES") {
                 0
             } else {
-                text.len()
+                text.replace(clause, ")").len()
             }
         };
         let short = [CanonicalMemory {
             object_id: "nfu-0".to_owned(),
             category: NAMED_FILES_SECTION.to_owned(),
-            content: "docs/guide.md (use day)".to_owned(),
+            content: format!("docs/guide.md (use day{clause}"),
         }];
-        assert_eq!(bytes(&(render_memory_line(&short[0]) + "\n")), 24);
+        assert_eq!(tags_free(&(render_memory_line(&short[0]) + "\n")), 24);
         let frame = bytes(&delivered_memory_frame()) as f64;
         assert!((frame + 20.0) / 8.0 >= 24.0);
         assert!(trim_block_to_budget(&short, &[], &[], frame + 20.0, tags_free).is_empty());
@@ -604,6 +628,28 @@ mod trim_memories_tests {
             trim_block_to_budget(&short, &[], &[], frame + 24.0, tags_free),
             short
         );
+
+        // A line is charged for the packer's clause whatever its own
+        // clause holds: the same budgets admit the same file with a
+        // shorter clause and with a longer one.
+        for own in [
+            "; last changed 2026-03-01T09:30Z)",
+            "; last changed at a time the read history does not show)",
+        ] {
+            let other = [CanonicalMemory {
+                content: format!("docs/guide.md (use day{own}"),
+                ..short[0].clone()
+            }];
+            assert!(
+                trim_block_to_budget(&other, &[], &[], frame + 20.0, tags_free).is_empty(),
+                "{own}"
+            );
+            assert_eq!(
+                trim_block_to_budget(&other, &[], &[], frame + 24.0, tags_free),
+                other,
+                "{own}"
+            );
+        }
     }
 
     #[test]
@@ -1827,9 +1873,20 @@ mod charged_text_tests {
             row("mem_4", CURRENT_WORK_SECTION, "update docs/a.md"),
             row("mem_5", CURRENT_WORK_SECTION, "rename the upload helper"),
         ];
+        // Each file's line ends with the clause the packer charges, so the
+        // charged text of a line is the line the block renders.
+        let clause = crate::named_files::CHARGED_CLAUSE;
         let files = [
-            row("nfu_1", NAMED_FILES_SECTION, "docs/guide.md (used most)"),
-            row("nfu_2", NAMED_FILES_SECTION, "tools/check.sh (used less)"),
+            row(
+                "nfu_1",
+                NAMED_FILES_SECTION,
+                &format!("docs/guide.md (used most{clause}"),
+            ),
+            row(
+                "nfu_2",
+                NAMED_FILES_SECTION,
+                &format!("tools/check.sh (used less{clause}"),
+            ),
         ];
         let charged = RefCell::new(Vec::<String>::new());
         let record = |text: &str| {

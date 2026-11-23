@@ -77,26 +77,35 @@ fn session_binding(project: &Path, session: &str) -> SessionBinding {
     }
 }
 
-/// A Pi window of `session`, whose working directory is the project root. The Pi row of each
-/// tool result states whether its call failed, as Pi writes a result.
+/// A Pi window of `session`, whose working directory is the project root. The Pi row of a
+/// tool call holds the call's part with its id, and the row of a tool result names that id
+/// and states whether the call failed, as Pi writes them.
 fn window(session: &str, messages: &[IngressMessage]) -> TransformRequest {
     let mut request = capture_transform_request(messages);
     request.session_id = session.to_string();
     request.working_directory = Some(String::new());
     let rows = request.native_messages.as_mut().unwrap();
     for (message, row) in messages.iter().zip(rows) {
-        let Some(BlockKind::ToolResult { output, .. }) =
-            message.ck.content().first().map(|block| block.kind())
-        else {
-            continue;
-        };
-        let failed = !matches!(
-            output.kind,
-            OutputKind::Text { .. } | OutputKind::Json { .. } | OutputKind::Content { .. }
-        );
-        let result = &mut Arc::make_mut(row)["message"];
-        result["role"] = json!("toolResult");
-        result["isError"] = json!(failed);
+        let native = &mut Arc::make_mut(row)["message"];
+        match message.ck.content().first().map(|block| block.kind()) {
+            Some(BlockKind::ToolCall {
+                id, name, input, ..
+            }) => {
+                native["content"] = json!([{
+                    "type": "toolCall", "id": id, "name": name, "arguments": input
+                }]);
+            }
+            Some(BlockKind::ToolResult { id, output, .. }) => {
+                let failed = !matches!(
+                    output.kind,
+                    OutputKind::Text { .. } | OutputKind::Json { .. } | OutputKind::Content { .. }
+                );
+                native["role"] = json!("toolResult");
+                native["toolCallId"] = json!(id);
+                native["isError"] = json!(failed);
+            }
+            _ => {}
+        }
     }
     request
 }
@@ -207,18 +216,27 @@ fn stored_paths(handler: &Handler, project: &Path) -> Vec<String> {
 }
 
 fn delivered_lines(handler: &Handler, project: &Path, session: &str) -> Vec<String> {
+    let budget = session_binding(project, session)
+        .config
+        .memory_budget_tokens;
+    delivered_lines_within(handler, project, session, budget)
+}
+
+/// The lines of the element a pass of `session` reads under a memory budget of `budget`
+/// tokens.
+fn delivered_lines_within(
+    handler: &Handler,
+    project: &Path,
+    session: &str,
+    budget: f64,
+) -> Vec<String> {
     let binding = session_binding(project, session);
-    canonical_memory::read_project_memory(
-        &handler.kernel,
-        &binding.kernel_project,
-        session,
-        binding.config.memory_budget_tokens,
-    )
-    .rows()
-    .iter()
-    .filter(|row| row.category == memory_render::NAMED_FILES_SECTION)
-    .map(|row| row.content.clone())
-    .collect()
+    canonical_memory::read_project_memory(&handler.kernel, &binding.kernel_project, session, budget)
+        .rows()
+        .iter()
+        .filter(|row| row.category == memory_render::NAMED_FILES_SECTION)
+        .map(|row| row.content.clone())
+        .collect()
 }
 
 /// The last-change clause of the line of a file that shows its modification time: the UTC
@@ -237,7 +255,11 @@ fn changed_on_disk(project: &Path, path: &str) -> String {
 
 /// The paths the lines of [`delivered_lines`] hold, in order.
 fn delivered_paths(handler: &Handler, project: &Path, session: &str) -> Vec<String> {
-    delivered_lines(handler, project, session)
+    paths_of(&delivered_lines(handler, project, session))
+}
+
+fn paths_of(lines: &[String]) -> Vec<String> {
+    lines
         .iter()
         .map(|line| line.split(' ').next().unwrap().to_owned())
         .collect()
@@ -589,11 +611,17 @@ async fn the_element_orders_files_by_sessions_then_last_use_then_path() {
     // A second session used guide 2, the one used longest ago.
     record("again", &names[2], 6 * day);
 
-    assert_eq!(
-        delivered_paths(&handler, &project, "reader"),
-        [2, 5, 7, 9, 1, 11, 3, 4].map(|index: usize| names[index].clone())
-    );
+    // A budget whose eighth holds the element's note and more than eight of these lines, so
+    // the eight-line bound decides.
+    let roomy = 8_000.0;
+    let listed =
+        |session: &str| paths_of(&delivered_lines_within(&handler, &project, session, roomy));
+    let eight = [2, 5, 7, 9, 1, 11, 3, 4].map(|index: usize| names[index].clone());
+    assert_eq!(listed("reader"), eight);
+    // The eighth of the default budget holds the note and a leading run of the same lines.
     let lines = delivered_lines(&handler, &project, "reader");
+    assert!((2..=8).contains(&lines.len()), "{lines:?}");
+    assert_eq!(paths_of(&lines), eight[..lines.len()]);
     assert_eq!(
         lines[0],
         format!(
@@ -609,10 +637,7 @@ async fn the_element_orders_files_by_sessions_then_last_use_then_path() {
         )
     );
     // The reading session's own records are left out of its block.
-    assert_eq!(
-        delivered_paths(&handler, &project, "s5")[..2],
-        [names[2].clone(), names[7].clone()]
-    );
+    assert_eq!(listed("s5")[..2], [names[2].clone(), names[7].clone()]);
 
     // Two newer records of paths no recorder writes, one with a space and one of 257 bytes:
     // they take two of the 32 places that are looked for and are never listed, so the eight
@@ -623,10 +648,7 @@ async fn the_element_orders_files_by_sessions_then_last_use_then_path() {
     assert_eq!(long.len(), 257);
     std::fs::write(project.join(&long), "Long.\n").unwrap();
     record("odd", &long, 38 * day);
-    assert_eq!(
-        delivered_paths(&handler, &project, "reader"),
-        [2, 5, 7, 9, 1, 11, 3, 4].map(|index: usize| names[index].clone())
-    );
+    assert_eq!(listed("reader"), eight);
     // Newer records of 28 absent files: guide 2 is the first path, the absent files and the
     // two odd paths take the next 30, guide 5 is the 32nd and the last that is looked for,
     // and guide 7 is the 33rd.
@@ -637,10 +659,7 @@ async fn the_element_orders_files_by_sessions_then_last_use_then_path() {
             40 * day + index,
         );
     }
-    assert_eq!(
-        delivered_paths(&handler, &project, "reader"),
-        [names[2].clone(), names[5].clone()]
-    );
+    assert_eq!(listed("reader"), [names[2].clone(), names[5].clone()]);
 }
 
 /// The records come from primary Pi sessions whose configuration permits memory capture, and
@@ -1213,6 +1232,17 @@ async fn serve_pi(
     session: &str,
     rows: &[Value],
 ) -> Result<Value, String> {
+    serve_pi_from(handler, channel, session, rows, Value::Null).await
+}
+
+/// [`serve_pi`] for a window that declares `boundary` as the anchor its rows follow.
+async fn serve_pi_from(
+    handler: &Handler,
+    channel: u16,
+    session: &str,
+    rows: &[Value],
+    boundary: Value,
+) -> Result<Value, String> {
     let shared: Vec<Arc<Value>> = rows.iter().cloned().map(Arc::new).collect();
     let messages = codec::pi::decode_pi_rows(&shared).unwrap().messages;
     let mut request = request_with_usage(messages, 1_000, 200_000);
@@ -1220,6 +1250,7 @@ async fn serve_pi(
     request["native_messages"] = json!(rows);
     request["session_id"] = json!(session);
     request["working_directory"] = json!("");
+    request["boundary"] = boundary;
     request.as_object_mut().unwrap().remove("base_revision");
     match handler
         .handle_transform_applied_for_test(test_route(channel), request)
@@ -1253,6 +1284,16 @@ async fn a_pi_turn_served_over_the_routes_is_recorded_and_delivered() {
     repeated.push(repeated[2].clone());
     let refused = serve_pi(&handler, WRITER, "writer", &repeated).await;
     assert_eq!(refused, Err("invalid_params".to_string()));
+    settle(&handler).await;
+    assert!(stored_records(&handler, &project).is_empty());
+
+    // A window that follows an anchor the session's coverage does not hold is observed, shows
+    // the read, and is refused when its window is resolved: the refused pass hands off nothing.
+    let unknown = json!({ "mid": "1a2b3c4d", "sequence": 99 });
+    let refused = serve_pi_from(&handler, WRITER, "writer", &pi_turn(true), unknown)
+        .await
+        .unwrap();
+    assert_eq!(refused["status"], "boundary_unknown", "{refused}");
     settle(&handler).await;
     assert!(stored_records(&handler, &project).is_empty());
 
@@ -1499,11 +1540,11 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
             stored[0].clone(),
             (
                 "mem-tabs".to_owned(),
-                format!("User stated: {tabs} (stated {})", minute(tabs_seq))
+                format!("User stated: {tabs} (recorded {})", minute(tabs_seq))
             ),
             (
                 "mem-width".to_owned(),
-                format!("User stated: {width} (stated {})", minute(width_seq))
+                format!("User stated: {width} (recorded {})", minute(width_seq))
             ),
         ]
     );
@@ -1553,7 +1594,7 @@ async fn a_block_that_lists_a_file_dates_the_users_statements() {
     assert_eq!(response.decisions["mem-tabs"].payload.summary, marked);
     assert_eq!(
         response.decisions["mem-width"].payload.summary,
-        format!("User stated: {width} (stated {})", minute(width_seq))
+        format!("User stated: {width} (recorded {})", minute(width_seq))
     );
     assert_eq!(
         response.decisions["mem-other"].payload.summary,

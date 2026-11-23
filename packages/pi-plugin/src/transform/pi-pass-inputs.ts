@@ -41,8 +41,9 @@ export interface PiPassFieldsArgs {
 
 /**
  * `cwd` as a path beneath `projectRoot`, with `/` separators and empty for the root itself. The
- * daemon records named files for a session whose value is empty: there a relative path of a
- * tool call names the project file of that path. Both directories are taken at their physical
+ * daemon records named files for a session whose value is empty: there the relative path a
+ * `read` call opens names the project file of that path, and the daemon matches a `bash`
+ * command line by its spelling from the project root. Both directories are taken at their physical
  * paths, so a working directory that is a symbolic link to the root is the root. `undefined`
  * for a working directory outside the root and for a directory that cannot be resolved.
  */

@@ -1506,13 +1506,17 @@ A call after the message uses a named file when it is a call of Pi's `read`
 whose `path` argument, read without one leading `@` as Pi opens it, names
 the file, or a call of Pi's `bash` whose `command` names the file in one of
 its first 256 such runs, read as written with their periods, and when the
-call's id, as Pi wrote it with its item suffix, is the id of no other call
+call's id is the id of no other call
 after the message and of exactly one
 result, which follows the call, is text, JSON, or content that carries
 no error, and whose Pi row states the outcome: its `isError` is the boolean
 `false` and its `content` is an array. A result whose row holds no
 `isError`, or one of another type, shows no use, while the window still
-renders it as Section 8 decodes it. The `bash` match is one of spelling: a
+renders it, since the Pi codec decodes such a result as text. An id here is the one the row
+itself holds, item suffix included: a call part's string `id`, else its
+string `callId`, and a result row's string `toolCallId`. A call or a result
+whose row holds no such string shows no use, although the window renders
+it under an id the codec makes. The `bash` match is one of spelling: a
 path the command line names in a comment, or after a `cd`, matches as the
 same path elsewhere in the line does. A file the
 turn also edits is used the same way. When the pass's transform has
@@ -1530,7 +1534,10 @@ Its id derives from the project, the session, and the path, so a second
 write replays the first and leaves its time. A session records 64 distinct
 paths at most while the daemon holds its recorded paths, which it does for
 the 256 sessions that recorded a path last. At most four passes' records
-are written at once. A pass that finds four being written, a pass observed
+are written at once. The paths of one pass share a five-second wait for
+the Kernel's writer and are committed one by one: a path whose commit that
+wait or the Kernel refuses is left out, and the paths committed before it
+stay recorded. A pass that finds four being written, a pass observed
 before a `session.delete` that its write follows, a session id the
 redaction would rewrite, a project root that cannot be opened, a Kernel
 that is unavailable, a daemon that is shutting down, and a write the Kernel
@@ -1544,12 +1551,13 @@ the older rows stay as they are, the records name the domain by
 `named-files` whichever id its row has, and a store that holds a row under
 every one of the nine ids refuses each named-file write. The daemon alone writes and
 changes the domain: a `kernel.commit` operation that names `named-files`,
-that writes a row under the id prefixes `nfu_`, `dnf_`, or `nfd_` or the id
-`domain:named-files`, or that replaces, retires, or marks one of the
+that writes a row under the id prefixes `nfu_`, `dnf_`, or `nfd_`, the id
+`domain:named-files`, or an id under the attestation verifier's prefixes
+(`verattest:`, `verattestdec:`, `verwitness:`, `verwitnessobj:`), or that
+replaces, retires, or marks one of the
 domain's rows, is refused as `invalid_input`, and so is a
 `kernel.artifact.ingest.begin` whose artifact's object id is one of those
-ids or an id under the attestation verifier's prefixes (`verattest:`,
-`verattestdec:`, `verwitness:`, `verwitnessobj:`), or whose artifact names the
+ids, or whose artifact names the
 domain, the source kind `named_file_recorder`, or the verifier's source
 kind `verifier`; a path leaves the element a pass composes when its file
 does, and a pass that serves the m0 of an earlier pass serves that pass's
@@ -1565,47 +1573,81 @@ that moment, so a path enters a block only while its file exists; a read
 its bounds cut short marks the composition truncated. A line is
 `<path> (the agent used it in <n> earlier session(s), last on <date>; last changed <time>)`,
 the date being the UTC day of `used_ms`; it carries no id, and the record's
-id is no handle of `eidnara_memory`. `<time>` is when the file last
-changed, as the composing pass reads it, as a UTC minute
-(`2026-03-01T09:30Z`). When the project root opens as a Git work tree, HEAD
-holds a regular or executable blob at the path, and the file's bytes (at
-most 256 KiB of them) hash to that blob, the time is the committer time of
-the commit that gave the file those bytes: the daemon walks from HEAD to
-the first parent that holds the same blob, as `git log` simplifies the
-history of one file, and stops at the commit none of whose parents holds
-it. A walk reads at most 256 parents; one that reaches that bound, or a
-parent it cannot read, as a shallow clone has, gives the committer time of
-the commit it stopped at, and the line reads `<time> or earlier`. The walk
-of a path is kept for the HEAD it was read at, for the 64 project roots
-read last and 64 paths of each. Any other file reads `<time> on disk`, the
-file's modification time: a file HEAD holds no blob for, a file edited
-since its commit, a larger file, a file whose checkout filters change its
-bytes, and a file of a project whose root opens as no work tree (a
-directory beneath a repository's root among them) or whose history cannot
-be read. The commit time is chosen over the modification time because a
+id is no handle of `eidnara_memory`. The clause after `; last changed` says
+when the file last changed, as the composing pass reads it. The pass reads
+the file through one descriptor: its status, its bytes when it holds at
+most 256 KiB, and its status again; a reading that a write crossed is
+taken once more, and a file that then still changes, or that left since it
+was selected, has no line. When the project root opens as the work tree of
+a SHA-1 Git repository, HEAD names a commit, and the tree of that commit
+holds a regular or executable blob at the path that the file's bytes hash
+to, the clause is the committer time of the commit that gave the file
+those bytes, as a UTC minute (`2026-03-01T09:30Z`): the walk goes from HEAD
+to the first parent that holds the same blob, as `git log` simplifies the
+history of one file, and ends at the commit none of whose parents holds
+it. A walk reads at most 256 parents; one that reaches that bound, a
+commit or tree it cannot read whole, as a shallow clone has, or its time
+budget gives no time, and the clause reads `at a time the read history
+does not show`. Any other file reads `<time> on disk`, the modification
+time its reading took: a file HEAD holds no blob for, a file edited since
+its commit, a larger file, a file whose checkout filters change its bytes,
+and a file of a project whose root opens as no work tree (a directory
+beneath a repository's root among them) or whose HEAD names no readable
+commit. The commit time is chosen over the modification time because a
 clone or a checkout writes the file anew and leaves the commit time as it
-is. The block's revision reads a line up to `; last changed`, so an edit or
-a commit of a listed file changes no revision and folds no m0; the line a
-session holds is the one its last composition read. When the element lists
-a file, each fact that capture stored as the user's statement ends with
-` (stated <time>)`, the UTC minute of the commit that first recorded the
-statement, read from the commit log in one statement for the pass; a
-statement shown with its contest already carries the day it was stated and
-takes no second mark, a statement whose commit the log holds no time for
-is shown as stored, and the summarizer's block and `eidnara_search` show
-no such mark. The element is charged first, to an
+is; both times are shown as their sources hold them, a time ahead of the
+daemon's clock included. No pass reads the repository. One thread of the
+daemon reads it for every pass: HEAD as capture's head observation reads
+it, and each commit and tree through the attestation verifier's object
+reader, which bounds an object at the document read cap, bounds the delta
+chains of the repository's own packs, and takes an object only when its
+bytes hash to its id; an object the repository holds only through an
+alternate is read by the Git library's store under the allocation bound
+alone. The thread works on one pass's files for at most two seconds and
+checks that budget before each object. A pass waits at most one second
+for its answer and then shows the files' modification times; at most four
+passes wait at once, and a further pass asks nothing. A repository that
+blocks a read, such as one whose `HEAD` is a pipe, therefore costs the
+passes of the daemon that second each until four wait, and holds the one
+thread until the daemon stops. An answer is kept for the path and the
+blob, for the 64 project roots asked about last and 64 paths of each, so a
+pass at unchanged bytes asks nothing, and a history rewritten to give the
+same bytes another commit keeps the first answer while it is held. The
+block's revision reads a line up to `; last changed`, and the budget
+charges every line up to there and then for one fixed clause, the form of
+the most tokens, so an edit or a commit of a listed file changes neither
+the rows a budget admits nor the revision, and folds no m0; the line a
+session holds is the one its last composition read. When the read lists a
+file, each fact that capture stored as the user's statement ends with
+` (recorded <time>)`, the UTC minute of the commit that first recorded the
+statement, read from the commit log in one statement for the pass.
+Capture commits a statement after the turn it was made in has ended, so
+the statement was made at that minute or before it, and a statement the
+user repeats later keeps the time of its first record. A
+statement shown with its contest already carries the day it was first
+recorded, as `stated <day>`, and takes no second mark, a statement whose
+commit the log holds no time for is shown as stored, the facts carry the
+mark also when the budget then admits no line of the element, and
+`eidnara_search` shows no such mark. A summarizer
+that fires on a pass whose read serves it holds the facts as that read
+rendered them, the times and the contest marks included; a summarizer read
+that no pass read serves lists no file and so shows the stored text. The
+daemon's clock dates a record and a committer's clock dates a commit, so
+two machines whose clocks disagree can order a record and a commit made
+within that disagreement the other way. The element is charged first, to an
 eighth of `memory.injection_budget_tokens`: it holds the longest leading run
 of the lines that fits that share with its tags, the other facts are then
 selected against the rest of the budget, and the element is absent when no
 line fits. Its `note` says that a message of the user named the files, that
 the agent read them or named them in a command it ran, that the paths are relative
-to the repository root, that each file existed when the block was composed,
-that memory holds none of their content, that each line gives the file's
-last change as of that moment and each `User stated` line the time it was
-stated, and which of the two is newer: a statement made after a file's
-last change is newer than the file, and a file changed after a statement is
-newer than the statement in the lines changed since then, which the
-repository's history dates. A pass that re-renders m0
+to the project root, that each file existed when the block was composed,
+that memory holds none of their content, that a line ends with the file's
+last change as of that moment, that a `User stated` line that ends with a
+time was recorded then, when the turn it was made in had ended, and what
+the two times order: a statement made after a file's last change is newer
+than the file, and a file changed after a statement was recorded is newer
+than the statement in the lines changed since then, which the
+repository's history dates for a committed change. A pass that re-renders m0
 composes the element anew; a pass that serves the m0 of an earlier pass
 serves that pass's list. The block the summarizer's prompt carries holds no
 `NAMED_FILES` element: a summarizer that fires on a pass whose read serves it
@@ -1909,7 +1951,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `prev_response_cache_usage` | optional | `{"cache_read_tokens", "cache_write_tokens"}`; a malformed value is dropped |
 | `mid_turn`, `is_subagent`, `tool_present` | optional, default `false` | booleans |
 | `todo_tool_present` | optional | boolean |
-| `working_directory` | optional; `pi` sends it for a session that has a project identity and whose working directory lies beneath the project root | string: the session's working directory, at its physical path, relative to the project root at its physical path, with `/` separators, empty for the root; the named-file records of Section 7.9 are taken for a request whose value is empty, where a relative path of a tool call names the file of that path, and a request without the field or with another value records none; the daemon keeps the value no longer than the observation |
+| `working_directory` | optional; `pi` sends it for a session that has a project identity and whose working directory lies beneath the project root | string: the session's working directory, at its physical path, relative to the project root at its physical path, with `/` separators, empty for the root; the named-file records of Section 7.9 are taken for a request whose value is empty, where the relative path a `read` call opens names the file of that path and a `bash` command line is matched by its spelling from the project root, and a request without the field or with another value records none; the daemon keeps the value no longer than the observation |
 | `provider_id`, `model_key`, `cache_ttl`, `system_prompt_hash`, `upgrade_state`, `provider_error` | optional | strings |
 | `prev_response_completed_at_ms`, `request_observed_at_ms` | optional | unsigned integers (milliseconds) |
 | `effective_execute_threshold`, `history_budget_tokens` | optional | numbers |
