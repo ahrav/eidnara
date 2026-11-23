@@ -28,6 +28,28 @@ pub enum Writer {
 }
 
 impl Writer {
+    /// Who a memory's statement says said it: memory capture opens a statement with its writer.
+    pub fn of_statement(statement: &str) -> Self {
+        let [user, assistant] = crate::memory_capture::STATEMENT_WRITERS;
+        if statement.starts_with(user) {
+            Self::User
+        } else if statement.starts_with(assistant) {
+            Self::Assistant
+        } else {
+            Self::Unrecorded
+        }
+    }
+
+    /// The writer of a source the Kernel admitted under `class`.
+    pub fn of_source(class: kernel::SourceClass) -> Self {
+        match class {
+            kernel::SourceClass::ExplicitUser => Self::User,
+            kernel::SourceClass::TrustedToolResult => Self::Tool,
+            kernel::SourceClass::UntrustedRepoText => Self::RepositoryFile,
+            _ => Self::Assistant,
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -67,9 +89,14 @@ impl ReviewState {
         self.later.iter().any(|reference| self.eligible(reference))
     }
 
+    /// Whether `reference` is evidence a decider can flag the review on and a change proposal can cite: an eligible later reference, or any later reference of a memory of work in progress.
+    pub fn counts(&self, reference: &StateReference) -> bool {
+        self.work_in_progress || self.eligible(reference)
+    }
+
     /// Whether the state holds a later reference a decider could flag the review on. A review with none is a keep by the flag rule, settled before any request.
     pub fn has_evidence(&self) -> bool {
-        self.has_eligible_later() || (self.work_in_progress && !self.later.is_empty())
+        self.later.iter().any(|reference| self.counts(reference))
     }
 
     /// The state as compact JSON text with its members in one fixed order: the memory (text, who said it, category, work in progress), its source references, the later references, each reference as id, writer, time and text.
@@ -304,10 +331,12 @@ pub fn decide(state: &ReviewState, answers: Option<&ChatAnswers>) -> Stage1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage1Record {
     pub decision: Stage1,
-    /// The `provider/model` of the chat model that answered.
+    /// The `provider/model` of the chat model that answered; empty when the host decided without a request.
     pub model: String,
     /// Whether the decision rests on an answer in the decider's closed form; `false` for a flag raised on a malformed or missing answer.
     pub answered: bool,
+    /// The evidence ids of the later references the review was shown that count as evidence against the memory ([`ReviewState::counts`]). A change proposal acts only when it cites one of them.
+    pub later: Vec<String>,
 }
 
 #[derive(Default)]
@@ -339,10 +368,14 @@ impl StageOneBook {
 
     /// Whether a stage-1 request of `project` failed within [`FAILURE_COOLDOWN`].
     pub fn failing(&self, project: &str) -> bool {
+        self.failing_at(project, Instant::now())
+    }
+
+    fn failing_at(&self, project: &str, now: Instant) -> bool {
         self.lock()
             .failures
             .get(project)
-            .is_some_and(|at| at.elapsed() <= FAILURE_COOLDOWN)
+            .is_some_and(|at| now.saturating_duration_since(*at) <= FAILURE_COOLDOWN)
     }
 
     pub fn record(&self, causal_identity: &str, record: Stage1Record) {
@@ -448,6 +481,16 @@ pub(super) mod tests {
         assert!(!text.contains("ref-"), "the instructions quote no review");
     }
 
+    /// The instructions are the wording the offline choice measured. A changed digest is a new wording, which needs its own measurement.
+    #[test]
+    fn the_system_text_is_the_measured_wording() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            format!("{:x}", Sha256::digest(system_text().as_bytes())),
+            "dffaac456bc96ea71b6f8c3efcacc03a4d87ad0e89a2e17ca7ae515fece34b61"
+        );
+    }
+
     #[test]
     fn yes_and_unsure_flag_and_no_keeps() {
         let by_user = user_statement(vec![reference("ref-3", Writer::User, "Deploy from main.")]);
@@ -468,6 +511,7 @@ pub(super) mod tests {
             "Understood, deploying from main.",
         )]);
         assert!(!by_assistant.has_evidence());
+        assert!(!by_assistant.counts(&by_assistant.later[0]));
         assert_eq!(
             decided(&by_assistant, &answer("yes", "no")),
             Stage1::Keep,
@@ -484,6 +528,7 @@ pub(super) mod tests {
             ..by_assistant.clone()
         };
         assert!(work.has_evidence());
+        assert!(work.counts(&work.later[0]));
         assert_eq!(decided(&work, &answer("no", "unsure")), Stage1::Flagged);
         assert_eq!(decided(&work, &answer("no", "no")), Stage1::Keep);
     }
@@ -526,6 +571,32 @@ pub(super) mod tests {
         assert!(!book.failing("other"));
     }
 
+    /// The pause ends: past the cooldown the project's reviews run again.
+    #[test]
+    fn a_failure_stops_marking_the_project_after_the_cooldown() {
+        let book = StageOneBook::default();
+        book.note_failure("project");
+        let now = Instant::now();
+        assert!(book.failing_at("project", now + FAILURE_COOLDOWN / 2));
+        assert!(!book.failing_at("project", now + FAILURE_COOLDOWN + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_statement_names_its_writer() {
+        assert_eq!(
+            Writer::of_statement("User stated: Deploy from main."),
+            Writer::User
+        );
+        assert_eq!(
+            Writer::of_statement("Assistant reported: the limit is 2."),
+            Writer::Assistant
+        );
+        assert_eq!(
+            Writer::of_statement("Deploy from main."),
+            Writer::Unrecorded
+        );
+    }
+
     #[test]
     fn a_stage_one_record_is_read_once() {
         let book = StageOneBook::default();
@@ -533,6 +604,7 @@ pub(super) mod tests {
             decision: Stage1::Flagged,
             model: "prov/small".to_string(),
             answered: true,
+            later: vec!["evidence".to_string()],
         };
         book.record("job", record.clone());
         assert_eq!(book.take_record("job"), Some(record));

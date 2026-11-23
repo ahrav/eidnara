@@ -2312,6 +2312,8 @@ const USER_STATED: &str = "User stated";
 /// The attribution native capture prefixes to an assistant message's
 /// quotation.
 const ASSISTANT_REPORTED: &str = "Assistant reported";
+/// The attributions a stored statement opens with, the user's first.
+pub(crate) const STATEMENT_WRITERS: [&str; 2] = [USER_STATED, ASSISTANT_REPORTED];
 
 /// The plain-prose paragraphs of one message, parsed when first needed, so
 /// every check of one job's memories shares a single parse.

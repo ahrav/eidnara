@@ -89,6 +89,8 @@ pub struct ProjectRoute {
     pub roots: Vec<RootScope>,
     /// The review switch of the project's newest bound root, when its user tier set one.
     pub review: Option<ReviewSwitch>,
+    /// Whether the project's memories authority is one its owner recorded. The authority the review switch gives a root covers reviews of its stored memories alone, so the owner's activation record runs nothing for it.
+    pub recorded_authority: bool,
 }
 
 /// One project's `memory_reviewer` settings as its newest route froze them at bind, with the route facts a host-routed request connects under.
@@ -121,6 +123,15 @@ pub struct SwitchedReview {
 }
 
 impl SwitchedReview {
+    /// Sets the bounds of the selection's walk, so a test covers a store larger than one selection examines.
+    #[cfg(test)]
+    pub(crate) fn walk_within(&self, walk: review_cycle::Walk) {
+        self.selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .walk_within(walk);
+    }
+
     /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer.
     pub fn through(
         producers: Arc<dyn HistorySummarizerProducerFactory>,
@@ -151,6 +162,11 @@ impl DerivedDefaults {
         } else {
             &switch.stage1_model.reference
         }
+    }
+
+    /// Whether `switch`'s stage-1 model is a derived default that no request has yet answered or failed.
+    fn unproven(&self, switch: &ReviewSwitch) -> bool {
+        switch.stage1_model.derived && !self.proven.contains_key(&switch.stage1_model.reference)
     }
 
     /// Records how `switch`'s derived default fared in the job that just ran, and returns whether this call is the one that refused it. A named stage-1 model is the user's choice and is never replaced.
@@ -211,6 +227,7 @@ impl RejectionLatch {
 pub(crate) fn module_projects(
     store: &MemoryStore,
     bindings: &Mutex<RouteBindings>,
+    user_tier: Option<&crate::config::DaemonConfig>,
 ) -> Vec<ProjectRoute> {
     let mut roots: Vec<(u64, SessionBinding)> = bindings
         .lock()
@@ -223,14 +240,15 @@ pub(crate) fn module_projects(
     let mut projects: BTreeMap<String, ProjectRoute> = BTreeMap::new();
     for (_, binding) in roots {
         let root = binding.project_root.to_string_lossy().to_string();
-        let review = binding
-            .config
+        // The four `memory_reviewer` keys are the user tier's alone. The tier as it reads now decides them, so a switch turned off stops the reviews of a root whose routes have closed; without it the binding's own load stands.
+        let config = user_tier.unwrap_or(&binding.config);
+        let review = config
             .memory_reviewer_model()
-            .zip(binding.config.memory_reviewer_stage1_model())
+            .zip(config.memory_reviewer_stage1_model())
             .map(|(model, stage1_model)| ReviewSwitch {
                 model_ref: model.to_string(),
                 stage1_model,
-                apply: binding.config.memory_reviewer.apply,
+                apply: config.memory_reviewer.apply,
                 harness: binding.harness.clone(),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
@@ -251,6 +269,8 @@ pub(crate) fn module_projects(
                     authority_generation: authority.generation,
                     roots: Vec::new(),
                     review,
+                    recorded_authority: authority.context_store_uuid
+                        != review_cycle::SWITCH_AUTHORITY_STORE,
                 })
                 .roots
                 .push(RootScope {
@@ -261,6 +281,11 @@ pub(crate) fn module_projects(
         }
     }
     projects.into_values().collect()
+}
+
+/// Whether `job` reviews a stored memory, which is the review the switch selects.
+fn reviews_memory(job: &MemoryReviewerJob) -> bool {
+    job.question_template == QuestionTemplate::MemoryStatement.id()
 }
 
 /// The Kernel store while the coordinator reports it ready.
@@ -358,6 +383,7 @@ impl Worker {
                 "daemon: memory_reviewer provider rejected an attempt ({rejection}); the gate stays closed until the daemon restarts"
             );
         }
+        self.status.set_switched_review(false);
         self.stamp_latched();
     }
 
@@ -374,9 +400,9 @@ impl Worker {
     /// One pass over every project the worker runs for: first the projects the owner's activation record admits, then the projects under the review switch. Returns how many runs settled. Passes of one worker run one at a time.
     pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         let _serial = self.switched.serial.lock().await;
-        // The owner's record speaks for the projects outside the switch. When every project the worker runs for is switched, the record has nothing to open and the gate reads as the switched pass leaves it.
+        // The owner's record speaks for the projects whose authority the owner recorded. When the switch gave every project its authority, the record has nothing to open and is left unread.
         let routes = (self.projects)();
-        let recorded = if routes.is_empty() || routes.iter().any(|route| !self.is_switched(route)) {
+        let recorded = if routes.is_empty() || routes.iter().any(|route| route.recorded_authority) {
             self.recorded_pass(cancel).await
         } else {
             0
@@ -404,13 +430,17 @@ impl Worker {
         root: &RootScope,
         (kernel_incarnation, memstore_incarnation): (&str, &str),
     ) -> Option<StageOne> {
-        let model = self
-            .switched
-            .derived_defaults
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .model(switch)
-            .to_string();
+        let (model, unproven_default) = {
+            let defaults = self
+                .switched
+                .derived_defaults
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                defaults.model(switch).to_string(),
+                defaults.unproven(switch),
+            )
+        };
         let host = HostExecution::new(
             Arc::clone(producers),
             root.project_root.clone(),
@@ -432,6 +462,7 @@ impl Worker {
             book: Arc::clone(&self.switched.stage_one),
             project: root.project_digest.clone(),
             retry_pause: STAGE_ONE_RETRY_PAUSE,
+            unproven_default,
         })
     }
 
@@ -454,19 +485,21 @@ impl Worker {
             return 0;
         };
         let routes = self.switched_routes();
-        if routes.is_empty() {
+        // An answer from another model closed review for the rest of the process, as it does on the direct route.
+        let latched = self.rejection.get().is_some();
+        // The status block reads `open` while a switched project is under review. The owner's record keeps its own state, which is what admits fact sets.
+        self.status
+            .set_switched_review(!routes.is_empty() && !latched);
+        if latched {
+            self.stamp_latched();
             return 0;
         }
-        // An answer from another model closed review for the rest of the process, as it does on the direct route.
-        if self.rejection.get().is_some() {
-            self.stamp_latched();
+        if routes.is_empty() {
             return 0;
         }
         let Some(kernel) = (self.kernel)() else {
             return 0;
         };
-        // The gate the History Summarizer and the status block read is open while a switched project is under review.
-        self.status.set_activation(ActivationState::Open);
         let prepared = {
             let worker = Arc::clone(self);
             let kernel = Arc::clone(&kernel);
@@ -579,12 +612,22 @@ impl Worker {
                             )
                             .map_err(|error| error.to_string())
                     };
-                    let pending = list(&store)?;
-                    let scope = kernel::ProjectScope::new(&root.project_digest)
-                        .map_err(|error| error.to_string())?;
                     let mut selection = selection
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if review_cycle::holds_at_bound(
+                        &kernel,
+                        &mut selection,
+                        &root.project_digest,
+                        now,
+                    )
+                    .map_err(|error| error.to_string())?
+                    {
+                        return Ok(Vec::new());
+                    }
+                    let pending = list(&store)?;
+                    let scope = kernel::ProjectScope::new(&root.project_digest)
+                        .map_err(|error| error.to_string())?;
                     let selected = review_cycle::select_and_enqueue(
                         &kernel,
                         &store,
@@ -622,6 +665,8 @@ impl Worker {
                     continue;
                 }
             };
+            // The switch reviews stored memories. A fact-set job of the project belongs to the owner's record and its pass.
+            ready.retain(reviews_memory);
             // A selection numbers its jobs newest evidence first; the jobs of one selection share a queue deadline, so its order decides which run first.
             ready.sort_by_key(|job| (job.queue_deadline_ms, job.producer.ordinal));
             let mut runs = 0;
@@ -646,11 +691,7 @@ impl Worker {
                     .derived_defaults
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .note(
-                        &switch,
-                        answered,
-                        stage_one.is_none() && stage_one_failing(),
-                    );
+                    .note(&switch, answered, !answered && stage_one_failing());
                 if refused {
                     eprintln!(
                         "daemon: memory_reviewer stage-1 default {} failed its first request; stage 1 uses the review model until the daemon restarts. Set memory_reviewer.stage1_model to a small model the host serves.",
@@ -669,9 +710,12 @@ impl Worker {
                                 let (kernel_incarnation, memstore_incarnation) =
                                     (kernel_incarnation.clone(), memstore_incarnation.clone());
                                 let mode = switch.apply;
-                                let flagged = stage_one.as_ref().is_some_and(|record| {
-                                    record.decision == super::stage_one::Stage1::Flagged
-                                });
+                                // A change acts on the later references of a review stage 1 flagged. A run with no stage-1 record, as one adopted after a restart, has none.
+                                let later = stage_one
+                                    .filter(|record| {
+                                        record.decision == super::stage_one::Stage1::Flagged
+                                    })
+                                    .map(|record| record.later);
                                 let job = Arc::clone(&job);
                                 tokio::task::spawn_blocking(move || {
                                     review_cycle::apply_proposal(
@@ -686,7 +730,7 @@ impl Worker {
                                         },
                                         &job.causal_identity,
                                         mode,
-                                        flagged,
+                                        later.as_deref(),
                                         crate::now_ms(),
                                     )
                                 })
@@ -740,7 +784,7 @@ impl Worker {
         settled
     }
 
-    /// The pass over projects the owner's activation record admits: nothing runs unless the gate is open; then every Ready job of every MODULE project outside the review switch is claimed and investigated. Returns how many runs settled. Store and filesystem work runs on the blocking pool; only the investigation itself is awaited on the runtime. A latched rejection closes the gate before the record is read, and every pass stamps it again.
+    /// The pass over projects the owner's activation record admits: nothing runs unless the gate is open; then every Ready job of every project whose authority the owner recorded is claimed and investigated, except a review of a stored memory, which the switched pass runs. Returns how many runs settled. Store and filesystem work runs on the blocking pool; only the investigation itself is awaited on the runtime. A latched rejection closes the gate before the record is read, and every pass stamps it again.
     async fn recorded_pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         if self.rejection.get().is_some() {
             self.stamp_latched();
@@ -788,8 +832,8 @@ impl Worker {
             if cancel.is_cancelled() {
                 break;
             }
-            // A switched project runs in the switched pass, through the host's model execution.
-            if self.is_switched(&route) {
+            // The record admits the projects whose authority the owner recorded. A project the switch gave its authority is reviewed in the switched pass alone.
+            if !route.recorded_authority {
                 continue;
             }
             let ready = {
@@ -807,7 +851,7 @@ impl Worker {
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()))
             };
-            let ready = match ready {
+            let mut ready = match ready {
                 Ok(ready) => ready,
                 Err(error) => {
                     eprintln!(
@@ -816,6 +860,8 @@ impl Worker {
                     continue;
                 }
             };
+            // A review of a stored memory is the switch's: it runs in the switched pass, through the host's model execution.
+            ready.retain(|job| !reviews_memory(job));
             let route = Arc::new(route);
             let mut runs = 0;
             for job in ready {
@@ -1004,22 +1050,23 @@ impl Worker {
             subject: job.causal_identity.clone(),
             generation: receipt.generation,
         };
-        let project_text =
-            ProtectedLocations::new([self.home.clone()])
+        // A fact-set run may inspect the project's working tree. A memory review reads stored memory and conversation text alone, so it opens no inspection.
+        let project_text = (!reviews_memory(job))
+            .then(|| ProtectedLocations::new([self.home.clone()]).ok())
+            .flatten()
+            .and_then(|protected| {
+                ProjectText::open(
+                    &root.project_root,
+                    &protected,
+                    InspectionBinding {
+                        hold,
+                        domain_id: MEMORY_DOMAIN_ID.to_string(),
+                        scope_id: Some(root.scope_id.clone()),
+                        retain_until: receipt.execution_cutoff_ms,
+                    },
+                )
                 .ok()
-                .and_then(|protected| {
-                    ProjectText::open(
-                        &root.project_root,
-                        &protected,
-                        InspectionBinding {
-                            hold,
-                            domain_id: MEMORY_DOMAIN_ID.to_string(),
-                            scope_id: Some(root.scope_id.clone()),
-                            retain_until: receipt.execution_cutoff_ms,
-                        },
-                    )
-                    .ok()
-                });
+            });
         Ok(Some(PreparedJob {
             binding,
             claim,

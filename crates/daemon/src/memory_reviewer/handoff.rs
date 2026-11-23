@@ -293,7 +293,7 @@ fn reserved_row(
             _ => ReservedRow::Done(Handoff::Settled),
         });
     }
-    if target.gate.activation_state() != ActivationState::Open {
+    if target.gate.recorded_state() != ActivationState::Open {
         return Ok(ReservedRow::Done(Handoff::Nonadmission(
             MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable,
         )));

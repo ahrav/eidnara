@@ -38,7 +38,7 @@ pub const SWITCH_AUTHORITY_STORE: &str = "eidnara-memory-reviewer";
 pub const SELECTION_PRODUCER: &str = "memory-reviewer-switch";
 /// The operation key the worker accepts its own proposals under in `apply` mode.
 pub const APPLY_OPERATION_KEY: &str = "memory-reviewer-switch";
-/// Claim descriptors one selection examines, so a selection's work is bounded whatever the inventory's size.
+/// Claim descriptors one selection examines, of every project and representation in the store, so a selection's work is bounded whatever the inventory's size. A larger store is covered over successive passes.
 pub const MAX_WALKED_DESCRIPTORS: usize = 4096;
 /// Later overlapping sources a job carries as starting references and causal signals, newest first.
 pub const MAX_LATER_SOURCES: usize = 4;
@@ -55,27 +55,37 @@ const CYCLE_BUDGET: Duration = Duration::from_secs(30);
 /// Claim slices one catch-up runs before it leaves the rest to the next pass.
 const MAX_CLAIM_SLICES: usize = 256;
 
-/// Gives `route_root` MODULE memories authority when it has none, with the root itself as the authority project, so every key derived from the authority project keeps the value an unmanaged root has. A root that already holds the authority is left as it is.
+/// Gives `route_root` MODULE memories authority when no authority is bound to it, with the root itself as the authority project, so every key derived from the authority project keeps the value an unmanaged root has. A root that holds an authority, active or draining, is left as it is. A grant that stopped after its acknowledgement left its row MODULE and unbound; the next call binds it.
 pub fn grant_authority(store: &MemoryStore, route_root: &str) -> Result<(), MemoryStoreError> {
     const DOMAIN: &str = "memories";
     if store
-        .module_authority_for_route(route_root, DOMAIN)?
+        .authority_project_state_for_route(route_root, DOMAIN)?
         .is_some()
     {
         return Ok(());
     }
-    let begun = store.authority_begin_prepare(SWITCH_AUTHORITY_STORE, route_root, DOMAIN)?;
-    // The seed is the store's own rows for this identity, so the expected checksum is the one it computes.
-    let checksum = store.authority_seed_checksum(SWITCH_AUTHORITY_STORE, route_root, DOMAIN)?;
-    store.authority_verify_prepare(
-        SWITCH_AUTHORITY_STORE,
-        route_root,
-        DOMAIN,
-        begun.generation,
-        &checksum,
-        &checksum,
-    )?;
-    store.authority_ack_prepare(SWITCH_AUTHORITY_STORE, route_root, DOMAIN, begun.generation)?;
+    let granted = store
+        .authority_status(SWITCH_AUTHORITY_STORE, route_root, DOMAIN)?
+        .is_some_and(|row| row.state == "MODULE");
+    if !granted {
+        let begun = store.authority_begin_prepare(SWITCH_AUTHORITY_STORE, route_root, DOMAIN)?;
+        // The seed is the store's own rows for this identity, so the expected checksum is the one it computes.
+        let checksum = store.authority_seed_checksum(SWITCH_AUTHORITY_STORE, route_root, DOMAIN)?;
+        store.authority_verify_prepare(
+            SWITCH_AUTHORITY_STORE,
+            route_root,
+            DOMAIN,
+            begun.generation,
+            &checksum,
+            &checksum,
+        )?;
+        store.authority_ack_prepare(
+            SWITCH_AUTHORITY_STORE,
+            route_root,
+            DOMAIN,
+            begun.generation,
+        )?;
+    }
     store.bind_authority_route(SWITCH_AUTHORITY_STORE, route_root, route_root)
 }
 
@@ -180,6 +190,28 @@ pub enum CycleError {
 pub struct SelectionMemory {
     sources: HashMap<String, SourceFacts>,
     pending: HashMap<String, PendingProposals>,
+    /// Where each project's next selection resumes its walk of the claim descriptors, by project digest. A store with more descriptors than one selection examines is covered over successive passes.
+    resume: HashMap<String, String>,
+    /// The projects whose review holds were at the project bound at their last selection, so the wait is logged once.
+    held: BTreeSet<String>,
+    /// The bounds of one selection's walk; `None` is [`Walk::PRODUCTION`].
+    walk: Option<Walk>,
+}
+
+/// The bounds of one selection's walk of the claim descriptors.
+#[derive(Debug, Clone, Copy)]
+pub struct Walk {
+    /// Descriptors one page reads.
+    pub page_rows: usize,
+    /// Descriptors one selection examines before it leaves the rest to the next pass.
+    pub bound: usize,
+}
+
+impl Walk {
+    const PRODUCTION: Self = Self {
+        page_rows: 256,
+        bound: MAX_WALKED_DESCRIPTORS,
+    };
 }
 
 /// The descriptor a job reads a source through and who wrote the source. The writer is fixed for an evidence row. The descriptor is live until the store retires it: a captured message is retained for a bounded time, and a memory outlives it.
@@ -187,7 +219,7 @@ pub struct SelectionMemory {
 struct SourceFacts {
     object_id: String,
     writer: Writer,
-    /// Set once a later read finds the descriptor retired. A retired source still counts as evidence a memory was reviewed on, and no job reads it.
+    /// Set once a read finds the descriptor retired. A retired source still counts as evidence a memory was reviewed on, and no job reads it. A source found retired at its first lookup has no writer on record.
     retired: bool,
 }
 
@@ -195,7 +227,13 @@ struct SourceFacts {
 const MAX_REMEMBERED_SOURCES: usize = 65_536;
 
 impl SelectionMemory {
-    /// The descriptor and writer of `evidence_id`, read once and remembered, with whether a later read found the descriptor retired. `None` while no live descriptor has cited the evidence, which is looked up again on the next pass.
+    /// Sets the walk's bounds, so a test covers a store larger than one selection examines.
+    #[cfg(test)]
+    pub fn walk_within(&mut self, walk: Walk) {
+        self.walk = Some(walk);
+    }
+
+    /// The descriptor and writer of `evidence_id`, read once and remembered, with whether a read found the descriptor retired. `None` while no descriptor has cited the evidence, which is looked up again on the next pass. A read the store fails is an error and is remembered as nothing.
     fn source(
         &mut self,
         kernel: &KernelStore,
@@ -206,29 +244,31 @@ impl SelectionMemory {
         if let Some(facts) = self.sources.get(evidence_id) {
             return Ok(Some(facts.clone()));
         }
-        let Some(object_id) = source_descriptor(kernel, evidence_id, tip, budget)? else {
-            return Ok(None);
+        let facts = match source_descriptor(kernel, evidence_id, tip, budget)? {
+            Source::Uncited => return Ok(None),
+            Source::Retired => SourceFacts {
+                object_id: String::new(),
+                writer: Writer::Unrecorded,
+                retired: true,
+            },
+            Source::Live(object_id) => {
+                let (_, admission) = kernel
+                    .preview(Instant::now() + Duration::from_secs(5), |preview| {
+                        preview.subject_admission(&object_id)
+                    })
+                    .map_err(CycleError::Kernel)?;
+                SourceFacts {
+                    writer: admission.map_or(Writer::Unrecorded, |(prior, _)| {
+                        Writer::of_source(prior.source_class)
+                    }),
+                    object_id,
+                    retired: false,
+                }
+            }
         };
-        let writer = kernel
-            .preview(Instant::now() + Duration::from_secs(5), |preview| {
-                preview.subject_admission(&object_id)
-            })
-            .ok()
-            .and_then(|(_, admission)| admission)
-            .map_or(Writer::Unrecorded, |(prior, _)| match prior.source_class {
-                SourceClass::ExplicitUser => Writer::User,
-                SourceClass::TrustedToolResult => Writer::Tool,
-                SourceClass::UntrustedRepoText => Writer::RepositoryFile,
-                _ => Writer::Assistant,
-            });
         if self.sources.len() >= MAX_REMEMBERED_SOURCES {
             self.sources.clear();
         }
-        let facts = SourceFacts {
-            object_id,
-            writer,
-            retired: false,
-        };
         self.sources.insert(evidence_id.to_string(), facts.clone());
         Ok(Some(facts))
     }
@@ -248,13 +288,15 @@ impl SelectionMemory {
         {
             return Ok(None);
         }
-        let live = source_descriptor(kernel, evidence_id, tip, budget)?;
-        if live.is_none()
-            && let Some(facts) = self.sources.get_mut(evidence_id)
-        {
-            facts.retired = true;
+        match source_descriptor(kernel, evidence_id, tip, budget)? {
+            Source::Live(object_id) => Ok(Some(object_id)),
+            Source::Retired | Source::Uncited => {
+                if let Some(facts) = self.sources.get_mut(evidence_id) {
+                    facts.retired = true;
+                }
+                Ok(None)
+            }
         }
-        Ok(live)
     }
 
     /// Records that the memory `target` waits for the change proposal of the job `causal_identity`.
@@ -278,37 +320,28 @@ struct PendingProposals {
 const MAX_REBUILD_RECEIPTS: usize = 16_384;
 
 impl PendingProposals {
+    /// Reads the project's active review holds and the receipts that select them. A read the store fails leaves the map as it was, and the next selection reads again.
     fn rebuild(
         &mut self,
         kernel: &KernelStore,
         ledger: &MemoryStore,
         scope: &SelectionScope<'_>,
         now: i64,
-    ) {
-        self.rebuilt = true;
-        let Ok(holds) =
-            kernel.list_active_review_holds(now, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
-        else {
-            return;
-        };
-        let held: BTreeSet<String> = holds
+    ) -> Result<(), CycleError> {
+        let held: BTreeSet<String> = active_review_holds(kernel, scope.project_digest, now)?
             .into_iter()
-            .filter(|hold| hold.binding.project_digest == scope.project_digest)
-            .map(|hold| hold.binding.subject)
             .collect();
-        if held.is_empty() {
-            return;
-        }
+        let mut waiting = HashMap::new();
         let mut after: Option<String> = None;
         let mut read = 0;
-        while read < MAX_REBUILD_RECEIPTS {
-            let Ok(page) = ledger.list_completed_memory_reviewer_receipts(
-                scope.ledger_project,
-                after.as_deref(),
-                256,
-            ) else {
-                return;
-            };
+        while !held.is_empty() && read < MAX_REBUILD_RECEIPTS {
+            let page = ledger
+                .list_completed_memory_reviewer_receipts(
+                    scope.ledger_project,
+                    after.as_deref(),
+                    256,
+                )
+                .map_err(|error| CycleError::Ledger(error.to_string()))?;
             read += page.len();
             let last = page.last().map(|receipt| receipt.causal_identity.clone());
             for receipt in &page {
@@ -319,12 +352,12 @@ impl PendingProposals {
                 if !selects_held {
                     continue;
                 }
-                if let Ok(Some(job)) = ledger
+                if let Some(job) = ledger
                     .lookup_memory_reviewer_job(scope.ledger_project, &receipt.causal_identity)
+                    .map_err(|error| CycleError::Ledger(error.to_string()))?
                     && let ReviewTarget::Memory { object_id, .. } = job.target
                 {
-                    self.waiting
-                        .insert(object_id, receipt.causal_identity.clone());
+                    waiting.insert(object_id, receipt.causal_identity.clone());
                 }
             }
             match last {
@@ -332,9 +365,12 @@ impl PendingProposals {
                 _ => break,
             }
         }
+        self.waiting.extend(waiting);
+        self.rebuilt = true;
+        Ok(())
     }
 
-    /// Whether `target` waits for a pending change proposal. The proposal is read back: one that was settled, or whose review window ended, no longer holds the memory.
+    /// Whether `target` waits for a pending change proposal. The proposal is read back: one that was settled, or whose review window ended, no longer holds the memory. While the store cannot be read the memory waits.
     fn waits(
         &mut self,
         kernel: &KernelStore,
@@ -342,26 +378,47 @@ impl PendingProposals {
         scope: &SelectionScope<'_>,
         target: &str,
         now: i64,
-    ) -> bool {
+    ) -> Result<bool, CycleError> {
         if !self.rebuilt {
-            self.rebuild(kernel, ledger, scope, now);
+            self.rebuild(kernel, ledger, scope, now)?;
         }
         let Some(causal_identity) = self.waiting.get(target) else {
-            return false;
+            return Ok(false);
         };
-        let pending =
-            read_selected_proposal(kernel, ledger, scope.ledger_project, causal_identity, now)
-                .is_ok_and(|selected| {
-                    matches!(
-                        selected.proposal.action,
-                        ProposalAction::Retire | ProposalAction::Revise
-                    )
-                });
+        let pending = match read_selected_proposal(
+            kernel,
+            ledger,
+            scope.ledger_project,
+            causal_identity,
+            now,
+        ) {
+            Ok(selected) => matches!(
+                selected.proposal.action,
+                ProposalAction::Retire | ProposalAction::Revise
+            ),
+            Err(ReadRefusal::Store(error)) => return Err(CycleError::Ledger(error)),
+            Err(_) => false,
+        };
         if !pending {
             self.waiting.remove(target);
         }
-        pending
+        Ok(pending)
     }
+}
+
+/// The subjects of the project's unreleased, unexpired review holds at `now`.
+fn active_review_holds(
+    kernel: &KernelStore,
+    project_digest: &str,
+    now: i64,
+) -> Result<Vec<String>, CycleError> {
+    Ok(kernel
+        .list_active_review_holds(now, kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_HOST)
+        .map_err(|error| CycleError::Ledger(error.to_string()))?
+        .into_iter()
+        .filter(|hold| hold.binding.project_digest == project_digest)
+        .map(|hold| hold.binding.subject)
+        .collect())
 }
 
 /// One later source that may bear on a memory.
@@ -457,8 +514,12 @@ fn stem(term: &str) -> &str {
     cut(stem, "e").unwrap_or(stem)
 }
 
-/// For each decision, the later decisions that share enough subject terms with it: [`MIN_SHARED_SUBJECT_TERMS`] within one category and [`MIN_SHARED_SUBJECT_TERMS_ACROSS_CATEGORIES`] across two. Each later decision names at most [`REOPENED_PER_STATEMENT`] earlier ones. This is the second way a memory comes back to review beside the ledger's candidate rows: a later statement about the same subject reaches the earlier one even when it shares too few words for a candidate row.
+/// For each decision, the later decisions that share enough subject terms with it: [`MIN_SHARED_SUBJECT_TERMS`] within one category and [`MIN_SHARED_SUBJECT_TERMS_ACROSS_CATEGORIES`] across two. Each later decision names at most [`REOPENED_PER_STATEMENT`] earlier ones. A statement is ordered by the commit that first recorded it, which a contest's rewrite of its row leaves unchanged. This is the second way a memory comes back to review beside the ledger's candidate rows: a later statement about the same subject reaches the earlier one even when it shares too few words for a candidate row.
 fn reopened_by_later_statements(decisions: &[&DecisionRow]) -> Vec<Vec<usize>> {
+    let stated: Vec<i64> = decisions
+        .iter()
+        .map(|decision| crate::memory_capture::stated_commit(decision))
+        .collect();
     let terms: Vec<BTreeSet<String>> = decisions
         .iter()
         .map(|decision| subject_terms(&decision.payload.summary))
@@ -474,7 +535,7 @@ fn reopened_by_later_statements(decisions: &[&DecisionRow]) -> Vec<Vec<usize>> {
         let mut shared: HashMap<usize, usize> = HashMap::new();
         for term in later_terms {
             for &earlier in postings.get(term.as_str()).into_iter().flatten() {
-                if decisions[earlier].created_commit_seq < decisions[later].created_commit_seq {
+                if stated[earlier] < stated[later] {
                     *shared.entry(earlier).or_default() += 1;
                 }
             }
@@ -495,12 +556,12 @@ fn reopened_by_later_statements(decisions: &[&DecisionRow]) -> Vec<Vec<usize>> {
         ranked.sort_by(|a, b| {
             (
                 std::cmp::Reverse(a.1),
-                std::cmp::Reverse(decisions[a.0].created_commit_seq),
+                std::cmp::Reverse(stated[a.0]),
                 &decisions[a.0].object_id,
             )
                 .cmp(&(
                     std::cmp::Reverse(b.1),
-                    std::cmp::Reverse(decisions[b.0].created_commit_seq),
+                    std::cmp::Reverse(stated[b.0]),
                     &decisions[b.0].object_id,
                 ))
         });
@@ -509,17 +570,6 @@ fn reopened_by_later_statements(decisions: &[&DecisionRow]) -> Vec<Vec<usize>> {
         }
     }
     reopened
-}
-
-/// Who a memory's statement says said it.
-fn said_by(statement: &str) -> Writer {
-    if statement.starts_with("User stated") {
-        Writer::User
-    } else if statement.starts_with("Assistant reported") {
-        Writer::Assistant
-    } else {
-        Writer::Unrecorded
-    }
 }
 
 /// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, newest evidence first, each Ready with its starting references. Evidence is a later source the memory does not cite, written by someone who may change it: a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. A user's statement takes evidence only from the user; a fact the assistant reported, and work in progress, take it from anyone. The evidence is the job's causal signal, so a memory is reviewed once per set of evidence and again only when the set grows. A memory whose change proposal is pending waits for it.
@@ -539,7 +589,32 @@ pub fn select_and_enqueue(
     let tip = kernel
         .tip_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
-    let descriptors = subject_descriptors(kernel, scope.project, tip, &budget)?;
+    let walk = memory.walk.unwrap_or(Walk::PRODUCTION);
+    let (descriptors, next) = subject_descriptors(
+        kernel,
+        scope.project,
+        tip,
+        &budget,
+        memory.resume.get(scope.project_digest).map(String::as_str),
+        walk,
+    )?;
+    match next {
+        Some(next) => {
+            if memory
+                .resume
+                .insert(scope.project_digest.to_string(), next)
+                .is_none()
+            {
+                eprintln!(
+                    "daemon: memory_reviewer selection examines {} claim descriptors a pass and the store holds more; each pass continues where the last one ended",
+                    walk.bound
+                );
+            }
+        }
+        None => {
+            memory.resume.remove(scope.project_digest);
+        }
+    }
     let ids: Vec<String> = descriptors
         .iter()
         .filter_map(|row| decision_of(row).map(str::to_string))
@@ -589,6 +664,7 @@ pub fn select_and_enqueue(
     for (index, (descriptor, decision)) in subjects.iter().enumerate() {
         selected.examined += 1;
         let cited = cited_by(decision);
+        let stated = crate::memory_capture::stated_commit(decision);
         let mut evidence: Vec<LaterEvidence> = ledger
             .candidates_for_decision(
                 scope.project_digest,
@@ -599,10 +675,7 @@ pub fn select_and_enqueue(
             .map_err(|error| CycleError::Ledger(error.to_string()))?
             .items
             .into_iter()
-            .filter(|row| {
-                row.publish_tip > decision.created_commit_seq
-                    && row.evidence_id.len() <= MAX_IDENTITY_BYTES
-            })
+            .filter(|row| row.publish_tip > stated && row.evidence_id.len() <= MAX_IDENTITY_BYTES)
             .map(|row| LaterEvidence {
                 recency: row.publish_tip,
                 evidence_id: row.evidence_id,
@@ -641,16 +714,9 @@ pub fn select_and_enqueue(
         evidence.retain(|later| {
             !cited.contains(&later.evidence_id) && !reviewed_on.contains(&later.evidence_id)
         });
-        // Newest first; one source keeps its strongest trigger.
-        evidence.sort_by(|a, b| {
-            (std::cmp::Reverse(a.recency), &a.evidence_id, a.trigger).cmp(&(
-                std::cmp::Reverse(b.recency),
-                &b.evidence_id,
-                b.trigger,
-            ))
-        });
-        evidence.dedup_by(|a, b| a.evidence_id == b.evidence_id);
-        let own_words = said_by(&decision.payload.summary) == Writer::User && !work_in_progress;
+        let evidence = newest_first(evidence);
+        let own_words =
+            Writer::of_statement(&decision.payload.summary) == Writer::User && !work_in_progress;
         let mut signals = Vec::new();
         let mut trigger = None;
         let mut recency = decision.created_commit_seq;
@@ -661,7 +727,9 @@ pub fn select_and_enqueue(
             let Some(source) = memory.source(kernel, &item.evidence_id, tip, &budget)? else {
                 continue;
             };
-            if source.retired || (own_words && source.writer != Writer::User) {
+            // A source the store retired before its first lookup has no writer on record. It stays in the set a review is named by, so evidence that ages out of the store starts no second review; no job reads it.
+            let unrecorded = source.retired && source.writer == Writer::Unrecorded;
+            if own_words && source.writer != Writer::User && !unrecorded {
                 continue;
             }
             if signals.is_empty() {
@@ -722,7 +790,7 @@ pub fn select_and_enqueue(
             .pending
             .entry(scope.ledger_project.to_string())
             .or_default()
-            .waits(kernel, ledger, scope, &candidate.descriptor.object_id, now)
+            .waits(kernel, ledger, scope, &candidate.descriptor.object_id, now)?
         {
             selected.waiting += 1;
             continue;
@@ -810,18 +878,20 @@ fn decision_of(descriptor: &LiveDescriptor) -> Option<&str> {
     )
 }
 
-/// The live `decision_summary` descriptors of the project's decisions that the configured model may read, at most [`MAX_WALKED_DESCRIPTORS`] examined.
+/// The live `decision_summary` descriptors of the project's decisions that the configured model may read, from one walk of the store's claim descriptors that starts after `after` and examines at most `walk.bound` of them, of every project and representation. Returns the descriptors with the cursor the next walk resumes after, or `None` when this walk reached the end.
 fn subject_descriptors(
     kernel: &KernelStore,
     project: &ProjectScope,
     tip: i64,
     budget: &EvalBudget,
-) -> Result<Vec<LiveDescriptor>, CycleError> {
-    let page_rows = NonZeroUsize::new(256).expect("nonzero");
+    after: Option<&str>,
+    walk: Walk,
+) -> Result<(Vec<LiveDescriptor>, Option<String>), CycleError> {
+    let page_rows = NonZeroUsize::new(walk.page_rows).unwrap_or(NonZeroUsize::MIN);
     let mut rows = Vec::new();
-    let mut after: Option<String> = None;
+    let mut after: Option<String> = after.map(str::to_string);
     let mut examined = 0;
-    while examined < MAX_WALKED_DESCRIPTORS {
+    loop {
         let page = kernel
             .live_source_descriptors(
                 OccurrenceClass::CanonicalClaims,
@@ -837,9 +907,9 @@ fn subject_descriptors(
                 .into_iter()
                 .filter(|row| row.detail.representation == SUBJECT_REPRESENTATION),
         );
-        match page.next {
-            Some(next) => after = Some(next),
-            None => break,
+        after = page.next;
+        if after.is_none() || examined >= walk.bound {
+            break;
         }
     }
     let mut permitted = Vec::with_capacity(rows.len());
@@ -866,30 +936,84 @@ fn subject_descriptors(
     }
     let mut permitted = permitted.into_iter();
     rows.retain(|_| permitted.next().unwrap_or(false));
-    Ok(rows)
+    Ok((rows, after))
 }
 
-/// The object id of a live source descriptor citing `evidence_id`: a message block first, then a repository document, then a tool span.
+/// `evidence` newest first, each source once under its strongest trigger and at its newest recency.
+fn newest_first(mut evidence: Vec<LaterEvidence>) -> Vec<LaterEvidence> {
+    let mut strongest: HashMap<String, Trigger> = HashMap::new();
+    for later in &evidence {
+        strongest
+            .entry(later.evidence_id.clone())
+            .and_modify(|trigger| *trigger = (*trigger).min(later.trigger))
+            .or_insert(later.trigger);
+    }
+    evidence.sort_by(|a, b| {
+        (std::cmp::Reverse(a.recency), &a.evidence_id)
+            .cmp(&(std::cmp::Reverse(b.recency), &b.evidence_id))
+    });
+    let mut seen = BTreeSet::new();
+    evidence.retain_mut(|later| {
+        later.trigger = strongest[&later.evidence_id];
+        seen.insert(later.evidence_id.clone())
+    });
+    evidence
+}
+
+/// Whether the project's review holds are at the project bound. Every run a model answers ends in a proposal that takes one of them, so at the bound no run can settle: the worker selects and runs nothing for the project until a pending proposal is settled or its review window ends. The wait is logged once.
+pub fn holds_at_bound(
+    kernel: &KernelStore,
+    memory: &mut SelectionMemory,
+    project_digest: &str,
+    now: i64,
+) -> Result<bool, CycleError> {
+    let holds = active_review_holds(kernel, project_digest, now)?.len();
+    if holds < kernel::MAX_ACTIVE_MEMORY_REVIEWER_HOLDS_PER_PROJECT {
+        memory.held.remove(project_digest);
+        return Ok(false);
+    }
+    if memory.held.insert(project_digest.to_string()) {
+        eprintln!(
+            "daemon: memory_reviewer reviews of a project wait: its {holds} pending proposals hold every review hold the project has; reviews resume when one is settled or its review window ends"
+        );
+    }
+    Ok(true)
+}
+
+/// What the store holds for the source of one evidence row.
+enum Source {
+    /// The object id of a live descriptor citing the evidence.
+    Live(String),
+    /// Descriptors cited the evidence and the store retired each.
+    Retired,
+    Uncited,
+}
+
+/// The source descriptor citing `evidence_id`: a message block first, then a repository document, then a tool span.
 fn source_descriptor(
     kernel: &KernelStore,
     evidence_id: &str,
     tip: i64,
     budget: &EvalBudget,
-) -> Result<Option<String>, CycleError> {
+) -> Result<Source, CycleError> {
+    let mut found = Source::Uncited;
     for class in [
         OccurrenceClass::Messages,
         OccurrenceClass::RepositoryDocuments,
         OccurrenceClass::RawToolSpans,
     ] {
         match kernel.source_descriptor_citing_evidence(class, evidence_id, tip, budget) {
-            Ok(CitingDescriptor::Live(descriptor)) => return Ok(Some(descriptor.object_id)),
-            Ok(CitingDescriptor::Retired | CitingDescriptor::Uncited) => {}
+            Ok(CitingDescriptor::Live(descriptor)) => {
+                return Ok(Source::Live(descriptor.object_id));
+            }
+            Ok(CitingDescriptor::Retired) => found = Source::Retired,
+            Ok(CitingDescriptor::Uncited) => {}
             // A row of another class under the evidence fails this class's row check; the next class reads it.
             Err(KernelError::CorruptCanonicalRow) => {}
             Err(error) => return Err(CycleError::Kernel(error)),
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// What the worker did with one published proposal.
@@ -941,71 +1065,59 @@ pub struct ApplyScope<'a> {
     pub memstore_incarnation: &'a str,
 }
 
-/// Whether a change proposal passes the action rule: stage 1 flagged the review, the model states `low` uncertainty, and a contradiction cites a source other than the ones the memory itself cites, which is a later reference.
-fn actionable(
-    kernel: &KernelStore,
-    proposal: &kernel::ReviewProposal,
-    target: &kernel::CanonicalTarget,
-    flagged: bool,
-) -> bool {
-    if !flagged || proposal.uncertainty != kernel::Uncertainty::Low {
-        return false;
-    }
-    let budget = EvalBudget::new(
-        Some(Instant::now() + Duration::from_secs(5)),
-        Arc::default(),
-    );
-    let Ok(cited) = kernel.tip_within_budget(&budget).and_then(|tip| {
-        kernel.linked_decision_evidence_within_budget(
-            &target.object_id,
-            tip,
-            super::selection::MAX_LINKED_EVIDENCE,
-            &budget,
-        )
-    }) else {
-        return false;
+/// The contradictions of a change proposal that pass the action rule: the model states `low` uncertainty, and the contradiction cites one of `later`, the later references that count as evidence in a review stage 1 flagged. `later` is `None` for a review stage 1 did not flag. The memory's own source, another memory and a project file the run read are none of them, so a proposal that cites only those changes nothing.
+fn actionable<'a>(
+    uncertainty: kernel::Uncertainty,
+    contradictions: &'a [kernel::EvidenceReference],
+    later: Option<&[String]>,
+) -> Vec<&'a kernel::EvidenceReference> {
+    let Some(later) = later else {
+        return Vec::new();
     };
-    proposal.contradictions.iter().any(|contradiction| {
-        !cited
-            .iter()
-            .any(|linked| linked.evidence_id == contradiction.evidence_id)
-    })
+    if uncertainty != kernel::Uncertainty::Low {
+        return Vec::new();
+    }
+    contradictions
+        .iter()
+        .filter(|contradiction| later.contains(&contradiction.evidence_id))
+        .collect()
 }
 
-/// The live decision row of the memory `object_id`.
-fn decision_row(kernel: &KernelStore, object_id: &str) -> Option<DecisionRow> {
+/// The live decision row of the memory `object_id`; `None` when the store holds none.
+fn decision_row(kernel: &KernelStore, object_id: &str) -> Result<Option<DecisionRow>, KernelError> {
     let budget = EvalBudget::new(
         Some(Instant::now() + Duration::from_secs(5)),
         Arc::default(),
     );
-    kernel
-        .tip_within_budget(&budget)
-        .and_then(|tip| {
-            kernel.decisions_for_objects_as_of_within_budget(
-                std::slice::from_ref(&object_id.to_string()),
-                tip,
-                &budget,
-            )
-        })
-        .ok()
-        .and_then(|rows| rows.into_iter().next())
+    let tip = kernel.tip_within_budget(&budget)?;
+    Ok(kernel
+        .decisions_for_objects_as_of_within_budget(
+            std::slice::from_ref(&object_id.to_string()),
+            tip,
+            &budget,
+        )?
+        .into_iter()
+        .next())
 }
 
-/// The newest live memory of the project, other than `statement`, that cites one of `evidence`: the memory capture stored for the later message a review cites. `None` when capture stored none, or the read fails.
+/// The live memory of the project that capture stored for a later message a review cites: one recorded after `statement` that cites one of `evidence`. Among several, the one sharing most subject terms with the statement, then the newest. `None` when capture stored none.
 fn later_memory_citing(
     kernel: &KernelStore,
     scope: &ApplyScope<'_>,
-    statement: &str,
+    statement: &DecisionRow,
     evidence: &[&str],
-) -> Option<String> {
+) -> Result<Option<String>, CycleError> {
     let budget = EvalBudget::new(Some(Instant::now() + CYCLE_BUDGET), Arc::default());
-    let project = ProjectScope::new(scope.project_digest).ok()?;
-    let tip = kernel.tip_within_budget(&budget).ok()?;
-    let descriptors = subject_descriptors(kernel, &project, tip, &budget).ok()?;
+    let project = ProjectScope::new(scope.project_digest).map_err(CycleError::Kernel)?;
+    let tip = kernel
+        .tip_within_budget(&budget)
+        .map_err(CycleError::Kernel)?;
+    let (descriptors, _) =
+        subject_descriptors(kernel, &project, tip, &budget, None, Walk::PRODUCTION)?;
     let ids: Vec<&str> = descriptors
         .iter()
         .filter_map(decision_of)
-        .filter(|id| *id != statement)
+        .filter(|id| *id != statement.object_id)
         .collect();
     let linked = kernel
         .linked_decisions_evidence_within_budget(
@@ -1014,7 +1126,7 @@ fn later_memory_citing(
             super::selection::MAX_LINKED_EVIDENCE,
             &budget,
         )
-        .ok()?;
+        .map_err(CycleError::Kernel)?;
     let citing: Vec<String> = ids
         .iter()
         .zip(&linked)
@@ -1024,28 +1136,39 @@ fn later_memory_citing(
         })
         .map(|(id, _)| (*id).to_string())
         .collect();
-    kernel
+    let stated = crate::memory_capture::stated_commit(statement);
+    let terms = subject_terms(&statement.payload.summary);
+    Ok(kernel
         .decisions_for_objects_as_of_within_budget(&citing, tip, &budget)
-        .ok()?
+        .map_err(CycleError::Kernel)?
         .into_iter()
-        .max_by_key(|row| row.created_commit_seq)
-        .map(|row| row.object_id)
+        .filter(|row| row.created_commit_seq > stated)
+        .max_by_key(|row| {
+            (
+                subject_terms(&row.payload.summary)
+                    .intersection(&terms)
+                    .count(),
+                row.created_commit_seq,
+                std::cmp::Reverse(row.object_id.clone()),
+            )
+        })
+        .map(|row| row.object_id))
 }
 
 /// Treats the proposal the job's completed receipt selects as `mode` says. A `retain` or `no_change` proposal asks for no write, so every mode accepts it at once: the acceptance leaves the memory as it is and ends the proposal's review hold, which keeps the project's hold allowance for proposals that wait on a decision.
 ///
-/// A proposal that would change a memory passes the action rule first (`actionable`): stage 1 flagged the review, the model stated `low` uncertainty, and it cites a later reference. `propose` writes nothing and leaves every change proposal for `review.accept`. In `contest` and `apply` a change proposal outside the rule is dropped: its review hold ends, the memory stays as it is, and new evidence can bring it to review again.
+/// A proposal that would change a memory passes the action rule first (`actionable`): stage 1 flagged the review, the model stated `low` uncertainty, and a contradiction cites one of `later`, the later references the review was shown as evidence. `propose` writes nothing and leaves every change proposal for `review.accept`. In `contest` and `apply` a change proposal outside the rule is dropped: its review hold ends, the memory stays as it is, and new evidence can bring it to review again. A memory whose row the store cannot read now is left with its proposal unapplied.
 ///
 /// A `revise` of the user's own statement inside the rule is treated alike in `contest` and `apply`. The model proposes `revise` when a later statement replaces part of what the statement says, as when one sentence gives two rules and the user later changes one. The reviewer writes no successor text for a user statement, and removing the statement would take the part that still stands out of delivery with it. So the statement stays delivered and is marked contested by the memory capture stored for the later message: its line names that memory and both dates, and a session reads the old sentence beside the newer rule. When capture stored no memory for the cited message, the statement stays as it is.
 ///
-/// For every other change inside the rule, `contest` disputes the target, citing the first contradicting evidence row; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs.
+/// For every other change inside the rule, `contest` disputes the target, citing the first later reference the proposal names as a contradiction; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs. A `revise` whose new text opens with another writer than the memory's own is dropped, so the reviewer's text never reads as the user's.
 pub fn apply_proposal(
     kernel: &KernelStore,
     ledger: &MemoryStore,
     scope: &ApplyScope<'_>,
     causal_identity: &str,
     mode: ReviewApply,
-    flagged: bool,
+    later: Option<&[String]>,
     now: i64,
 ) -> Applied {
     let selected =
@@ -1107,36 +1230,48 @@ pub fn apply_proposal(
     ) else {
         return Applied::Left;
     };
-    // A proposal the worker has settled without a reader ends its review hold and leaves `settled` as the outcome.
-    let release = |settled: Applied| match receipt() {
-        Ok(Some(receipt)) => match release_settled_review_hold(
-            kernel,
-            receipt,
-            scope.memstore_incarnation,
-            causal_identity,
-            now,
-        ) {
-            Ok(_) => settled,
-            Err(error) => Applied::Refused(error),
-        },
-        Ok(None) => settled,
-        Err(error) => Applied::Refused(error.to_string()),
+    // A proposal the worker has settled without a reader ends its review hold and leaves `settled` as the outcome. A hold the store keeps past the settlement ends with its review window, and the outcome stands.
+    let release = |settled: Applied| {
+        let released =
+            receipt()
+                .map_err(|error| error.to_string())
+                .and_then(|receipt| match receipt {
+                    Some(receipt) => release_settled_review_hold(
+                        kernel,
+                        receipt,
+                        scope.memstore_incarnation,
+                        causal_identity,
+                        now,
+                    )
+                    .map(|_| ()),
+                    None => Ok(()),
+                });
+        if let Err(error) = released {
+            eprintln!(
+                "daemon: memory_reviewer kept the review hold of a settled proposal: {error}"
+            );
+        }
+        settled
     };
-    if !actionable(kernel, proposal, target, flagged) {
+    let cited = actionable(proposal.uncertainty, &proposal.contradictions, later);
+    let Some(first) = cited.first() else {
         // The proposal is outside the action rule, so no reader is asked to settle it: its hold ends and the memory stays.
         return release(Applied::Dropped);
-    }
-    let statement = decision_row(kernel, &target.object_id)
-        .filter(|decision| said_by(&decision.payload.summary) == Writer::User);
-    if proposal.action == ProposalAction::Revise
-        && let Some(statement) = statement
-    {
+    };
+    let memory = match decision_row(kernel, &target.object_id) {
+        Ok(Some(memory)) => memory,
+        // The memory left the store while its review ran; nothing is left to change.
+        Ok(None) => return release(Applied::Dropped),
+        Err(error) => return Applied::Refused(error.to_string()),
+    };
+    let writer = Writer::of_statement(&memory.payload.summary);
+    if proposal.action == ProposalAction::Revise && writer == Writer::User {
         return match contest_with_later_statement(
             kernel,
             scope,
             causal_identity,
-            &statement,
-            proposal,
+            &memory,
+            &cited,
             now,
         ) {
             Applied::Refused(reason) => Applied::Refused(reason),
@@ -1144,36 +1279,39 @@ pub fn apply_proposal(
         };
     }
     if mode == ReviewApply::Contest {
-        let Some(contradiction) = proposal.contradictions.first() else {
-            return Applied::Dropped;
-        };
         return dispute(
             kernel,
             scope,
             causal_identity,
             &target.object_id,
-            &contradiction.evidence_id,
+            &first.evidence_id,
         );
+    }
+    if proposal.action == ProposalAction::Revise
+        && proposal.new_text.as_deref().map(Writer::of_statement) != Some(writer)
+    {
+        return release(Applied::Dropped);
     }
     accept()
 }
 
-/// Marks the user statement `statement` contested by the memory capture stored for a later message the proposal cites, under an operation key the job names, so a retried pass replays the first commit. [`Applied::Standing`] when no live memory cites those messages or the statement's row takes no contest.
+/// Marks the user statement `statement` contested by the memory capture stored for a later message among `cited`, the later references the proposal names as contradictions, under an operation key the job names, so a second call for the job replays the first commit. [`Applied::Standing`] when no live memory recorded after the statement cites those messages or the statement's row takes no contest.
 fn contest_with_later_statement(
     kernel: &KernelStore,
     scope: &ApplyScope<'_>,
     causal_identity: &str,
     statement: &DecisionRow,
-    proposal: &kernel::ReviewProposal,
+    cited: &[&kernel::EvidenceReference],
     now: i64,
 ) -> Applied {
-    let cited: Vec<&str> = proposal
-        .contradictions
+    let cited: Vec<&str> = cited
         .iter()
         .map(|contradiction| contradiction.evidence_id.as_str())
         .collect();
-    let Some(later) = later_memory_citing(kernel, scope, &statement.object_id, &cited) else {
-        return Applied::Standing;
+    let later = match later_memory_citing(kernel, scope, statement, &cited) {
+        Ok(Some(later)) => later,
+        Ok(None) => return Applied::Standing,
+        Err(error) => return Applied::Refused(error.to_string()),
     };
     let request = format!("{}\u{1f}{later}", statement.object_id);
     let intent = CommitIntent {
@@ -1198,7 +1336,7 @@ fn contest_with_later_statement(
     }
 }
 
-/// Records `mark_disputed` on `object_id`, citing `evidence_id`, under an operation key the job names, so a retried pass replays the first commit.
+/// Records `mark_disputed` on `object_id`, citing `evidence_id`, under an operation key the job names, so a second call for the job replays the first commit.
 fn dispute(
     kernel: &KernelStore,
     scope: &ApplyScope<'_>,
@@ -1249,13 +1387,6 @@ fn dispute(
             disposition: receipt.result,
         },
         Err(error) => Applied::Refused(error.to_string()),
-    }
-}
-
-/// Reads a refusal as text for the worker's log.
-impl From<ReadRefusal> for Applied {
-    fn from(refusal: ReadRefusal) -> Self {
-        Self::Refused(refusal.to_string())
     }
 }
 
@@ -1451,13 +1582,66 @@ mod tests {
         }
     }
 
+    fn later(recency: i64, evidence_id: &str, trigger: Trigger) -> LaterEvidence {
+        LaterEvidence {
+            recency,
+            evidence_id: evidence_id.to_string(),
+            trigger,
+        }
+    }
+
+    /// One source two triggers found at different times takes one of a job's later slots, at its newest time and under its strongest trigger.
     #[test]
-    fn statements_name_who_said_them() {
-        assert_eq!(said_by("User stated: Deploy from main."), Writer::User);
+    fn a_source_found_twice_is_one_piece_of_evidence() {
+        let evidence = newest_first(vec![
+            later(5, "a", Trigger::LaterMessage),
+            later(9, "b", Trigger::LaterMessage),
+            later(7, "a", Trigger::LaterStatement),
+            later(3, "a", Trigger::Contested),
+        ]);
         assert_eq!(
-            said_by("Assistant reported: the limit is 2."),
-            Writer::Assistant
+            evidence,
+            [
+                later(9, "b", Trigger::LaterMessage),
+                later(7, "a", Trigger::Contested),
+            ]
         );
-        assert_eq!(said_by("Deploy from main."), Writer::Unrecorded);
+    }
+
+    fn citing(evidence: &[&str]) -> Vec<kernel::EvidenceReference> {
+        evidence
+            .iter()
+            .map(|evidence_id| kernel::EvidenceReference {
+                evidence_id: (*evidence_id).to_string(),
+                span: None,
+            })
+            .collect()
+    }
+
+    /// The action rule has three conditions and each holds alone: stage 1 flagged the review, the model states `low` uncertainty, and a contradiction cites a later reference of the review. A citation of the memory's own source, of another memory, or of a project file is none.
+    #[test]
+    fn a_change_acts_only_on_a_later_reference_of_a_flagged_review() {
+        use kernel::Uncertainty::{Low, Medium};
+        let later = ["later-message".to_string()];
+        let cited = |uncertainty, contradictions: &[kernel::EvidenceReference], later| {
+            actionable(uncertainty, contradictions, later)
+                .into_iter()
+                .map(|reference| reference.evidence_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let change = citing(&["own-source", "later-message"]);
+        assert_eq!(cited(Low, &change, Some(&later[..])), ["later-message"]);
+        assert!(
+            cited(Low, &change, None).is_empty(),
+            "stage 1 did not flag the review"
+        );
+        assert!(cited(Medium, &change, Some(&later[..])).is_empty());
+        for elsewhere in ["own-source", "another-memory", "project-file"] {
+            assert!(
+                cited(Low, &citing(&[elsewhere]), Some(&later[..])).is_empty(),
+                "{elsewhere}"
+            );
+        }
+        assert!(cited(Low, &change, Some(&[][..])).is_empty());
     }
 }

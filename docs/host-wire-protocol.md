@@ -642,7 +642,7 @@ payload, a reason string, or a project.
 | field | type | rule |
 | --- | --- | --- |
 | `memory_reviewer_state` | `"ready" \| "starting" \| "unavailable"` | required; any other value, a non-string, or a non-object block drops `memory_reviewer` whole |
-| `activation_state` | `"open" \| "unknown" \| "stale" \| "missing" \| "refused" \| "unreadable" \| "malformed" \| "identity_mismatch" \| "unacknowledged" \| "unknown_credential" \| "unavailable" \| "store"` | whether MemoryReviewer disclosure is admitted, as the worker last evaluated it: `open` while the deployment owner's activation record admits it or a bound project's user tier sets `memory_reviewer.enabled`; `unknown` before its first pass; `stale` once that evaluation is older than 300 s; any other value drops the field |
+| `activation_state` | `"open" \| "unknown" \| "stale" \| "missing" \| "refused" \| "unreadable" \| "malformed" \| "identity_mismatch" \| "unacknowledged" \| "unknown_credential" \| "unavailable" \| "store"` | whether MemoryReviewer disclosure is admitted, as the worker last evaluated it: `open` while the deployment owner's activation record admits it or the worker's latest pass found a project to review under the user tier's `memory_reviewer.enabled`; `unknown` before its first pass; `stale` once that evaluation is older than 300 s; any other value drops the field |
 | `sampled_at_ms` | unsigned integer or `null` | `null` means no sample yet; a `ready` block older than five minutes reports as `unavailable` |
 | `swept_jobs`, `swept_selections` | unsigned integer | jobs and frozen selections the last expiry sweep closed |
 | `jobs_reserved`, `jobs_ready` | unsigned integer | pending review jobs by state |
@@ -702,7 +702,8 @@ The `context` component MAY also carry a sanitized
 `metrics.contradiction_candidates` object describing write-time
 contradiction candidates: derived rows naming a live memory decision a
 published source descriptor overlaps lexically, written and reclaimed only
-while the user-only `contradiction_candidates.enabled` (default false) is on;
+while the user-only `contradiction_candidates.enabled` (default false) or
+`memory_reviewer.enabled` is on;
 the daemon ignores a project-tier value with a warning, and each plugin strips
 it from the project tier before merging. The counters are process-local, start
 at zero when the daemon starts, and stay at zero until the flag is first on;
@@ -1191,7 +1192,7 @@ the daemon ignores a project-tier value with a warning, and each plugin strips
 it from the project tier before merging. The user-only
 `memory_reviewer.enabled` (default false) also turns it on, together with
 `contradiction_candidates.enabled`, because a memory review reads the message
-blocks a memory cites and the source text recorded after it. It consents to a different capture:
+blocks a memory cites and the source text recorded after it. `source_capture.enabled` consents to a different capture:
 the daemon retaining the exact bytes of user and completed assistant message
 text, tool outputs, tool errors, and the configured repository documents a
 pass reads for its prompt block, as Kernel source descriptors, published by

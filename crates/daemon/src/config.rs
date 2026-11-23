@@ -140,8 +140,10 @@ pub struct Stage1Model {
 pub fn default_stage1_model(review_model: &str) -> Stage1Model {
     const FAMILY: &str = "claude-";
     const SMALL_TIER: &str = "haiku";
-    let derived = review_model.rfind(FAMILY).and_then(|at| {
-        let tier_start = at + FAMILY.len();
+    // The family word is read in the model part alone, so a provider whose own name holds it keeps its name.
+    let model_start = review_model.find('/').map_or(0, |at| at + 1);
+    let derived = review_model[model_start..].rfind(FAMILY).and_then(|at| {
+        let tier_start = model_start + at + FAMILY.len();
         let tier = review_model[tier_start..].split('-').next()?;
         let named = !tier.is_empty() && tier.bytes().all(|byte| byte.is_ascii_lowercase());
         (named && tier != SMALL_TIER).then(|| {
@@ -630,6 +632,16 @@ impl ConfigCache {
         self.effective_from_sources(user, Path::new("/"))
             .0
             .verifier_enabled
+    }
+
+    /// The configuration the user tier gives alone, which decides every user-tier-only key for every project: the merge names the filesystem root as its project. Tier warnings are left to the routes' loads, which report them on every bind.
+    pub fn user_tier(
+        &mut self,
+        xdg_config_home: Option<&str>,
+        home: Option<&str>,
+    ) -> Arc<DaemonConfig> {
+        let user = user_config_base_from(xdg_config_home, home).map(discover_tier);
+        self.effective_from_sources(user, Path::new("/")).0
     }
 
     /// The daemon-level `contradiction_candidates.enabled`: the user tier's value over the
@@ -1424,38 +1436,28 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
         }
         ConfigKey::MemoryReviewerModel => {
             if let Some(model) = tier.pointer(pointer).and_then(Value::as_str) {
-                let model = model.trim();
                 // The host's model execution takes a canonical `provider/model`; any other spelling leaves the History Summarizer's model in place.
-                if model
-                    .split_once('/')
-                    .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
-                {
-                    cfg.memory_reviewer.model = Some(model.to_string());
-                } else if !model.is_empty() {
-                    warnings.push(format!(
-                        "ignoring {pointer}: not in provider/model form; reviews use the history summarizer's model"
-                    ));
+                match model_reference(model) {
+                    Ok(model) => cfg.memory_reviewer.model = model.map(ToOwned::to_owned),
+                    Err(()) => warnings.push(format!(
+                        "ignoring {pointer}: expected a literal provider/model without {{env:}} or {{file:}} references; reviews use the history summarizer's model"
+                    )),
                 }
             }
         }
         ConfigKey::MemoryReviewerStage1Model => {
             if let Some(model) = tier.pointer(pointer).and_then(Value::as_str) {
-                let model = model.trim();
-                if model
-                    .split_once('/')
-                    .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
-                {
-                    cfg.memory_reviewer.stage1_model = Some(model.to_string());
-                } else if !model.is_empty() {
-                    warnings.push(format!(
-                        "ignoring {pointer}: not in provider/model form; stage 1 uses the default derived from the review model"
-                    ));
+                match model_reference(model) {
+                    Ok(model) => cfg.memory_reviewer.stage1_model = model.map(ToOwned::to_owned),
+                    Err(()) => warnings.push(format!(
+                        "ignoring {pointer}: expected a literal provider/model without {{env:}} or {{file:}} references; stage 1 uses the default derived from the review model"
+                    )),
                 }
             }
         }
         ConfigKey::MemoryReviewerApply => {
             if let Some(mode) = tier.pointer(pointer).and_then(Value::as_str) {
-                match ReviewApply::parse(mode.trim()) {
+                match ReviewApply::parse(mode) {
                     Some(mode) => cfg.memory_reviewer.apply = mode,
                     None => warnings.push(format!(
                         "ignoring {pointer}: expected propose, contest, or apply; the mode stays contest"
@@ -1632,6 +1634,22 @@ fn dedup_preserving_order(chain: &mut Vec<String>) {
 fn literal_chain_model(value: &str) -> Option<&str> {
     let value = value.trim_matches(is_ecmascript_whitespace);
     (!value.is_empty() && !has_variable_reference(value)).then_some(value)
+}
+
+/// A `provider/model` reference a `memory_reviewer` key names: `Ok(None)` for a blank value, which leaves the key unset, and `Err` for a value outside the canonical form or one that holds an `{env:}` or `{file:}` reference. The daemon reads the key as written and resolves no reference, so a reference would name no model.
+fn model_reference(value: &str) -> Result<Option<&str>, ()> {
+    let value = value.trim_matches(is_ecmascript_whitespace);
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let canonical = value
+        .split_once('/')
+        .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty());
+    if canonical && !has_variable_reference(value) {
+        Ok(Some(value))
+    } else {
+        Err(())
+    }
 }
 
 pub(crate) fn has_variable_reference(text: &str) -> bool {
@@ -2547,6 +2565,7 @@ mod tests {
             "anthropic/claude-3-5-sonnet-20241022",
             "openai/gpt-5",
             "prov/claude-",
+            "claude-max-proxy/gpt-5",
         ] {
             assert_eq!(
                 default_stage1_model(own),
@@ -2670,6 +2689,39 @@ mod tests {
                 "{warnings:?}"
             );
         }
+
+        // The daemon reads a model key as written and resolves no reference, and the mode is one of three exact words: a reference and a padded mode are refused with a warning.
+        let unresolved = serde_json::json!({
+            "history_summarizer": { "module_model": "prov/summarizer" },
+            "memory_reviewer": { "enabled": true, "model": "{env:REVIEW_PROVIDER}/reviewer", "stage1_model": "prov/{file:small.txt}", "apply": " apply " },
+        });
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&unresolved), None);
+        assert_eq!(cfg.memory_reviewer_model(), Some("prov/summarizer"));
+        assert_eq!(cfg.memory_reviewer.stage1_model, None);
+        assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Contest);
+        for pointer in [
+            "/memory_reviewer/model",
+            "/memory_reviewer/stage1_model",
+            "/memory_reviewer/apply",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(pointer)),
+                "{warnings:?}"
+            );
+        }
+        // A blank model key is an unset key and warns of nothing.
+        let blank = serde_json::json!({
+            "history_summarizer": { "module_model": "prov/summarizer" },
+            "memory_reviewer": { "enabled": true, "model": "  ", "stage1_model": "" },
+        });
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&blank), None);
+        assert_eq!(cfg.memory_reviewer_model(), Some("prov/summarizer"));
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("/memory_reviewer/")),
+            "{warnings:?}"
+        );
 
         // A project tier sets none of the four keys.
         let (cfg, warnings) = merge_tiers_with_warnings(None, Some(&own));

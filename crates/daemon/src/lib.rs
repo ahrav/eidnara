@@ -4162,6 +4162,7 @@ impl HandlerCore {
                                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                                         .is_some()
                                 });
+                            let review_config = Mutex::new(config::ConfigCache::default());
                             let worker = Arc::new(memory_reviewer::worker::Worker {
                                 host,
                                 home,
@@ -4170,9 +4171,18 @@ impl HandlerCore {
                                     memory_reviewer::worker::ready_kernel(&kernel_source)
                                 }),
                                 projects: Arc::new(move || {
+                                    // The switch and its models are the user tier's, read on every pass, so a change there takes effect at the next pass, also for a root whose routes have closed.
+                                    let user_tier = review_config
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .user_tier(
+                                            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+                                            std::env::var("HOME").ok().as_deref(),
+                                        );
                                     memory_reviewer::worker::module_projects(
                                         &project_store,
                                         &project_bindings,
+                                        Some(&user_tier),
                                     )
                                 }),
                                 status: Arc::clone(&memory_reviewer_status),
@@ -6117,8 +6127,13 @@ impl HandlerCore {
     ) -> Option<memory_reviewer::handoff::HandoffTarget> {
         let route_root = binding.project_root.to_string_lossy().to_string();
         match memories_authority_for_route(store, &route_root) {
-            Ok(MemoriesAuthority::Module(_)) => {}
-            Ok(MemoriesAuthority::NotModule { .. }) | Err(_) => return None,
+            // The authority the review switch gave a root covers reviews of its stored memories. Fact sets are handed to review under an authority the root's owner recorded.
+            Ok(MemoriesAuthority::Module(authority))
+                if authority.context_store_uuid
+                    != memory_reviewer::review_cycle::SWITCH_AUTHORITY_STORE => {}
+            Ok(MemoriesAuthority::Module(_) | MemoriesAuthority::NotModule { .. }) | Err(_) => {
+                return None;
+            }
         }
         let kernel = self.memory_classifier.kernel.kernel_store().ok()?;
         let budget = kernel::applicability::EvalBudget::new(
@@ -15781,7 +15796,7 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
-        let memory_reviewer_open = self.memory_reviewer_status.activation_state()
+        let memory_reviewer_open = self.memory_reviewer_status.recorded_state()
             == memory_reviewer::lifecycle::ActivationState::Open
             && memory_reviewer::selection::PRODUCTION_SELECTION_OPEN;
         Ok(by_project
@@ -36176,7 +36191,11 @@ mod tests {
         let views = || {
             let roster = harness.handler.bindings.lock().unwrap().bound_projects();
             (
-                memory_reviewer::worker::module_projects(&harness.store, &harness.handler.bindings),
+                memory_reviewer::worker::module_projects(
+                    &harness.store,
+                    &harness.handler.bindings,
+                    None,
+                ),
                 bridge.scheduled_projects().unwrap(),
                 bridge
                     .binding_for_root(&root)

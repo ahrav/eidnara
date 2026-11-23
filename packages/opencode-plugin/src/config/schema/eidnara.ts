@@ -635,13 +635,13 @@ export const EidnaraConfigSchema = z
                     .string()
                     .optional()
                     .describe(
-                        "User-only: the provider/model every proposal request names. Absent, reviews use the history summarizer's model.",
+                        "User-only: the provider/model every proposal request names, as a literal; {env:} and {file:} references are not supported. Absent, reviews use the history summarizer's model.",
                     ),
                 stage1_model: z
                     .string()
                     .optional()
                     .describe(
-                        "User-only: the provider/model of the small chat model that decides stage 1 of each review, whether later messages may have changed the memory. A small, fast model of the provider you already use is the intended value, for example the current Claude Haiku. Absent, a Claude review model gives the Haiku of the same provider and version (amazon-bedrock/global.anthropic.claude-opus-5-5 gives amazon-bedrock/global.anthropic.claude-haiku-5-5), and any other review model answers stage 1 itself. If the derived model fails its first request, stage 1 uses the review model until the daemon restarts.",
+                        "User-only: the provider/model of the small chat model that decides stage 1 of each review, whether later messages may have changed the memory, as a literal; {env:} and {file:} references are not supported. A small, fast model of the provider you already use is the intended value, for example the current Claude Haiku. Absent, a Claude review model gives the Haiku of the same provider and version (amazon-bedrock/global.anthropic.claude-opus-5-5 gives amazon-bedrock/global.anthropic.claude-haiku-5-5), and any other review model answers stage 1 itself. If the derived model fails its first request, stage 1 uses the review model until the daemon restarts.",
                     ),
                 apply: z
                     .enum(["propose", "contest", "apply"])

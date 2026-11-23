@@ -15,14 +15,15 @@ use super::broker::check_render;
 use super::model_request::{AssistantText, ResponseAccounting, SendError};
 use super::model_response::StopReason;
 use crate::HistorySummarizerProducerFactory;
+use crate::history_summarizer::HistorySummarizerProducerDriver;
 use crate::history_summarizer_producer::{
     HistorySummarizerProducerError, HistorySummarizerSendOutcome,
 };
 
 /// The credential an attempt marker names for a request the host carries: the host's own credential source, held by the host and its harness child.
 pub const HOST_CREDENTIAL_ID: &str = "host-model-execution";
-/// The harness whose child reports the model id of every answer.
-const PI_HARNESS: &str = "pi";
+/// The harness whose child's transcript carries no model id.
+const OPENCODE_HARNESS: &str = "opencode";
 /// Every child session of a review request starts with this prefix.
 pub const CHILD_SESSION_PREFIX: &str = "eidnara-memory_reviewer:";
 /// The sampling value a request carries. The host omits it for a model whose provider refuses a temperature.
@@ -41,6 +42,43 @@ pub struct HostExecution {
 impl std::fmt::Debug for HostExecution {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "HostExecution({})", self.identity)
+    }
+}
+
+/// The child session of one request and the producer that can delete it. The session holds the prompt and the answer, so it is deleted when the request ends, whatever ends it. The deletion runs as a task of its own: it finishes after an attempt's deadline has passed and after a cancellation dropped the request, and the attempt's terminal never waits on it past the deadline.
+struct ChildSession {
+    producer: Option<Box<dyn HistorySummarizerProducerDriver + Send>>,
+    session: String,
+}
+
+impl ChildSession {
+    fn producer(&mut self) -> &mut (dyn HistorySummarizerProducerDriver + Send) {
+        self.producer
+            .as_deref_mut()
+            .expect("the producer is held until the session is deleted")
+    }
+
+    /// Starts the deletion and returns its task; `None` once it has started.
+    fn delete(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let mut producer = self.producer.take()?;
+        let session = std::mem::take(&mut self.session);
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        Some(runtime.spawn(async move {
+            let _ = producer.purge_session(&session).await;
+        }))
+    }
+
+    /// Deletes the session and waits for the deletion until `deadline`.
+    async fn end(mut self, deadline: Instant) {
+        if let Some(deletion) = self.delete() {
+            let _ = tokio::time::timeout_at(deadline, deletion).await;
+        }
+    }
+}
+
+impl Drop for ChildSession {
+    fn drop(&mut self) {
+        self.delete();
     }
 }
 
@@ -94,11 +132,11 @@ impl HostExecution {
             .map_or(self.model_ref.as_str(), |(_, model)| model)
     }
 
-    /// Whether an answer that reports `reported` came from the model the route names. A Pi child's answer always carries its model id, so on that harness an answer without one is held too. An OpenCode child's transcript carries no model id; there the dispatch, which names the pair, is the binding.
+    /// Whether an answer that reports `reported` came from the model the route names. An OpenCode child's transcript carries no model id; there the dispatch, which names the pair, is the binding. On every other harness an answer without a model id is held.
     pub fn answered_by_requested(&self, reported: Option<&str>) -> bool {
         match reported {
             Some(model) => model == self.expected_model(),
-            None => self.harness != PI_HARNESS,
+            None => self.harness == OPENCODE_HARNESS,
         }
     }
 
@@ -134,8 +172,11 @@ impl HostExecution {
             &self.harness,
             &self.credential_fingerprints,
         );
-        let mut producer = match tokio::time::timeout(remaining(), connect).await {
-            Ok(Ok(producer)) => producer,
+        let mut child = match tokio::time::timeout(remaining(), connect).await {
+            Ok(Ok(producer)) => ChildSession {
+                producer: Some(producer),
+                session: session.to_string(),
+            },
             Ok(Err(_)) => return Err(unsent(SendError::Connect)),
             Err(_) => return Err(unsent(SendError::Deadline)),
         };
@@ -147,7 +188,7 @@ impl HostExecution {
         };
         let started = tokio::time::timeout(
             remaining(),
-            producer.start_with_generation(
+            child.producer().start_with_generation(
                 session,
                 &system,
                 prompt,
@@ -161,7 +202,7 @@ impl HostExecution {
             Ok(Ok(handle)) => handle,
             Ok(Err(error)) => {
                 let sent = error.send_outcome() != Some(HistorySummarizerSendOutcome::NotSent);
-                let _ = producer.purge_session(session).await;
+                child.end(deadline).await;
                 return Err(HostFailure {
                     error: if sent {
                         SendError::Transport
@@ -172,18 +213,18 @@ impl HostExecution {
                 });
             }
             Err(_) => {
-                let _ = producer.purge_session(session).await;
+                child.end(deadline).await;
                 return Err(HostFailure {
                     error: SendError::Deadline,
                     sent: true,
                 });
             }
         };
-        let output = producer
+        let output = child
+            .producer()
             .await_output_with_timeout(&handle.run_id, remaining())
             .await;
-        // The run's session holds the prompt and the answer; it is deleted on every path.
-        let _ = producer.purge_session(session).await;
+        child.end(deadline).await;
         let sent = |error| HostFailure { error, sent: true };
         // The provider ended the response itself without an answer, as a content filter does. The same request meets the same stop again, so the attempt reads as the model declining, which settles the review on this request.
         if let Err(HistorySummarizerProducerError::RunFailed { detail, .. }) = &output
@@ -214,7 +255,8 @@ impl HostExecution {
         }
         accounting.transport_bytes = bytes;
         accounting.decoded_text_bytes = bytes;
-        if output.text.trim().is_empty() {
+        // An answer the output cap cut before any visible text is a cut answer, which the caller reads by its stop reason. Any other empty answer is a failed request.
+        if output.text.trim().is_empty() && !output.length_capped {
             return Err(sent(SendError::Transport));
         }
         check_render(output.text.as_bytes(), None).map_err(|_| sent(SendError::EgressCheck))?;

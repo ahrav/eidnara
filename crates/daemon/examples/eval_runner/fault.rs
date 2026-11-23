@@ -2535,6 +2535,7 @@ impl ReviewerRig {
         let kernel = Arc::clone(&stores.corpus.kernel);
         let route = ProjectRoute {
             review: None,
+            recorded_authority: true,
             project: reviewer::PROJECT.to_string(),
             authority_generation: self.generation,
             roots: vec![RootScope {

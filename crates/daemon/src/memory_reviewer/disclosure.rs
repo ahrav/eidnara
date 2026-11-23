@@ -13,7 +13,7 @@ use kernel::{ArtifactDestination, KernelStore, MemoryReviewerHoldKind};
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_ledger::{
     AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerError,
-    MemoryReviewerLedgerRefusal, ResponseAllowance, ResponseUsage,
+    MemoryReviewerLedgerRefusal, ResponseUsage,
 };
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -474,7 +474,7 @@ impl Disclosure<'_> {
         })
     }
 
-    /// One attempt through the host's model execution. The marker commits first, under the same claim, deadline, cutoff, and allowance checks as a direct attempt, and the host is asked only once the ledger hands the attempt over; the wait ends at the attempt deadline the marker committed under. The request names the profile's `provider/model`, which the host runs as given.
+    /// One proposal attempt through the host's model execution ([`Self::exchange_through_host`]). The request names the profile's `provider/model`, which the host runs as given.
     async fn disclose_through_host(
         &self,
         host: &super::host_execution::HostExecution,
@@ -505,6 +505,32 @@ impl Disclosure<'_> {
             credential_id: self.sender.credential_id().to_string(),
             policy_union_digest: prepared.policy_union_digest.clone(),
         };
+        let (attempt_index, text) = self
+            .exchange_through_host(
+                host,
+                &marker,
+                (body.system.as_deref().unwrap_or(""), &prompt),
+                body.max_tokens,
+                cancel,
+                deadline,
+            )
+            .await?;
+        Ok(Disclosed {
+            attempt_index,
+            text,
+        })
+    }
+
+    /// One request through the host's model execution under `marker`. The marker commits first, under the claim, deadline, cutoff, and allowance checks of a direct attempt, and the host is asked only once the ledger hands the attempt over; the wait ends at the attempt deadline the marker committed under. The answer is released only when it comes from the model the route names, and the attempt's terminal is recorded on every path past the marker. Returns the attempt's index with the answer.
+    async fn exchange_through_host(
+        &self,
+        host: &super::host_execution::HostExecution,
+        marker: &AttemptMarker,
+        (system, prompt): (&str, &str),
+        max_tokens: u32,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<(u32, AssistantText), DisclosureRefusal> {
         let hold = &self.broker.binding().hold;
         let outcome = self
             .ledger
@@ -514,7 +540,7 @@ impl Disclosure<'_> {
                 hold.generation,
                 self.claim_id,
                 &hold.kernel_incarnation,
-                &marker,
+                marker,
                 (),
                 self.now_ms,
                 |()| (),
@@ -570,8 +596,8 @@ impl Disclosure<'_> {
             }
             completed = host.complete(
                 &session,
-                (body.system.as_deref().unwrap_or(""), &prompt),
-                body.max_tokens,
+                (system, prompt),
+                max_tokens,
                 deadline,
                 allowance,
                 &mut accounting,
@@ -593,7 +619,7 @@ impl Disclosure<'_> {
                 ));
             }
         };
-        // The answer is released only when it comes from the model the route names, as on the direct route. A response the provider stopped carries no answer and no model id, and releases nothing.
+        // A response the provider stopped carries no answer and no model id, and releases nothing.
         if text.stop_reason != Some(StopReason::Refusal)
             && !host.answered_by_requested(text.model.as_deref())
         {
@@ -618,10 +644,7 @@ impl Disclosure<'_> {
             error,
             cause: None,
         })?;
-        Ok(Disclosed {
-            attempt_index,
-            text,
-        })
+        Ok((attempt_index, text))
     }
 
     /// The approval must name exactly the provider this sender dials, the requested model, the credential, and both live incarnations. The hold's Memory Store incarnation is checked against the live store because the hold copied it at acquisition and a restored ledger changes it.
@@ -679,60 +702,7 @@ impl Disclosure<'_> {
             .map_err(|_| DisclosureRefusal::PolicyUnion)
     }
 
-    /// Commits the attempt marker of a stage-1 request under the same claim, deadline, cutoff, and allowance checks as a proposal request, and returns the attempt's index, its deadline, and the response allowance the ledger granted.
-    fn begin_stage_one(
-        &self,
-        marker: &AttemptMarker,
-    ) -> Result<(u32, i64, ResponseAllowance), DisclosureRefusal> {
-        let hold = &self.broker.binding().hold;
-        let outcome = self
-            .ledger
-            .dispatch_memory_reviewer_attempt(
-                self.project,
-                &hold.subject,
-                hold.generation,
-                self.claim_id,
-                &hold.kernel_incarnation,
-                marker,
-                (),
-                self.now_ms,
-                |()| (),
-            )
-            .map_err(|error| match error {
-                MemoryReviewerLedgerError::Refused(reason) => DisclosureRefusal::Ledger(reason),
-                MemoryReviewerLedgerError::Store(error) => {
-                    DisclosureRefusal::Store(error.to_string())
-                }
-            })?;
-        match outcome {
-            DispatchOutcome::ChargedNotDispatched {
-                attempt_index,
-                reason,
-                finished,
-            } => Err(DisclosureRefusal::ChargedNotDispatched {
-                attempt_index,
-                reason,
-                terminal_recorded: finished,
-            }),
-            DispatchOutcome::Handed {
-                attempt_index,
-                attempt_deadline_ms,
-                allowance,
-                release,
-                ..
-            } => match release {
-                Ok(()) => Ok((attempt_index, attempt_deadline_ms, allowance)),
-                Err(error) => Err(self.end(
-                    attempt_index,
-                    MemoryReviewerAttemptTerminal::Failed,
-                    ResponseUsage::NONE,
-                    DisclosureRefusal::Store(error.to_string()),
-                )),
-            },
-        }
-    }
-
-    /// One stage-1 attempt by the chat model this disclosure's sender reaches through the host: the fixed instructions as the system text and the review state as the prompt, under an attempt marker like a proposal request. Returns the decider's answers, or `None` for an answer outside the closed form, with the SHA-256 of the request body. An answer the provider stopped or cut at the output cap reads as outside the closed form. The attempt's terminal is recorded on every path past the marker.
+    /// One stage-1 attempt by the chat model this disclosure's sender reaches through the host: the fixed instructions as the system text and the review state as the prompt, under an attempt marker like a proposal request ([`Self::exchange_through_host`]). Returns the decider's answers, or `None` for an answer outside the closed form, with the SHA-256 of the request body. An answer the provider stopped or cut at the output cap reads as outside the closed form.
     pub async fn screen(
         &self,
         review: &ReviewState,
@@ -773,69 +743,16 @@ impl Disclosure<'_> {
             credential_id: self.sender.credential_id().to_string(),
             policy_union_digest: union_digest,
         };
-        let (attempt_index, attempt_deadline_ms, allowance) = self.begin_stage_one(&marker)?;
-        let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
-        let deadline = deadline.min(Instant::now() + Duration::from_millis(remaining));
-        let hold = &self.broker.binding().hold;
-        let session = super::host_execution::HostExecution::child_session(
-            &hold.subject,
-            hold.generation,
-            attempt_index,
-        );
-        let mut accounting = ResponseAccounting::default();
-        let completed = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                return Err(self.end(attempt_index, MemoryReviewerAttemptTerminal::Cancelled, consumed(&accounting), DisclosureRefusal::Cancelled));
-            }
-            completed = host.complete(
-                &session,
+        let (_, text) = self
+            .exchange_through_host(
+                host,
+                &marker,
                 (&system, &prompt),
                 stage_one::MAX_TOKENS,
+                cancel,
                 deadline,
-                allowance,
-                &mut accounting,
-            ) => completed,
-        };
-        let usage = consumed(&accounting);
-        let text = match completed {
-            Ok(text) => text,
-            Err(failure) => {
-                return Err(self.end(
-                    attempt_index,
-                    MemoryReviewerAttemptTerminal::Failed,
-                    usage,
-                    DisclosureRefusal::Send {
-                        attempt_index: Some(attempt_index),
-                        error: failure.error,
-                        sent: failure.sent,
-                    },
-                ));
-            }
-        };
-        let stopped = text.stop_reason == Some(StopReason::Refusal);
-        if !stopped && !host.answered_by_requested(text.model.as_deref()) {
-            return Err(self.end(
-                attempt_index,
-                MemoryReviewerAttemptTerminal::Failed,
-                usage,
-                DisclosureRefusal::ModelMismatch {
-                    attempt_index,
-                    reported: text.model,
-                    expected: host.expected_model().to_string(),
-                },
-            ));
-        }
-        self.finish(
-            attempt_index,
-            MemoryReviewerAttemptTerminal::Complete,
-            usage,
-        )
-        .map_err(|error| DisclosureRefusal::TerminalNotRecorded {
-            attempt_index,
-            error,
-            cause: None,
-        })?;
+            )
+            .await?;
         let answers = (text.stop_reason == Some(StopReason::EndTurn))
             .then(|| ChatAnswers::parse(review, &text.text))
             .flatten();
@@ -1001,6 +918,19 @@ mod tests {
         )]);
         assert_eq!(
             admits_request(&leaking, &leaking.state_json()),
+            Err(DisclosureRefusal::RenderCheck)
+        );
+
+        // JSON text escapes the line ends of a key block, so only the plain form of the state holds the block as its scanner rule reads it. Each form is checked.
+        let key = format!(
+            "-----BEGIN {kind} PRIVATE KEY-----\n{body}\n-----END {kind} PRIVATE KEY-----",
+            kind = "RSA",
+            body = "MIIEowIBAAKCAQEAx3Jq1v0kq9bN8Yd2Hk5mT7uVwXyZaBcDeFgHiJkLmNoPqRsT\nuVwXyZaBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgHiJkLmNoPqRsTuVwXyZ01234"
+        );
+        let block = user_statement(vec![reference("ref-3", Writer::User, &key)]);
+        assert!(check_render(block.plain_text().as_bytes(), None).is_err());
+        assert_eq!(
+            admits_request(&block, &block.state_json()),
             Err(DisclosureRefusal::RenderCheck)
         );
 
