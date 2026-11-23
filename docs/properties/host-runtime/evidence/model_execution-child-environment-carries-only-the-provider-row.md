@@ -34,7 +34,8 @@ only adapter-owned variables. OpenCode (`opencode.rs:116-121`, `:164-179`)
 adds `OPENCODE_DB`, `OPENCODE_CONFIG_CONTENT`,
 `OPENCODE_DISABLE_PROJECT_CONFIG`, `EIDNARA_MODEL_EXECUTION_CHILD`, and `HOME`. Pi
 (`pi.rs:215-220`, `:313-322`) adds `EIDNARA_PI_SUBAGENT`,
-`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS`, `EIDNARA_MODEL_EXECUTION_TEMPERATURE`, and `HOME`.
+`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS`, `EIDNARA_MODEL_EXECUTION_TEMPERATURE`, `HOME`, and,
+for a request that asks for its system text as written, `EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM`.
 The `OPENCODE_CONFIG_CONTENT` value is bounded before spawn by
 `MAX_OPENCODE_CONFIG_BYTES` (`opencode.rs:124-135`).
 
@@ -45,7 +46,7 @@ inherited.
 Existing checks, verified. Three are unit-level against `EnvSnapshot`:
 
 - `env_snapshot_strips_launch_identity`
-  (`tests/model_execution_subprocess.rs:2800-2812`): both identity names are removed
+  (`tests/model_execution_subprocess.rs:2910-2922`): both identity names are removed
   and `KEEP_ME` survives.
 - `env_snapshot_admission_charges_per_entry_overhead` (`:2815-2838`): 16,384
   one-byte variables are under the cap on string bytes alone (`:2823-2826`)
@@ -73,7 +74,7 @@ proves the credential row is the only channel from snapshot to child.
   `:1473-1490`.
 
 `credential_snapshot_must_match_before_backend_spawn`
-(`tests/model_execution_protocol.rs:434-496`) covers the send-time check in
+(`tests/model_execution_protocol.rs:461-523`) covers the send-time check in
 `CredentialVerifier::verify` (`mod.rs:44-69`): a route without a fingerprint
 gets `harness_unavailable` and `backend.starts() == 0` (`:456-458`); a route
 bound with the correct fingerprint admits and starts one backend (`:469-493`).

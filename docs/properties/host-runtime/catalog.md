@@ -9962,7 +9962,7 @@ footprint.
 Type: safety
 Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
 this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/model_execution_subprocess.rs:1102`, which opens a store to materialise a fixture
+`tests/model_execution_subprocess.rs:1111`, which opens a store to materialise a fixture
 closure), and `manifest_digest` is reached through the store and directly from
 `tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
@@ -10244,7 +10244,7 @@ Open questions: None.
 Type: safety
 Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
 this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/model_execution_subprocess.rs:1102`, which opens a store to materialise a fixture
+`tests/model_execution_subprocess.rs:1111`, which opens a store to materialise a fixture
 closure), and `manifest_digest` is reached through the store and directly from
 `tests/harness_closure.rs:410-413`; the daemon that opens the store in production
 (`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
@@ -10263,7 +10263,7 @@ Open questions: None.
 ### credential-fingerprint-derives-from-the-product-domain
 
 Type: safety
-Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `ModelExecutionComponent::new_with_credentials` (`crates/host-runtime/src/model_execution/mod.rs:82`) installs one; its single caller is `tests/model_execution_protocol.rs:443`. `ModelExecutionComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:223-235`). Reclassify when a production constructor installs the verifier.
+Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `ModelExecutionComponent::new_with_credentials` (`crates/host-runtime/src/model_execution/mod.rs:82`) installs one; its single caller is `tests/model_execution_protocol.rs:470`. `ModelExecutionComponent::new` (`:73-80`) sets no verifier, so the default construction path skips the check (`:242-254`). Reclassify when a production constructor installs the verifier.
 Status: active
 Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value and two non-UTF-8 byte values agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows; field-boundary pairs, including an empty name and an empty harness, are encoded apart by the pure encoder.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-model-execution-credential-v3"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
@@ -10335,7 +10335,7 @@ Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
 Open questions:
 
-- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3625`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
+- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3735`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
 
 ### model_execution-child-environment-carries-only-the-provider-row
 
@@ -10362,7 +10362,7 @@ Reachability: test-only - every request a composed `ModelExecutionComponent` rec
 Status: active
 Exercised: partial - each valid operation decodes its exact schema, every enumerated malformed shape is rejected, and the 512 KiB boundary is exact; two cases remain open (evidence, "What a test must construct"): the array-params case uses an empty array and cannot detect a decoder that accepts a correctly sized positional sequence, and the host-level rejection test does not observe release of its resident scratch charge, so the exact-schema and no-state halves are not fully exercised.
 Guarantee: The ModelExecution application protocol accepts exactly the enumerated operations with their exact schemas; unknown fields, wrong types, and oversize bodies are `schema_violation` terminals, an unsupported harness name is rejected at bind as `invalid_identity`, and malformed requests create no run state.
-Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, a bind naming a harness outside the supported set is rejected with exactly `invalid_identity` (`bind_requires_absolute_root_nonempty_session_and_supported_harness`, `crates/host-runtime/tests/model_execution_protocol.rs:372`, asserts the code at `:397`), and a rejected request or bind leaves no run state; every clause is an invariant over every request, so one `always` covers the conjunction.
+Check: `always` - every malformed shape is rejected with `schema_violation`, a 512 KiB body is admitted and one byte more is rejected, a bind naming a harness outside the supported set is rejected with exactly `invalid_identity` (`bind_requires_absolute_root_nonempty_session_and_supported_harness`, `crates/host-runtime/tests/model_execution_protocol.rs:391`, asserts the code at `:421`), and a rejected request or bind leaves no run state; every clause is an invariant over every request, so one `always` covers the conjunction.
 Fault/timing angle: A permissive decoder lets a harness smuggle fields the host does not validate.
 Required faults and enabling state: Malformed and boundary-sized bodies.
 Confidence: medium - [evidence](evidence/model_execution-protocol-shapes-are-closed.md). `each_valid_operation_decodes_its_exact_schema`, `every_malformed_shape_is_rejected_with_schema_violation`, `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`, `malformed_requests_over_the_host_create_no_run_state`, `harness_vocabulary_is_closed` (`crates/host-runtime/tests/model_execution_protocol.rs`).

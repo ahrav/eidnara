@@ -50,7 +50,7 @@ accepts only `fired` or `no_fire: "busy"`, retries `busy` only inside that
 deadline, and on `fired` waits within a second budget for a higher
 `firing_seq` at idle.
 
-Rotation witness: `crates/host-runtime/tests/model_execution_subprocess.rs:4266`
+Rotation witness: `crates/host-runtime/tests/model_execution_subprocess.rs:4376`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner` runs
 49 Bedrock runs on a shifted wall clock, 48 at 1,760-second steps and one at
 the 24-hour mark, through one OpenCode adapter and one owner. The 13th refresh

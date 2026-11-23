@@ -199,7 +199,7 @@ spawns".** The fingerprint check runs only under
 `ModelExecutionComponent::new` sets `credential_verifier: None` (`mod.rs:73-80`, the
 field at `:80`). The verifier is installed only by `new_with_credentials`
 (`mod.rs:82`), whose sole caller in the workspace is
-`tests/model_execution_protocol.rs:443`. So a component built through the crate's default
+`tests/model_execution_protocol.rs:470`. So a component built through the crate's default
 constructor fingerprints nothing, and every other test and both examples use
 that constructor. The derivation function is still exercised, at
 `subprocess.rs:174` through `provider_row`, which production paths do call
@@ -209,8 +209,8 @@ producer here.
 **[model_execution-child-environment-carries-only-the-provider-row](../catalog.md#model_execution-child-environment-carries-only-the-provider-row)
 says "every harness child receives the snapshot environment".** `EnvSnapshot`'s
 only public constructor is `capture_from` (`subprocess.rs:97`), and its callers
-are `tests/model_execution_subprocess.rs:2827`, `:2836`, `:2841`, `:2871`, `:2885`,
-`tests/model_execution_protocol.rs:436`, and the inline test at `subprocess.rs:1662`.
+are `tests/model_execution_subprocess.rs:2937`, `:2946`, `:2951`, `:2981`, `:2995`,
+`tests/model_execution_protocol.rs:463`, and the inline test at `subprocess.rs:1662`.
 Nothing in `src/` builds one. Every consumer takes it as an argument
 (`OpenCodeBackend::new` `opencode.rs:39`, `PiBackend::new` `pi.rs:60`,
 `new_with_credentials` `mod.rs:82`), and the first two have zero callers
@@ -247,7 +247,7 @@ confirmed stopped. The grace is `termination_grace`, 5 seconds by default
 `:684`, `:689`, `:691`), so the reaping ceiling is four graces and not one. An
 oracle written to the record's `Check:` fails on a correct build as soon as a
 child outlives the grace, which is what `hang_ignore_term` exists to produce
-(`tests/model_execution_subprocess.rs:2553`).
+(`tests/model_execution_subprocess.rs:2663`).
 
 **[model_execution-permits-and-charges-return-to-baseline](../catalog.md#model_execution-permits-and-charges-return-to-baseline)**
 asserts "after shutdown the state is empty". That clause is true and the code
@@ -256,7 +256,7 @@ says why: local state is released even when teardown is unproven
 return value. `Supervisor::shutdown` returns the count of runs whose teardown
 was never proven (`:611`, `:630-633`), and
 `shutdown_counts_runs_with_unproven_teardown` asserts it equals 1
-(`tests/model_execution_supervisor.rs:770`). The doc comments at `:615-618` are explicit
+(`tests/model_execution_supervisor.rs:839`). The doc comments at `:684-687` are explicit
 that a drained supervisor does not prove harness process trees stopped and
 that the component must not report a clean shutdown while provider work may
 still run. A baseline check that reads only the metrics passes in exactly the

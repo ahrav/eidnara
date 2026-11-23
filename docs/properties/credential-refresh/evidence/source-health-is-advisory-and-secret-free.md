@@ -37,7 +37,7 @@ checks.
   vectors through the TypeScript parser; `:68` shows a missing, malformed, or
   extra-key block is unknown and never ready, with a canary value that must not
   appear.
-- `crates/host-runtime/tests/model_execution_protocol.rs:408`
+- `crates/host-runtime/tests/model_execution_protocol.rs:435`
   `health_reports_the_cached_source_observation_for_each_mode` reads the
   `aws_credentials` block for no source (`kind: none`), an environment row
   (`kind: environment`, `state: ready`), and a selected profile before any
