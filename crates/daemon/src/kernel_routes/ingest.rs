@@ -628,12 +628,13 @@ impl HandlerCore {
             ));
         };
         let artifact = parsed.request;
-        // The named-file recorder alone writes its domain, its ids, and its
-        // source kind; an artifact under one would occupy a record's id or
-        // pass as a record.
-        if crate::named_files::is_reserved_id(&artifact.object_id)
+        // The daemon's own writers alone write their ids and source kinds,
+        // and the named-file recorder its domain; an artifact under one
+        // would occupy a writer's id or pass as its row.
+        if super::is_writer_reserved_id(&artifact.object_id)
             || artifact.domain_id == crate::named_files::DOMAIN_ID
             || artifact.source_kind == crate::named_files::SOURCE_KIND
+            || artifact.source_kind == crate::attestation_verifier::classify::VERIFIER_SOURCE_KIND
         {
             return state_only(KernelOutcome::invalid(InvalidReason::InvalidInput));
         }

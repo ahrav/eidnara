@@ -3406,7 +3406,7 @@ fn is_list_marker(marker: &str) -> bool {
             && matches!((letters.next(), letters.next()), (Some(letter), None) if letter.is_alphabetic()))
 }
 
-pub(crate) fn tag_name(line: &str) -> Option<(&str, bool)> {
+fn tag_name(line: &str) -> Option<(&str, bool)> {
     let inner = line.trim().strip_prefix('<')?.strip_suffix('>')?;
     let (inner, closing) = match inner.strip_prefix('/') {
         Some(rest) => (rest, true),

@@ -8,8 +8,11 @@
 //! of the file's content.
 //!
 //! Each admitted transform pass of a primary Pi session at the project root
-//! shows the turn in progress: the last message the user typed and the tool
-//! calls after it.
+//! shows the turn in progress: the last message of the user and the tool
+//! calls after it. A message of the user is a row that Pi gives the user
+//! role and that carries neither the synthetic nor the summary mark: a
+//! prompt the user types, a template the user invokes, or a prompt an
+//! extension sends in the user's name.
 //! The daemon reads the paths the message names and the calls use from that
 //! window alone, keeps no state of the turn, and records each such path once
 //! for the session when the path names a regular file of the project.
@@ -40,8 +43,6 @@ use crate::{HandlerCore, SessionBinding};
 /// the `memory` domain and the search projection publishes none of these
 /// rows, so the capture extractor and `eidnara_search` see none of them.
 pub(crate) const DOMAIN_ID: &str = "named-files";
-/// The object id the Kernel gives the domain's own row.
-const DOMAIN_OBJECT_ID: &str = "domain:named-files";
 /// The prefixes of a record's object id and decision id.
 const ID_PREFIXES: [&str; 2] = ["nfu_", "dnf_"];
 const SOURCE_ID: &str = "named_file_use";
@@ -55,7 +56,8 @@ pub(crate) const SOURCE_KIND: &str = "named_file_recorder";
 /// ingest refuse a caller's row under one, which would keep the recorder's
 /// own write of that id from committing.
 pub(crate) fn is_reserved_id(id: &str) -> bool {
-    id == DOMAIN_OBJECT_ID || ID_PREFIXES.iter().any(|prefix| id.starts_with(prefix))
+    id.strip_prefix(kernel_routes::commit::DOMAIN_OBJECT_PREFIX) == Some(DOMAIN_ID)
+        || ID_PREFIXES.iter().any(|prefix| id.starts_with(prefix))
 }
 const DECISION_KIND: &str = "named_file_use";
 
@@ -155,8 +157,8 @@ impl Default for NamedFiles {
     }
 }
 
-/// What one submitted window shows: the project paths that a message the
-/// user typed names and that a tool call of its turn used, which the session
+/// What one submitted window shows: the project paths that the last message
+/// of the user names and that a tool call after it used, which the session
 /// has not recorded, in the order the calls show them.
 #[derive(Debug)]
 pub(crate) struct Observed {
@@ -200,17 +202,20 @@ fn is_recordable(path: &str) -> bool {
 
 /// `raw` as a recordable path of the project, for a session whose working
 /// directory is the project root: a relative path without its leading `./`
-/// marks, or an absolute path beneath `root` as `root` is spelled. A path
-/// with a `.` or `..` component past those marks names no file here.
-fn project_path(root: &Path, raw: &str) -> Option<String> {
-    let mut rest = match raw.strip_prefix('/') {
-        Some(_) => Path::new(raw).strip_prefix(root).ok()?.to_str()?,
-        None => raw,
-    };
-    while let Some(after) = rest.strip_prefix("./") {
-        rest = after;
+/// marks, or an absolute path that opens with `root` as the daemon spells
+/// it. `raw` holds path characters alone, so a root spelled with another
+/// character admits no absolute path, and nothing is normalized: a `.` or
+/// `..` component past the leading marks names no file here.
+fn project_path<'a>(root: &Path, raw: &'a str) -> Option<&'a str> {
+    if !raw.chars().all(is_path_char) {
+        return None;
     }
-    is_recordable(rest).then(|| rest.to_owned())
+    let rest = if raw.starts_with('/') {
+        raw.strip_prefix(root.to_str()?)?.strip_prefix('/')?
+    } else {
+        raw.trim_start_matches("./")
+    };
+    is_recordable(rest).then_some(rest)
 }
 
 /// The runs of path characters in `text`.
@@ -223,15 +228,24 @@ fn is_path_word(word: &&str) -> bool {
     word.contains(['.', '/'])
 }
 
+/// Where the sender's own text of a part ends: at the first `<` that an
+/// ASCII letter or a `/` follows, where a tag opens. A block another writer
+/// adds to a message, such as an attached file or a hint, opens with a tag,
+/// on a line of its own or at the end of the sender's line.
+fn own_text(part: &str) -> &str {
+    let tag = part.match_indices('<').find(|(at, _)| {
+        part[at + 1..].starts_with(|next: char| next.is_ascii_alphabetic() || next == '/')
+    });
+    tag.map_or(part, |(at, _)| &part[..at])
+}
+
 /// The project paths a message names. The message's text parts are read
-/// when they hold at most [`MAX_MESSAGE_BYTES`] together, each through the
-/// line before its first line that holds a tag alone: a block another
-/// writer appends to a message, such as a hint, opens with such a line.
-/// A path word is a run of path characters that holds a `.` or a `/` once
-/// the periods that end it are dropped. Each of the first
-/// [`MAX_NAMES_CHECKED`] distinct path words names a path as written and,
-/// for a word that opens with Pi's file-reference mark `@`, without the
-/// mark.
+/// when they hold at most [`MAX_MESSAGE_BYTES`] together, each as far as
+/// its own text runs ([`own_text`]). A path word is a run of path characters
+/// that holds a `.` or a `/` once the periods that end it are dropped. Each
+/// of the first [`MAX_NAMES_CHECKED`] distinct path words names a path as
+/// written and, for a word that opens with Pi's file-reference mark `@`,
+/// without the mark.
 fn named_paths(root: &Path, message: &crate::wire::IngressMessage) -> Vec<String> {
     let parts: Vec<&str> = message
         .ck
@@ -245,16 +259,14 @@ fn named_paths(root: &Path, message: &crate::wire::IngressMessage) -> Vec<String
     if parts.iter().map(|part| part.len()).sum::<usize>() > MAX_MESSAGE_BYTES {
         return Vec::new();
     }
-    let words = parts.iter().flat_map(|part| {
-        part.lines()
-            .take_while(|line| crate::memory_capture::tag_name(line).is_none())
-            .flat_map(words)
+    let path_words = parts.iter().flat_map(|part| {
+        words(own_text(part))
             .map(|word| word.trim_end_matches('.'))
             .filter(is_path_word)
     });
     let mut seen: HashSet<&str> = HashSet::new();
-    let mut named = Vec::new();
-    for word in words {
+    let mut named: Vec<String> = Vec::new();
+    for word in path_words {
         if seen.len() == MAX_NAMES_CHECKED {
             break;
         }
@@ -263,13 +275,38 @@ fn named_paths(root: &Path, message: &crate::wire::IngressMessage) -> Vec<String
         }
         for spelling in std::iter::once(word).chain(word.strip_prefix('@')) {
             if let Some(path) = project_path(root, spelling)
-                && !named.contains(&path)
+                && !named.iter().any(|held| held == path)
             {
-                named.push(path);
+                named.push(path.to_owned());
             }
         }
     }
     named
+}
+
+/// What the observed rows hold for one call id.
+#[derive(Default, PartialEq)]
+struct Answers {
+    calls: usize,
+    results: usize,
+    /// The id's last result is text, JSON, or content that carries no error.
+    succeeded: bool,
+    /// A result of the id precedes every call of it, so it answers a call
+    /// before the observed rows.
+    result_first: bool,
+}
+
+impl Answers {
+    /// One call, answered after it by one result, which succeeded.
+    fn is_one_answered_call(&self) -> bool {
+        *self
+            == Self {
+                calls: 1,
+                results: 1,
+                succeeded: true,
+                result_first: false,
+            }
+    }
 }
 
 /// The files of `named` that the calls of `messages` used. A call of Pi's
@@ -278,8 +315,8 @@ fn named_paths(root: &Path, message: &crate::wire::IngressMessage) -> Vec<String
 /// [`MAX_COMMAND_WORDS`] runs of path characters with a `.` or a `/` in its
 /// command line name as written.
 /// A call counts when its id is the id of no other call of `messages` and
-/// of one result, and that result is text, JSON, or content that carries
-/// no error.
+/// of one result, which follows the call and is text, JSON, or content that
+/// carries no error.
 fn used_by_calls(
     root: &Path,
     messages: &[Arc<crate::wire::IngressMessage>],
@@ -291,16 +328,15 @@ fn used_by_calls(
             .flat_map(|message| message.ck.content())
             .map(|block| block.kind())
     };
-    // For each call id: how many calls carry it, how many results answer
-    // it, and whether a result that answers it reports success.
-    let mut ids: HashMap<&str, (usize, usize, bool)> = HashMap::new();
+    let mut ids: HashMap<&str, Answers> = HashMap::new();
     for block in blocks() {
         match block {
-            BlockKind::ToolCall { id, .. } => ids.entry(id.as_str()).or_default().0 += 1,
+            BlockKind::ToolCall { id, .. } => ids.entry(id.as_str()).or_default().calls += 1,
             BlockKind::ToolResult { id, output, .. } => {
-                let entry = ids.entry(id.as_str()).or_default();
-                entry.1 += 1;
-                entry.2 = matches!(
+                let answers = ids.entry(id.as_str()).or_default();
+                answers.result_first |= answers.calls == 0;
+                answers.results += 1;
+                answers.succeeded = matches!(
                     output.kind,
                     OutputKind::Text { .. } | OutputKind::Json { .. } | OutputKind::Content { .. }
                 );
@@ -310,7 +346,7 @@ fn used_by_calls(
     }
     let named_file = |raw: &str| {
         let path = project_path(root, raw)?;
-        named.iter().find(|file| **file == path)
+        named.iter().find(|file| *file == path)
     };
     let mut used: Vec<&String> = Vec::new();
     for block in blocks() {
@@ -320,7 +356,10 @@ fn used_by_calls(
         else {
             continue;
         };
-        if ids.get(id.as_str()) != Some(&(1, 1, true)) {
+        if !ids
+            .get(id.as_str())
+            .is_some_and(Answers::is_one_answered_call)
+        {
             continue;
         }
         let files: Vec<&String> = match tool_vocabulary::pi_operand(name, input) {
@@ -637,8 +676,8 @@ impl NamedFiles {
 impl HandlerCore {
     /// What the submitted window of a primary Pi session whose
     /// configuration permits memory capture and whose working directory is
-    /// the project root shows: the project paths that the last message the
-    /// user typed names and that a call after it used, except the paths the
+    /// the project root shows: the project paths that the last message of
+    /// the user names and that a call after it used, except the paths the
     /// session has recorded. The rows before that message can be another
     /// session's, which a fork copies, so they show nothing. Reads the
     /// window and the memo and changes nothing.
@@ -896,30 +935,33 @@ mod bounds_tests {
     }
 
     /// A path is held relative to the project root: a relative path without
-    /// its leading `./` marks, or an absolute path beneath the root. A path
-    /// with a `.` or `..` component past those marks, a path of the Git
-    /// store, a path past 256 bytes, and a word with another character name
-    /// no file.
+    /// its leading `./` marks, or an absolute path that opens with the root
+    /// as the daemon spells it. Nothing is normalized: a path with a `.` or
+    /// `..` component past those marks, an absolute path with a repeated
+    /// separator, a path of the Git store, a path past 256 bytes, and a
+    /// word with another character name no file. A root spelled with
+    /// another character admits relative paths alone.
     #[test]
     fn a_path_is_a_plain_path_beneath_the_root_within_256_bytes() {
-        let path = |raw: &str| project_path(root(), raw);
-        assert_eq!(path("docs/a.md").as_deref(), Some("docs/a.md"));
-        assert_eq!(path("./docs/a.md").as_deref(), Some("docs/a.md"));
-        assert_eq!(
-            path("././tools/check.sh").as_deref(),
-            Some("tools/check.sh")
-        );
-        assert_eq!(
-            path("/work/project/docs/a.md").as_deref(),
-            Some("docs/a.md")
-        );
+        fn path(raw: &str) -> Option<&str> {
+            project_path(root(), raw)
+        }
+        assert_eq!(path("docs/a.md"), Some("docs/a.md"));
+        assert_eq!(path("./docs/a.md"), Some("docs/a.md"));
+        assert_eq!(path("././tools/check.sh"), Some("tools/check.sh"));
+        assert_eq!(path("/work/project/docs/a.md"), Some("docs/a.md"));
         for refused in [
             "docs/./a.md",
             "docs/../README.md",
             "../project/docs/a.md",
             "/work/other/docs/a.md",
+            "/work/projects/docs/a.md",
             "/work/project/../project/docs/a.md",
+            "/work/project/./docs/a.md",
+            "/work/project//docs/a.md",
+            "//work/project/docs/a.md",
             "/work/project",
+            "/work/project/",
             ".git/config",
             "docs/a b.md",
             "\"docs/a.md\"",
@@ -933,10 +975,21 @@ mod bounds_tests {
         }
         let longest = format!("{}/{}.md", "a".repeat(100), "b".repeat(152));
         assert_eq!(longest.len(), 256);
-        assert_eq!(path(&longest), Some(longest.clone()));
-        assert_eq!(path(&format!("./{longest}")), Some(longest.clone()));
-        assert_eq!(path(&format!("{ROOT}/{longest}")), Some(longest.clone()));
+        assert_eq!(path(&longest), Some(longest.as_str()));
+        assert_eq!(path(&format!("./{longest}")), Some(longest.as_str()));
+        assert_eq!(path(&format!("{ROOT}/{longest}")), Some(longest.as_str()));
         assert_eq!(path(&format!("{longest}x")), None);
+
+        // Pi's `read` rewrites a no-break space of an absolute path to a
+        // space before it opens the file, so the operand names another root.
+        for spaced in ["/work/my project", "/work/my\u{a0}project"] {
+            let spaced_root = Path::new(spaced);
+            assert_eq!(
+                project_path(spaced_root, &format!("{spaced}/docs/a.md")),
+                None
+            );
+            assert_eq!(project_path(spaced_root, "docs/a.md"), Some("docs/a.md"));
+        }
     }
 
     /// A message's path words are its runs of path characters that hold a
@@ -966,28 +1019,39 @@ mod bounds_tests {
         );
     }
 
-    /// Each text part of a message is read through the line before its
-    /// first line that holds a tag alone, where a block another writer
-    /// appended opens. A tag inside a line is the sender's text.
+    /// Each text part of a message is read as far as the sender's own text
+    /// runs: to the first `<` that a letter or a `/` follows, where a block
+    /// another writer added opens, on its own line or at the end of the
+    /// sender's line. A `<` that anything else follows is the sender's.
     #[test]
-    fn a_text_part_is_read_up_to_its_first_tag_line() {
-        let text = "Follow docs/a.md and <b>docs/b.md</b>.\n```\ntools/check.sh\n```\n\
-                    <context-hint>\nSee docs/hinted.md.\n</context-hint>\nThen docs/after.md.";
+    fn a_text_part_is_read_up_to_its_first_tag() {
+        let names = |text: &str| named_paths(root(), &user(text));
         assert_eq!(
-            named_paths(root(), &user(text)),
-            ["docs/a.md", "docs/b.md", "tools/check.sh"]
-        );
-        // A closing tag alone on a line ends the read as well, and an open
-        // fence holds a later block no longer than its first tag line.
-        assert_eq!(
-            named_paths(
-                root(),
-                &user("docs/a.md\n</stray>\ndocs/b.md\n```\ndocs/c.md\n<aug>\ndocs/d.md")
+            names(
+                "Follow docs/a.md.\n```\ntools/check.sh < in.txt && a <= b\n```\n\
+                 <context-hint>\nSee docs/hinted.md.\n</context-hint>\nThen docs/after.md."
             ),
+            ["docs/a.md", "tools/check.sh", "in.txt"]
+        );
+        // Pi joins an attached file's block to piped input with no line
+        // break, and the attached path can hold a `>`.
+        assert_eq!(
+            names("Apply docs/a.md<file name=\"/work/project/docs/g>h.md\">\ndocs/b.md\n</file>"),
             ["docs/a.md"]
         );
+        assert_eq!(
+            names("<skill name=\"x\" location=\"a>b\">\ndocs/b.md\n</skill>\ndocs/c.md"),
+            [""; 0]
+        );
+        assert_eq!(names("docs/a.md\n</stray>\ndocs/b.md"), ["docs/a.md"]);
+        // An open code fence holds a later block no longer than its tag.
+        assert_eq!(
+            names("docs/a.md\n```\ndocs/c.md\n<aug>\ndocs/d.md"),
+            ["docs/a.md", "docs/c.md"]
+        );
+        assert_eq!(names("Fix <b>docs/b.md</b> and docs/c.md."), [""; 0]);
         // Each part is read on its own: a block that ends the first part
-        // leaves the second part's lines the sender's.
+        // leaves the second part's text the sender's.
         let parts = message(
             "user",
             vec![
@@ -1002,26 +1066,39 @@ mod bounds_tests {
         assert_eq!(named_paths(root(), &parts), ["docs/a.md", "docs/b.md"]);
     }
 
-    /// A message whose text parts hold more than 64 KiB together names no
-    /// file; one of exactly 64 KiB is read whole.
+    /// A message whose text parts hold more than 65,536 bytes together
+    /// names no file; one of exactly that many bytes is read whole. The
+    /// bound counts bytes, and the parts alone.
     #[test]
     fn a_message_past_64_kib_of_text_names_no_file() {
-        let filler = "x ".repeat(MAX_MESSAGE_BYTES / 2 - 5);
+        let filler = "x ".repeat(32_763);
         let whole = format!("{filler}docs/a.md ");
-        assert_eq!(whole.len(), MAX_MESSAGE_BYTES);
+        assert_eq!(whole.len(), 65_536);
         assert_eq!(named_paths(root(), &user(&whole)), ["docs/a.md"]);
         assert!(named_paths(root(), &user(&format!("{whole} "))).is_empty());
-        let parts = message(
-            "user",
-            vec![
-                BlockKind::Text { text: whole },
-                BlockKind::Text {
-                    text: String::new(),
-                },
-                BlockKind::Text { text: "x".into() },
-            ],
-        );
-        assert!(named_paths(root(), &parts).is_empty());
+        // Two-byte characters: 65,537 bytes in 32,773 characters.
+        let accented = format!("docs/a.md {}", "\u{e9}".repeat(32_763));
+        assert_eq!((accented.len(), accented.chars().count()), (65_536, 32_773));
+        assert_eq!(named_paths(root(), &user(&accented)), ["docs/a.md"]);
+        assert!(named_paths(root(), &user(&format!("{accented}x"))).is_empty());
+        // Parts of 65,535 bytes and 1 byte are read; a third part of one
+        // more byte passes the bound.
+        let parts = |last: &str| {
+            message(
+                "user",
+                vec![
+                    BlockKind::Text {
+                        text: whole[..65_535].to_owned(),
+                    },
+                    BlockKind::Text {
+                        text: String::new(),
+                    },
+                    BlockKind::Text { text: last.into() },
+                ],
+            )
+        };
+        assert_eq!(named_paths(root(), &parts("x")), ["docs/a.md"]);
+        assert!(named_paths(root(), &parts("xy")).is_empty());
     }
 
     /// A word that opens with Pi's `@` names the path as written and the
@@ -1130,32 +1207,59 @@ mod bounds_tests {
         }
     }
 
-    /// A call counts when its id is one call's and one result's. Two calls
-    /// under one id, of which one failed, use nothing: the window does not
-    /// say which result answers which call.
+    /// A call counts when its id is one call's and one result's, and the
+    /// result follows the call. Two calls under one id, a call with two
+    /// results, and a call whose id an earlier result carries use nothing:
+    /// the rows do not say which result answers which call.
     #[test]
-    fn calls_that_share_an_id_use_nothing() {
+    fn a_call_counts_when_its_id_pairs_it_with_one_later_result() {
         let named = ["docs/a.md".to_owned(), "docs/b.md".to_owned()];
-        let failed = answered_as(
-            "call-1",
-            "read",
-            json!({"path": "docs/a.md"}),
-            OutputKind::ErrorText {
-                text: "no such file".into(),
-            },
-        );
-        let read_b = |id: &str| {
-            answered_as(
+        let block = |kind: BlockKind| Arc::new(message("assistant", vec![kind]));
+        let read = |id: &str, path: &str| {
+            block(BlockKind::ToolCall {
+                id: id.to_owned(),
+                name: "read".to_owned(),
+                input: json!({ "path": path }),
+                provider_executed: false,
+            })
+        };
+        let result = |id: &str, output: OutputKind| {
+            block(BlockKind::ToolResult {
+                id: id.to_owned(),
+                tool_name: "read".to_owned(),
+                output: memory_store::ToolOutput::bare(output),
+                provider_executed: false,
+            })
+        };
+        let ok = |id: &str| result(id, OutputKind::Text { text: "ok".into() });
+        let failed = |id: &str| {
+            result(
                 id,
-                "read",
-                json!({"path": "docs/b.md"}),
-                OutputKind::Text { text: "ok".into() },
+                OutputKind::ErrorText {
+                    text: "no such file".into(),
+                },
             )
         };
-        assert!(used_by_calls(root(), &[failed.clone(), read_b("call-1")], &named).is_empty());
-        assert!(used_by_calls(root(), &[read_b("call-1"), failed.clone()], &named).is_empty());
+        let used = |rows: &[Arc<crate::wire::IngressMessage>]| used_by_calls(root(), rows, &named);
+        let (a, b) = (read("call-1", "docs/a.md"), read("call-1", "docs/b.md"));
+        assert_eq!(used(&[a.clone(), ok("call-1")]), ["docs/a.md"]);
+        // Two calls under one id, in either order of their results.
+        assert!(used(&[a.clone(), failed("call-1"), b.clone(), ok("call-1")]).is_empty());
+        assert!(used(&[b.clone(), ok("call-1"), a.clone(), failed("call-1")]).is_empty());
+        assert!(used(&[a.clone(), b.clone(), ok("call-1")]).is_empty());
+        // One call with two results.
+        assert!(used(&[a.clone(), ok("call-1"), ok("call-1")]).is_empty());
+        assert!(used(&[a.clone(), failed("call-1"), ok("call-1")]).is_empty());
+        // A result before the call answers a call before the observed rows.
+        assert!(used(&[ok("call-1"), a.clone()]).is_empty());
+        // Another id's rows leave the pair as it is.
         assert_eq!(
-            used_by_calls(root(), &[failed, read_b("call-2")], &named),
+            used(&[
+                a,
+                failed("call-1"),
+                read("call-2", "docs/b.md"),
+                ok("call-2")
+            ]),
             ["docs/b.md"]
         );
     }

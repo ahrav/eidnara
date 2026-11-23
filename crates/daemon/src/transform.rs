@@ -747,7 +747,7 @@ pub struct TransformRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo_tool_present: Option<bool>,
     /// The session's working directory as a path beneath the project root, empty for the root.
-    /// `pi` sends it; the named-file records resolve the relative paths of a turn against it.
+    /// `pi` sends it; the named-file records are taken for a session whose value is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
     #[serde(default)]

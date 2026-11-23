@@ -739,6 +739,9 @@ pub(crate) fn ensure_scope(
 
 const DOMAIN_SOURCE_KIND: &str = "kernel_route";
 
+/// What precedes a domain's id in the object id of the domain's own row.
+pub(crate) const DOMAIN_OBJECT_PREFIX: &str = "domain:";
+
 /// The shared transaction prevents concurrent commits from inserting the same domain twice.
 pub(crate) fn ensure_domain(
     envelope: &mut Envelope<'_>,
@@ -749,7 +752,7 @@ pub(crate) fn ensure_domain(
         return Ok(());
     }
     if !envelope.domain_exists(domain_id)? {
-        let object_id = format!("domain:{domain_id}");
+        let object_id = format!("{DOMAIN_OBJECT_PREFIX}{domain_id}");
         envelope.insert_domain(DomainSpec {
             domain_id: domain_id.to_string(),
             object_id: object_id.clone(),
@@ -1482,25 +1485,18 @@ impl Operation {
     /// must lie outside the ids the daemon's own writers derive, and a
     /// disposition's reason must compose.
     fn validate(&mut self, reporter_taint: TaintClass) -> Result<(), InvalidReason> {
-        if self.names_reserved_ids() {
+        if self.names_verifier_ids() {
             return Err(InvalidReason::InvalidInput);
         }
         self.compose_reason(reporter_taint)
     }
 
     /// Whether the operation writes a row under an id one of the daemon's own
-    /// writers derives: an id under one of the verifier's prefixes
-    /// ([`crate::attestation_verifier::attest::ID_PREFIXES`]), which the
-    /// verifier derives from `(model decision, oid)`, or an id of the
-    /// named-file recorder ([`crate::named_files::is_reserved_id`]). A row a
+    /// writers derives ([`super::is_writer_reserved_id`]): an id under one of
+    /// the verifier's prefixes, or an id of the named-file recorder. A row a
     /// caller placed under one would occupy the writer's id for good.
-    fn names_reserved_ids(&self) -> bool {
-        let reserved = |id: &str| {
-            crate::attestation_verifier::attest::ID_PREFIXES
-                .iter()
-                .any(|prefix| id.starts_with(prefix))
-                || crate::named_files::is_reserved_id(id)
-        };
+    fn names_verifier_ids(&self) -> bool {
+        let reserved = super::is_writer_reserved_id;
         match self {
             Self::InsertDecision { spec } | Self::SupersedeDecision { spec, .. } => {
                 reserved(&spec.object_id) || reserved(&spec.decision_id)

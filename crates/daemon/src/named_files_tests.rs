@@ -947,6 +947,8 @@ async fn a_kernel_caller_changes_no_named_file_record() {
         ("ingest-domain-object", "object_id", "domain:named-files"),
         ("ingest-domain", "domain_id", "named-files"),
         ("ingest-source-kind", "source_kind", "named_file_recorder"),
+        ("ingest-verifier-prefix", "object_id", "verattest:forged"),
+        ("ingest-verifier-kind", "source_kind", "verifier"),
     ] {
         let mut begin =
             kernel_route_fixtures::ingest_begin_request(&project, "writer", upload, b"text", 1);
