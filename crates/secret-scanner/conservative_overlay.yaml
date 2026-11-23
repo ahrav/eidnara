@@ -214,9 +214,9 @@ rules:
 # | Rule | Reads | Value |
 # | --- | --- | --- |
 # | magic-value-option | `--name WORD`, `-name WORD` on one line | WORD that begins with a character other than `-` |
-# | magic-value-field | `name: WORD` | WORD that ends its line (blanks and then a `#` comment or a serialized line break may follow it; 1,024 bytes of blanks count as the line's end), or WORD whose part after the sections holds a serialized line break after any run of backslashes (text serialized twice writes `\\n`) |
+# | magic-value-field | `name: WORD` | WORD that ends its line (blanks and then a `#` comment or a serialized line break may follow it; 1,008 bytes of blanks count as the line's end), or WORD whose part after the sections holds a serialized line break after any run of backslashes (text serialized twice writes `\\n`) |
 # | magic-value-password-assignment | `XPASSWORD=WORD`, the name ending in `PASSWORD` or `password` joined to a letter of the same case or a digit | WORD, which for this rule also ends at a serialized line break |
-# | magic-value-digits | `name=DIGITS`, `name: DIGITS` with a blank after `:`, `"name": DIGITS`, the name ending in `password` or `secret` | 4 or more digits that are the whole assigned word: only quotes, `,`, `;`, and closing brackets follow them up to the next blank or `&` |
+# | magic-value-digits | `name=DIGITS`, `name: DIGITS` with a blank after `:`, `"name": DIGITS`, the name ending in `password` or `secret` | 4 or more digits that are the whole assigned word: only quotes, `,`, `;`, and closing brackets, fewer than 1,008 bytes of them, follow the digits up to the next blank, `&`, or serialized line break |
 # | magic-value-digits-quoted | the same names before `=` or `:` and digits in quotes (`"name": "DIGITS"`, `name='DIGITS'`) | 4 or more digits between two quotes of one kind |
 # | magic-value-url-userinfo | `scheme://user:VALUE@` | from the first `:` of the authority to its last `@`; no separator, `/`, `?`, `#`, quote, backquote, angle bracket, or backslash |
 # | magic-value-basic-authorization | `Authorization: Basic VALUE` on one line | 4 or more Base64 characters of either alphabet and up to two `=`, decoding to `user:password` |
@@ -235,8 +235,8 @@ rules:
 # text is what that section holds, as the word reader delimits it. For any other word the
 # text is the word up to its first serialized line break or the first quote that closes a
 # string around the value (an unescaped quote at the end of the word, or before `,`, `;`,
-# `:`, or closing brackets that the end of the word or another quote follows), with the
-# `,`, `;`, and surplus closing brackets that end it taken off. The rest of the word is replaced with the
+# `:`, or closing brackets that the end of the word, another quote, or an opening `{` or `[` follows), with the
+# `,`, `;`, surplus closing brackets, closing backquotes, and one unpaired final backslash that end it taken off. The rest of the word is replaced with the
 # value and decides nothing. A text of blanks and serialized breaks alone is empty. A word
 # whose text is one of these stand-ins is left as written, whole:
 #   - every form: a mask (`***`, punctuation alone), a reference (`$NAME`, `%NAME%`, a
@@ -298,7 +298,11 @@ rules:
 # break, which separates the lines of a serialized environment file, so a name on the next
 # serialized line has its own match. The pattern takes the run after the `=` up to that
 # end, so a second such name inside the run (`APASSWORD=$x;BPASSWORD=y`, or after an
-# escaped blank) is text of the first name's word and the runs this rule reads are disjoint.
+# escaped blank) is text of the first name's word and the runs this rule reads are
+# disjoint. A quoted section of the word is read whole, and the gates of this form read its
+# text up to the first serialized line break. The run and the word end at the same place (`ends_an_assignment_run` in
+# `evaluator.rs`): before `\n`, `\r`, `\u000a`, `\u000d`, and before a `\u` whose next
+# four characters hold a separator or a backslash.
 - name: magic-value-password-assignment
   regex: '(?-u:\b)[A-Za-z0-9_.-]*(?:[A-Z0-9]PASSWORD|[a-z0-9]password)(?P<value>=)(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}\\]|\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|\\[^nru\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|\\u(?:[^0\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|0[^0\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|00[^0\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|000[^aAdD\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]))*'
   anchors: [password]
@@ -384,15 +388,17 @@ rules:
 # its footer, and its body lines are key material all the same. The pattern matches the
 # header, and the form reads the body from there (`read_key_body` in `evaluator.rs`):
 #   - a line break after the header, then up to four `Name: value` lines of at most 232
-#     bytes (PGP armor headers, `Proc-Type` and `DEK-Info` of an encrypted PEM) and one
-#     blank line;
+#     bytes (PGP armor headers, `Proc-Type` and `DEK-Info` of an encrypted PEM), each
+#     name an ASCII letter and up to 30 more letters, digits, or `-`, and one blank line;
 #   - body lines that begin with 16 or more Base64 characters, which are the reported part
 #     of the line: an output limit can cut the last line and append its own marker;
 #   - one last line of 1 to 15 Base64 characters when it is a whole line: a line break, the
 #     end of the text, or a quote that closes a serialized string follows it.
-# A line break is LF, CRLF, or their serialized spellings (`\n`, `\r\n`, `\u000a`,
-# `\u000d\u000a`). At most 256 blanks may stand before and after a line break and after
-# the last line. A header followed by `...` or by prose of shorter words stays as written.
+# A line break is LF or CR LF, each written raw or serialized (`\n`, `\r`, `\u000a`,
+# `\u000d`). At most 256 spaces or tabs may stand before and after a line break and after
+# the last line. When no body follows the `Name: value` lines, the lines under the header
+# are read as the body. A header followed by `...` or by prose of shorter words stays as
+# written.
 - name: magic-value-private-key-body
   regex: '(?i:-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?----)(?P<value>-)'
   anchors: ['-----begin']

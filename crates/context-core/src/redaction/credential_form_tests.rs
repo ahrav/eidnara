@@ -473,6 +473,64 @@ fn a_gate_reads_the_text_the_word_reader_delimits() {
 }
 
 #[test]
+fn a_form_reads_its_stated_bounds_and_spellings() {
+    let chosen = chosen();
+    let (header, line) = (private_key_header(), private_key_body_line());
+    let slot = format!("<{chosen}>example.sql");
+    assert_redacts(&format!("mysql -uroot -p{slot}"), &slot, PASSWORD);
+    let blanks = |count: usize| format!("sshpass -p{}{chosen} ssh host", "\u{a0}".repeat(count));
+    assert_redacts(&blanks(8), &chosen, PASSWORD);
+    assert_exact(&blanks(9));
+    let ends_in_backslashes = format!("{}\\\\", ["Sum", "mer"].concat());
+    assert_redacts(
+        &format!("deploy --password {ends_in_backslashes} --yes"),
+        &ends_in_backslashes,
+        PASSWORD,
+    );
+    let continued = format!("{}\\\n  --yes", ["sum", "mer"].concat());
+    assert_exact(&format!("deploy --password {continued}"));
+    let list = "'1433;database=sales;;encrypt=true'";
+    assert_redacts(&format!("deploy --password {list} --yes"), list, PASSWORD);
+    assert_redacts(
+        &format!("user: bob\\\\npassword: {chosen} \\\\nhost: db"),
+        &chosen,
+        PASSWORD,
+    );
+    for block in [
+        format!("{header}\nComment: C:\\keys\\id_rsa\n\n{line}\n"),
+        format!("{header}\\r\\u000a{line}\\u000d\\n"),
+        format!("{header}\r\\n{line}\n"),
+    ] {
+        assert_redacts(&block, &line, "<REDACTED:private_key>");
+    }
+    let name = &line[..16];
+    assert_redacts(
+        &format!("{header}\n{name}: [output clipped]\n"),
+        name,
+        "<REDACTED:private_key>",
+    );
+    let in_array = format!("[{{\"command\":\"deploy --password {chosen}\"}},{{\"example\":true}}]");
+    let word = format!("{chosen}\"}},{{\"example\":true}}]");
+    assert_redacts(&in_array, &word, PASSWORD);
+    let records = format!("[{{\"text\":\"password: {chosen}\"}},{{\"text\":\"ok\"}}]");
+    let word = format!("{chosen}\"}},{{\"text\":\"ok\"}}]");
+    assert_redacts(&records, &word, PASSWORD);
+    let next_line = ["DBPASSWORD", "example"].join("=");
+    let quoted = format!("\"{chosen}\\n{next_line}\"");
+    assert_redacts(&format!("PGPASSWORD={quoted} psql"), &quoted, PASSWORD);
+    let digits = digits();
+    for line_break in ["\\n", "\\r\\n", "\\u000a", "\\u000d"] {
+        let serialized = format!("{{{line_break}  \\\"password\\\": {digits}{line_break}}}");
+        assert_redacts(&serialized, &digits, PASSWORD);
+    }
+    let twice = format!("{digits}\\\\nnext");
+    assert_redacts(&format!("password: {twice}"), &twice, PASSWORD);
+    let closers = |count: usize| format!("password={digits}{} next", ")".repeat(count));
+    assert_redacts(&closers(1007), &digits, PASSWORD);
+    assert_exact(&closers(1008));
+}
+
+#[test]
 fn a_name_that_ends_in_password_joined_to_its_prefix_is_a_password_key() {
     let chosen = chosen();
     for (input, value) in [
@@ -1185,6 +1243,17 @@ fn adversarial_inputs(total: usize) -> Vec<(&'static str, String)> {
         (
             "suffix keys after unicode escapes",
             filled("aPASSWORD=\\u0041", total),
+        ),
+        (
+            "suffix keys after cut unicode escapes",
+            filled("aPASSWORD=\\u00\\x", total),
+        ),
+        (
+            "key header lines of blanks",
+            filled(
+                &format!("{}\nA:{}\n", private_key_header(), " ".repeat(200)),
+                total,
+            ),
         ),
         (
             "private key header lines",

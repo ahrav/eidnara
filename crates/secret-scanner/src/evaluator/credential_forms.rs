@@ -442,10 +442,10 @@ const SEP: &str =
 const BRK: &str = r"\n\x0B\f\r\x{2028}\x{2029}";
 const BLK: &str = r"\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}";
 
-/// The word grammar of the overlay as two anchored patterns: the quoted sections, and the
-/// sections with the run after them. Each alternative has one reading, so the leftmost-first
-/// match is the word.
-static WORD_PATTERNS: LazyLock<(regex::Regex, regex::Regex)> = LazyLock::new(|| {
+/// `WORD_PATTERNS` includes anchored patterns for quoted sections and for quoted sections
+/// followed by a run. Each alternative has one reading, so the leftmost-first match is the
+/// word.
+static WORD_PATTERNS: LazyLock<(regex::Regex, regex::Regex, regex::Regex)> = LazyLock::new(|| {
     let serialized =
         format!(r#"\\"(?:[^"\\{BRK}]|(?:\\{{4}})*\\{{3}}"|\\+[^"\\{BRK}])*(?:\\{{4}})*\\""#);
     let section = |quote: char| format!(r"{quote}(?:[^{quote}\\{BRK}]|\\[^{BRK}])*{quote}");
@@ -456,9 +456,11 @@ static WORD_PATTERNS: LazyLock<(regex::Regex, regex::Regex)> = LazyLock::new(|| 
         section('`')
     );
     let word = format!(r"{sections}(?:\\[{BLK}\\]|[^{SEP}])*");
+    let run = format!(r"^(?:\\[{BLK}\\]|[^{SEP}])*");
     (
         regex::Regex::new(&sections).unwrap(),
         regex::Regex::new(&word).unwrap(),
+        regex::Regex::new(&run).unwrap(),
     )
 });
 
@@ -476,7 +478,7 @@ fn read(input: &str) -> Word {
 
 fn assert_reader_agrees_with_the_word_patterns(input: &str) {
     let word = read(input);
-    let (sections, whole) = &*WORD_PATTERNS;
+    let (sections, whole, _) = &*WORD_PATTERNS;
     assert_eq!(
         (word.plain_start, word.end),
         (
@@ -855,7 +857,13 @@ proptest::proptest! {
         for finding in &whole {
             assert!(from_cut.contains(finding), "{finding:?} of {input:?} from {at}");
         }
-        let cut_run_end = at + input[at..].find(is_separator).unwrap_or(input.len() - at);
+        let escapes = input.as_bytes()[..at]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        let run = WORD_PATTERNS.2.find(&input[at - escapes..]).unwrap();
+        let cut_run_end = at - escapes + run.end();
         for finding in &from_cut {
             assert!(
                 whole.contains(finding) || finding.1 < cut_run_end,

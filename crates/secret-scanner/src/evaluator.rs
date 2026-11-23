@@ -1865,9 +1865,7 @@ fn read_word(reader: &mut WordReader<'_>, ends_at_serialized_break: bool) -> Res
         if reader.at - start > MAX_MATCH_BYTES {
             return Err(Abort::Match);
         }
-        if ends_at_serialized_break
-            && opens_a_serialized_line_break(&reader.input.as_bytes()[reader.at..])
-        {
+        if ends_at_serialized_break && ends_an_assignment_run(&reader.input[reader.at..]) {
             break;
         }
         reader.advance(character)?;
@@ -1886,6 +1884,32 @@ fn read_word(reader: &mut WordReader<'_>, ends_at_serialized_break: bool) -> Res
     })
 }
 
+/// Returns whether the run of the password-assignment pattern ends before `rest`, which
+/// begins at an unpaired position of the word: at `\n`, `\r`, and at a `\u` that the
+/// pattern's alternatives leave unread (`\u000a`, `\u000d`, and a `\u` whose next four
+/// characters hold a separator or a backslash before a character that is no `0`).
+fn ends_an_assignment_run(rest: &str) -> bool {
+    let mut characters = rest.chars();
+    if characters.next() != Some('\\') {
+        return false;
+    }
+    match characters.next() {
+        Some('n' | 'r') => true,
+        Some('u') => {
+            for zeros in 0..4 {
+                match characters.next() {
+                    Some('0') if zeros < 3 => {}
+                    Some('a' | 'A' | 'd' | 'D') if zeros == 3 => return true,
+                    Some(next) => return next == '\\' || is_separator(next),
+                    None => return true,
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 fn ends_its_line(reader: &mut WordReader<'_>) -> Result<bool, Abort> {
     let word_end = reader.at;
     loop {
@@ -1893,18 +1917,28 @@ fn ends_its_line(reader: &mut WordReader<'_>) -> Result<bool, Abort> {
             return Ok(true);
         };
         if !is_blank(character) {
+            let rest = &reader.input.as_bytes()[reader.at..];
+            let backslashes = rest
+                .iter()
+                .take(8)
+                .take_while(|byte| **byte == b'\\')
+                .count();
             return Ok(reader.at > word_end
                 && (character == '#'
-                    || opens_a_serialized_line_break(&reader.input.as_bytes()[reader.at..])));
+                    || (backslashes > 0
+                        && opens_a_serialized_line_break(&rest[backslashes - 1..]))));
         }
         reader.advance(character)?;
-        if reader.at - word_end >= MAX_LOCAL_CONTEXT_BYTES {
+        if reader.at - word_end >= MAX_FORM_CONTEXT_BYTES {
             return Ok(true);
         }
     }
 }
 
 const MAX_OPTION_BLANKS: usize = 8;
+/// The bytes a form reads past its match, which with the escape it tests there stay within
+/// `MAX_LOCAL_CONTEXT_BYTES`.
+const MAX_FORM_CONTEXT_BYTES: usize = MAX_LOCAL_CONTEXT_BYTES - 16;
 const MAX_KEY_BLANKS: usize = 256;
 const MAX_KEY_HEADER_LINES: usize = 4;
 const MAX_KEY_HEADER_BYTES: usize = 232;
@@ -1924,30 +1958,19 @@ impl WordReader<'_> {
     fn line_break(&mut self) -> Result<bool, Abort> {
         let input = self.input;
         let rest = &input.as_bytes()[self.at..];
-        let len = match rest {
-            [b'\r', b'\n', ..] => 2,
+        let carriage_return = match rest {
+            [b'\r', ..] => 1,
+            [b'\\', b'r', ..] => 2,
+            [b'\\', b'u', b'0', b'0', b'0', b'd' | b'D', ..] => 6,
+            _ => 0,
+        };
+        let line_feed = match &rest[carriage_return..] {
             [b'\n', ..] => 1,
-            [b'\\', b'r', b'\\', b'n', ..] => 4,
             [b'\\', b'n', ..] => 2,
-            [
-                b'\\',
-                b'u',
-                b'0',
-                b'0',
-                b'0',
-                b'd' | b'D',
-                b'\\',
-                b'u',
-                b'0',
-                b'0',
-                b'0',
-                b'a' | b'A',
-                ..,
-            ] => 12,
             [b'\\', b'u', b'0', b'0', b'0', b'a' | b'A', ..] => 6,
             _ => return Ok(false),
         };
-        for byte in &rest[..len] {
+        for byte in &rest[..carriage_return + line_feed] {
             self.advance(char::from(*byte))?;
         }
         Ok(true)
@@ -1986,11 +2009,20 @@ fn key_header_line(reader: &mut WordReader<'_>) -> Result<bool, Abort> {
         name > 0 && reader.input.as_bytes()[at].is_ascii_alphabetic() && reader.peek() == Some(':');
     if named {
         reader.advance(':')?;
-        reader.run(MAX_KEY_HEADER_BYTES - name, |character| {
-            !matches!(character, '\n' | '\\')
-        })?;
-        if key_line_break(reader)? {
-            return Ok(true);
+        loop {
+            if key_line_break(reader)? {
+                return Ok(true);
+            }
+            let left = MAX_KEY_HEADER_BYTES.saturating_sub(reader.at - at);
+            if left == 0 {
+                break;
+            }
+            if reader.run(left, is_key_blank)? == 0 {
+                match reader.peek().filter(|next| !is_line_break(*next)) {
+                    Some(character) => reader.advance(character)?,
+                    None => break,
+                }
+            }
         }
     }
     reader.rewind(at);
@@ -2001,22 +2033,34 @@ fn read_key_body(reader: &mut WordReader<'_>) -> Result<Option<Word>, Abort> {
     if !key_line_break(reader)? {
         return Ok(None);
     }
+    let first_line = reader.at;
     for _ in 0..MAX_KEY_HEADER_LINES {
         if !key_header_line(reader)? {
             break;
         }
     }
     key_line_break(reader)?;
+    let under_header_lines = reader.at > first_line;
+    match read_key_lines(reader)? {
+        None if under_header_lines => {
+            reader.rewind(first_line);
+            read_key_lines(reader)
+        }
+        body => Ok(body),
+    }
+}
+
+fn read_key_lines(reader: &mut WordReader<'_>) -> Result<Option<Word>, Abort> {
     let start = reader.at;
     let mut end = start;
     loop {
-        if reader.at - start > MAX_MATCH_BYTES {
-            return Err(Abort::Match);
-        }
         let line = reader.at;
         let length = reader.run(MAX_MATCH_BYTES + 1, is_base64)?;
         if length >= MIN_KEY_LINE_BYTES {
             end = reader.at;
+            if end - start > MAX_MATCH_BYTES {
+                return Err(Abort::Match);
+            }
             if key_line_break(reader)? {
                 continue;
             }
@@ -2054,7 +2098,11 @@ fn read_basic_credentials(reader: &mut WordReader<'_>) -> Result<Option<Word>, A
 }
 
 fn digits_end_the_assigned_word(reader: &mut WordReader<'_>) -> Result<bool, Abort> {
+    let digits_end = reader.at;
     loop {
+        if reader.at - digits_end >= MAX_FORM_CONTEXT_BYTES {
+            return Ok(false);
+        }
         let rest = &reader.input[reader.at..];
         let Some(character) = rest
             .chars()
@@ -2063,6 +2111,9 @@ fn digits_end_the_assigned_word(reader: &mut WordReader<'_>) -> Result<bool, Abo
         else {
             return Ok(true);
         };
+        if opens_a_serialized_line_break(rest.as_bytes()) {
+            return Ok(true);
+        }
         let closes = match character {
             '"' | '\'' | '`' | ',' | ';' | ')' | ']' | '}' => true,
             '\\' => rest.as_bytes().get(1) == Some(&b'"'),
@@ -2140,7 +2191,12 @@ impl CredentialForm {
             Self::ClientPasswordOption => (MAX_OPTION_BLANKS, true),
             Self::FieldValue | Self::PasswordAssignment | Self::ClientPassword => (0, false),
         };
-        reader.run(blanks, is_blank)?;
+        for _ in 0..blanks {
+            match reader.peek().filter(|next| is_blank(*next)) {
+                Some(blank) => reader.advance(blank)?,
+                None => break,
+            }
+        }
         let word = read_word(reader, self == Self::PasswordAssignment)?;
         if word.end == word.start || (dash_opens_an_option && input[word.start..].starts_with('-'))
         {
@@ -2187,6 +2243,10 @@ impl CredentialForm {
         if is_blank_text(text) || quote == Quote::Command {
             return None;
         }
+        let text = match self {
+            Self::PasswordAssignment => before_serialized_line_break(text),
+            _ => text,
+        };
         let bare = quote == Quote::Bare;
         let stands_in = |text: &[u8]| match self {
             Self::Digits | Self::DigitsQuoted | Self::BasicAuthorization | Self::PrivateKeyBody => {
@@ -2245,9 +2305,14 @@ impl CredentialForm {
 /// pairs from the left, so an escaped operator is text of the argument, and a leading
 /// `<name>` slot is text of the argument up to its `>`.
 fn before_attached_operator(text: &[u8]) -> &[u8] {
-    let mut at = match text {
-        [b'<', ..] => memchr::memchr(b'>', text).map_or(text.len(), |close| close + 1),
+    let slot = match text {
+        [b'<', ..] => memchr::memchr(b'>', text).map_or(0, |close| close + 1),
         _ => 0,
+    };
+    let mut at = if opens_a_template(&text[..slot]) {
+        slot
+    } else {
+        0
     };
     while at < text.len() {
         match text[at] {
@@ -2267,6 +2332,7 @@ fn is_blank_text(text: &[u8]) -> bool {
         at += match &text[at..] {
             [b' ' | b'\t', ..] => 1,
             [b'\\', b'n' | b'r' | b't', ..] => 2,
+            [b'\\', b'u', b'0', b'0', b'0', b'a' | b'A' | b'd' | b'D', ..] => 6,
             _ => return false,
         };
     }
@@ -2296,9 +2362,9 @@ struct ValueText<'a> {
 ///
 /// For a word with a leading quoted section, the gates read the text that `leading_section`
 /// returns. For any other word, the text is the word up to its first serialized line break
-/// or string-closing quote. `value_text` strips closing punctuation, then trailing quotes,
-/// backticks, and backslashes, then one leading escaped double quote, double quote, or
-/// single quote.
+/// or string-closing quote. `value_text` strips closing punctuation, then trailing
+/// backticks and one unpaired final backslash, then one leading escaped double quote,
+/// double quote, or single quote.
 fn value_text(word: &[u8]) -> ValueText<'_> {
     if let Some(section) = leading_section(word) {
         return section;
@@ -2306,7 +2372,13 @@ fn value_text(word: &[u8]) -> ValueText<'_> {
     let head = before_serialized_line_break(word);
     let body = string_closing_quote(head).map_or(head, |quote| &head[..quote]);
     let closed = before_closing_punctuation(body);
-    let unclosed = trim_end(closed, |byte| matches!(byte, b'"' | b'\'' | b'`' | b'\\'));
+    let unclosed = trim_end(closed, |byte| byte == b'`');
+    let escapes = unclosed
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count();
+    let unclosed = &unclosed[..unclosed.len() - escapes % 2];
     let text = [&b"\\\""[..], b"\"", b"'"]
         .iter()
         .find_map(|quote| unclosed.strip_prefix(*quote))
@@ -2365,7 +2437,7 @@ fn string_closing_quote(head: &[u8]) -> Option<usize> {
             || (punctuation > 0
                 && matches!(
                     &after[punctuation..],
-                    [] | [b'"' | b'\'', ..] | [b'\\', b'"', ..]
+                    [] | [b'"' | b'\'' | b'{' | b'[', ..] | [b'\\', b'"', ..]
                 ));
         if structure {
             return Some(at - usize::from(run % 4 == 1 && *byte == b'"'));
@@ -2578,13 +2650,9 @@ fn is_port_and_properties(text: &[u8]) -> bool {
     let Some(properties) = text[digits..].strip_prefix(b";") else {
         return false;
     };
-    let mut segments = properties
-        .split(|byte| *byte == b';')
-        .filter(|segment| !segment.is_empty())
-        .peekable();
+    let properties = properties.strip_suffix(b";").unwrap_or(properties);
     digits > 0
-        && segments.peek().is_some()
-        && segments.all(|segment| {
+        && properties.split(|byte| *byte == b';').all(|segment| {
             let name = segment
                 .iter()
                 .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
