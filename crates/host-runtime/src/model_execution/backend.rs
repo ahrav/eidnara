@@ -127,7 +127,7 @@ pub(crate) const OPENCODE_PROVIDER_ERROR_MESSAGE: &str = "opencode provider repo
 /// `BackendError::message` of a Pi run whose model provider rejected the request.
 pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with reason \"error\"";
 
-/// A first line of `system` with which a caller asks that the model receive the rest of the text exactly as written, without the lines a harness adds about its own process, such as the current date. A caller whose evidence carries its own times asks for this. [`plain_system`] reads it, and each adapter removes it before the text reaches a harness.
+/// A first line of `system` with which a caller asks that the model receive the rest of the text exactly as written, without the lines a harness adds about its own process, such as the current date. A caller whose evidence carries its own times asks for this. [`plain_system`] reads it, and each adapter removes it before the text reaches a harness. The Pi adapter sends the text as written. The OpenCode adapter sends it as the agent prompt, after which OpenCode appends its environment block with the working directory and the date.
 pub const PLAIN_SYSTEM_DIRECTIVE: &str = "[eidnara: send this system text as written]\n";
 
 /// Splits `system` into whether it opens with [`PLAIN_SYSTEM_DIRECTIVE`] and the text after the directive.
@@ -140,7 +140,7 @@ pub fn plain_system(system: &str) -> (bool, &str) {
 /// `BackendError::message` of a Pi run whose provider completed the response under a stop outside end, length, and tool use, such as a content filter, and so returned no answer.
 pub const PI_PROVIDER_STOP_MESSAGE: &str = "pi provider ended the response without an answer";
 
-/// Whether a `BackendError::message` says the provider itself ended the response without an answer. The same request meets the same stop again, so a caller with a bounded number of requests settles on the first one.
+/// Whether a `BackendError::message` says the provider itself ended the response without an answer. The same request meets the same stop again, so a caller with a bounded number of requests settles on the first one. Pi 0.80.2 writes one text for every stop of a completed response outside end, length, and tool use, so this is also true of the few such stops a second request can pass.
 pub fn is_provider_stop(message: &str) -> bool {
     message
         .strip_prefix(PI_PROVIDER_STOP_MESSAGE)

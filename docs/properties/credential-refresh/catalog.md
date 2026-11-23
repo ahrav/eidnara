@@ -96,8 +96,8 @@ Confidence: high - [evidence](evidence/credential-lifetime-covers-dispatch.md).
 The predicate and its three checks were read at the #872 branch.
 Existing check: `crates/host-runtime/src/model_execution/aws_refresh.rs:1105`
 `lifetime_must_exceed_the_deadline_plus_skew_strictly`;
-`crates/host-runtime/tests/model_execution_subprocess.rs:4198`
-`profile_rows_without_lifetime_start_no_child`; `:4265`
+`crates/host-runtime/tests/model_execution_subprocess.rs:4073`
+`profile_rows_without_lifetime_start_no_child`; `:4140`
 `a_wall_jump_after_acquisition_refuses_the_spawn`.
 Impact: a child could run on credentials that expire mid-run.
 Open questions: None.
@@ -173,7 +173,7 @@ The five tests and the bound their wait helpers enforce were read at the #872
 branch.
 Existing check: `crates/daemon/src/source_recovery_tests.rs:68`, `:93`, `:124`,
 `:157` (normal, emergency, wrapup, reattach);
-`crates/host-runtime/tests/model_execution_subprocess.rs:4391`
+`crates/host-runtime/tests/model_execution_subprocess.rs:4266`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner`.
 Impact: folding stalls after a credential outage until the daemon restarts.
 Open questions: None.
@@ -203,7 +203,7 @@ The vectors and the host test were read; the absence of credential I/O in
 Existing check: `crates/host-runtime/tests/source_health_vectors.rs:5`
 `rust_sanitizer_matches_the_shared_vectors`;
 `packages/opencode-plugin/src/shared/source-health.test.ts:25`;
-`crates/host-runtime/tests/model_execution_protocol.rs:435`
+`crates/host-runtime/tests/model_execution_protocol.rs:408`
 `health_reports_the_cached_source_observation_for_each_mode`.
 Impact: a secret reaches a status surface, or health authorizes a dispatch.
 Open questions:
@@ -240,7 +240,7 @@ hardware.
 Existing check: `crates/eval-core/src/qualification.rs:922` `audit_lineage`;
 `:1309` `the_outage_judge_fires_on_each_failure`;
 `crates/daemon/examples/eval_runner/qualification.rs` (the campaign runner);
-`crates/host-runtime/tests/model_execution_supervisor.rs:1882`
+`crates/host-runtime/tests/model_execution_supervisor.rs:1813`
 `warm_acquisition_p99_stays_within_one_millisecond` (ignored, release only).
 Impact: a million-message or outage claim without evidence that it holds.
 Open questions:

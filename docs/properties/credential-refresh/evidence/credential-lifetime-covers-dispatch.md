@@ -22,17 +22,17 @@ its runnable checks.
   `SourceError::InsufficientLifetime` and the next acquisition yields
   `SourceError::Cooldown`. A row exactly at the skew is refused for a
   one-second demand.
-- `crates/host-runtime/tests/model_execution_subprocess.rs:4198`
+- `crates/host-runtime/tests/model_execution_subprocess.rs:4073`
   `profile_rows_without_lifetime_start_no_child` returns a row `needed - 5`
   seconds long, then one with no lifetime, for both the OpenCode and Pi
   adapters, and asserts a `Permanent` `SourceFailed` terminal with no
   `argv.json` written. `needed` is `RUN_DEADLINE_SECS + EXPIRY_SKEW`.
-- `model_execution_subprocess.rs:4265`
+- `model_execution_subprocess.rs:4140`
   `a_wall_jump_after_acquisition_refuses_the_spawn` installs a `ShiftedClock`
   that jumps the wall 3,600 seconds at its second read, between acquisition
   and the spawn recheck, for both adapters, and asserts no child starts.
 - Both subprocess tests are registered by name in the manual test list at
-  `model_execution_subprocess.rs:317` and `:325`.
+  `model_execution_subprocess.rs:308` and `:316`.
 
 ## Failure scenario
 

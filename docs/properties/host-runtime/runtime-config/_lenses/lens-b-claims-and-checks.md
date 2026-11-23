@@ -422,7 +422,7 @@ is the one CI-executed path that touches this file at all.
 `tests/harness_closure.rs` deserves separate emphasis. It is the **only**
 place in the repository that constructs a `HarnessClosureStore` for test
 purposes, at 11 sites (`:159`, `:182`, `:253`, `:277`, `:325`, `:414`, `:447`,
-`:462`, `:477`, `:497`, plus `tests/model_execution_subprocess.rs:862`), each with
+`:462`, `:477`, `:497`, plus `tests/model_execution_subprocess.rs:853`), each with
 `.expect("store")`. So a 1,122-line module with zero in-crate tests and zero
 doctests has exactly one test binary, and CI does not run it.
 

@@ -33,9 +33,8 @@ Composition. Both adapters start `child_env` from `provider_row` and append
 only adapter-owned variables. OpenCode (`opencode.rs:116-121`, `:164-179`)
 adds `OPENCODE_DB`, `OPENCODE_CONFIG_CONTENT`,
 `OPENCODE_DISABLE_PROJECT_CONFIG`, `EIDNARA_MODEL_EXECUTION_CHILD`, and `HOME`. Pi
-(`pi.rs:215-220`, `:313-322`) adds `EIDNARA_PI_SUBAGENT`,
-`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS`, `EIDNARA_MODEL_EXECUTION_TEMPERATURE`, `HOME`, and,
-for a request that asks for its system text as written, `EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM`.
+(`pi.rs:218-223`, `:316-325`) adds `EIDNARA_PI_SUBAGENT`,
+`EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS`, `EIDNARA_MODEL_EXECUTION_TEMPERATURE`, `HOME`, and, for a request that asks for its system text as written, `EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM`.
 The `OPENCODE_CONFIG_CONTENT` value is bounded before spawn by
 `MAX_OPENCODE_CONFIG_BYTES` (`opencode.rs:124-135`).
 
@@ -46,18 +45,18 @@ inherited.
 Existing checks, verified. Three are unit-level against `EnvSnapshot`:
 
 - `env_snapshot_strips_launch_identity`
-  (`tests/model_execution_subprocess.rs:2910-2922`): both identity names are removed
+  (`tests/model_execution_subprocess.rs:2925-2937`): both identity names are removed
   and `KEEP_ME` survives.
-- `env_snapshot_admission_charges_per_entry_overhead` (`:2815-2838`): 16,384
-  one-byte variables are under the cap on string bytes alone (`:2823-2826`)
-  yet rejected (`:2827`); 100 ordinary variables admit (`:2833-2837`).
+- `env_snapshot_admission_charges_per_entry_overhead` (`:2940-2963`): 16,384
+  one-byte variables are under the cap on string bytes alone (`:2948-2951`)
+  yet rejected (`:2952`); 100 ordinary variables admit (`:2958-2962`).
 - `provider_rows_exclude_ambient_credentials_and_enforce_caps`
-  (`:2840-2893`): from a snapshot holding two credentials plus `AWS`, proxy,
+  (`:2965-3018`): from a snapshot holding two credentials plus `AWS`, proxy,
   `PATH`, and `LD_PRELOAD` entries, the OpenCode anthropic row is exactly one
-  pair (`:2851-2856`), the Pi `openai-codex` alias selects the OpenAI row
-  (`:2857-2862`), `custom` is `provider_unsupported` (`:2863-2869`), a
-  16 KiB + 1 value is `credential_value_too_large` (`:2871-2882`), and the
-  fingerprint matches the committed vector (`:2884-2892`).
+  pair (`:2976-2981`), the Pi `openai-codex` alias selects the OpenAI row
+  (`:2982-2987`), `custom` is `provider_unsupported` (`:2988-2994`), a
+  16 KiB + 1 value is `credential_value_too_large` (`:2996-3007`), and the
+  fingerprint matches the committed vector (`:3009-3017`).
 
 Two more exercise a real spawn. The fixture design is itself evidence: the
 fixture binary receives its test controls only through the credential value
@@ -74,7 +73,7 @@ proves the credential row is the only channel from snapshot to child.
   `:1473-1490`.
 
 `credential_snapshot_must_match_before_backend_spawn`
-(`tests/model_execution_protocol.rs:461-523`) covers the send-time check in
+(`tests/model_execution_protocol.rs:462-524`) covers the send-time check in
 `CredentialVerifier::verify` (`mod.rs:44-69`): a route without a fingerprint
 gets `harness_unavailable` and `backend.starts() == 0` (`:456-458`); a route
 bound with the correct fingerprint admits and starts one backend (`:469-493`).
@@ -119,7 +118,7 @@ control channel and the test would still pass.
 ### Q: Does the child receive the snapshot, or only the provider row?
 
 - Sources examined: `subprocess.rs:139-165`, `:317`, `:357-359`;
-  `opencode.rs:116-121`, `:164-184`; `pi.rs:215-220`, `:313-327`; the record's
+  `opencode.rs:116-121`, `:164-184`; `pi.rs:218-223`, `:316-330`; the record's
   `Guarantee` line.
 - Findings: only the provider row plus adapter-owned variables. The record's
   phrase "the admitted snapshot with the launch identity stripped and exactly

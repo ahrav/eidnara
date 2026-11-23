@@ -4,7 +4,7 @@
 
 `crates/host-runtime/src/model_execution/pi.rs:44-45` compiles `assets/pi-model_execution-extension.mjs`
 into the runtime with `include_bytes!`, and the hook's own header
-(`pi-model_execution-extension.mjs:1-23`) states the contract: loaded last, it replaces the
+(`pi-model_execution-extension.mjs:1-32`) states the contract: loaded last, it replaces the
 provider-native output-token and temperature fields with the values ModelExecution
 admitted, sends no temperature to a model Pi's registry marks as refusing it, and
 rejects payload shapes it does not recognize. The hook is the
@@ -36,29 +36,29 @@ pushes each trusted closure extension (`:505-508`), and pushes the hook last
 `EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS` (`:523-526`); `EIDNARA_MODEL_EXECUTION_TEMPERATURE` is
 set only when the request admitted a temperature (`:527-532`).
 
-The hook. `requiredNumber` (`pi-model_execution-extension.mjs:37`) throws when a
+The hook. `requiredNumber` (`pi-model_execution-extension.mjs:38`) throws when a
 variable is present but empty or not finite; the bound is always required
-(`:114`), while temperature is read only when its variable exists (`:115-116`) and
-is dropped for a model whose registry entry refuses it (`:117-118`).
+(`:115`), while temperature is read only when its variable exists (`:116-117`) and
+is dropped for a model whose registry entry refuses it (`:118-119`).
 The handler throws on a non-object payload, collects every present spelling
 from `max_output_tokens`, `max_completion_tokens`, `max_tokens`, and
 `maxOutputTokens`, reads Gemini-style `generationConfig` and Bedrock-style
 `inferenceConfig` objects and rejects either when present but not an object
-(`:141-145`), throws when none is present (`:152-156`), rewrites every collected
+(`:142-146`), throws when none is present (`:153-157`), rewrites every collected
 spelling, sets `temperature` only when a spelling was present and a temperature
-was admitted (`:164-166`), and rewrites `generationConfig` and `inferenceConfig`
+was admitted (`:165-167`), and rewrites `generationConfig` and `inferenceConfig`
 with the bound and, when admitted, the temperature, preserving their other keys
-(`:170-175`, `:180-185`). For a registry-refusing model it also removes any
-`temperature` already present in those three places (`:167-169`, `:176-178`,
-`:186-188`). With no admitted temperature for any other model the hook neither
+(`:171-176`, `:181-186`). For a registry-refusing model it also removes any
+`temperature` already present in those three places (`:168-170`, `:177-179`,
+`:187-189`). With no admitted temperature for any other model the hook neither
 writes nor removes a `temperature` field, so an earlier handler's value or the
 provider default survives.
 
 Cache markers. A run sends one user message and ends: the argv passes
 `--print`, `--no-session`, and `--no-tools` (`pi.rs:492-500`). The handler passes a
 payload's `messages` array through `withoutConversationCacheMarkers`
-(`pi-model_execution-extension.mjs:158-160`). That function
-(`pi-model_execution-extension.mjs:73-91`) removes the Bedrock Converse
+(`pi-model_execution-extension.mjs:159-161`). That function
+(`pi-model_execution-extension.mjs:74-92`) removes the Bedrock Converse
 `cachePoint` member and the Anthropic `cache_control` member from each content
 block of every message whose role is `user`. A block's other members stay, and
 a block that held only a `cachePoint` is dropped. The function reads a block's
@@ -157,7 +157,7 @@ run.
 
 ### Q: Does the hook trust the environment values?
 
-- Sources examined: `pi-model_execution-extension.mjs:37-44`; `pi.rs:523-532`;
+- Sources examined: `pi-model_execution-extension.mjs:38-45`; `pi.rs:523-532`;
   `model_execution/protocol.rs:265-280`.
 - Findings: the values are formatted from the admitted request. The hook fails
   the request rather than defaulting when the bound is absent or either value is
@@ -168,18 +168,18 @@ run.
 
 ### Q: Does the hook write a temperature for a model whose API refuses it?
 
-- Sources examined: `crates/host-runtime/assets/pi-model_execution-extension.mjs:50-59`, `:93-118`, and `:164-188`;
+- Sources examined: `crates/host-runtime/assets/pi-model_execution-extension.mjs:51-60`, `:104-119`, and `:165-189`;
   Pi 0.80.2 `pi-ai/dist/api/anthropic-messages.js:115` and `:698`, which read
   `model.compat.supportsTemperature` and send no temperature when it is false;
   `pi-coding-agent/dist/core/extensions/runner.js:411-441`, where the handler
   context's `model` getter returns the session model.
-- Findings: `modelRefusesTemperature` (`:47`) reads
+- Findings: `modelRefusesTemperature` (`:54`) reads
   `ctx.model.compat.supportsTemperature` and returns true only for `false`; a
   context that throws or carries no model counts as accepting. The handler
-  still validates a present temperature variable (`:90-91`), drops it for a
-  refusing model (`:92-93`), and deletes a `temperature` an earlier handler left
-  on the payload, in `generationConfig`, or in `inferenceConfig` (`:142-144`,
-  `:151-153`, `:161-163`), so such a model keeps its native decoding and the
+  still validates a present temperature variable (`:116-117`), drops it for a
+  refusing model (`:118-119`), and deletes a `temperature` an earlier handler left
+  on the payload, in `generationConfig`, or in `inferenceConfig` (`:168-170`,
+  `:177-179`, `:187-189`), so such a model keeps its native decoding and the
   provider sees no refused field whatever ran before the hook. Every other model keeps the admitted
   temperature, and the host's refusal retry in
   `crates/host-runtime/src/model_execution/pi.rs` still covers models the

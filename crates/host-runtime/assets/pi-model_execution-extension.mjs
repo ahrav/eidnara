@@ -14,9 +14,10 @@
 // since that API refuses the field and a refused request costs a whole
 // retried run.
 // The hook preserves every
-// unrelated payload field, and REJECTS (throws, failing the request)
-// payload shapes it does not recognize — silently dropping generation
-// controls would let a provider default exceed the caller's budget.
+// unrelated payload field, and throws on payload shapes it does not
+// recognize. Pi's runner logs a handler's throw and sends the payload it
+// had, so a throw here is a diagnostic on standard error; the system-text
+// guard in the handler ends the process, which is what fails a run.
 //
 // The hook also owns where a run writes provider cache entries; see
 // `withoutConversationCacheMarkers`.

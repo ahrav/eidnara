@@ -55,22 +55,22 @@ every task that will ever exist.
 Existing checks, verified:
 
 - `every_path_returns_permits_and_charges_to_baseline`
-  (`tests/model_execution_supervisor.rs:1041-1100`). With `max_active_runs: 2` and
-  `max_backend_processes: 1` (`:1044-1049`) it drives a conflict rejection
-  (`:1054-1057`), an active-run-cap rejection (`:1061-1064`), a subscriber that
-  reads one frame then drops (`:1067-1070`), a completion (`:1072-1077`), a
-  cancel and an idempotent second cancel (`:1078-1085`), a delete (`:1087`),
-  and retention expiry under paused time (`:1088`). `assert_baseline` at
-  `:1092` with `sessions == 0` checks all four permit counts, the retained
+  (`tests/model_execution_supervisor.rs:972-1031`). With `max_active_runs: 2` and
+  `max_backend_processes: 1` (`:975-980`) it drives a conflict rejection
+  (`:985-988`), an active-run-cap rejection (`:992-995`), a subscriber that
+  reads one frame then drops (`:998-1001`), a completion (`:1003-1008`), a
+  cancel and an idempotent second cancel (`:1009-1016`), a delete (`:1018`),
+  and retention expiry under paused time (`:1019`). `assert_baseline` at
+  `:1023` with `sessions == 0` checks all four permit counts, the retained
   budget, live runs, and tombstones (`:75-92`). A second supervisor is shut
-  down with a live gated run and checked the same way (`:1095-1099`).
-- `host_shutdown_drains_the_supervisor_to_zero_state` (`:1314-1358`). A real
+  down with a live gated run and checked the same way (`:1026-1030`).
+- `host_shutdown_drains_the_supervisor_to_zero_state` (`:1245-1289`). A real
   loopback host with a mid-stream subscriber is shut down; the metrics show
   zero sessions, full retained budget, and full subscriber, backend, and run
-  pools (`:1347-1357`). It does not check `free_command_permits`.
-- `transport_detach_paths_leave_the_run_untouched` (`:1167-1312`). Request
+  pools (`:1278-1288`). It does not check `free_command_permits`.
+- `transport_detach_paths_leave_the_run_untouched` (`:1098-1243`). Request
   cancel, route goodbye, and connection loss each detach a subscriber; the
-  test polls until `free_subscriber_permits == 64` (`:1273-1283`).
+  test polls until `free_subscriber_permits == 64` (`:1204-1214`).
 
 All three are in the default-harness `model_execution_supervisor` binary, which CI runs
 via `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`).
@@ -115,7 +115,7 @@ and the tombstone is carved from `base_charge` instead.
 The existing tests cover every in-process terminal. The uncovered case is a
 backend that never returns and ignores its cancellation token.
 `ScriptedBackend::gated_ignoring_cancel` (`tests/support/model_execution.rs:117-134`)
-exists and is used at `tests/model_execution_supervisor.rs:500`, `:674`, and `:869`,
+exists and is used at `tests/model_execution_supervisor.rs:431`, `:605`, and `:800`,
 but in each case the gate is eventually opened. A test that calls `shutdown`
 without opening the gate would need a bound on the tracker wait, which the
 supervisor does not have; it would hang. That absence is a design fact worth
@@ -123,7 +123,7 @@ recording, not a test to write: the supervisor relies on the backend
 implementation to be bounded.
 
 For the real runner, `sigkill_escalation_when_term_ignored`
-(`tests/model_execution_subprocess.rs:2678-2717`) shows the bound holds with a child that
+(`tests/model_execution_subprocess.rs:2553-2592`) shows the bound holds with a child that
 ignores `SIGTERM`, but it asserts the terminal shape, not the supervisor's
 permit counts. A version that runs through a `Supervisor` and asserts
 `free_backend_permits` after the run would close the gap.

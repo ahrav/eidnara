@@ -126,7 +126,7 @@ would close what remains:
 
 ### Q: Does every malformed case return `schema_violation` and no other code?
 
-- Sources examined: `tests/model_execution_protocol.rs:126-339`; `protocol.rs:142-144`,
+- Sources examined: `tests/model_execution_protocol.rs:126-320`; `protocol.rs:142-144`,
   `:147-158`, `:160-190`, `:197-243`; `local_embeddings/protocol.rs:27`.
 - Findings: yes. Every rejection path in `preflight`, `decode`,
   `decode_request`, `parse_run_id`, and `parse_send` builds its error through
@@ -140,7 +140,7 @@ would close what remains:
 
 ### Q: Does a rejected request leave any supervisor state?
 
-- Sources examined: `mod.rs:202-216`; `tests/model_execution_protocol.rs:700-752`.
+- Sources examined: `mod.rs:202-216`; `tests/model_execution_protocol.rs:673-710`.
 - Findings: the parse at `mod.rs:213` precedes every `self.supervisor` call,
   so a `schema_violation` return cannot have admitted, subscribed, or
   cancelled anything. The host-level test confirms `metrics()` is unchanged

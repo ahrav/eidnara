@@ -62,20 +62,20 @@ Existing checks, verified:
   over the same row does not produce it (`:1673-1679`). It runs under
   `cargo test --workspace --all-targets` (`.github/workflows/ci.yml:118`).
 - `provider_rows_exclude_ambient_credentials_and_enforce_caps`
-  (`tests/model_execution_subprocess.rs:2965-3018`) asserts that ambient `AWS_*`,
+  (`tests/model_execution_subprocess.rs:2840-2893`) asserts that ambient `AWS_*`,
   proxy, `PATH`, and `LD_PRELOAD` variables are excluded from the row
-  (`:2976-2981`), that the Pi alias selects the canonical row (`:2982-2987`),
-  that a custom provider is `provider_unsupported` (`:2988-2994`), that a
-  value one byte over 16 KiB is `credential_value_too_large` (`:2996-3007`),
-  and that the committed vector holds (`:3009-3017`). The binary is
+  (`:2851-2856`), that the Pi alias selects the canonical row (`:2857-2862`),
+  that a custom provider is `provider_unsupported` (`:2863-2869`), that a
+  value one byte over 16 KiB is `credential_value_too_large` (`:2871-2882`),
+  and that the committed vector holds (`:2884-2892`). The binary is
   `harness = false` (`Cargo.toml:36-38`); its runner registers the function
   by name at `:194-195`.
 - `credential_snapshot_must_match_before_backend_spawn`
-  (`tests/model_execution_protocol.rs:462-523`) drives a real host built with
+  (`tests/model_execution_protocol.rs:435-496`) drives a real host built with
   `new_with_credentials`, sends with a wrong fingerprint and asserts
-  `harness_unavailable` with zero backend starts (`:482-484`), then computes
+  `harness_unavailable` with zero backend starts (`:455-457`), then computes
   the correct fingerprint from the host's key and asserts the send is
-  accepted and the backend starts once (`:486-520`). The record does not
+  accepted and the backend starts once (`:459-493`). The record does not
   list this test.
 
 ## Failure scenario
@@ -145,7 +145,7 @@ The remaining gaps:
 ### Q: Was the committed vector produced independently of the crate?
 
 - Sources examined: `model_execution/subprocess.rs:167-201`, `:1660-1683`;
-  `tests/model_execution_subprocess.rs:3009-3017`; a Python HMAC over the layout
+  `tests/model_execution_subprocess.rs:2884-2892`; a Python HMAC over the layout
   described above.
 - Findings: the evidence summary at U3 states the vector came from a Python
   implementation of the documented derivation. The audit re-derived it from
@@ -164,10 +164,10 @@ The remaining gaps:
 - Sources examined: `model_execution/mod.rs:73-91`, `:223-236`; a grep for
   `ModelExecutionComponent::new_with_credentials` across `crates`.
 - Findings: the only callers of `new_with_credentials` are in
-  `tests/model_execution_protocol.rs:470`. Every other construction uses `new`, which
+  `tests/model_execution_protocol.rs:443`. Every other construction uses `new`, which
   sets `credential_verifier` to `None`, and `handle` then skips the
   fingerprint check. `provider_row` itself runs on every spawn
-  (`model_execution/opencode.rs:116`, `model_execution/pi.rs:218`), so the row selection and
+  (`model_execution/opencode.rs:116`, `model_execution/pi.rs:215`), so the row selection and
   caps are default-production; the fingerprint comparison is not exercised
   by any non-test constructor in this tree.
 - Missing evidence: the daemon that composes `ModelExecutionComponent` with a

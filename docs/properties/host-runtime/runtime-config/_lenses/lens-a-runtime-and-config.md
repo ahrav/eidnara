@@ -75,9 +75,9 @@ Three conclusions siblings can rely on:
 `harness_closure.rs` deserves a note because it is 35 percent of this
 sub-part's lines. It is a self-contained content-addressed store with no
 `#[cfg(test)]` module of its own and no in-crate constructor. Its production
-consumers are `model_execution/pi.rs:52` and `model_execution/opencode.rs:40`, which hold an
+consumers are `model_execution/pi.rs:49` and `model_execution/opencode.rs:40`, which hold an
 `Arc<ValidatedHarnessClosure>` that someone else built. Its tests are
-`crates/host-runtime/tests/harness_closure.rs` and `tests/model_execution_subprocess.rs:862`,
+`crates/host-runtime/tests/harness_closure.rs` and `tests/model_execution_subprocess.rs:853`,
 plus one ignored qualification test driven by
 `scripts/run-host-closure-qualification.ts`. So its validation logic is
 well covered as a library and completely unexercised as part of host startup.

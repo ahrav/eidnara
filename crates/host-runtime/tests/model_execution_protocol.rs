@@ -81,6 +81,18 @@ fn each_valid_operation_decodes_its_exact_schema() {
     assert_eq!(send.max_output_tokens, 32_000);
     assert_eq!(send.temperature, Some(0.1));
 
+    // A system text that opens with the plain-system directive is admitted whole: the adapter, not admission, removes the directive.
+    let flagged = format!(
+        "{}guidance",
+        host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE
+    );
+    let request = protocol::parse_request(&send_body("hello", Some(&flagged)), false)
+        .expect("a directive followed by text decodes");
+    let Request::Send(send) = request else {
+        panic!("expected a send");
+    };
+    assert_eq!(send.system.as_deref(), Some(flagged.as_str()));
+
     // Canonical model strings split at the first slash; remaining slashes belong to the model segment.
     let request = protocol::parse_request(
         &body(serde_json::json!({
@@ -220,17 +232,6 @@ fn every_malformed_shape_is_rejected_with_schema_violation() {
                 Some(host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE),
             ),
             false,
-        ),
-        (
-            "system with text after its directive",
-            send_body(
-                "p",
-                Some(&format!(
-                    "{}guidance",
-                    host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE
-                )),
-            ),
-            true,
         ),
         (
             "flat model string",

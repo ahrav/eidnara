@@ -824,7 +824,7 @@ fn names_provider_stop(provider_text: &str) -> bool {
         || text == "Provider finish_reason: content_filter"
         || text
             .strip_prefix("Provider stopped with: ")
-            .is_some_and(|reason| !reason.is_empty() && !reason.starts_with("error"))
+            .is_some_and(|reason| !reason.starts_with("error"))
 }
 
 /// The events of a completed answer: the model id the message reports, when it is a string within [`protocol::MAX_ANSWERING_MODEL_BYTES`], then the text.

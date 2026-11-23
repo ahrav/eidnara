@@ -155,7 +155,7 @@ fn inline_config(request: &BackendRequest, base_url: Option<&str>) -> String {
         agent["temperature"] = serde_json::json!(temperature);
     }
     if let Some(system) = &request.system {
-        // The agent prompt is the caller's text; a directive that opens it is addressed to the adapter and is left out.
+        // The agent prompt is the caller's text; a directive that opens it is addressed to the adapter and is left out. OpenCode appends its environment block, which names the working directory and the date, after the agent prompt, so the directive's promise holds on the Pi adapter.
         let system = super::backend::plain_system(system).1;
         agent["prompt"] = serde_json::Value::String(system.to_owned());
     }
@@ -547,7 +547,7 @@ mod tests {
         assert!(decoded["provider"]["{env:P}"].get("options").is_none());
     }
 
-    /// A directive that opens the system text is addressed to the adapter: the agent prompt is the caller's text after it. OpenCode adds no line of its own to an agent prompt, so the adapter has nothing else to do for the directive.
+    /// A directive that opens the system text is addressed to the adapter: the agent prompt is the caller's text after it. OpenCode appends its own environment block after the agent prompt, which this adapter has no setting for.
     #[test]
     fn inline_config_leaves_a_plain_system_directive_out_of_the_agent_prompt() {
         let request = BackendRequest {
