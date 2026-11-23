@@ -41,7 +41,10 @@ snapshot rather than demanding unchanged metadata across different tips.
 Independently seed eligible memory with valid other-domain decisions,
 observations, hidden rows, and out-of-project rows. Place noise ahead of memory
 in lexical and serving rank. Compare selected IDs, order, bytes, revision, and
-truncation. K3 supplies pressure; existing generic cap checks remain
+truncation. A pair of stores that holds named-file rows also holds equal the
+listed files, the repository's HEAD and history, and the commit log's times,
+or compares each line up to its last-change clause and its `recorded` mark.
+K3 supplies pressure; existing generic cap checks remain
 [unaudited](../existing-checks.md#canonical-read). No new exercise is claimed.
 
 ## Investigation log
