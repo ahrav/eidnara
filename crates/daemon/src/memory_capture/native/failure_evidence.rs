@@ -454,6 +454,7 @@ mod tests {
             duplicate_of: None,
             contests: Vec::new(),
             lifetime: None,
+            speaker: Some(crate::memory_capture::Speaker::User),
         }
     }
 
