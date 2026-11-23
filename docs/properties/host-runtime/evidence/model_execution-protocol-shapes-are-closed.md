@@ -69,7 +69,7 @@ binary CI runs via `cargo test --workspace --all-targets`
   nonempty and missing `tools`, out-of-range and string-typed generation
   fields, `from=cursor:3`, missing and oversize `run_id`, junk delete params,
   and an over-depth body. Each is asserted to return `schema_violation`
-  (`:316-319`). The `mutate` helper panics if its needle is absent (`:32-38`),
+  (`:372-375`). The `mutate` helper panics if its needle is absent (`:32-38`),
   so a stale case cannot pass by testing an unmutated valid body.
 - `the_512kib_boundary_admits_exactly_and_rejects_one_byte_over`
   (`:322-341`): a body of exactly `MAX_SEND_BODY_BYTES` admits (`:326-331`),
@@ -126,21 +126,21 @@ would close what remains:
 
 ### Q: Does every malformed case return `schema_violation` and no other code?
 
-- Sources examined: `tests/model_execution_protocol.rs:138-340`; `protocol.rs:142-144`,
+- Sources examined: `tests/model_execution_protocol.rs:169-376`; `protocol.rs:142-144`,
   `:147-158`, `:160-190`, `:197-243`; `local_embeddings/protocol.rs:27`.
 - Findings: yes. Every rejection path in `preflight`, `decode`,
   `decode_request`, `parse_run_id`, and `parse_send` builds its error through
   `schema` at
   `local_embeddings/protocol.rs:27`, and `decode` wraps every `serde_json` error the
-  same way (`protocol.rs:143`). The loop at `:316-319` asserts the code for
-  all thirty-four cases with the case name in the failure message.
+  same way (`protocol.rs:143`). The loop at `:372-375` asserts the code for
+  all thirty-six cases with the case name in the failure message.
 - Missing evidence: none.
 - Conclusion: resolved. There is no path from `parse_request` to a
   non-`schema_violation` error.
 
 ### Q: Does a rejected request leave any supervisor state?
 
-- Sources examined: `mod.rs:202-216`; `tests/model_execution_protocol.rs:1271-1313` (`malformed_requests_over_the_host_create_no_run_state`).
+- Sources examined: `mod.rs:202-216`; `tests/model_execution_protocol.rs:1271-1310` (`malformed_requests_over_the_host_create_no_run_state`).
 - Findings: the parse at `mod.rs:213` precedes every `self.supervisor` call,
   so a `schema_violation` return cannot have admitted, subscribed, or
   cancelled anything. The host-level test confirms `metrics()` is unchanged
