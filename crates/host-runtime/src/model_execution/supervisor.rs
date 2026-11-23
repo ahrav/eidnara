@@ -1247,7 +1247,11 @@ fn append_event(inner: &Arc<Inner>, run: &Arc<Run>, event: BackendEvent) -> Sink
         BackendEvent::HarnessDispatch { harness } => {
             return append_reserved(run, protocol::harness_dispatch_unit(&run.run_id, harness));
         }
+        // The unit is appended from the terminal headroom, which reserves room for one model id within the bound; a longer id is dropped and the answer stays unnamed.
         BackendEvent::AnsweringModel { model } => {
+            if model.len() > protocol::MAX_ANSWERING_MODEL_BYTES {
+                return SinkStatus::Accepted;
+            }
             return append_reserved(run, protocol::answering_model_unit(&run.run_id, &model));
         }
         BackendEvent::AssistantText {

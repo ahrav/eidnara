@@ -2065,6 +2065,36 @@ console.log(JSON.stringify([
         serde_json::from_str::<serde_json::Value>(unflagged.trim()).expect("json"),
         serde_json::json!([null, null])
     );
+    // A flagged run whose agent start carried no custom prompt fails at its provider request; once the text was replaced, and in an unflagged run, the request passes.
+    let request = r#"const handlers = {};
+hook({ on(name, fn) { handlers[name] = fn; } });
+const send = () => {
+  try {
+    handlers.before_provider_request({ payload: { modelId: "m", inferenceConfig: { maxTokens: 1 }, system: [], messages: [] } });
+    return "sent";
+  } catch (error) { return String(error.message); }
+};
+handlers.before_agent_start({ systemPrompt: "built", systemPromptOptions: {} });
+const unreplaced = send();
+handlers.before_agent_start({ systemPrompt: "built", systemPromptOptions: { customPrompt: "Review the memory." } });
+console.log(JSON.stringify([unreplaced, send()]));"#;
+    let limit = [(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "64")];
+    let flagged = run_hook_driver(
+        request,
+        &[limit[0], (MODEL_EXECUTION_PLAIN_SYSTEM_ENV, "1")],
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(flagged.trim()).expect("json"),
+        serde_json::json!([
+            "model_execution payload hook: the system text could not be sent as written",
+            "sent"
+        ])
+    );
+    let unflagged = run_hook_driver(request, &limit);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(unflagged.trim()).expect("json"),
+        serde_json::json!(["sent", "sent"])
+    );
 }
 
 /// The hook removes cache markers from user messages and keeps the system prompt's marker, in the Bedrock Converse, Anthropic Messages, and OpenAI-completions payload shapes.

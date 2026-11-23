@@ -452,14 +452,13 @@ async fn run_pi(
     };
     // `run_pi` writes caller-private system prompts to a private 0600 file instead of passing them through argv.
     // A caller's directive to send its system text as written is read here and never reaches the harness; the hook receives it as an environment flag.
-    let plain_system = request
-        .system
-        .as_deref()
-        .is_some_and(|system| backend::plain_system(system).0);
-    let system_prompt_write = match &request.system {
+    let (plain_system, system) = match request.system.as_deref().map(backend::plain_system) {
+        Some((plain, text)) => (plain, Some(text)),
+        None => (false, None),
+    };
+    let system_prompt_write = match system {
         None => Ok(None),
         Some(system) => {
-            let system = backend::plain_system(system).1;
             let mut write = std::pin::pin!(
                 dir.write_private_async("system-prompt.txt".to_owned(), system.as_bytes().to_vec())
             );
@@ -818,12 +817,14 @@ fn rejects_temperature(provider_text: &str) -> bool {
     })
 }
 
-/// Whether Pi's error text says the provider completed the response under a stop Pi maps to no answer. Pi names the stop (`Provider stopped with: content_filtered`, `Provider finish_reason: content_filter`); a Pi from before that naming reports every such stop of a completed response as `An unknown error occurred`.
+/// Whether Pi's error text says the provider completed the response under a stop Pi maps to no answer, which the same request meets again. Pi writes three such texts. `Provider stopped with: <reason>` names the stop a provider gave a completed response, such as `content_filtered`, `guardrail_intervened`, or `sensitive`; the reason `error` is Pi's text for a server failure, which a second request can pass. `Provider finish_reason: content_filter` is the one finish reason of that family that is a content stop; Pi writes the same prefix for `network_error` and for reasons it has no name for. A Pi from before that naming reports every such stop of a completed response as `An unknown error occurred`.
 fn names_provider_stop(provider_text: &str) -> bool {
     let text = provider_text.trim();
-    text.starts_with("Provider stopped with: ")
-        || text.starts_with("Provider finish_reason: ")
-        || text == "An unknown error occurred"
+    text == "An unknown error occurred"
+        || text == "Provider finish_reason: content_filter"
+        || text
+            .strip_prefix("Provider stopped with: ")
+            .is_some_and(|reason| !reason.is_empty() && !reason.starts_with("error"))
 }
 
 /// The events of a completed answer: the model id the message reports, when it is a string within [`protocol::MAX_ANSWERING_MODEL_BYTES`], then the text.
@@ -886,24 +887,23 @@ fn assistant_message_terminal(
                 .get("errorMessage")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if reason == "error" && names_provider_stop(provider_text) {
+            // An `error` stop whose text Pi fixes takes a fixed message of its own; the provider stop is read first.
+            let fixed = match reason {
+                "error" if names_provider_stop(provider_text) => {
+                    Some(backend::PI_PROVIDER_STOP_MESSAGE)
+                }
+                "error" if rejects_temperature(provider_text) => {
+                    Some(PI_TEMPERATURE_REJECTED_MESSAGE)
+                }
+                _ => None,
+            };
+            if let Some(message) = fixed {
                 return Ok(Some((
                     Vec::new(),
                     BackendTerminal::Failed(BackendError {
                         class: ErrorClass::Permanent,
                         retry_after_secs: None,
-                        message: backend::PI_PROVIDER_STOP_MESSAGE.to_owned(),
-                        provider_code: None,
-                    }),
-                )));
-            }
-            if reason == "error" && rejects_temperature(provider_text) {
-                return Ok(Some((
-                    Vec::new(),
-                    BackendTerminal::Failed(BackendError {
-                        class: ErrorClass::Permanent,
-                        retry_after_secs: None,
-                        message: PI_TEMPERATURE_REJECTED_MESSAGE.to_owned(),
+                        message: message.to_owned(),
                         provider_code: None,
                     }),
                 )));
@@ -1083,6 +1083,17 @@ mod tests {
                 finish_reason: FinishReason::Completed,
             }
         );
+        // An id of exactly the bound is published.
+        let longest = "m".repeat(protocol::MAX_ANSWERING_MODEL_BYTES);
+        let (events, _) = parse_pi_transcript(line(longest.clone().into()).as_bytes())
+            .expect("a clean transcript");
+        assert_eq!(
+            events,
+            [
+                BackendEvent::AnsweringModel { model: longest },
+                text.clone()
+            ]
+        );
         // A message that reports no usable id publishes its text alone; the producer decides what an unnamed answer is worth.
         for unnamed in [
             serde_json::Value::Null,
@@ -1124,12 +1135,26 @@ mod tests {
             assert!(backend::is_provider_stop(&error.message), "{stopped}");
             assert!(!backend::is_provider_reported_failure(&error.message));
         }
-        for other in ["model not found: prov/typo", "429 rate limit exceeded"] {
+        // Pi writes the same prefixes for a failure a second request can pass, and other texts only resemble the fixed ones.
+        for other in [
+            "model not found: prov/typo",
+            "429 rate limit exceeded",
+            "Provider finish_reason: network_error",
+            "Provider finish_reason: some_new_reason",
+            "Provider stopped with: error (server error)",
+            "Provider stopped with: ",
+            "upstream: Provider stopped with: content_filtered",
+            "An unknown error occurred while connecting",
+        ] {
             let error = terminal(other);
             assert!(!backend::is_provider_stop(&error.message), "{other}");
         }
         assert!(backend::is_provider_stop(&format!(
             "{}; additionally cleanup failed",
+            backend::PI_PROVIDER_STOP_MESSAGE
+        )));
+        assert!(!backend::is_provider_stop(&format!(
+            "{} later",
             backend::PI_PROVIDER_STOP_MESSAGE
         )));
     }

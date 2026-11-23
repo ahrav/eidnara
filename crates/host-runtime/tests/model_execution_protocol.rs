@@ -214,6 +214,25 @@ fn every_malformed_shape_is_rejected_with_schema_violation() {
         ("empty prompt", send_body("", None), false),
         ("empty system", send_body("p", Some("")), false),
         (
+            "system of a directive alone",
+            send_body(
+                "p",
+                Some(host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE),
+            ),
+            false,
+        ),
+        (
+            "system with text after its directive",
+            send_body(
+                "p",
+                Some(&format!(
+                    "{}guidance",
+                    host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE
+                )),
+            ),
+            true,
+        ),
+        (
             "flat model string",
             mutate(
                 &ok_text,
@@ -380,7 +399,7 @@ fn the_512kib_boundary_admits_exactly_and_rejects_one_byte_over() {
 fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
     use host_runtime::model_execution::backend::{BackendError, ErrorClass};
 
-    // Admission headroom must accommodate the worst-case encoding of two diagnostic fields plus the `run_started` unit that shares the reserved slice.
+    // Admission headroom must accommodate the worst-case encoding of two diagnostic fields plus the `run_started`, `harness_dispatch`, and `answering_model` units that share the reserved slice.
     let hostile = "\u{1}".repeat(4096);
     let run_id = "r".repeat(protocol::MAX_RUN_ID_BYTES);
     let unit = protocol::error_unit(
@@ -394,11 +413,19 @@ fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
         protocol::ErrorScope::CredentialSource,
     );
     let started = protocol::run_started_unit(&run_id);
+    let dispatch = protocol::harness_dispatch_unit(&run_id, Harness::OpenCode);
+    let answering = protocol::answering_model_unit(
+        &run_id,
+        &"\u{1}".repeat(protocol::MAX_ANSWERING_MODEL_BYTES),
+    );
     assert!(
-        unit.len() + started.len() <= config::TERMINAL_HEADROOM_BYTES,
-        "terminal ({}) plus run_started ({}) must fit the {}-byte headroom",
+        unit.len() + started.len() + dispatch.len() + answering.len()
+            <= config::TERMINAL_HEADROOM_BYTES,
+        "terminal ({}), run_started ({}), harness_dispatch ({}), and answering_model ({}) must fit the {}-byte headroom",
         unit.len(),
         started.len(),
+        dispatch.len(),
+        answering.len(),
         config::TERMINAL_HEADROOM_BYTES
     );
 }

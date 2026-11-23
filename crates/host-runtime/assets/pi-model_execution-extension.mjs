@@ -91,12 +91,23 @@ function withoutConversationCacheMarkers(messages) {
 }
 
 export default function (pi) {
+	const plainSystem = process.env[PLAIN_SYSTEM_ENV] === "1";
+	let sentAsWritten = false;
 	pi.on("before_agent_start", (event) => {
-		if (process.env[PLAIN_SYSTEM_ENV] !== "1") return undefined;
+		if (!plainSystem) return undefined;
 		const written = event?.systemPromptOptions?.customPrompt;
-		return typeof written === "string" && written !== "" ? { systemPrompt: written } : undefined;
+		if (typeof written !== "string" || written === "") return undefined;
+		sentAsWritten = true;
+		return { systemPrompt: written };
 	});
 	pi.on("before_provider_request", (event, ctx) => {
+		// A flagged run whose system text was not replaced would send Pi's own lines to
+		// the model while its caller counts on the text as written, so it fails here.
+		if (plainSystem && !sentAsWritten) {
+			throw new Error(
+				"model_execution payload hook: the system text could not be sent as written",
+			);
+		}
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
 		const requestedTemperature = process.env[TEMPERATURE_ENV] === undefined
 			? undefined : requiredNumber(TEMPERATURE_ENV);

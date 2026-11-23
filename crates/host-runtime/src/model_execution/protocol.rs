@@ -247,8 +247,11 @@ fn parse_send(params: SendParams) -> Result<Request, RequestError> {
     let system = match params.system {
         None => None,
         Some(system) => {
-            // Reject empty `system`: producers omit it, so accepting `""` would create a second encoding for absence.
+            // Reject empty `system`: producers omit it, so accepting `""` would create a second encoding for absence. A directive with no text after it is the same absence.
             check_string("system", &system, MAX_SEND_BODY_BYTES, true).map_err(schema)?;
+            if super::backend::plain_system(&system).1.is_empty() {
+                return Err(schema("system must hold text after its directive"));
+            }
             Some(system)
         }
     };
