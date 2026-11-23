@@ -514,6 +514,60 @@ describe("Pi native entry identity", () => {
         ]);
     });
 
+    it("sends a message a context handler changed without its entry's type and parentId", async () => {
+        const call = {
+            ...assistant(""),
+            content: [
+                { type: "toolCall", id: "call-1", name: "bash", arguments: { command: "ls" } },
+            ],
+            stopReason: "toolUse",
+        };
+        const persisted: Json[] = [user("first"), call, { ...toolResult("call-1"), isError: true }];
+        const identities = async (context: Json[]) => {
+            const transport = fakeTransport({
+                "transform.boundary": [() => ({ anchors: [] })],
+                transform: [rawReply],
+            });
+            const pass = passOver(branchOver(persisted), context);
+            await transformOver(transport.client, pass.branch).run(pass);
+            const sent = transport.calls.find((entry) => entry.method === "transform")?.body ?? {};
+            return (sent.native_messages as PiRow[]).map((row) => ({
+                id: row.id,
+                type: row.type,
+                parentId: row.parentId,
+                message: row.message,
+            }));
+        };
+        const whole = [
+            { id: "e1", type: "message", parentId: null },
+            { id: "e2", type: "message", parentId: "e1" },
+            { id: "e3", type: "message", parentId: "e2" },
+        ];
+        const named = (rows: { id: string; type?: string; parentId?: string | null }[]) =>
+            rows.map(({ id, type, parentId }) => ({ id, type, parentId }));
+        // Pi hands a handler a clone of the array: equal messages keep their entries.
+        expect(named(await identities(structuredClone(persisted)))).toEqual(whole);
+        // The mark of the result alone, in either direction, and its text alone.
+        const result = persisted[2] as Json;
+        for (const edited of [
+            { ...result, isError: false },
+            { ...result, isError: undefined },
+            { ...result, content: [{ type: "text", text: "pruned" }] },
+        ]) {
+            const rows = await identities([persisted[0] as Json, call, edited]);
+            expect(named(rows)).toEqual([whole[0], whole[1], { id: "e3" }]);
+            // The model's context keeps the handler's edit.
+            expect(rows[2]?.message).toEqual(JSON.parse(JSON.stringify(edited)));
+        }
+        // The arguments of the call alone.
+        const rerun = {
+            ...call,
+            content: [{ ...(call.content[0] as Json), arguments: { command: "rm -rf build" } }],
+        };
+        const rows = await identities([persisted[0] as Json, rerun, result]);
+        expect(named(rows)).toEqual([whole[0], { id: "e2" }, whole[2]]);
+    });
+
     it("keeps a row whose entry cannot be read to its id and message", () => {
         const messages: Json[] = [user("first")];
         const reader = branchOver(messages);

@@ -1701,17 +1701,28 @@ first part; it pairs a result with its call and stands in the fact's
 rationale. A provider can give the calls of two turns one id, and each result
 is then its own execution under its own entry. The daemon reads the ids from
 the request's native rows, which stand one for each message of the window in
-order: a call counts when the `toolCall` part at its place in its message's
-row carries the call's id itself, as its `id` when that is a string and else
-as its `callId`, and a result counts when its row carries the id itself as
-its `toolCallId`, each a string with a character other than whitespace. The
-Pi codec gives a call part without an id a synthesized id and a result row
-without a `toolCallId` the id `tool`, which name no execution, so such a call
-is answered by no result and such a result changes no fact and settles no
-call. A window names no execution, and its pass hands off nothing, when the
-request carries no native rows, when the rows and the messages differ in
-number, when a message's id is another than its row's `id`, and when two
-messages share an id.
+order: a call counts when the `toolCall` part at its place among the
+`toolCall` parts of its message's row carries the call's id itself, as its
+`id` when that is a string and else as its `callId`, and a result counts when
+its row carries the id itself as its `toolCallId`, each a string with a
+character other than whitespace. The Pi codec gives a call part without an id
+a synthesized id and a result row without a `toolCallId` the id `tool`, which
+name no execution, so such a call is answered by no result and such a result
+changes no fact and settles no call. A call and a result also count only in a
+row whose `type` is `message`, which the Pi plugin sets when the row's message
+is the message its session entry holds (section 7.10): Pi hands each `context`
+handler the array the handlers before it returned, and a message that one of
+them changed, in its mark, its text, or a call's arguments, reaches the
+transform under its entry's id and carries no `type`, so it writes, resolves,
+and settles nothing. A window names no execution, and its pass hands off
+nothing, when the request carries no native rows, when the rows and the
+messages differ in number, when a message's id is another than its row's
+`id`, when two messages share an id, when a message's id is longer than 128
+bytes, and when the session's id is longer than 256 bytes; the transform
+refuses the last three with `invalid_params`. A request that the transform
+refuses for another reason, such as another identity field past its bound or
+a boundary the store does not hold, is read as it was submitted, as the
+capture checkpoint reads it.
 
 The handler reads the window as the request carries it, before the pass
 resolves it, as the capture checkpoint does. A pass considers the last 1,024
@@ -1734,9 +1745,10 @@ judged by a later pass of the session whose window still carries the call and
 its result. A result is paired with the call it answers in its tool turn: a
 command call of the assistant message before it, with no message of another
 role between them. A tool turn begins at an assistant message and ends at the
-next message that is neither the assistant's nor a tool's, so a result that
-arrives after its call's turn has ended is paired with no call and shares no
-id with that turn. A result under an id that two tool calls or two tool
+next assistant message, which begins another turn, or at the next message
+that is neither the assistant's nor a tool's, so a result that arrives after
+its call's turn has ended is paired with no call and shares no id with that
+turn, and two turns that use one call id are two executions. A result under an id that two tool calls or two tool
 results of its turn carry is left out, since the id names neither alone, and
 takes no place among the 1,024 results a pass considers.
 A daemon that shuts down ends a task before its next result, ends
@@ -1787,7 +1799,7 @@ a live, unresolved fact that it follows.
 A fact states what the harness reports of the result and claims no more of
 the command. Pi's built-in shell tool ends the result of a command that exited
 with a nonzero status with the line `Command exited with code <n>`. The daemon reads
-the last non-empty line of a marked result, trimmed: when the whole line is
+the last non-empty line of a marked result's whole text, trimmed: when the whole line is
 those words and one to ten ASCII digits, a nonzero number is the fact's exit
 code, which is the code that line states. A marked result that ends in any
 other line, or in a code of 0, is a failure with no exit code. Pi marks other
@@ -1826,13 +1838,18 @@ letter or digit (so `error_count` holds the run `error`), or when it holds
 harness marked and decide no failure. A line is judged as trimmed: an empty
 line, a line with a control character other than a tab, and a line with U+2028
 or U+2029 are left out. Pi answers a call whose arguments its schema refuses
-with a report that begins `Validation failed for tool` and lists the call's
-arguments, as JSON, after the line `Received arguments:`. Of such a result
-the fact reads the part before that line: the chosen lines, the path, and the
-error come from the lines that state what Pi refused, and the arguments stay
-in the tool result. Every other result is read whole; a program's own output
-can repeat an argument, and such a line is kept under the redactor's rule
-like any other. The redactor judges the whole text of every result. With a finding
+with a report that begins `Validation failed for tool` and, after the line
+`Received arguments:`, holds the call's arguments as one JSON value that runs
+to the end of the text. Of such a result the fact chooses from the part
+before that line: the chosen lines, the path, and the error come from the
+lines that state what Pi refused, and the arguments stay in the tool result.
+The lines of every other marked result are chosen from its whole text, also
+of one that holds those two lines and then other text, as the output of a
+command that printed such a report does; a program's own output can repeat an
+argument, and such a line is kept under the redactor's rule like any other.
+The exit code is read from the whole text in every case. The redactor judges
+the whole text of every marked result the task reads, the arguments of a
+refused call included. With a finding
 the fact keeps no line of the output and says that the text is withheld and
 that it stands in the result of its tool call in its session while that
 session's history holds it; Pi keeps the end of a long output there and the
@@ -1843,10 +1860,14 @@ around it, of ASCII letters, digits, and `_`, `.`, `/`, `-` with a file
 extension of one to five letters and digits, at least one a letter, and with a
 directory, a position (`:` or `(`, a digit, and then digits, `:`, `,`, and
 `)`), or a test's name (`::`, then letters, digits, `_`, and `:`); an error is
-a word, read as a run of letters and digits of any script, `_`, and `.`
-without the dots at its ends, that is a type name ending in `Error` or
-`Exception` after a first letter, or a code of one to four ASCII capitals and
-two to six digits (`E0308`, `TS2307`); each is at most 96 bytes. Both are read by shape and are what the line names, with no claim that
+a word, read as a run of letters, combining marks, and numeric characters of
+any script, `_`, and `.` without the dots at its ends, that is a type name of
+letters, marks, decimal digits, `_`, and `.` ending in `Error` or `Exception`
+after a first letter, or a code of one to four ASCII capitals and two to six
+ASCII digits (`E0308`, `TS2307`); each is at most 96 bytes. A word is named
+whole or left out: a name with a combining mark is one name, and a word with
+a numeric character that is no decimal digit, such as a fraction, names no
+error. Both are read by shape and are what the line names, with no claim that
 they caused the failure: a host with a port has the shape of a file with a
 line, and the name of a digest such as `SHA256` the shape of a code. With a
 finding the path and the error come from error lines that hold no finding.
@@ -1989,13 +2010,16 @@ new fact. `tool_failure` and every `tool_failure:<text>` are reserved as a
 `source_id`. A host `kernel.commit` whose `insert_decision` or
 `insert_observation` names one answers `invalid:invalid_input`, unless the
 Kernel answers the commit from the receipt of an earlier one. A
-`supersede_decision` is checked in this order. A replaced fact that is
-missing or stands in another project answers `invalid:not_found`, as on any
-`source_id`. Next, a replaced fact on a reserved `source_id`, and a request
-that names one for its successor, answer `invalid:admission_policy`. Then the
-fact to fold into is looked up: one that stands in another project answers
-`invalid:not_found`, and a live one of the bound project on a reserved
-`source_id` answers `invalid:admission_policy`. A
+`supersede_decision` that the Kernel answers from no receipt, and whose
+domain and project scope the route accepts as for any `source_id`, reaches
+these checks in this order. A replaced fact that is missing or stands in
+another project answers `invalid:not_found`, as on any `source_id`. After the
+check of the replaced fact's user authority, a replaced fact on a reserved
+`source_id`, and a request that names one for its successor, answer
+`invalid:admission_policy`. Then the fact to fold into is looked up: one that
+stands in another project answers `invalid:not_found`, live or retired, and a
+live one of the bound project on a reserved `source_id` answers
+`invalid:admission_policy`. A
 `kernel.artifact.ingest.begin` whose `source_id` is one answers
 `invalid:invalid_input`. The MemoryReviewer forms no proposal that targets a
 fact on one. Retiring a fact and recording a disposition on it stay open.
@@ -2018,7 +2042,10 @@ unwritten and its call unlearned, and the daemon gives up its memo of judged
 calls. A task judges under one history, the one its pass filtered the window
 under or the first one it reads, and ends when the Kernel holds another, so
 the session's next pass judges the window's results, in window order, against
-the history the Kernel holds. A commit that the Kernel answers from the
+the history the Kernel holds. A judged call is learned while the memo stands
+in the history its judgment read: when another pass has given the memo's
+calls up in between, the call stays unlearned and the task ends, and a memo
+that stands in no history holds no judged call. A commit that the Kernel answers from the
 receipt of an earlier commit of the same execution writes nothing and settles
 the call: the history the Kernel holds has that execution's commit. `session.delete` holds the same gate and retires the
 session's place in the daemon's memo of judged calls before it changes either
@@ -2036,9 +2063,10 @@ executions, by project, for each of 256 sessions, and a full session entry gives
 call it learned first; a session past the 256 takes the place of the oldest
 session that runs no task, whose results are judged again on its next request,
 where the Kernel's log stops a second write of a call that wrote a fact. A
-Kernel history that cannot be read, a busy or failing Kernel, a fact another
-writer changed under the judgment, and a read that names a commit past the
-Kernel's tip end the task with the call unlearned; any other refusal of the
+Kernel history that cannot be read, a busy or failing Kernel, a Kernel whose
+handle a failed restore has closed, a fact another writer changed under the
+judgment, and a read that names a commit past the Kernel's tip end the task
+with the call unlearned; any other refusal of the
 Kernel to a judgment settles the call. A result that
 writes nothing for a reason an operator can act on is reported on stderr by a
 fixed sentence that holds no text of the result: a tool name or an id that the
@@ -2078,7 +2106,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `previous_output_revision` | optional | the revision of the consumer's retained, applied output, when it offers one |
 | `serializer_profile` | required | `owned-llmrunner`, `pi`, `opencode-aisdk`, or `claude-code-anthropic` |
 | `render_config` | required | string; a change is a render-configuration change |
-| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read is `{"id", "message"}` alone. The daemon reads `type` and `parentId` for source capture only: a row without `type` or whose `type` is not `"message"` contributes no source and is counted as an adapter refusal, and neither field changes the transform or its response |
+| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read, and a row of a message entry whose message differs from the message the entry holds (a `context` handler that ran before the plugin's changed it), is `{"id", "message"}` alone. The daemon reads `type` and `parentId` for source capture and `type` for failed-command facts (section 7.9): a row without `type` or whose `type` is not `"message"` contributes no source, is counted as an adapter refusal, and names no execution of a command, and neither field changes the transform or its response |
 | `messages` | the window of `owned-llmrunner` and `claude-code-anthropic`, empty when absent; absent for `pi` and `opencode-aisdk` | the window in CK form, in canonical order: `[{"mid": string, "ck": CK message}]` |
 | `usage` | optional | `{"current_total_input_tokens", "context_limit_tokens", "final_wire_input_tokens", "final_wire_trusted"}` |
 | `geometry` | optional | `{"usable_soft": integer, "usable_hard": integer, "derivation": string}` |

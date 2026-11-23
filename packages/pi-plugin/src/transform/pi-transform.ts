@@ -65,14 +65,39 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
 }
 
 /**
+ * Whether `left` and `right` hold the same JSON value: equal primitives, arrays equal item by
+ * item, and objects equal key by key, where a key that holds `undefined` counts as absent. The
+ * comparison reads both values in place.
+ */
+function sameValue(left: unknown, right: unknown): boolean {
+    if (left === right) return true;
+    if (typeof left !== "object" || typeof right !== "object" || !left || !right) return false;
+    if (Array.isArray(left) || Array.isArray(right)) {
+        if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length)
+            return false;
+        return left.every((item, index) => sameValue(item, right[index]));
+    }
+    const [a, b] = [left as Json, right as Json];
+    const held = (value: Json) => Object.keys(value).filter((key) => value[key] !== undefined);
+    const keys = held(a);
+    return keys.length === held(b).length && keys.every((key) => sameValue(a[key], b[key]));
+}
+
+/**
  * The row for `message` at host id `id`, carrying the `type` and `parentId` of the session entry
  * the row was built from, so the daemon reads native entry identity from the wire. A row whose
- * entry cannot be read keeps its id and message alone.
+ * entry cannot be read keeps its id and message alone. So does a row of a message entry whose
+ * message differs from the entry's: Pi hands each context handler the array the handlers before
+ * it returned, and a message one of them changed is the entry's message under its id for the
+ * transform alone. The daemon retains a tool result and records a failed command for a row that
+ * carries its entry's `type`, so both read the message the session holds.
  */
 export function entryRow(id: string, message: Json, reader: PiBranchReader): PiRow {
     const entryId = rowEntry(id)?.entryId;
     const entry = entryId === undefined ? undefined : reader.getEntry(entryId);
     if (!entry) return { id, message };
+    if (entry.type === "message" && !sameValue((entry as unknown as Json).message, message))
+        return { id, message };
     return { id, type: entry.type, parentId: entry.parentId ?? null, message };
 }
 

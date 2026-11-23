@@ -4926,20 +4926,14 @@ fn command_rows(runs: &[Run]) -> Vec<Value> {
         "role": "user", "content": [{ "type": "text", "text": "Run the suite." }], "timestamp": 1,
     } })];
     for (index, run) in runs.iter().enumerate() {
-        let ordinal = 2 + 2 * index;
-        rows.push(json!({ "id": format!("m-{ordinal}"), "message": {
-            "role": "assistant",
-            "content": [{
-                "type": "toolCall", "id": run.call, "name": "bash",
-                "arguments": { "command": run.command },
-            }],
-            "usage": {}, "stopReason": "toolUse", "timestamp": run.at_ms,
-        } }));
-        rows.push(json!({ "id": result_entry(index), "message": {
-            "role": "toolResult", "toolCallId": run.call, "toolName": "bash",
-            "content": [{ "type": "text", "text": run.output }], "isError": run.flagged,
-            "timestamp": run.at_ms,
-        } }));
+        let call = format!("m-{}", 2 + 2 * index);
+        rows.push(pi_call_row(&call, Some(run.call), run.command, run.at_ms));
+        rows.push(pi_output_row(
+            &result_entry(index),
+            Some(run.call),
+            (run.output, run.flagged),
+            run.at_ms,
+        ));
     }
     rows
 }
@@ -4950,9 +4944,9 @@ fn result_entry(index: usize) -> String {
     format!("m-{}", 3 + 2 * index)
 }
 
-/// The window of a Pi session as the transform handler derives it from the
-/// session's native rows, which the request carries beside it.
-fn native_window(session: &str, rows: Vec<Value>) -> TransformRequest {
+/// The window of a Pi session as the transform handler derives it from
+/// `rows`, which the request carries beside it as they stand.
+fn window_of_rows(session: &str, rows: Vec<Value>) -> TransformRequest {
     let native: Vec<Arc<Value>> = rows.into_iter().map(Arc::new).collect();
     let mut request = request_with_usage(Vec::new(), 1_000, 200_000);
     request["session_id"] = json!(session);
@@ -4964,6 +4958,22 @@ fn native_window(session: &str, rows: Vec<Value>) -> TransformRequest {
         .collect();
     window.native_messages = Some(native);
     window
+}
+
+/// The window of a Pi session whose rows are the session's message entries
+/// as the session holds them: the Pi plugin sends such a row with its
+/// entry's `type` and `parentId`.
+fn native_window(session: &str, rows: Vec<Value>) -> TransformRequest {
+    let mut parent = Value::Null;
+    let rows = rows
+        .into_iter()
+        .map(|mut row| {
+            row["type"] = json!("message");
+            row["parentId"] = std::mem::replace(&mut parent, row["id"].clone());
+            row
+        })
+        .collect();
+    window_of_rows(session, rows)
 }
 
 fn command_window(session: &str, runs: &[Run]) -> TransformRequest {
@@ -5589,12 +5599,14 @@ async fn a_result_without_the_harness_s_mark_writes_no_record_whatever_its_outpu
 #[tokio::test]
 async fn a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writes_nothing() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    // The rows as the Pi plugin sends them, each with its session entry's
+    // `type` and `parentId`.
     let rows = vec![
-        json!({ "id": "1a2b3c4d", "message": {
+        json!({ "id": "1a2b3c4d", "type": "message", "parentId": null, "message": {
             "role": "user", "content": [{ "type": "text", "text": "Run the suite." }],
             "timestamp": 900
         } }),
-        json!({ "id": "2b3c4d5e", "message": {
+        json!({ "id": "2b3c4d5e", "type": "message", "parentId": "1a2b3c4d", "message": {
             "role": "assistant",
             "content": [{
                 "type": "toolCall", "id": "call-1", "name": "bash",
@@ -5602,7 +5614,7 @@ async fn a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writ
             }],
             "usage": {}, "stopReason": "toolUse", "timestamp": 950
         } }),
-        json!({ "id": "3c4d5e6f", "message": {
+        json!({ "id": "3c4d5e6f", "type": "message", "parentId": "2b3c4d5e", "message": {
             "role": "toolResult", "toolCallId": "call-1", "toolName": "bash",
             "content": [{ "type": "text", "text": PANIC_OUTPUT }], "isError": true,
             "timestamp": 1_000
@@ -6071,6 +6083,11 @@ fn pi_result_row(row: &str, call: Option<&str>, marked: bool, at_ms: i64) -> Val
     } else {
         "test result: ok."
     };
+    pi_output_row(row, call, (text, marked), at_ms)
+}
+
+/// The Pi row of a tool result that holds `text` and the harness's mark.
+fn pi_output_row(row: &str, call: Option<&str>, (text, marked): (&str, bool), at_ms: i64) -> Value {
     let mut message = json!({
         "role": "toolResult", "toolName": "bash",
         "content": [{ "type": "text", "text": text }], "isError": marked, "timestamp": at_ms,
@@ -6246,7 +6263,10 @@ async fn a_pass_without_a_fact_leaves_no_receipt_and_resolves_a_failure_judged_a
 /// passes alone and takes the words after it in the fact's first line as
 /// its value, so the composed fact is refused: the recorder writes no
 /// decision and no receipt, and settles the call. The same result under
-/// the name `bash` is recorded.
+/// the name `bash` is recorded. The fixture rests on the redactor reading
+/// the word after an empty assignment as its value; the writer's own test,
+/// `a_commit_refuses_a_record_the_redactor_would_change_and_an_id_another_row_holds`,
+/// pins the refusal with a credential in each field.
 #[tokio::test]
 async fn a_fact_the_redactor_refuses_as_composed_is_left_unwritten() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
@@ -6398,6 +6418,12 @@ async fn a_judgment_whose_reads_a_restore_replaced_writes_nothing_and_is_judged_
         1,
         "the pass ended at the restore, ahead of the third result's commit"
     );
+    // The pass ended at the restored commit: a judgment after it would
+    // have moved the memo to the history the Kernel holds.
+    assert_eq!(
+        handler.failure_memo.lock().unwrap().history_for_test(),
+        None
+    );
     // The memo gave up the calls it judged under the replaced history, and
     // learned neither the call the restore interrupted nor the one after.
     for (index, call) in [(0, "call-1"), (1, "call-2"), (2, "call-3")] {
@@ -6483,6 +6509,193 @@ async fn a_window_judged_before_a_restore_is_handed_off_again_after_it() {
         "the window is judged against the restored history"
     );
     assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+}
+
+/// A backup of the Kernel in a directory of its own, taken now.
+fn kernel_backup(kernel: &kernel::KernelStore) -> (tempfile::TempDir, PathBuf) {
+    let backups = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        backups.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let backup = kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backups.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(30),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    (backups, backup.destination_path)
+}
+
+/// A task judges under the history its pass filtered the window under. A
+/// restore between the handoff and the task's first judgment ends the task
+/// with its result unlearned, and the next pass judges the whole window in
+/// order against the restored history: the failure is written and the
+/// passing run after it resolves it.
+#[tokio::test]
+async fn a_task_handed_off_before_a_restore_judges_nothing_after_it() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let scope = kernel_routes::ProjectBinding::new(&project);
+    let (_backups, backup) = kernel_backup(&kernel);
+    let runs = [
+        failed_run("call-1", "cargo test -p api", 1_000),
+        passed_run("call-2", "cargo test -p api", 2_000),
+    ];
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &runs[..1]).await,
+        1
+    );
+    let learned = |index: usize, call: &str| {
+        handler.failure_memo.lock().unwrap().has_seen_for_test(
+            scope.digest(),
+            "s1",
+            (&result_entry(index), call),
+        )
+    };
+    assert!(learned(0, "call-1"));
+    // The pass filters the window under the history that holds the fact,
+    // and hands off the passing result alone.
+    let binding = failure_binding(&project, "pi", "s1");
+    let checkpoint = handler
+        .failure_checkpoint(&binding, &command_window("s1", &runs))
+        .unwrap();
+    kernel.restore(&backup).unwrap();
+    assert_eq!(checkpoint.run().await, 0);
+    assert!(!learned(0, "call-1") && !learned(1, "call-2"));
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 2);
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rationales.len(), 1, "{rationales:?}");
+    assert_eq!(
+        (
+            &rationales[0]["state"],
+            &rationales[0]["call"],
+            &rationales[0]["resolved_call"]
+        ),
+        (&json!("resolved"), &json!("call-1"), &json!("call-2"))
+    );
+}
+
+/// A call is learned while the memo stands in the history its judgment
+/// read. A restore and another session's handoff between a judgment's
+/// history read and its settlement give the memo's calls up, so the
+/// judgment's call stays unlearned and the session's next pass hands it
+/// off again.
+#[tokio::test]
+async fn a_call_judged_under_a_history_the_memo_has_left_is_handed_off_again() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let kernel = handler.kernel.kernel_store().unwrap();
+    let scope = kernel_routes::ProjectBinding::new(&project);
+    let (_backups, backup) = kernel_backup(&kernel);
+    // A passing result of a command without a fact settles with no commit.
+    let runs = [passed_run("call-1", "cargo test -p api", 1_000)];
+    let other = failure_binding(&project, "pi", "s3");
+    let handoffs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hook = {
+        let (core, kernel) = (Arc::clone(&handler.core), Arc::clone(&kernel));
+        let handoffs = Arc::clone(&handoffs);
+        Arc::new(move || {
+            if handoffs.fetch_add(1, Ordering::SeqCst) == 0 {
+                kernel.restore(&backup).unwrap();
+                let window = command_window("s3", &[failed_run("call-9", "npm run deploy", 500)]);
+                // The other session's pass compares the histories and
+                // hands its result off; its task is left unrun.
+                assert!(core.failure_checkpoint(&other, &window).is_some());
+            }
+        })
+    };
+    handler.failure_memo.lock().unwrap().under_gate = Some(hook);
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 0);
+    assert_eq!(handoffs.load(Ordering::SeqCst), 1);
+    handler.failure_memo.lock().unwrap().under_gate = None;
+    assert!(!handler.failure_memo.lock().unwrap().has_seen_for_test(
+        scope.digest(),
+        "s1",
+        (&result_entry(0), "call-1")
+    ));
+    let binding = failure_binding(&project, "pi", "s1");
+    assert!(
+        handler
+            .failure_checkpoint(&binding, &command_window("s1", &runs))
+            .is_some(),
+        "the call is handed off again"
+    );
+}
+
+/// The Pi plugin sends a row with its session entry's `type` when the
+/// row's message is the entry's message. A marked result, or its call, in
+/// a row without the type is a message a context handler changed: it
+/// writes no fact. The same rows with their entries' types are recorded.
+#[tokio::test]
+async fn a_result_in_a_row_without_its_entry_s_type_writes_no_fact() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let binding = failure_binding(&project, "pi", "s1");
+    let rows = || {
+        let typed = native_window(
+            "s1",
+            vec![
+                pi_call_row("m-call", Some("call-1"), "cargo test -p api", 1_000),
+                pi_result_row("m-result", Some("call-1"), true, 1_100),
+            ],
+        );
+        let rows = typed.native_messages.unwrap();
+        rows.iter().map(|row| Value::clone(row)).collect::<Vec<_>>()
+    };
+    for edited in [0, 1] {
+        let mut rows = rows();
+        rows[edited].as_object_mut().unwrap().remove("type");
+        let window = window_of_rows("s1", rows);
+        assert!(
+            handler.failure_checkpoint(&binding, &window).is_none(),
+            "row {edited}"
+        );
+    }
+    assert!(
+        explicit_search(&handler, (SECOND, "s2"), &project)
+            .await
+            .is_empty()
+    );
+    let whole = window_of_rows("s1", rows());
+    assert_eq!(record_window(&handler, &project, "s1", &whole).await, 1);
+}
+
+/// The transform refuses a window whose message id passes 128 bytes and a
+/// request whose session id passes 256 bytes. The recorder hands off
+/// nothing for either and keeps no memo entry for the session; a window at
+/// both bounds is recorded.
+#[tokio::test]
+async fn a_window_past_the_transform_s_id_bounds_hands_off_nothing() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let window = |session: &str, entry: &str| {
+        native_window(
+            session,
+            vec![
+                pi_call_row("m-call", Some("call-1"), "cargo test -p api", 1_000),
+                pi_result_row(entry, Some("call-1"), true, 1_100),
+            ],
+        )
+    };
+    let entry = |bytes: usize| "e".repeat(bytes);
+    let session = |bytes: usize| "s".repeat(bytes);
+    for (session, entry) in [
+        (session(8), entry(crate::wire::MAX_MID_BYTES + 1)),
+        (session(257), entry(8)),
+    ] {
+        let binding = failure_binding(&project, "pi", &session);
+        let refused = window(&session, &entry);
+        assert!(handler.failure_checkpoint(&binding, &refused).is_none());
+        let memo = handler.failure_memo.lock().unwrap();
+        assert_eq!(memo.calls_for_test(&session), 0);
+        assert_eq!(memo.active_for_test(), 0);
+    }
+    let (session, entry) = (session(256), entry(crate::wire::MAX_MID_BYTES));
+    let at_bounds = window(&session, &entry);
+    assert_eq!(
+        record_window(&handler, &project, &session, &at_bounds).await,
+        1
+    );
 }
 
 /// The results of one window are judged in window order: a failure is
@@ -6795,9 +7008,9 @@ async fn bind_pi_session(handler: &Handler, channel: u16, session: &str) {
 /// the log and the lineage and its commit, and observes that the gate is
 /// held there and that a delete of the session has not finished while the
 /// hook blocks. Once the hook returns, a second hook between the
-/// judgment's reads and its commit observes the gate still held and the
-/// delete unfinished. The judgment then writes its record, the delete
-/// completes, and the record stands.
+/// judgment's reads and its commit observes the gate held and the delete
+/// unfinished. The judgment then writes its record, the delete completes,
+/// and the record stands.
 #[tokio::test]
 async fn a_result_is_judged_under_the_capture_publication_gate() {
     let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
@@ -6815,11 +7028,12 @@ async fn a_result_is_judged_under_the_capture_publication_gate() {
         reached.lock().unwrap().send(held).unwrap();
         let _ = released.lock().unwrap().recv();
     }));
-    // At its commit the judgment reports the gate and the delete again.
+    // Ahead of its commit the judgment reports the gate and the delete
+    // again.
     let deleted = Arc::new(AtomicBool::new(false));
-    let at_commit = Arc::new(Mutex::new(Vec::new()));
+    let before_commit = Arc::new(Mutex::new(Vec::new()));
     let gate = Arc::clone(&handler.capture_commit_gate);
-    let (finished, observed) = (Arc::clone(&deleted), Arc::clone(&at_commit));
+    let (finished, observed) = (Arc::clone(&deleted), Arc::clone(&before_commit));
     handler.failure_memo.lock().unwrap().before_commit = Some(Arc::new(move || {
         let held = matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock));
         let seen = (held, finished.load(Ordering::SeqCst));
@@ -6853,9 +7067,9 @@ async fn a_result_is_judged_under_the_capture_publication_gate() {
     drop(release);
     assert_eq!(task.await.unwrap(), 1, "the judgment writes its record");
     assert_eq!(
-        *at_commit.lock().unwrap(),
+        *before_commit.lock().unwrap(),
         [(true, false)],
-        "the commit runs with the gate held, ahead of the waiting delete"
+        "ahead of the commit the gate is held and the delete has not returned"
     );
     let deleted = delete.await.unwrap();
     assert!(

@@ -19,7 +19,7 @@
 //! ([`context_core::redaction`]) finds nothing is kept as it is, and text
 //! with a finding is withheld whole. The record names its command by the
 //! program's name and its first plain operand; its `Command:` line and its
-//! rationale hold no other argument of the command line.
+//! rationale's `command` field hold no other argument of the command line.
 //!
 //! One row is live per command line of a project. The rows of one command
 //! line share a source lineage, `tool_failure:<digest>`, and the Kernel's
@@ -34,11 +34,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use kernel::applicability::EvalBudget;
 use memory_store::{BlockKind, OutputKind, ResultBlockKind, WireBlock};
+use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -421,25 +422,39 @@ impl FailureMemo {
             .is_some_and(|entry| entry.epoch == epoch)
     }
 
-    /// Remembers a judged call. A full entry gives up the call it learned
-    /// first, which has left the results a pass considers.
-    fn learn(&mut self, session: &str, epoch: u64, call: u64) {
+    /// Remembers a call judged under the Kernel history `history`, and
+    /// answers whether the memo holds it. The call is kept while `history`
+    /// is the history the memo's calls stand in and the session's entry is
+    /// the one `epoch` names; a memo that another pass has moved to another
+    /// history, or to none, keeps its calls as they are. A full entry gives
+    /// up the call it learned first, which has left the results a pass
+    /// considers.
+    fn learn(
+        &mut self,
+        session: &str,
+        epoch: u64,
+        call: u64,
+        history: kernel::CommitReadIncarnation,
+    ) -> bool {
+        if self.history != Some(history) {
+            return false;
+        }
         let Some(entry) = self
             .sessions
             .get_mut(session)
             .filter(|entry| entry.epoch == epoch)
         else {
-            return;
+            return false;
         };
-        if !entry.calls.insert(call) {
-            return;
-        }
-        entry.order.push_back(call);
-        while entry.order.len() > MEMO_CALLS_PER_SESSION {
-            if let Some(evicted) = entry.order.pop_front() {
-                entry.calls.remove(&evicted);
+        if entry.calls.insert(call) {
+            entry.order.push_back(call);
+            while entry.order.len() > MEMO_CALLS_PER_SESSION {
+                if let Some(evicted) = entry.order.pop_front() {
+                    entry.calls.remove(&evicted);
+                }
             }
         }
+        true
     }
 
     fn forget_session(&mut self, session: &str) {
@@ -472,15 +487,24 @@ impl FailureMemo {
     /// The Kernel history the judged calls stand in, while it is the
     /// history `kernel` holds. Once a restore has installed another, the
     /// judged calls are given up, so a pass hands the window's results off
-    /// again. The comparison reads no row of the Kernel.
+    /// again; a memo that holds no history holds no judged call. The
+    /// comparison reads no row of the Kernel.
     fn history_in(
         &mut self,
         kernel: &kernel::KernelStore,
     ) -> Option<kernel::CommitReadIncarnation> {
-        let history = self.history?;
-        if kernel.require_incarnation(history).is_err() {
+        let held = self
+            .history
+            .filter(|history| kernel.require_incarnation(*history).is_ok());
+        if held.is_none() {
             self.give_up_calls();
         }
+        held
+    }
+
+    /// The Kernel history the judged calls stand in.
+    #[cfg(test)]
+    pub(crate) fn history_for_test(&self) -> Option<kernel::CommitReadIncarnation> {
         self.history
     }
 
@@ -676,7 +700,8 @@ fn shown_of(line: &str) -> String {
 /// The command line as a record names it, or `None` when the redactor's
 /// scan of it does not finish. The command line passes the redactor first,
 /// so the words shown and the digest derive from redacted text: two command
-/// lines that differ in a credential the redactor finds are one command.
+/// lines that differ inside the spans the redactor finds are one command
+/// when the redactor writes the same marks for them.
 ///
 /// The digest names the command line as it is written: the SHA-256 of the
 /// project and the whole redacted line, each behind its length, and then,
@@ -686,14 +711,15 @@ fn shown_of(line: &str) -> String {
 /// `cd` or with other spacing, are two commands with a record each, so a
 /// run of one spelling changes the record of that spelling alone. The
 /// counts hold no byte and no length of a finding, so a credential of
-/// another length keeps the digest, and a command line that spells the
-/// redactor's mark itself has another digest than one in which the
-/// redactor wrote that mark.
+/// another length under the same mark keeps the digest, and a command line
+/// that spells the redactor's mark itself has another digest than one in
+/// which the redactor wrote that mark.
 ///
 /// The words shown (see [`shown_of`]) are a reading aid: the digest alone
-/// names the command, and the record's `Command:` line and rationale hold
-/// no other argument. The excerpt holds lines of the output as the tool
-/// wrote them, and a tool that prints its command there is quoted.
+/// names the command, and the record's `Command:` line and its rationale's
+/// `command` field hold no other argument. The excerpt, and the path and
+/// the error read from it, hold text of the output as the tool wrote it,
+/// and a tool that prints its command there is quoted.
 fn command_named(scope: &str, command: &str) -> Option<Command> {
     let scanned = context_core::redaction::redact_windowed_durable_text(command, usize::MAX);
     let scanned = scanned.ok()?;
@@ -790,29 +816,55 @@ struct Chosen {
     errors: usize,
 }
 
-/// The part of a marked result's text that a record reads. Pi's report of
-/// a call it refused before running it begins `Validation failed for tool`
-/// and lists the call's arguments, as JSON over several lines, after the
-/// line `Received arguments:`. The record reads the part before that line,
-/// which states what the harness refused; the arguments stay in the tool
-/// result. Any other text is read whole.
+/// The part of a marked result's text whose lines a record chooses. Pi's
+/// report of a call it refused before running it begins `Validation failed
+/// for tool`, and after the line `Received arguments:` it holds the call's
+/// arguments as one JSON value that runs to the end of the text. Of such a
+/// report the record chooses from the part before that line, which states
+/// what the harness refused; the arguments stay in the tool result. Any
+/// other text is read whole, also one that holds those two lines and then
+/// other text, as the output of a command that printed a report does.
 fn read_part(text: &str) -> &str {
     const REFUSAL: &str = "Validation failed for tool \"";
     const ARGUMENTS: &str = "\nReceived arguments:\n";
-    match text.starts_with(REFUSAL) {
-        true => text.find(ARGUMENTS).map_or(text, |at| &text[..at]),
-        false => text,
+    if !text.starts_with(REFUSAL) {
+        return text;
+    }
+    let Some(at) = text.find(ARGUMENTS) else {
+        return text;
+    };
+    let arguments = &text[at + ARGUMENTS.len()..];
+    match serde_json::from_str::<serde::de::IgnoredAny>(arguments) {
+        Ok(_) => &text[..at],
+        Err(_) => text,
     }
 }
 
+/// The exit code that the last non-empty line of a marked result's whole
+/// text states, which is where Pi's shell tool states it (see
+/// [`harness_exit_code`]), with the line's place in the text. A result
+/// that ends in another line states no code.
+fn stated_in(text: &str) -> Option<(i64, Range<usize>)> {
+    let mut end = text.len();
+    for raw in text.rsplit('\n') {
+        let span = end - raw.len()..end;
+        let line = raw.trim();
+        if !line.is_empty() {
+            return harness_exit_code(line).map(|code| (code, span));
+        }
+        if span.start == 0 {
+            break;
+        }
+        end = span.start - 1;
+    }
+    None
+}
+
 /// The lines a record chooses from the text of a marked result, and the
-/// exit code the harness states. Both are read from the part of the text a
-/// record reads (see [`read_part`]), and each chosen line carries its
-/// place in the whole text.
-///
-/// The exit code is read from the last non-empty line alone, which is
-/// where Pi's shell tool states it (see [`harness_exit_code`]); a marked
-/// result that ends in another line states no code.
+/// exit code the harness states. The code is read from the whole text (see
+/// [`stated_in`]). The lines are chosen from the part of the text a record
+/// chooses from (see [`read_part`]), and each carries its place in the
+/// whole text.
 ///
 /// The chosen lines are the first [`MAX_ERROR_LINES`] lines that state an
 /// error, each failure line with the line that completes it, and then the
@@ -824,6 +876,7 @@ fn read_part(text: &str) -> &str {
 /// lines are chosen, and the second reads the output from its end, so
 /// neither holds a table of the output's lines.
 fn chosen_of(text: &str) -> Chosen {
+    let stated = stated_in(text);
     let text = read_part(text);
     let mut lines: Vec<(Kept, Range<usize>)> =
         Vec::with_capacity(MAX_ERROR_LINES + MAX_CLOSING_LINES);
@@ -851,20 +904,14 @@ fn chosen_of(text: &str) -> Chosen {
     }
     let errors = lines.len();
     let mut end = text.len();
-    let mut stated = None;
-    let mut last_read = false;
     let mut closing: Vec<(&str, Range<usize>)> = Vec::with_capacity(MAX_CLOSING_LINES);
     for raw in text.rsplit('\n') {
         let span = end - raw.len()..end;
         let line = raw.trim();
-        if !last_read && !line.is_empty() {
-            last_read = true;
-            stated = harness_exit_code(line).map(|code| (code, span.clone()));
-        }
-        if closing.len() < MAX_CLOSING_LINES && shown(line) {
+        if shown(line) {
             closing.push((line, span.clone()));
         }
-        if span.start == 0 || (last_read && closing.len() == MAX_CLOSING_LINES) {
+        if span.start == 0 || closing.len() == MAX_CLOSING_LINES {
             break;
         }
         end = span.start - 1;
@@ -1026,22 +1073,37 @@ fn named_path(line: &str) -> Option<&str> {
     })
 }
 
+/// A word of a line that may name an error: a run of letters, combining
+/// marks, and numeric characters of any script, `_`, and `.`. A mark
+/// belongs to the letter it follows, so a name spelled with one is one
+/// word.
+static WORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\p{L}\p{M}\p{N}_.]+").expect("the word pattern compiles"));
+
+/// A word that is a name: letters, combining marks, decimal digits, `_`,
+/// and `.` alone.
+static NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[\p{L}\p{M}\p{Nd}_.]+$").expect("the name pattern compiles"));
+
 /// The error a line names: its first word that is a type name ending in
 /// `Error` or `Exception` (`ModuleNotFoundError`,
 /// `java.lang.NullPointerException`) or a diagnostic code of one to four
 /// ASCII capitals and two to six ASCII digits (`E0308`, `TS2307`). A word
-/// is a run of letters and digits of any script, `_`, and `.`, without the
-/// dots at its ends, so a name with a letter outside ASCII is read whole;
-/// a type name begins with a letter. The reading is by shape: the name of
-/// a digest such as `SHA256` has the shape of a code.
+/// is read whole (see [`WORD`]), without the dots at its ends, and is named
+/// whole or left out: a type name holds letters, marks, decimal digits,
+/// `_`, and `.` and begins with a letter, so a name with a letter outside
+/// ASCII or a combining mark is one name, and a word with another numeric
+/// character, such as a fraction, names no error. The reading is by shape:
+/// the name of a digest such as `SHA256` has the shape of a code.
 fn named_error(line: &str) -> Option<&str> {
-    line.split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '.'))
-        .map(|word| word.trim_matches('.'))
+    WORD.find_iter(line)
+        .map(|word| word.as_str().trim_matches('.'))
         .find(|word| {
             let typed = word
                 .strip_suffix("Error")
                 .or_else(|| word.strip_suffix("Exception"))
-                .is_some_and(|stem| stem.starts_with(char::is_alphabetic));
+                .is_some_and(|stem| stem.starts_with(char::is_alphabetic))
+                && NAME.is_match(word);
             let letters = word.bytes().take_while(u8::is_ascii_uppercase).count();
             let digits = word.len() - letters;
             let coded = (1..=4).contains(&letters)
@@ -1188,16 +1250,31 @@ fn carried(value: Option<&Value>) -> Option<&str> {
         .filter(|id| !id.trim().is_empty())
 }
 
-/// The id the `position`th tool call part of the Pi row `row` carries
-/// itself, by the codec's precedence: its `id` when that is a string, else
-/// its `callId`. The codec gives a call part without one a synthesized id,
-/// which names no execution.
-fn native_call_id(row: &Value, position: usize) -> Option<&str> {
-    let parts = row.get("message")?.get("content")?.as_array()?;
-    let part = parts
-        .iter()
+/// Whether the Pi row `row` stands for a message entry of the session as
+/// the session holds it. The Pi plugin sets a row's `type` to its entry's
+/// when the row's message is that entry's message, so a message that a
+/// context handler changed, and one whose entry the plugin cannot read,
+/// carry no entry's identity. Source capture reads a row by the same field.
+fn entry_row(row: &Value) -> bool {
+    row.get("type").and_then(Value::as_str) == Some("message")
+}
+
+/// The tool call parts of the Pi row `row`, in the order of its content,
+/// which is the order of the tool call blocks the codec derives from it.
+fn native_call_parts(row: &Value) -> impl Iterator<Item = &Value> {
+    row.get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
         .filter(|part| part.get("type").and_then(Value::as_str) == Some("toolCall"))
-        .nth(position)?;
+}
+
+/// The id the tool call part `part` of a Pi row carries itself, by the
+/// codec's precedence: its `id` when that is a string, else its `callId`.
+/// The codec gives a call part without one a synthesized id, which names
+/// no execution.
+fn native_call_id(part: &Value) -> Option<&str> {
     match part.get("id") {
         Some(Value::String(_)) => carried(part.get("id")),
         _ => carried(part.get("callId")),
@@ -1214,12 +1291,17 @@ fn native_result_id(row: &Value) -> Option<&str> {
         .flatten()
 }
 
+/// A command call that waits for its result.
+struct Waiting<'a> {
+    tool: &'a str,
+    command: &'a str,
+}
+
 /// The tool turn under way while a window's results are paired.
 #[derive(Default)]
 struct Turn<'a> {
-    /// The command calls no result has answered yet: the tool's name and
-    /// the command line, by the call's id.
-    calls: HashMap<&'a str, (&'a str, &'a str)>,
+    /// The command calls no result has answered yet, by the call's id.
+    calls: HashMap<&'a str, Waiting<'a>>,
     /// The ids the turn's calls and results carry, and those that two
     /// calls or two results of the turn carry.
     named: HashSet<&'a str>,
@@ -1252,22 +1334,26 @@ impl<'a> Turn<'a> {
 /// with the call it answers in its tool turn, which is a command call of
 /// the assistant message before it, with no message of another role
 /// between them. A tool turn begins at an assistant message and ends at
-/// the next message that is neither the assistant's nor a tool's. A result
-/// under an id that two tool calls or two tool results of its turn carry
-/// is left out, since the id names neither alone; an id that another turn
-/// uses names another execution there. The last
-/// [`MEMO_CALLS_PER_SESSION`] of the remaining pairs are kept.
+/// the next assistant message, which begins another, or at the next
+/// message that is neither the assistant's nor a tool's. A result under an
+/// id that two tool calls or two tool results of its turn carry is left
+/// out, since the id names neither alone; an id that another turn uses
+/// names another execution there. The last [`MEMO_CALLS_PER_SESSION`] of
+/// the remaining pairs are kept.
 ///
 /// `native` holds the Pi rows the window's messages were derived from, one
-/// row for each message in order. A call counts when the tool call part at
-/// its place in its row carries the call's id itself, and a result when its
-/// row carries its `toolCallId` itself (see [`native_call_id`],
-/// [`native_result_id`]); any other call is answered by no result, and any
-/// other result changes no record and settles no call.
+/// row for each message in order. A call or a result counts when its row
+/// stands for a message entry of the session (see [`entry_row`]) and
+/// carries the id itself: for a call, the tool call part at the block's
+/// place among the row's tool call parts (see [`native_call_id`]), and for
+/// a result, the row's `toolCallId` (see [`native_result_id`]). Any other
+/// call is answered by no result, and any other result changes no record
+/// and settles no call.
 ///
 /// `None` for a window that names no executions: one in which two messages
-/// share an entry id, and one whose rows differ from its messages in number
-/// or in an id.
+/// share an entry id or an entry id passes [`crate::wire::MAX_MID_BYTES`],
+/// which the transform refuses too, and one whose rows differ from its
+/// messages in number or in an id.
 fn command_results<'a>(
     messages: &'a [Arc<crate::wire::IngressMessage>],
     native: &'a [Arc<Value>],
@@ -1276,6 +1362,7 @@ fn command_results<'a>(
     let derived = native.len() == messages.len()
         && native.iter().zip(messages).all(|(row, message)| {
             row.get("id").and_then(Value::as_str) == Some(message.mid.as_str())
+                && message.mid.len() <= crate::wire::MAX_MID_BYTES
                 && entries.insert(message.mid.as_str())
         });
     if !derived {
@@ -1288,34 +1375,36 @@ fn command_results<'a>(
         if role == "assistant" {
             turn.close(&mut kept);
         }
-        let mut call_parts = 0;
+        let held = entry_row(row);
+        // Each tool call block takes the next tool call part of its row.
+        let mut parts = native_call_parts(row);
         for block in message.ck.content() {
             match block.kind() {
                 BlockKind::ToolCall {
                     id, name, input, ..
                 } => {
                     let id = execution_id(block, id);
-                    let position = call_parts;
-                    call_parts += 1;
-                    if native_call_id(row, position) != Some(id) {
+                    let carried = parts.next().and_then(native_call_id);
+                    if !held || carried != Some(id) {
                         continue;
                     }
                     if !turn.named.insert(id) {
                         turn.shared.insert(id);
                     }
                     if let Some(command) = command_line(input).filter(|_| role == "assistant") {
-                        turn.calls.insert(id, (name.as_str(), command));
+                        let tool = name.as_str();
+                        turn.calls.insert(id, Waiting { tool, command });
                     }
                 }
                 BlockKind::ToolResult { id, output, .. } => {
                     let call = execution_id(block, id);
-                    if native_result_id(row) != Some(call) {
+                    if !held || native_result_id(row) != Some(call) {
                         continue;
                     }
                     if !turn.answered.insert(call) {
                         turn.shared.insert(call);
                     }
-                    if let Some((tool, command)) = turn.calls.remove(call) {
+                    if let Some(Waiting { tool, command }) = turn.calls.remove(call) {
                         turn.paired.push(Candidate {
                             entry: message.mid.as_str(),
                             call,
@@ -1355,9 +1444,10 @@ impl HandlerCore {
     /// at a time, and [`MAX_CHECKPOINTS`] over all sessions. The memo
     /// filters the window while the Kernel holds the history its judged
     /// calls stand in (see [`FailureMemo::history_in`]), and the task
-    /// judges under that history. Returns `None` when the request carries
-    /// no native rows, when the window names no executions, and when it
-    /// holds no unjudged result, so the caller spawns no task.
+    /// judges under that history. Returns `None` when the session's id
+    /// passes the transform's byte bound, when the request carries no
+    /// native rows, when the window names no executions, and when it holds
+    /// no unjudged result, so the caller spawns no task.
     pub(crate) fn failure_checkpoint(
         &self,
         binding: &SessionBinding,
@@ -1376,6 +1466,10 @@ impl HandlerCore {
         }
         let kernel = self.kernel.kernel_store().ok()?;
         let scope = binding.kernel_project.digest();
+        // The transform refuses a session id past its byte bound.
+        if binding.session.len() > crate::transform::MAX_REQUEST_IDENTITY_BYTES {
+            return None;
+        }
         // A Pi window reaches the daemon as the session's rows.
         let native = request.native_messages.as_deref()?;
         let mut considered = command_results(&request.messages, native)?;
@@ -1522,17 +1616,25 @@ fn names_whole(text: &str) -> bool {
 }
 
 /// Whether a Kernel error leaves a call for a later pass: the Kernel is
-/// busy or failing, another writer changed a row under the judgment, or a
-/// read named a commit past the tip, as it does once a restore has
-/// installed an earlier history. Any other refusal would meet the same
-/// result again.
+/// busy or failing, a restore that failed has closed its handle, another
+/// writer changed a row under the judgment, or a read named a commit past
+/// the tip, as it does once a restore has installed an earlier history. Any
+/// other refusal would meet the same result again.
 const fn leaves_for_later(error: &kernel::KernelError) -> bool {
     use kernel::KernelError::{
-        Busy, Deadline, Fault, FenceLost, FutureSnapshot, Held, Io, NotFound,
+        Busy, Deadline, Fault, FenceLost, FutureSnapshot, Held, InvalidRestore, Io, NotFound,
     };
     matches!(
         error,
-        Deadline | Busy | Held | Io | FenceLost | Fault | NotFound | FutureSnapshot
+        Deadline
+            | Busy
+            | Held
+            | Io
+            | FenceLost
+            | Fault
+            | NotFound
+            | FutureSnapshot
+            | InvalidRestore
     )
 }
 
@@ -1713,21 +1815,26 @@ impl FailureCheckpoint {
                     Err(Some(reason)) => Ok(Judged::Left(reason)),
                     Err(None) => Ok(Judged::Nothing),
                 };
-                let settled = match &judged {
+                let settles = match &judged {
                     Ok(Judged::Restored) => false,
                     Ok(_) => true,
                     Err(error) => !leaves_for_later(error),
                 };
-                match &judged {
+                // A settled call is learned while the memo stands in the
+                // history its judgment read; the check and the insert share
+                // one hold of the memo.
+                let learned = match &judged {
                     // The calls judged so far stand in the replaced history.
-                    Ok(Judged::Restored) => memo().give_up_calls(),
-                    _ if settled => memo().learn(&pin.session, pin.epoch, result.digest),
-                    _ => {}
-                }
-                Some((judged, settled))
+                    Ok(Judged::Restored) => {
+                        memo().give_up_calls();
+                        false
+                    }
+                    _ => settles && memo().learn(&pin.session, pin.epoch, result.digest, history),
+                };
+                Some((judged, learned))
             }));
             drop(gate);
-            let (judged, settled) = match judged {
+            let (judged, learned) = match judged {
                 Err(panic) => std::panic::resume_unwind(panic),
                 Ok(None) => break,
                 Ok(Some(judgment)) => judgment,
@@ -1740,7 +1847,7 @@ impl FailureCheckpoint {
             }
             // A call left unlearned ends the pass, so a later pass judges
             // it and the results after it in window order.
-            if !settled {
+            if !learned {
                 break;
             }
         }
@@ -2547,7 +2654,8 @@ mod tests {
             plain
         );
         // Two command lines that differ in a credential the redactor finds
-        // are one command, and the credential reaches no word shown.
+        // under one mark are one command, and the credential reaches no
+        // word shown.
         let (assignment, value) = keyed_credential();
         let rotated = assignment.replace(&value, "an0ther-fixture-value-88");
         let deploy = |assignment: &str| format!("deploy --{assignment} --target api");
@@ -2782,6 +2890,82 @@ mod tests {
         assert_eq!(read_part(&ran), ran);
     }
 
+    /// A line states an error when one of its runs of letters and digits
+    /// is an error word, so a word joined to others by `_` or `.` counts.
+    #[test]
+    fn an_error_word_inside_an_identifier_makes_its_line_an_error_line() {
+        for line in ["retry error_count=3", "hook on.failure ran", "FAILED."] {
+            let text = format!("first plain line\n{line}\nplain one\nplain two");
+            let chosen = chosen_of(&text);
+            assert_eq!(chosen.errors, 1, "{line}");
+            assert_eq!(chosen.lines[0].0.text, line);
+            assert!(!chosen.lines[0].0.closing, "{line}");
+        }
+        let plain = chosen_of("first plain line\nretry errorcount=3\nplain one\nplain two");
+        assert_eq!(plain.errors, 0);
+    }
+
+    /// The exit code is the one the last non-empty line of the whole
+    /// result states. A command's own output that holds the two lines of a
+    /// refusal report, with other text after its arguments, is read whole.
+    #[test]
+    fn a_command_s_output_that_holds_a_refusal_report_keeps_its_own_exit_code() {
+        // The output states a code ahead of the arguments' line and ends
+        // in the harness's status line.
+        let printed = "Validation failed for tool \"x\":\nCommand exited with code 7\n\nReceived arguments:\n{}\n\nCommand exited with code 2";
+        assert_eq!(read_part(printed), printed);
+        let (code, kept) = failed(printed);
+        assert_eq!(code, Some(2));
+        assert_eq!(
+            kept.last().map(String::as_str),
+            Some("Command exited with code 2")
+        );
+        let unit = input("make", printed, true).observe(SCOPE).unwrap();
+        let Outcome::Failed(failure) = &unit.outcome else {
+            panic!("a marked result");
+        };
+        let record = failed_record("s1", &unit, failure);
+        assert!(
+            record.summary.contains("its last line states exit code 2"),
+            "{}",
+            record.summary
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&record.rationale).unwrap()["exit_code"],
+            2
+        );
+        // A whole report that a command printed, and then the status line.
+        let saved = "Validation failed for tool \"bash\":\n  - timeout: must be number\n\nReceived arguments:\n{\n  \"command\": \"make\"\n}\n\nCommand exited with code 3";
+        assert_eq!(read_part(saved), saved);
+        assert_eq!(failed(saved).0, Some(3));
+        // The harness's own report ends in its arguments and states no
+        // code, also when a line ahead of the arguments holds one.
+        let refused = "Validation failed for tool \"bash\":\nCommand exited with code 7\n\nReceived arguments:\n{\n  \"command\": \"make\"\n}\n";
+        assert_eq!(
+            read_part(refused),
+            "Validation failed for tool \"bash\":\nCommand exited with code 7\n"
+        );
+        let (code, kept) = failed(refused);
+        assert_eq!(code, None);
+        assert_eq!(
+            kept,
+            [
+                "Validation failed for tool \"bash\":",
+                "Command exited with code 7"
+            ]
+        );
+        // A code of 0 and a last line of other words state no code.
+        assert_eq!(
+            stated_in("error: boom\nCommand exited with code 0").map(|(code, _)| code),
+            Some(0)
+        );
+        assert_eq!(failed("error: boom\nCommand exited with code 0").0, None);
+        assert_eq!(
+            stated_in("Command exited with code 4\nerror: boom\n\n"),
+            None
+        );
+    }
+
     #[test]
     fn pi_s_note_after_a_cut_output_is_a_line_of_the_result() {
         let note = "[Showing lines 3-9 of 9. Full output: /tmp/pi-bash-0123456789abcdef.log]";
@@ -2979,6 +3163,23 @@ mod tests {
             // A name with a letter outside ASCII is read whole.
             ("ÜberError: no such file", Some("ÜberError")),
             ("raise ΣException()", Some("ΣException")),
+            // A combining mark belongs to the letter it follows: a
+            // decomposed accent and a virama keep the name whole.
+            ("E\u{301}checError: abandon", Some("E\u{301}checError")),
+            (
+                "\u{915}\u{94d}\u{937}Error raised",
+                Some("\u{915}\u{94d}\u{937}Error"),
+            ),
+            // A word with a numeric character that is no decimal digit
+            // names no error, and the words after it are read.
+            ("\u{bd}Error then E0308", Some("E0308")),
+            ("\u{bd}Error alone", None),
+            // Punctuation of any script parts a name from its line.
+            ("\u{201c}ValueError\u{201d} was raised", Some("ValueError")),
+            (
+                "Parse\u{0663}Error: digits of any script",
+                Some("Parse\u{0663}Error"),
+            ),
         ] {
             assert_eq!(named_error(line), error, "{line}");
         }
@@ -3151,6 +3352,7 @@ mod tests {
             E::Fault,
             E::NotFound,
             E::FutureSnapshot,
+            E::InvalidRestore,
         ];
         for error in E::ALL {
             assert_eq!(leaves_for_later(error), later.contains(error), "{error:?}");
@@ -3198,7 +3400,7 @@ mod tests {
     /// The Pi row of an assistant message whose tool call parts are
     /// `parts`.
     fn calls_row(row: &str, parts: Vec<Value>) -> Arc<Value> {
-        Arc::new(json!({ "id": row, "message": {
+        Arc::new(json!({ "id": row, "type": "message", "message": {
             "role": "assistant", "content": parts, "usage": {}, "stopReason": "toolUse",
             "timestamp": 1_000,
         } }))
@@ -3228,7 +3430,7 @@ mod tests {
         if let Some(id) = id {
             message["toolCallId"] = id;
         }
-        Arc::new(json!({ "id": row, "message": message }))
+        Arc::new(json!({ "id": row, "type": "message", "message": message }))
     }
 
     /// The Pi row of a result that answers the call `id`.
@@ -3242,10 +3444,35 @@ mod tests {
             "assistant" => json!([{ "type": "text", "text": "Go on." }]),
             _ => json!("Go on."),
         };
-        Arc::new(json!({ "id": row, "message": {
+        Arc::new(json!({ "id": row, "type": "message", "message": {
             "role": role, "content": content, "usage": {}, "stopReason": "stop",
             "timestamp": 1_000,
         } }))
+    }
+
+    /// `row` as the plugin sends a message that is another than its
+    /// session entry's: its id and its message alone.
+    fn untyped(row: &Arc<Value>) -> Arc<Value> {
+        let mut row = Value::clone(row);
+        row.as_object_mut().unwrap().remove("type");
+        Arc::new(row)
+    }
+
+    /// The `(entry, call, command)` of each command result the window of
+    /// `rows` pairs.
+    fn paired_commands(rows: &[Arc<Value>]) -> Vec<(String, String, String)> {
+        let messages = derived(rows);
+        command_results(&messages, rows)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.entry.to_owned(),
+                    candidate.call.to_owned(),
+                    candidate.command.to_owned(),
+                )
+            })
+            .collect()
     }
 
     /// The window the transform handler derives from `rows`.
@@ -3430,6 +3657,7 @@ mod tests {
         let BlockKind::ToolCall { id, .. } = synthesized[0].ck.content()[0].kind() else {
             panic!("a tool call block");
         };
+        let id = &id.clone();
         let alone = [
             calls_row("0000000a", vec![bare.clone()]),
             answer_row("0000000b", id),
@@ -3439,10 +3667,72 @@ mod tests {
             "type": "toolCall", "id": id, "name": "read", "arguments": { "path": "src/lib.rs" },
         });
         let beside = [
-            calls_row("0000000a", vec![bare, lent]),
+            calls_row("0000000a", vec![bare.clone(), lent]),
             answer_row("0000000b", id),
         ];
         assert_eq!(paired(&beside), pairs(&[]));
+        // A text part that holds the id lends it to no call.
+        let text_lends = [
+            calls_row(
+                "0000000a",
+                vec![
+                    bare.clone(),
+                    json!({ "type": "text", "id": id, "text": "Running." }),
+                ],
+            ),
+            answer_row("0000000b", id),
+        ];
+        assert_eq!(paired(&text_lends), pairs(&[]));
+        // A command call that carries that id itself, after the call
+        // without one, is the call the result answers.
+        let own = json!({
+            "type": "toolCall", "id": id, "name": "bash",
+            "arguments": { "command": "make check" },
+        });
+        let owned = [
+            calls_row("0000000a", vec![bare, own]),
+            answer_row("0000000b", id),
+        ];
+        assert_eq!(
+            paired_commands(&owned),
+            [("0000000b".to_owned(), id.clone(), "make check".to_owned())]
+        );
+        // A call takes the place of its part among the row's tool call
+        // parts: a text part ahead of it takes none, and two calls of one
+        // row are each answered by their own result.
+        let check = |id: &str, command: &str| {
+            json!({
+                "type": "toolCall", "id": id, "name": "bash", "arguments": { "command": command },
+            })
+        };
+        let two = [
+            calls_row(
+                "0000000a",
+                vec![
+                    json!({ "type": "text", "text": "Running both." }),
+                    check("c1", "make lint"),
+                    json!({ "type": "text", "text": "And." }),
+                    check("c2", "make test"),
+                ],
+            ),
+            answer_row("0000000b", "c2"),
+            answer_row("0000000c", "c1"),
+        ];
+        assert_eq!(
+            paired_commands(&two),
+            [
+                (
+                    "0000000b".to_owned(),
+                    "c2".to_owned(),
+                    "make test".to_owned()
+                ),
+                (
+                    "0000000c".to_owned(),
+                    "c1".to_owned(),
+                    "make lint".to_owned()
+                ),
+            ]
+        );
         // A composite id pairs by its whole native text.
         let composite = [
             call_row("0000000a", "call-1|item-1"),
@@ -3477,6 +3767,48 @@ mod tests {
         assert!(command_results(&messages, &[]).is_none());
         let swapped = [rows[1].clone(), rows[0].clone()];
         assert!(command_results(&messages, &swapped).is_none());
+        // An entry id of the transform's bound names an execution, and one
+        // byte more names none.
+        for (bytes, named) in [
+            (crate::wire::MAX_MID_BYTES, true),
+            (crate::wire::MAX_MID_BYTES + 1, false),
+        ] {
+            let entry = "r".repeat(bytes);
+            let long = [call_row("a1", "c1"), answer_row(&entry, "c1")];
+            assert_eq!(paired(&long).is_some(), named, "{bytes}");
+        }
+    }
+
+    /// A row carries its session entry's `type` when its message is the
+    /// entry's message. A call or a result whose row carries none counts
+    /// for nothing: the call is answered by no result, and the result
+    /// changes no record.
+    #[test]
+    fn a_row_that_is_no_message_entry_of_the_session_names_no_execution() {
+        let rows = [call_row("a1", "c1"), answer_row("r1", "c1")];
+        assert_eq!(paired(&rows), pairs(&[("r1", "c1")]));
+        let edited_result = [rows[0].clone(), untyped(&rows[1])];
+        assert_eq!(paired(&edited_result), pairs(&[]));
+        let edited_call = [untyped(&rows[0]), rows[1].clone()];
+        assert_eq!(paired(&edited_call), pairs(&[]));
+        // A type of another entry kind, and one that is no string.
+        for kind in [json!("custom_message"), json!(null), json!(7)] {
+            let mut other = Value::clone(&rows[1]);
+            other["type"] = kind.clone();
+            assert_eq!(
+                paired(&[rows[0].clone(), Arc::new(other)]),
+                pairs(&[]),
+                "{kind}"
+            );
+        }
+        // A second result under the id in an untyped row shares no id with
+        // the turn: the typed pair stands.
+        let beside = [
+            rows[0].clone(),
+            rows[1].clone(),
+            untyped(&answer_row("r2", "c1")),
+        ];
+        assert_eq!(paired(&beside), pairs(&[("r1", "c1")]));
     }
 
     /// The memo's judged calls stand in one Kernel history. Under another
@@ -3489,7 +3821,7 @@ mod tests {
         let mut memo = FailureMemo::default();
         let epoch = memo.pin("s1");
         memo.follow(history);
-        memo.learn("s1", epoch, 7);
+        assert!(memo.learn("s1", epoch, 7, history));
         memo.follow(history);
         assert!(memo.has_seen("s1", 7), "the same history keeps the call");
         let budget = EvalBudget::new(None, Arc::new(AtomicBool::new(false)));
@@ -3515,7 +3847,11 @@ mod tests {
         memo.follow(restored);
         assert!(!memo.has_seen("s1", 7));
         assert!(memo.current("s1", epoch) && memo.busy("s1"));
-        memo.learn("s1", epoch, 7);
+        // A call judged under the replaced history is kept out, and one
+        // judged under the history the memo stands in is learned.
+        assert!(!memo.learn("s1", epoch, 7, history));
+        assert!(!memo.has_seen("s1", 7));
+        assert!(memo.learn("s1", epoch, 7, restored));
         assert!(memo.has_seen("s1", 7));
         // A pass reads the memo's history while the Kernel holds it, and
         // gives the judged calls up once the Kernel holds another.
@@ -3530,6 +3866,9 @@ mod tests {
             None,
             "a memo that holds no history"
         );
+        // A memo without a history learns no call.
+        assert!(!memo.learn("s1", epoch, 7, restored));
+        assert!(!memo.has_seen("s1", 7));
     }
 
     /// The writer's commit judges the composed record itself and requires
@@ -3625,7 +3964,27 @@ mod tests {
         assert_eq!(wrote, Judged::Wrote);
         assert_eq!(live(), std::slice::from_ref(&second));
         foreign("a-third-key", Some(&second));
-        assert_eq!(live(), [second]);
+        assert_eq!(live(), std::slice::from_ref(&second));
+        // A live row at a later revision of the lineage holds the id the
+        // next record plans, while the record it would take the place of
+        // is live: both rows stay live and the commit logs no receipt.
+        let (third, wrote) = commit("call-3", 5, None, clean.clone());
+        assert_eq!(wrote, Judged::Wrote);
+        assert_eq!(live(), [third.clone(), second.clone()]);
+        let tip = kernel.tip().unwrap();
+        let key = writer.record_key("s1", "a-fourth-key").unwrap();
+        let row = Row {
+            id: third.clone(),
+            key: key.clone(),
+            lineage: &lineage,
+            revision: 3,
+            target: Some(&second),
+            payload: clean.clone(),
+        };
+        assert_eq!(writer.commit(row, history, &budget).unwrap(), occupied);
+        assert_eq!(kernel.tip().unwrap(), tip);
+        assert!(!writer.committed(&key, &budget).unwrap());
+        assert_eq!(live(), [third, second]);
     }
 
     #[test]
@@ -4029,6 +4388,8 @@ mod tests {
     /// Each part of a record passes the redactor alone, and the record is
     /// judged again as composed: a tool name that ends in a secret's key
     /// and `=` takes the words after it in the first line as its value.
+    /// The fixture rests on that reading of an empty assignment by the
+    /// redactor; the writer's test pins the refusal with a credential.
     #[test]
     fn a_name_that_passes_alone_is_judged_again_in_the_composed_record() {
         let tool = format!("run {}=", ["api_", "tok", "en"].concat());
@@ -4067,6 +4428,21 @@ mod tests {
         ] {
             assert!(!is_failure_lineage(other), "{other}");
         }
+        // The stored encodings, computed once outside this module: the
+        // SHA-256 of `tool_failure` and the four parts, each behind its
+        // length as eight little-endian bytes, and the first eight bytes
+        // of the session id's SHA-256 as a big-endian number.
+        assert_eq!(
+            record_id("project-digest", "session-1", "entry-0007", "call_9|item"),
+            "mem_0baafb97e025e9429e0a6759e0a5e35c"
+        );
+        assert_eq!(
+            session_keys("session-1"),
+            (
+                "9514267805222021320:".to_owned(),
+                "9514267805222021320;".to_owned()
+            )
+        );
         let (from, to) = session_keys("s1");
         assert!(from < to && from.ends_with(':') && to.ends_with(';'));
         assert_ne!(session_keys("s2").0, from);
@@ -4093,12 +4469,15 @@ mod tests {
     /// and a pin after the fence is current.
     #[test]
     fn a_delete_fence_retires_the_session_s_entry_at_both_ends() {
+        let (_directory, history) = a_history();
         let memo = Mutex::new(FailureMemo::default());
+        memo.lock().unwrap().follow(history);
         let gate = Mutex::new(());
         let pin = || memo.lock().unwrap().pin("s1");
         let current = |epoch| memo.lock().unwrap().current("s1", epoch);
         let before = pin();
-        memo.lock().unwrap().learn("s1", before, 7);
+        assert!(memo.lock().unwrap().learn("s1", before, 7, history));
+        assert!(memo.lock().unwrap().has_seen("s1", 7));
         let fence = DeleteFence::raise(gate.lock().unwrap(), &memo, "s1");
         assert!(gate.try_lock().is_err(), "the fence holds the gate");
         assert!(!current(before), "the entry pinned before the delete");
@@ -4121,14 +4500,25 @@ mod tests {
         assert!(!memo.lock().unwrap().busy("other"));
     }
 
+    /// The history of a Kernel of its own, with the directory that holds
+    /// the Kernel.
+    fn a_history() -> (tempfile::TempDir, kernel::CommitReadIncarnation) {
+        let directory = tempfile::tempdir().unwrap();
+        let kernel = kernel::KernelStore::open(directory.path()).unwrap();
+        let history = kernel.capture_commit_read_target().unwrap().incarnation;
+        (directory, history)
+    }
+
     #[test]
     fn the_memo_holds_its_bound_of_calls_sessions_and_checkpoints() {
+        let (_directory, history) = a_history();
         let mut memo = FailureMemo::default();
+        memo.follow(history);
         let epoch = memo.pin("s1");
         assert!(memo.busy("s1"), "one checkpoint of a session at a time");
         assert!(!memo.busy("s2"));
         for call in 0..MEMO_CALLS_PER_SESSION as u64 + 1 {
-            memo.learn("s1", epoch, call);
+            assert!(memo.learn("s1", epoch, call, history));
         }
         assert_eq!(memo.calls_for_test("s1"), MEMO_CALLS_PER_SESSION);
         assert!(!memo.has_seen("s1", 0), "the call learned first gives way");
@@ -4142,7 +4532,7 @@ mod tests {
             memo.busy("s1"),
             "the deleted session's checkpoint still runs"
         );
-        memo.learn("s1", epoch, 7);
+        assert!(!memo.learn("s1", epoch, 7, history));
         assert_eq!(memo.calls_for_test("s1"), 0);
         memo.release("s1", epoch);
         assert!(!memo.busy("s1"));
