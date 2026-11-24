@@ -148,7 +148,7 @@ export function createReviewClassifierPump(
 
     /** Runs one classifier call and reports its outcome. A call that ignored its abort signal is returned still running, in an object so that awaiting the answer leaves the call unawaited. */
     async function answer(
-        scope: ReviewClassifierScope,
+        loop: Loop,
         work: ReviewClassifierWork,
     ): Promise<{ call: Promise<unknown> } | undefined> {
         let running: Promise<unknown> | undefined;
@@ -186,7 +186,8 @@ export function createReviewClassifierPump(
             clearTimeout(timer);
             closing.signal.removeEventListener("abort", cancel);
         }
-        // A report the daemon does not receive leaves the review to the end of its own wait.
+        // The lease belongs to the project, so the report travels on the session the loop serves when the call has ended. A report the daemon does not receive leaves the review to the end of its own wait.
+        const scope = loop.scope;
         await client
             .call({
                 sessionId: scope.sessionId,
@@ -251,8 +252,7 @@ export function createReviewClassifierPump(
                 const work = reviewClassifierWork(response);
                 // Work outside the contract, and work that arrives for a session released during the call, stays unanswered; its review's wait ends the attempt.
                 if (!work || loop.stopped) continue;
-                // The lease belongs to the project, so the session the loop serves now answers it.
-                const stuck = await answer(loop.scope, work);
+                const stuck = await answer(loop, work);
                 // A call that ignored its abort signal is still running in the harness. The loop waits for it, so a project has one such call at a time.
                 if (stuck) await Promise.race([stuck.call.catch(() => undefined), closed]);
             }

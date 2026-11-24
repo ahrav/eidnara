@@ -250,6 +250,32 @@ describe("createReviewClassifierPump", () => {
         ]);
     });
 
+    it("reports a finished call on the session that took the loop over while it ran", async () => {
+        const calls: Array<[string, string]> = [];
+        const client = {
+            call: async (args: { method: string; sessionId: string }) => {
+                calls.push([args.method.replace("memory.review.classify.", ""), args.sessionId]);
+                if (calls.length === 1) return work();
+                return args.method.endsWith("submit")
+                    ? { state: "processed" }
+                    : { state: "disabled" };
+            },
+        };
+        const finished = Promise.withResolvers<Record<string, unknown>>();
+        const pump = createReviewClassifierPump(client, () => finished.promise);
+        pump.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        pump.stop(SCOPE.sessionId);
+        pump.start({ ...SCOPE, sessionId: "s2" });
+        finished.resolve({});
+        await pump.idle();
+        expect(calls).toEqual([
+            ["next", "s1"],
+            ["submit", "s2"],
+            ["next", "s2"],
+        ]);
+    });
+
     it("goes on for the session that started while the old session's call ended the loop", async () => {
         // A `disabled` answer to the old session's call.
         {

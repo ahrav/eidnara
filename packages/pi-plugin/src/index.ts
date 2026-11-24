@@ -818,7 +818,11 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             const reviewer = deps.config.memory_reviewer;
             const classifier = reviewer?.enabled ? reviewer.classifier?.trim() : undefined;
             if (!sessionId || !deps.projectIdentity || !classifier) return;
-            if (!piHasReviewClassifier(ctx, classifier)) return;
+            if (!piHasReviewClassifier(ctx, classifier)) {
+                // A session whose classifier lost its credential stops asking for work, so the daemon's chat model decides.
+                reviewClassifier.pump?.stop(sessionId);
+                return;
+            }
             reviewClassifier.latest = ctx;
             reviewClassifier.pump ??= createReviewClassifierPump(moduleClient, (work, signal) =>
                 piReviewClassifierExecutor(reviewClassifier.latest ?? ctx)(work, signal),

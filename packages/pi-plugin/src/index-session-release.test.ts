@@ -240,6 +240,42 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
+    it("stops asking for classifier work once the classifier's credential is gone", async () => {
+        const methods: string[] = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                methods.push(input.method);
+                return { state: "ready" };
+            },
+        );
+        try {
+            const { registrations, shutdown } = await registeredHandlers({
+                memory_reviewer: { enabled: true, classifier: "typesafe/jev-latest" },
+            });
+            const sessionStart = registrations.handlers.get("session_start");
+            if (typeof sessionStart !== "function") throw new Error("session_start not registered");
+            let configured = true;
+            const ctx = {
+                ...captureContext({}),
+                modelRegistry: {
+                    getModelOfType: () => ({}),
+                    hasConfiguredAuth: () => configured,
+                    classify: async () => ({}),
+                },
+            };
+            await sessionStart({ reason: "startup" }, ctx);
+            configured = false;
+            await sessionStart({ reason: "startup" }, ctx);
+            // The loop's pause between two calls is two seconds; a stopped loop makes no second call.
+            await new Promise((resolve) => setTimeout(resolve, 2_300));
+            const asked = methods.filter((method) => method === "memory.review.classify.next");
+            expect(asked).toHaveLength(1);
+            await shutdown({ reason: "quit" }, ctx);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("returns from agent_end while the drain is still waiting on the daemon", async () => {
         const next = Promise.withResolvers<unknown>();
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
