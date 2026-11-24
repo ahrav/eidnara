@@ -16,8 +16,8 @@ use crate::decay_render::{
     PRESSURE_WINDOW, TokenCount, counting, fold_plan, m0_block, render_owned_rows,
 };
 use crate::memory_render::{
-    CURRENT_WORK_SECTION, M0Inputs, is_positive_memory_category, push_category_open,
-    render_m0_counted, render_memory_block, render_memory_line,
+    CURRENT_WORK_SECTION, M0Inputs, delivered_memory_frame, is_positive_memory_category,
+    push_category_open, render_delivered_memory_block, render_m0_counted, render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
 
@@ -82,7 +82,7 @@ pub(crate) fn trim_memories_to_budget(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> (Vec<CanonicalMemory>, u64) {
     let budget = budget_tokens.max(1.0);
-    let wrapper = estimate_tokens("<project-memory>\n</project-memory>");
+    let wrapper = estimate_tokens(delivered_memory_frame());
     if wrapper as f64 > budget {
         return (Vec::new(), 0);
     }
@@ -278,7 +278,7 @@ pub fn compose_m0(
         },
         tokens,
     );
-    let project_memory = render_memory_block(selected_memories, "project-memory");
+    let project_memory = render_delivered_memory_block(selected_memories);
     if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(&project_memory);
@@ -310,7 +310,7 @@ mod trim_memories_tests {
     }
 
     /// The loop the delegating implementation replaced, kept as the reference.
-    fn reference(
+    pub(super) fn reference(
         memories: &[CanonicalMemory],
         budget_tokens: f64,
         estimate_tokens: impl Fn(&str) -> usize + Copy,
@@ -318,7 +318,7 @@ mod trim_memories_tests {
         let budget = budget_tokens.max(1.0);
         let mut selected = Vec::new();
         let mut categories = std::collections::HashSet::<&str>::new();
-        let mut used = estimate_tokens("<project-memory>\n</project-memory>") as f64;
+        let mut used = estimate_tokens(delivered_memory_frame()) as f64;
         for memory in memories
             .iter()
             .filter(|memory| is_positive_memory_category(&memory.category))
@@ -352,7 +352,7 @@ mod trim_memories_tests {
             3,
             "the positive rows are admitted under a generous budget"
         );
-        let wrapper = bytes("<project-memory>\n</project-memory>") as f64;
+        let wrapper = bytes(delivered_memory_frame()) as f64;
         for budget in [
             f64::NAN,
             -3.0,
@@ -385,11 +385,13 @@ mod trim_memories_tests {
     /// The tokens of the `CURRENT_WORK` element `rows` render, through the
     /// line break that follows it, by `estimate`.
     fn section_tokens(rows: &[CanonicalMemory], estimate: impl Fn(&str) -> usize) -> usize {
-        let block = render_memory_block(rows, "project-memory");
+        let block = render_delivered_memory_block(rows);
         block
             .find(&format!("<{CURRENT_WORK_SECTION}"))
             .map_or(0, |start| {
-                estimate(&block[start..block.len() - "</project-memory>".len()])
+                let close = format!("</{CURRENT_WORK_SECTION}>\n");
+                let end = block.find(&close).expect("the element closes") + close.len();
+                estimate(&block[start..end])
             })
     }
 
@@ -424,10 +426,37 @@ mod trim_memories_tests {
                 "budget {budget}"
             );
             assert!(
-                bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget,
+                bytes(&render_delivered_memory_block(&kept)) as f64 <= budget,
                 "budget {budget}"
             );
         }
+    }
+
+    /// The section's charge is its rendered bytes, tags and line breaks
+    /// included: a quarter that equals the bytes of four rows' element holds
+    /// the four, and a quarter one byte below holds three.
+    #[test]
+    fn the_sections_charge_is_the_bytes_its_element_renders() {
+        let bytes = |text: &str| text.len();
+        let requests: Vec<CanonicalMemory> = (0..10)
+            .map(|id| work(id, &format!("request number {id}")))
+            .collect();
+        let element = section_tokens(&requests[..4], bytes);
+        let exact = (element * 4) as f64;
+        assert_eq!(
+            trim_block_to_budget(&[], &requests, exact, bytes),
+            requests[..4]
+        );
+        assert_eq!(
+            trim_block_to_budget(&[], &requests, exact - 4.0, bytes),
+            requests[..3]
+        );
+        // A lasting category's wrapper is charged as it renders too: the
+        // block of one row fits a budget of its bytes, and no smaller one.
+        let row = [memory("ARCHITECTURE", "alpha")];
+        let block = bytes(&render_delivered_memory_block(&row)) as f64;
+        assert_eq!(trim_block_to_budget(&row, &[], block, bytes), row);
+        assert!(trim_block_to_budget(&row, &[], block - 1.0, bytes).is_empty());
     }
 
     #[test]
@@ -477,16 +506,22 @@ mod trim_memories_tests {
             "the section holds fewer rows than its quarter admits: {}",
             section.len()
         );
-        assert!(bytes(&render_memory_block(&kept, "project-memory")) as f64 <= budget);
+        assert!(bytes(&render_delivered_memory_block(&kept)) as f64 <= budget);
         // Fewer lasting rows, and one too long for the room they leave, which
         // is positive and below the quarter: the long row is skipped, and
         // the section is a run from the first supplied row that fits the
         // room, with the next row exceeding it.
-        let some = &lasting[..22];
+        let some = &lasting[..20];
         let mut pressed = some.to_vec();
         pressed.push(memory("PROJECT_RULES", &"x".repeat(budget as usize)));
         let (kept_lasting, unspent) = trim_memories_to_budget(&pressed, budget, bytes);
         assert_eq!(kept_lasting, some);
+        // The charges are the rendered bytes: the block of the kept rows
+        // and the unspent budget make up the budget.
+        assert_eq!(
+            bytes(&render_delivered_memory_block(&kept_lasting)) as u64 + unspent,
+            budget as u64
+        );
         assert!(unspent > 0 && (unspent as f64) < budget / 4.0, "{unspent}");
         let kept = trim_block_to_budget(&pressed, &requests, budget, bytes);
         assert_eq!(&kept[..some.len()], some);
@@ -554,8 +589,10 @@ mod trim_memories_tests {
         #[test]
         fn skip_and_continue_delegation_matches_the_replaced_loop(
             rows in proptest::collection::vec((0u8..3, 1usize..40), 0..12),
-            budget in prop_oneof![Just(f64::NAN), -50.0f64..400.0],
+            room in prop_oneof![Just(f64::NAN), -100.0f64..366.0],
         ) {
+            // The room above the delivered frame's charge, so the cases follow the note's length.
+            let budget = delivered_memory_frame().len() as f64 + room;
             let memories: Vec<CanonicalMemory> = rows
                 .iter()
                 .map(|(category, len)| {
@@ -1597,5 +1634,107 @@ mod correction_compose_tests {
         let plain_m0 = m0(&store, 60_000.0);
         assert_eq!(m0(&other, 60_000.0), plain_m0);
         assert!(!plain_m0.contains("[corrected"));
+    }
+}
+
+#[cfg(test)]
+mod charged_text_tests {
+    use std::cell::RefCell;
+
+    use super::trim_memories_tests::reference;
+    use super::*;
+
+    fn row(id: &str, category: &str, content: &str) -> CanonicalMemory {
+        CanonicalMemory {
+            object_id: id.to_owned(),
+            category: category.to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    /// The lines of `texts`, each with the line break that ends it, sorted.
+    fn lines_of<'t>(texts: impl IntoIterator<Item = &'t str>) -> Vec<&'t str> {
+        let mut lines: Vec<&str> = texts
+            .into_iter()
+            .flat_map(|text| text.split_inclusive('\n'))
+            .collect();
+        lines.sort_unstable();
+        lines
+    }
+
+    /// The exact-fit tests measure a charge by its length. This test reads
+    /// the text of each charge: the strings the packer hands the estimator
+    /// under a budget that admits every row are, line for line, the block
+    /// the renderer writes for the rows it kept, each line charged once. A
+    /// charged tag line spelled another way at the same length is a line the
+    /// block lacks. The reference packer's charges hold to the same block.
+    #[test]
+    fn every_charged_line_is_a_line_of_the_rendered_block() {
+        let lasting = [
+            row("mem_1", "ARCHITECTURE", "the retry limit is 3"),
+            row("mem_2", "NAMING", "handlers end in `_handler`"),
+            row("mem_3", "ARCHITECTURE", "releases are cut on Tuesday"),
+        ];
+        let work = [
+            row("mem_4", CURRENT_WORK_SECTION, "update docs/a.md"),
+            row("mem_5", CURRENT_WORK_SECTION, "rename the upload helper"),
+        ];
+        let charged = RefCell::new(Vec::<String>::new());
+        let record = |text: &str| {
+            charged.borrow_mut().push(text.to_owned());
+            text.len()
+        };
+
+        let kept = trim_block_to_budget(&lasting, &work, 1e6, record);
+        assert_eq!(kept.len(), lasting.len() + work.len());
+        let block = render_delivered_memory_block(&kept);
+        let production = charged.take();
+        assert_eq!(
+            lines_of(production.iter().map(String::as_str)),
+            lines_of([block.as_str()]),
+            "{production:?}"
+        );
+
+        // Each wrapper is one charge of two tag lines, and the block holds
+        // both lines as the charge spells them, the line break after the
+        // closing tag included.
+        let rendered = lines_of([block.as_str()]);
+        for category in ["ARCHITECTURE", "NAMING"] {
+            let wrapper = format!("<{category}>\n</{category}>\n");
+            assert_eq!(
+                production.iter().filter(|text| **text == wrapper).count(),
+                1,
+                "{category}: {production:?}"
+            );
+            for line in wrapper.split_inclusive('\n') {
+                assert!(rendered.contains(&line), "{line:?}: {block}");
+            }
+        }
+        let section: Vec<&String> = production
+            .iter()
+            .filter(|text| text.starts_with("<CURRENT_WORK"))
+            .collect();
+        assert_eq!(section.len(), 1, "{production:?}");
+        let tags: Vec<&str> = section[0].split_inclusive('\n').collect();
+        assert_eq!(tags.len(), 2, "{tags:?}");
+        assert!(
+            tags[0].starts_with("<CURRENT_WORK note=\"Work the user left open")
+                && tags[0].ends_with("\">\n"),
+            "{tags:?}"
+        );
+        assert_eq!(tags[1], "</CURRENT_WORK>\n");
+        for line in tags {
+            assert!(rendered.contains(&line), "{line:?}: {block}");
+        }
+
+        let selected = reference(&lasting, 1e6, record);
+        assert_eq!(selected, lasting);
+        let block = render_delivered_memory_block(&selected);
+        let by_reference = charged.take();
+        assert_eq!(
+            lines_of(by_reference.iter().map(String::as_str)),
+            lines_of([block.as_str()]),
+            "{by_reference:?}"
+        );
     }
 }
