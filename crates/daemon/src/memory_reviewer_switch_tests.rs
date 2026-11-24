@@ -377,7 +377,7 @@ impl Rig {
 
     /// The next session's block, or an empty string when the session receives none.
     async fn block(&self) -> String {
-        memory_auto_delivery_tests::delivered_block(&self.handler, THIRD, "s3")
+        memory_auto_delivery_tests::served_block(&self.handler, THIRD, "s3")
             .await
             .unwrap_or_default()
     }

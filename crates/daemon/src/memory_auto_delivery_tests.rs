@@ -236,11 +236,7 @@ pub(super) fn body(outcome: PreparedOutcome) -> Value {
 }
 
 /// The memory block a new session of `channel` is served, when it is served one.
-pub(super) async fn delivered_block(
-    handler: &Handler,
-    channel: u16,
-    session: &str,
-) -> Option<String> {
+pub(super) async fn served_block(handler: &Handler, channel: u16, session: &str) -> Option<String> {
     project_memory_block(&serve(handler, channel, session).await)
 }
 
