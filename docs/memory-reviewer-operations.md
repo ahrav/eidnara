@@ -445,7 +445,7 @@ The attestation verifier re-reads repository bytes for a memory decision a model
 
 ### 9.1 Reachability and the flag
 
-The verifier is explicit-config-only. It runs only for a project whose effective `verifier.enabled` is `true`, and the shipped default is `false` (`crates/daemon/src/config.rs:247`). With the default, no pass body runs, no repository opens, and no row with `source_kind = "verifier"` is written, so the flag-off guarantee is the default-production behavior (`p6-new-flag-off-nothing-runs`).
+The verifier is explicit-config-only. It runs only for a project whose effective `verifier.enabled` is `true`, and the shipped default is `false` (`crates/daemon/src/config.rs:252`). With the default, no pass body runs, no repository opens, and no row with `source_kind = "verifier"` is written, so the flag-off guarantee is the default-production behavior (`p6-new-flag-off-nothing-runs`).
 
 `verifier.enabled` is a user-tier key. A project-tier value is ignored with the log line `ignoring /verifier/enabled from project tier; setting is user-tier only`, and both plugins strip it from the project tier before they merge configuration, so a repository cannot turn the verifier on for itself. The pass reads the flag for every bound project before any Kernel read or repository open, so a reload to `false` stops the next pass without a restart.
 
