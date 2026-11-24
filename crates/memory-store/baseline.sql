@@ -467,10 +467,11 @@ CREATE INDEX idx_memory_classifier_attempts_project_dispatched
             ON memory_classifier_attempts(project, dispatched_at_ms);
 
 -- MemoryReviewer review work. `memory_reviewer_store_identity` holds the store's own durable
--- incarnation, written once at genesis; a replaced file gets a new one. Job rows
--- are permanent receipts for the incarnation: `state` moves reserved -> ready ->
--- terminal and nothing deletes a row. `(project, causal_identity)` is the causal
--- review identity, so identical inputs deduplicate onto one row across firings.
+-- incarnation, written once at genesis; a replaced file gets a new one. A job row
+-- is the receipt of its review: `state` moves reserved -> ready -> terminal, and
+-- the retirement sweep deletes a terminal row a retention window after its queue
+-- deadline. `(project, causal_identity)` is the causal review identity, so
+-- identical inputs deduplicate onto one row across firings while the row stands.
 CREATE TABLE memory_reviewer_store_identity (
             id INTEGER PRIMARY KEY CHECK (id = 0),
             database_incarnation_id TEXT NOT NULL CHECK (length(database_incarnation_id) = 32),
@@ -489,10 +490,26 @@ CREATE TRIGGER memory_reviewer_store_identity_no_reinsert BEFORE INSERT ON memor
 WHEN EXISTS (SELECT 1 FROM memory_reviewer_store_identity)
 BEGIN SELECT RAISE(ABORT, 'the store incarnation is immutable'); END;
 
+-- The highest generation a retired receipt reached, absent until the first
+-- retirement. A receipt begins one above it, so a job enqueued again for a
+-- retired job's inputs runs under a generation its Kernel holds never carried.
+CREATE TABLE memory_reviewer_retired_generation (
+            id INTEGER PRIMARY KEY CHECK (id = 0),
+            generation INTEGER NOT NULL CHECK (generation >= 1)
+        );
+
+CREATE TRIGGER memory_reviewer_retired_generation_no_delete BEFORE DELETE ON memory_reviewer_retired_generation
+BEGIN SELECT RAISE(ABORT, 'the retired generation stays for the store incarnation'); END;
+
+CREATE TRIGGER memory_reviewer_retired_generation_no_decrease BEFORE UPDATE ON memory_reviewer_retired_generation
+WHEN NEW.generation < OLD.generation
+BEGIN SELECT RAISE(ABORT, 'the retired generation only rises'); END;
+
 -- `job_id` is the task id a MemoryReviewer claim persists; a declared integer key survives a
--- rebuild, where a hidden rowid may be renumbered.
+-- rebuild, where a hidden rowid may be renumbered. The key counts upward for the life of the
+-- file, so a claim that names a retired job names no later one.
 CREATE TABLE memory_reviewer_jobs (
-            job_id INTEGER PRIMARY KEY,
+            job_id INTEGER PRIMARY KEY AUTOINCREMENT,
             project TEXT NOT NULL CHECK (length(project) > 0),
             causal_identity TEXT NOT NULL CHECK (length(causal_identity) = 64),
             producer TEXT NOT NULL CHECK (length(producer) BETWEEN 1 AND 64),
@@ -542,8 +559,9 @@ END;
 -- selection deadline. `state` moves frozen -> enqueued | expired | failed_slot; only
 -- `frozen` counts against capacity, and a capacity deferral leaves it frozen. A frozen
 -- page keeps its references and continuation cursor so an enqueue commits both or
--- neither; a terminal row drops both and keeps its receipt charge, so the table is
--- bounded by the metadata quota the same way `memory_reviewer_jobs` is.
+-- neither; a terminal row drops both and keeps its receipt charge until the
+-- retirement sweep deletes it after the jobs it enqueued, so the table is bounded
+-- by the metadata quota the same way `memory_reviewer_jobs` is.
 CREATE TABLE memory_reviewer_frozen_selections (
             project TEXT NOT NULL CHECK (length(project) > 0),
             slot_id TEXT NOT NULL CHECK (length(slot_id) BETWEEN 1 AND 256),
@@ -706,7 +724,7 @@ CREATE TABLE memory_reviewer_receipts (
             CHECK ((terminal_kind IS 'abstained') = (abstained_reason IS NOT NULL))
         );
 
--- Receipts survive for the store incarnation; the expiry sweep reads only the in-progress ones by deadline.
+-- A receipt stays until its job is retired, after the job's review window and retention have passed; the expiry sweep reads only the in-progress ones by deadline.
 CREATE INDEX idx_memory_reviewer_receipts_state
             ON memory_reviewer_receipts(state, run_deadline_ms);
 
@@ -736,8 +754,11 @@ CREATE TABLE memory_reviewer_attempts (
             CHECK (terminal_kind IS NOT NULL OR (raw_response_bytes IS NULL AND decoded_text_bytes IS NULL))
         );
 
+-- A completed receipt is deleted only with its job, by the retirement sweep. An in-progress
+-- receipt is the fence of a run that may still dispatch and settle, so it refuses every delete.
 CREATE TRIGGER memory_reviewer_receipts_no_delete BEFORE DELETE ON memory_reviewer_receipts
-BEGIN SELECT RAISE(ABORT, 'memory_reviewer receipts survive for the store incarnation'); END;
+WHEN OLD.state <> 'complete'
+BEGIN SELECT RAISE(ABORT, 'an in-progress memory_reviewer receipt stays until it completes'); END;
 
 CREATE TRIGGER memory_reviewer_receipts_deadlines_immutable
 BEFORE UPDATE OF run_deadline_ms, execution_cutoff_ms, created_at_ms, database_incarnation_id, kernel_incarnation_id, authority_generation, authority_context_store
@@ -751,8 +772,14 @@ BEGIN
     SELECT reject_transaction_text(COALESCE(NEW.selected_candidate_id, ''));
 END;
 
+-- An attempt counts against its job's allowance for as long as the job can run, which is
+-- while its receipt is in progress. The retirement sweep deletes the attempts of a completed
+-- receipt together with the receipt and the job.
 CREATE TRIGGER memory_reviewer_attempts_no_delete BEFORE DELETE ON memory_reviewer_attempts
-BEGIN SELECT RAISE(ABORT, 'a committed memory_reviewer attempt stays consumed'); END;
+WHEN EXISTS(SELECT 1 FROM memory_reviewer_receipts r
+             WHERE r.project = OLD.project AND r.causal_identity = OLD.causal_identity
+               AND r.state <> 'complete')
+BEGIN SELECT RAISE(ABORT, 'a committed memory_reviewer attempt stays consumed while its receipt is in progress'); END;
 
 CREATE TRIGGER memory_reviewer_attempts_marker_immutable
 BEFORE UPDATE OF generation, attempt_index, body_digest, request_bytes, provider, model,
