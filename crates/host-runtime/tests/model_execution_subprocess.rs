@@ -41,8 +41,9 @@ use host_runtime::model_execution::opencode::{
 };
 use host_runtime::model_execution::pi::{
     EIDNARA_PI_SUBAGENT_ENV, MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV,
-    MODEL_EXECUTION_TEMPERATURE_ENV, PI_MODEL_EXECUTION_EXTENSION_BYTES,
-    PI_MODEL_EXECUTION_EXTENSION_FILE, PiBackend, PiRuntimeDescriptor, pi_model_ref,
+    MODEL_EXECUTION_PLAIN_SYSTEM_ENV, MODEL_EXECUTION_TEMPERATURE_ENV,
+    PI_MODEL_EXECUTION_EXTENSION_BYTES, PI_MODEL_EXECUTION_EXTENSION_FILE, PiBackend,
+    PiRuntimeDescriptor, pi_model_ref,
 };
 use host_runtime::model_execution::protocol::SendRequest;
 use host_runtime::model_execution::source_health::{
@@ -192,6 +193,14 @@ fn main() {
         (
             "pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt",
             pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt,
+        ),
+        (
+            "pi_model_execution_hook_sends_a_flagged_system_text_as_written",
+            pi_model_execution_hook_sends_a_flagged_system_text_as_written,
+        ),
+        (
+            "pi_plain_system_directive_becomes_a_flag",
+            pi_plain_system_directive_becomes_a_flag,
         ),
         (
             "success_transcripts_align_across_harnesses",
@@ -1955,6 +1964,17 @@ fn pi_project_pi_resources_ignored() {
 
 /// Runs `driver` with the bundled hook imported as `hook` and returns its standard output.
 fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
+    let output = hook_driver_output(driver, envs);
+    assert!(
+        output.status.success(),
+        "hook driver failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("driver output")
+}
+
+/// Runs `driver` with the bundled hook imported as `hook` and returns the process's output, whatever its exit status.
+fn hook_driver_output(driver: &str, envs: &[(&str, &str)]) -> std::process::Output {
     let scratch = tempfile::tempdir().expect("scratch");
     let hook_path = scratch.path().join(PI_MODEL_EXECUTION_EXTENSION_FILE);
     fs::write(&hook_path, PI_MODEL_EXECUTION_EXTENSION_BYTES).expect("materialize hook");
@@ -1967,24 +1987,129 @@ fn run_hook_driver(driver: &str, envs: &[(&str, &str)]) -> String {
         ),
     )
     .expect("driver");
-    let output = ["node", "bun"]
+    ["node", "bun"]
         .iter()
         .find_map(|runtime| {
             std::process::Command::new(runtime)
                 .arg(&driver_path)
                 .env_remove(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV)
                 .env_remove(MODEL_EXECUTION_TEMPERATURE_ENV)
+                .env_remove(MODEL_EXECUTION_PLAIN_SYSTEM_ENV)
                 .envs(envs.iter().copied())
                 .output()
                 .ok()
         })
-        .expect("a JavaScript runtime (node or bun) is required for the hook fixture");
-    assert!(
-        output.status.success(),
-        "hook driver failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        .expect("a JavaScript runtime (node or bun) is required for the hook fixture")
+}
+
+/// A system text that opens with the plain-system directive reaches Pi with the directive removed and the flag set; a system text of any other shape sets no flag.
+fn pi_plain_system_directive_becomes_a_flag() {
+    use host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE;
+    for (system, written, flagged) in [
+        (
+            format!("{PLAIN_SYSTEM_DIRECTIVE}{SYSTEM_SENTINEL}"),
+            SYSTEM_SENTINEL.to_owned(),
+            true,
+        ),
+        (
+            SYSTEM_SENTINEL.to_owned(),
+            SYSTEM_SENTINEL.to_owned(),
+            false,
+        ),
+    ] {
+        let setup = RunSetup::new();
+        let transcript = write_transcript(
+            setup.scratch.path(),
+            "success.ndjson",
+            &pi_success_lines("hi", "stop"),
+        );
+        let backend = pi_backend(
+            &setup,
+            &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+            Vec::new(),
+            None,
+        );
+        let request = request(
+            setup.project.path(),
+            Harness::Pi,
+            "openai/gpt-5-test",
+            Some(&system),
+        );
+        let (terminal, _) = execute(&backend, request);
+        assert!(matches!(terminal, BackendTerminal::Completed { .. }));
+        assert_eq!(
+            fs::read(setup.out.path().join("system-prompt.copy")).expect("system copy"),
+            written.as_bytes()
+        );
+        assert_eq!(
+            setup
+                .env()
+                .get(MODEL_EXECUTION_PLAIN_SYSTEM_ENV)
+                .map(String::as_str),
+            flagged.then_some("1")
+        );
+    }
+}
+
+/// With the plain-system flag the hook replaces the system prompt Pi built with the caller's own text, so the date and working-directory lines Pi appends are absent; without the flag, or with no custom prompt, Pi's prompt stands.
+fn pi_model_execution_hook_sends_a_flagged_system_text_as_written() {
+    let driver = r#"let handler;
+hook({ on(name, fn) { if (name === "before_agent_start") handler = fn; } });
+const built = "Review the memory.\nCurrent date: 2026-03-01\nCurrent working directory: /state/cwd";
+console.log(JSON.stringify([
+  handler({ systemPrompt: built, systemPromptOptions: { customPrompt: "Review the memory." } }) ?? null,
+  handler({ systemPrompt: built, systemPromptOptions: {} }) ?? null,
+]));"#;
+    let flagged = run_hook_driver(driver, &[(MODEL_EXECUTION_PLAIN_SYSTEM_ENV, "1")]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(flagged.trim()).expect("json"),
+        serde_json::json!([{ "systemPrompt": "Review the memory." }, null])
     );
-    String::from_utf8(output.stdout).expect("driver output")
+    let unflagged = run_hook_driver(driver, &[]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(unflagged.trim()).expect("json"),
+        serde_json::json!([null, null])
+    );
+    // Pi catches a handler's throw and sends the request as it stands, so the driver catches errors the same way. A flagged run whose agent start carried no custom prompt ends the process with a failing status before any request is sent; once the text was replaced, and in an unflagged run, the request passes.
+    let request = |replaced: bool| {
+        format!(
+            r#"const handlers = {{}};
+hook({{ on(name, fn) {{ handlers[name] = fn; }} }});
+const send = () => {{
+  try {{
+    handlers.before_provider_request({{ payload: {{ modelId: "m", inferenceConfig: {{ maxTokens: 1 }}, system: [], messages: [] }} }});
+  }} catch (error) {{}}
+  return "sent";
+}};
+handlers.before_agent_start({{ systemPrompt: "built", systemPromptOptions: {{ {custom} }} }});
+console.log(send());"#,
+            custom = if replaced {
+                r#"customPrompt: "Review the memory.""#
+            } else {
+                ""
+            }
+        )
+    };
+    let limit = (MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "64");
+    let flag = (MODEL_EXECUTION_PLAIN_SYSTEM_ENV, "1");
+    let unreplaced = hook_driver_output(&request(false), &[limit, flag]);
+    assert_eq!(unreplaced.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&unreplaced.stdout),
+        "",
+        "no request was sent"
+    );
+    assert!(
+        String::from_utf8_lossy(&unreplaced.stderr)
+            .contains("the system text could not be sent as written"),
+        "{}",
+        String::from_utf8_lossy(&unreplaced.stderr)
+    );
+    assert_eq!(
+        run_hook_driver(&request(true), &[limit, flag]).trim(),
+        "sent"
+    );
+    assert_eq!(run_hook_driver(&request(false), &[limit]).trim(), "sent");
 }
 
 /// The hook removes cache markers from user messages and keeps the system prompt's marker, in the Bedrock Converse, Anthropic Messages, and OpenAI-completions payload shapes.
@@ -4087,7 +4212,7 @@ fn pi_auto_retry_supersedes_the_failed_attempts_terminal() {
         .iter()
         .filter_map(|event| match event {
             BackendEvent::AssistantText { text, .. } => Some(text.as_str()),
-            BackendEvent::HarnessDispatch { .. } => None,
+            BackendEvent::HarnessDispatch { .. } | BackendEvent::AnsweringModel { .. } => None,
         })
         .collect();
     assert_eq!(

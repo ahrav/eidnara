@@ -24,7 +24,7 @@ pub const MAX_PI_PROVIDER_EXTENSIONS: usize = 32;
 /// `MAX_RUN_REPLAY_BYTES` includes terminal headroom so a full replay can record one terminal unit.
 pub const MAX_RUN_REPLAY_BYTES: usize = 1024 * 1024;
 
-/// Admission reserves part of `MAX_RUN_REPLAY_BYTES` for `run_started`, `harness_dispatch`, and one terminal unit.
+/// Admission reserves part of `MAX_RUN_REPLAY_BYTES` for `run_started`, `harness_dispatch`, one `answering_model` unit, and one terminal unit.
 /// The run's base reservation includes this headroom, so these appends cannot fail from budget pressure.
 /// Without this reservation, an overflowing run could fail to record the error that stopped it.
 /// Without this reservation, an admitted run could terminate before spawning.

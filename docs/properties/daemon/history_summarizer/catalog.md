@@ -800,7 +800,7 @@ the next model in the chain (`history_summarizer.rs:1970-1975`, `:2007-2012`)
 and then publishes clears the count instead. The host classes harness setup
 and supervision failures permanent too, such as a missing credential or a
 harness that cannot start; `is_provider_reported_failure`
-(`host-runtime/src/model_execution/backend.rs:134-143`) admits only an OpenCode
+(`host-runtime/src/model_execution/backend.rs:158-166`) admits only an OpenCode
 terminal whose status names the request (400, 413, 422). A Pi error stop drops
 the provider's text and a status-less OpenCode terminal keeps only a text
 classification, so neither separates a content refusal from an unknown model,

@@ -155,7 +155,9 @@ fn inline_config(request: &BackendRequest, base_url: Option<&str>) -> String {
         agent["temperature"] = serde_json::json!(temperature);
     }
     if let Some(system) = &request.system {
-        agent["prompt"] = serde_json::Value::String(system.clone());
+        // The agent prompt is the caller's text; a directive that opens it is addressed to the adapter and is left out. OpenCode appends its environment block, which names the working directory and the date, after the agent prompt, so the directive's promise holds on the Pi adapter.
+        let system = super::backend::plain_system(system).1;
+        agent["prompt"] = serde_json::Value::String(system.to_owned());
     }
     let mut provider = serde_json::json!({
         "models": {
@@ -543,6 +545,31 @@ mod tests {
         assert_eq!(decoded["compaction"]["auto"], false);
         // Production names no base URL, so the provider dials its own endpoint.
         assert!(decoded["provider"]["{env:P}"].get("options").is_none());
+    }
+
+    /// A directive that opens the system text is addressed to the adapter: the agent prompt is the caller's text after it. OpenCode appends its own environment block after the agent prompt, which this adapter has no setting for.
+    #[test]
+    fn inline_config_leaves_a_plain_system_directive_out_of_the_agent_prompt() {
+        let request = BackendRequest {
+            prompt: String::new(),
+            system: Some(format!(
+                "{}Judge the statement.",
+                super::super::backend::PLAIN_SYSTEM_DIRECTIVE
+            )),
+            provider: "prov".into(),
+            model: "model".into(),
+            max_output_tokens: 1,
+            temperature: None,
+            harness: Harness::OpenCode,
+            session: String::new(),
+            run_id: String::new(),
+        };
+        let decoded: serde_json::Value =
+            serde_json::from_str(&inline_config(&request, None)).expect("valid json");
+        assert_eq!(
+            decoded["agent"][OPENCODE_MODEL_EXECUTION_AGENT]["prompt"],
+            "Judge the statement."
+        );
     }
 
     #[test]
