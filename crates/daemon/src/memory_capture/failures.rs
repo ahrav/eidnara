@@ -1256,7 +1256,7 @@ fn execution_id<'a>(block: &'a WireBlock, id: &'a str) -> &'a str {
 fn carried(value: Option<&Value>) -> Option<&str> {
     value
         .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
+        .filter(|id| id.chars().any(|ch| !ch.is_whitespace()))
 }
 
 /// Whether the Pi row `row` stands for a message entry of the session as
@@ -1268,13 +1268,11 @@ fn entry_row(row: &Value) -> bool {
     row.get("type").and_then(Value::as_str) == Some("message")
 }
 
-/// The tool call parts of the Pi row `row`, in the order of its content,
-/// which is the order of the tool call blocks the codec derives from it.
+/// The tool call parts of the Pi row `row`, in the order of its content, which is the
+/// order of the codec's tool call blocks; the row is read when the first part is taken.
 fn native_call_parts(row: &Value) -> impl Iterator<Item = &Value> {
-    row.get("message")
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_array)
-        .into_iter()
+    std::iter::once(row)
+        .filter_map(|row| row.get("message")?.get("content")?.as_array())
         .flatten()
         .filter(|part| part.get("type").and_then(Value::as_str) == Some("toolCall"))
 }
@@ -1285,7 +1283,7 @@ fn native_call_parts(row: &Value) -> impl Iterator<Item = &Value> {
 /// no execution.
 fn native_call_id(part: &Value) -> Option<&str> {
     match part.get("id") {
-        Some(Value::String(_)) => carried(part.get("id")),
+        id @ Some(Value::String(_)) => carried(id),
         _ => carried(part.get("callId")),
     }
 }
@@ -1489,7 +1487,9 @@ impl HandlerCore {
             // The judged calls filter the window while the Kernel holds
             // the history they stand in.
             let history = memo.history_in(&kernel);
-            considered.retain(|candidate| !memo.has_seen(&binding.session, digest(candidate)));
+            if let Some(entry) = memo.sessions.get(&binding.session) {
+                considered.retain(|candidate| !entry.calls.contains(&digest(candidate)));
+            }
             if considered.is_empty() {
                 return None;
             }
