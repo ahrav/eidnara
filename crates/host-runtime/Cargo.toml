@@ -9,8 +9,7 @@ publish.workspace = true
 description = "Directly linked host for the context, LocalEmbeddings, and ModelExecution components."
 
 [features]
-# `test-support` re-exports `host_status_response_json` at the crate root for downstream integration tests.
-# The function is `pub` inside the crate; the feature gates only the cross-crate re-export.
+# `test-support` gives integration tests the crate-root re-export of `host_status_response_json` and the probes and gates the source marks `cfg(feature = "test-support")`.
 test-support = []
 
 [dependencies]
