@@ -1790,8 +1790,9 @@ window rule above, and its tool call id and tool name, each within 1,024
 bytes, 8 MiB together; the first result that lacks room and
 the results after it wait for a later pass. A result that is no text of one
 unit or is an empty text (below), one that passes one of those byte limits,
-and one whose message carries no creation time that a UTC date renders is
-handed off by name alone and settled unread. Every other result is
+one whose message carries no creation time that a UTC date renders, and one
+whose creation time is more than one hour ahead of the daemon's clock at the
+pass is handed off by name alone and settled unread. Every other result is
 copied and read by the task, which judges it or settles it (below). A session
 has one such task at a time and the daemon eight: a pass that finds its
 session's task running, or eight tasks running, hands off nothing, and so does
@@ -1834,7 +1835,7 @@ a command that printed nothing); a result whose text, or whose command line,
 is longer than 64 KiB, the largest tool span source capture retains; a result
 whose tool call id or tool name is empty or longer than 1,024 bytes (an entry
 id is a message id, so an empty one is refused by the Pi codec and one longer
-than 128 bytes names no execution for its whole window, above); a result whose message carries no creation time, or one outside the years a UTC date renders;
+than 128 bytes names no execution for its whole window, above); a result whose message carries no creation time, or one outside the years a UTC date renders, or one more than one hour ahead of the daemon's clock at the pass, the lead past which source capture retains no span of a native record;
 a result whose tool name, tool call id, or session id the redactor would
 change, or holds a control character, U+2028, or U+2029, each judged whole;
 and a command line on which the redactor's scan does not finish. These rules
@@ -1887,7 +1888,10 @@ fact that it follows, by the rules of order below.
 
 A fact holds text of the output under source capture's rule for a tool span:
 text in which the durable-text redactor finds nothing is kept as it is, and
-text with a finding is withheld whole. With no finding the fact keeps the
+text with a finding is withheld whole. Each place where the output repeats
+the text of a finding of the redactor in the command line counts as a finding
+of the output, so a credential the redactor reads by its key in the command
+line withholds an output that prints the value alone. With no finding the fact keeps the
 output's chosen lines: the first five lines that state an error, in output
 order, and then those of the last two lines that are none of them, each
 trimmed, each at most 160 bytes with `…` ending a cut line, a text that
@@ -2056,7 +2060,10 @@ place of a live newest fact that it follows. A result that reports no failure
 supersedes a live, unresolved newest fact that it follows with a copy whose
 `state` is `resolved`, and the fact is ordered by its passing run from then
 on. The order is the order of the creation times the harness gives: a harness
-clock that steps backward orders its runs by those times. A result that
+clock that steps backward orders its runs by those times, and a result dated
+more than one hour ahead of the daemon's clock writes no fact (above), so a
+fact's time is at most one hour ahead of the daemon's clock at the pass that
+read its result. A result that
 reports no failure while its command has no live, unresolved fact leaves no
 trace and no receipt in the Kernel's log. A failure that ran before it and is
 judged after it stays unresolved until a passing result that follows it is

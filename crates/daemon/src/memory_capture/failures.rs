@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
+use aho_corasick::{AhoCorasickBuilder, AhoCorasickKind};
 use kernel::applicability::EvalBudget;
 use memory_store::{BlockKind, OutputKind, ResultBlockKind, WireBlock};
 use regex::Regex;
@@ -167,7 +168,8 @@ enum Excerpt {
     /// The redactor found nothing in the output, so its chosen lines stand
     /// in the record.
     Kept(Vec<Kept>),
-    /// The redactor found credential-shaped content in the output. The
+    /// The redactor found credential-shaped content in the output, or the
+    /// output repeats the text of a finding in the command line. The
     /// record holds no line of it.
     Finding,
     /// The redactor's scan of the output did not finish. The record holds
@@ -545,7 +547,7 @@ impl FailureMemo {
         (entry, call): (&str, &str),
         command: &str,
     ) -> (String, String) {
-        let digest = command_named(scope, command).unwrap().digest;
+        let digest = command_named(scope, command).unwrap().0.digest;
         (
             record_id(scope, session, entry, call),
             format!("{FAILURE_SOURCE_ID}:{digest}"),
@@ -725,7 +727,11 @@ fn shown_of(line: &str) -> String {
 /// `command` field hold no other argument. The excerpt, and the path and
 /// the error read from it, hold text of the output as the tool wrote it,
 /// and a tool that prints its command there is quoted.
-fn command_named(scope: &str, command: &str) -> Option<Command> {
+///
+/// The second return value contains each distinct redactor finding as
+/// spelled on the command line. [`screened`] treats each occurrence of
+/// that text in the output as a finding.
+fn command_named<'a>(scope: &str, command: &'a str) -> Option<(Command, Vec<&'a str>)> {
     let scanned = context_core::redaction::redact_windowed_durable_text(command, usize::MAX);
     let scanned = scanned.ok()?;
     let line = scanned.text;
@@ -743,15 +749,20 @@ fn command_named(scope: &str, command: &str) -> Option<Command> {
         .collect();
     findings.sort_unstable();
     let mut end = 0;
+    let mut found = Vec::with_capacity(findings.len());
     for (start, next) in findings {
         hash.update((start.saturating_sub(end) as u64).to_le_bytes());
         end = end.max(next);
+        found.push(command.get(start..next).filter(|text| !text.is_empty())?);
     }
+    found.sort_unstable();
+    found.dedup();
     let digest = format!("{:x}", hash.finalize())[..32].to_owned();
-    Some(Command {
+    let command = Command {
         shown: shown_of(&line),
         digest,
-    })
+    };
+    Some((command, found))
 }
 
 /// The exit code the harness states in `line`: [`EXIT_LINE`] and then one
@@ -968,8 +979,36 @@ fn findings_in(text: &str) -> Option<Vec<Range<usize>>> {
 /// error name come from the chosen lines that state an error and hold no
 /// finding; when the scan does not finish, no text of the output reaches
 /// the record.
-fn screened(text: &str) -> Failure {
-    screened_with(text, findings_in)
+///
+/// `found` holds the redactor's findings in the command line (see
+/// [`command_named`]). Each occurrence of a value from `found` in `text`
+/// counts as an output finding.
+fn screened(text: &str, found: &[&str]) -> Failure {
+    screened_with(text, |text| {
+        let mut findings = findings_in(text)?;
+        if found.is_empty() {
+            return Some(findings);
+        }
+        // One pass over the text for every value of `found`. The matcher
+        // yields occurrences in the order of their ends, so one that
+        // overlaps the last range kept extends that range.
+        let matcher = AhoCorasickBuilder::new()
+            .kind(Some(AhoCorasickKind::ContiguousNFA))
+            .build(found)
+            .ok()?;
+        let mut repeated: Vec<Range<usize>> = Vec::new();
+        for hit in matcher.find_overlapping_iter(text) {
+            match repeated.last_mut() {
+                Some(last) if hit.start() < last.end => {
+                    last.start = last.start.min(hit.start());
+                    last.end = hit.end();
+                }
+                _ => repeated.push(hit.range()),
+            }
+        }
+        findings.append(&mut repeated);
+        Some(findings)
+    })
 }
 
 /// [`screened`] with `scan` as the redactor: it returns the bytes of its
@@ -1502,8 +1541,9 @@ impl HandlerCore {
         };
         let mut pending = Vec::new();
         let mut copied = 0;
+        let observed_at = crate::now_ms();
         for candidate in considered.into_iter().take(MAX_RESULTS_PER_PASS) {
-            let readable = candidate.readable();
+            let readable = candidate.readable(observed_at);
             let bytes = readable.as_ref().map_or(0, Readable::bytes);
             if copied + bytes > MAX_HANDOFF_BYTES {
                 break;
@@ -1536,8 +1576,16 @@ impl<'a> Candidate<'a> {
     /// [`MAX_OUTPUT_BYTES`] (see [`text_of`]), and one whose command line
     /// passes that bound. An unmarked result is read for the shape of its
     /// text alone.
-    fn readable(&self) -> Option<Readable<'a>> {
-        let at_ms = self.at_ms.filter(|at_ms| utc_time(*at_ms).is_some())?;
+    ///
+    /// `observed_at` is the daemon's clock reading for the pass. `readable`
+    /// returns `None` for timestamps more than
+    /// [`crate::harness_sources::MAX_REVISION_LEAD_MS`] ahead of that
+    /// reading.
+    fn readable(&self, observed_at: i64) -> Option<Readable<'a>> {
+        let latest = observed_at.saturating_add(crate::harness_sources::MAX_REVISION_LEAD_MS);
+        let at_ms = self
+            .at_ms
+            .filter(|at_ms| *at_ms <= latest && utc_time(*at_ms).is_some())?;
         let names = [self.entry, self.call, self.tool];
         if names
             .iter()
@@ -1593,10 +1641,10 @@ impl Input {
                 "the redactor changes the tool's name or the call's id, or one of them holds a control character",
             );
         }
-        let command = command_named(scope, &self.command)
+        let (command, found) = command_named(scope, &self.command)
             .ok_or("the redactor's scan of the command line did not finish")?;
         let outcome = match &self.marked {
-            Some(text) => Outcome::Failed(screened(text)),
+            Some(text) => Outcome::Failed(screened(text, &found)),
             None => Outcome::Passed,
         };
         Ok(Observed {
@@ -2299,10 +2347,11 @@ mod tests {
     use super::*;
 
     const SCOPE: &str = "project";
+    const OBSERVED: i64 = 1_000;
 
     /// The exit code and the kept lines of a marked text result of `make`.
     fn failed(text: &str) -> (Option<i64>, Vec<String>) {
-        let failure = screened(text);
+        let failure = screened(text, &[]);
         let lines = match failure.excerpt {
             Excerpt::Kept(lines) => lines.into_iter().map(|line| line.text).collect(),
             Excerpt::Finding | Excerpt::Unscanned | Excerpt::Refusal => Vec::new(),
@@ -2311,7 +2360,7 @@ mod tests {
     }
 
     fn named(command: &str) -> Command {
-        command_named(SCOPE, command).unwrap()
+        command_named(SCOPE, command).unwrap().0
     }
 
     /// A credential under a name the redactor reads as a secret's, joined at
@@ -2349,7 +2398,9 @@ mod tests {
             output: &output,
             at_ms: Some(1_000),
         };
-        let readable = candidate.readable().expect("a result within the bounds");
+        let readable = candidate
+            .readable(OBSERVED)
+            .expect("a result within the bounds");
         readable.copied()
     }
 
@@ -2656,6 +2707,7 @@ mod tests {
         assert_ne!(
             command_named("another project", "cargo test -p api")
                 .unwrap()
+                .0
                 .digest,
             plain
         );
@@ -3349,6 +3401,44 @@ mod tests {
         // The same text without the harness's mark is a pass, and its text
         // is left unread.
         assert_eq!(outcome("make", &block, false), Outcome::Passed);
+    }
+
+    /// Keeping the output fixed isolates the command line's credential as
+    /// the cause of the withheld excerpt.
+    #[test]
+    fn an_output_that_repeats_a_finding_of_its_command_line_keeps_no_line() {
+        let (assignment, value) = keyed_credential();
+        let command = format!("deploy --{assignment} --target api");
+        let text = format!(
+            "ValueError: bad login {value} at src/deploy.rs:14:9\nerror[E0308]: mismatched types\n  --> src/main.rs:2:1\nCommand exited with code 1"
+        );
+        let control = recorded("deploy --target api", &text, true).unwrap();
+        let Excerpt::Kept(lines) = &control.excerpt else {
+            panic!("{control:?}");
+        };
+        assert!(lines.iter().any(|line| line.text.contains(&value)));
+        // The path and the error name come from the lines clear of the
+        // repeated credential.
+        let found = recorded(&command, &text, true).unwrap();
+        assert!(!format!("{found:?}").contains(&value));
+        assert_eq!(
+            found,
+            Failure {
+                exit_code: Some(1),
+                path: Some("src/main.rs:2:1".into()),
+                error: Some("E0308".into()),
+                excerpt: Excerpt::Finding,
+            }
+        );
+        let stated = format!("error: boom\nCommand exited with code 1 {value}");
+        assert_eq!(recorded(&command, &stated, true).unwrap().exit_code, None);
+        let text = "see abab and ababab at src/app.rs:3:1\nCommand exited with code 7";
+        let failure = screened(text, &["abab", "ba"]);
+        assert_eq!(
+            (failure.exit_code, failure.path, failure.excerpt),
+            (Some(7), None, Excerpt::Finding)
+        );
+        assert_eq!(screened(text, &["absent"]), screened(text, &[]));
     }
 
     #[test]
@@ -4152,7 +4242,7 @@ mod tests {
             output: &output,
             at_ms,
         };
-        let of = |at_ms| candidate("entry-1", "call-1", "bash", at_ms).readable();
+        let of = |at_ms| candidate("entry-1", "call-1", "bash", at_ms).readable(OBSERVED);
         assert!(of(Some(1_000)).is_some());
         // An id or a tool name that is empty or past 1,024 bytes is left
         // out before a byte of it is copied.
@@ -4160,7 +4250,7 @@ mod tests {
         let timed = Some(1_000);
         assert!(
             candidate(&at_bound, &at_bound, &at_bound, timed)
-                .readable()
+                .readable(OBSERVED)
                 .is_some()
         );
         for (entry, call_id, tool) in [
@@ -4171,7 +4261,11 @@ mod tests {
             ("entry-1", "", "bash"),
             ("entry-1", "call-1", ""),
         ] {
-            assert!(candidate(entry, call_id, tool, timed).readable().is_none());
+            assert!(
+                candidate(entry, call_id, tool, timed)
+                    .readable(OBSERVED)
+                    .is_none()
+            );
         }
         for at_ms in [
             None,
@@ -4181,6 +4275,14 @@ mod tests {
         ] {
             assert!(of(at_ms).is_none(), "{at_ms:?}");
         }
+        let lead = crate::harness_sources::MAX_REVISION_LEAD_MS;
+        assert!(of(Some(OBSERVED + lead)).is_some());
+        assert!(of(Some(OBSERVED + lead + 1)).is_none());
+        let read_at = |observed_at| {
+            candidate("entry-1", "call-1", "bash", Some(OBSERVED + lead + 1)).readable(observed_at)
+        };
+        assert!(read_at(OBSERVED + 1).is_some());
+        assert!(read_at(i64::MAX).is_some());
     }
 
     /// A pass charges a result the bytes its copy holds: the text of a
@@ -4202,7 +4304,7 @@ mod tests {
                 output: &output,
                 at_ms: Some(1_000),
             };
-            let readable = candidate.readable().unwrap();
+            let readable = candidate.readable(OBSERVED).unwrap();
             let copy = readable.copied();
             assert_eq!(copy.marked.as_deref(), marked);
             assert_eq!(
@@ -4237,7 +4339,7 @@ mod tests {
                 output,
                 at_ms: Some(1_000),
             };
-            assert_eq!(candidate.readable().is_some(), read);
+            assert_eq!(candidate.readable(OBSERVED).is_some(), read);
         }
     }
 

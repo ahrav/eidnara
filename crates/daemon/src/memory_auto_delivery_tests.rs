@@ -5892,6 +5892,104 @@ async fn a_record_holds_no_credential_of_its_command_or_its_output() {
     );
 }
 
+/// Identical output in both runs isolates the command line's credential as
+/// the reason the record withholds the output lines.
+#[tokio::test]
+async fn an_output_that_repeats_a_credential_of_its_command_line_is_withheld() {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let (assignment, value) = keyed_credential("db");
+    let output: &'static str =
+        format!("error: invalid value '{value}' for the login\n\nCommand exited with code 1")
+            .leak();
+    let runs = [
+        Run {
+            call: "call-1",
+            command: format!("deploy --{assignment} --target api").leak(),
+            output,
+            flagged: true,
+            at_ms: 1_000,
+        },
+        Run {
+            call: "call-2",
+            command: "deploy --target api",
+            output,
+            flagged: true,
+            at_ms: 2_000,
+        },
+    ];
+    assert_eq!(record_failures(&handler, &project, "s1", &runs).await, 2);
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    let rationales = memory_rationales(&handler, (SECOND, "s2"), &project).await;
+    let kept = rows
+        .iter()
+        .find(|(record, _)| record.contains("1970-01-01T00:00:02.000Z"))
+        .unwrap();
+    assert!(
+        kept.0.ends_with(&format!(
+            "\nOutput lines:\n> error: invalid value '{value}' for the login\n> Command exited with code 1"
+        )),
+        "the positive control: {kept:?}"
+    );
+    let withheld = rows
+        .iter()
+        .find(|(record, _)| record.contains("1970-01-01T00:00:01.000Z"))
+        .unwrap();
+    assert_eq!(
+        withheld.0,
+        "Tool failure recorded from the result of bash at 1970-01-01T00:00:01.000Z: the harness marked the result as an error and its last line states exit code 1.\nCommand: deploy [arguments left out]\nOutput text withheld: the redactor found credential-shaped content in the output. The text stands in the result of tool call call-1 of session s1 while that session's history holds it."
+    );
+    let rationale = rationales
+        .iter()
+        .find(|rationale| rationale["call"] == "call-1")
+        .unwrap();
+    assert_eq!(rationale["output_text"], "withheld");
+    assert!(!rationale.to_string().contains(&value), "{rationale}");
+}
+
+/// A result dated more than [`crate::harness_sources::MAX_REVISION_LEAD_MS`]
+/// ahead of the daemon clock produces no fact. Later runs of the same
+/// command remain recordable even when their harness timestamps precede
+/// that result.
+#[tokio::test]
+async fn a_result_dated_past_the_lead_of_the_daemon_s_clock_writes_no_fact_and_later_runs_are_recorded()
+ {
+    let (handler, _store, _dir, project) = delivery_handler(failure_config()).await;
+    let command = "cargo test -p api";
+    let now = now_ms();
+    let lead = crate::harness_sources::MAX_REVISION_LEAD_MS;
+    let ahead = || failed_run("call-1", command, now + lead + 60_000);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[ahead()]).await,
+        0
+    );
+    assert_eq!(
+        explicit_search(&handler, (SECOND, "s2"), &project).await,
+        []
+    );
+    let later = || {
+        [
+            ahead(),
+            failed_run("call-2", command, now - 2_000),
+            passed_run("call-3", command, now - 1_000),
+        ]
+    };
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &later()).await,
+        2,
+        "the later failure and its resolution"
+    );
+    let rows = explicit_search(&handler, (SECOND, "s2"), &project).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].0.contains(RESOLVED), "{rows:?}");
+    let [first, second, third] = later();
+    let near = failed_run("call-4", "cargo test -p web", now + lead / 2);
+    assert_eq!(
+        record_failures(&handler, &project, "s1", &[first, second, third, near]).await,
+        1,
+        "the positive control: a time within the lead is read"
+    );
+}
+
 /// The harness's error mark alone records a failure. A result without the
 /// mark writes no record, whatever its output states: a status the command
 /// line echoes, a status line, a failure behind a pipe or a list, a shell's
