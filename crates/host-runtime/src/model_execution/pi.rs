@@ -817,10 +817,11 @@ fn rejects_temperature(provider_text: &str) -> bool {
     })
 }
 
-/// Whether Pi's error text says the provider completed the response under a stop Pi maps to no answer, which the same request meets again. Pi writes three such texts. `Provider stopped with: <reason>` names the stop a provider gave a completed response, such as `content_filtered`, `guardrail_intervened`, or `sensitive`; the reason `error` is Pi's text for a server failure, which a second request can pass. `Provider finish_reason: content_filter` is the one finish reason of that family that is a content stop; Pi writes the same prefix for `network_error` and for reasons it has no name for. A Pi from before that naming reports every such stop of a completed response as `An unknown error occurred`.
+/// Whether Pi's error text says the provider completed the response under a stop Pi maps to no answer, which the same request meets again. Pi writes four such texts. `The model refused to complete the request` is an Anthropic refusal that gives no explanation; one that gives an explanation carries it as the error text and keeps the plain error message. `Provider stopped with: <reason>` names the stop a provider gave a completed response, such as `content_filtered`, `guardrail_intervened`, or `sensitive`; the reason `error` is Pi's text for a server failure, which a second request can pass. `Provider finish_reason: content_filter` is the one finish reason of that family that is a content stop; Pi writes the same prefix for `network_error` and for reasons it has no name for. A Pi from before that naming reports every such stop of a completed response as `An unknown error occurred`.
 fn names_provider_stop(provider_text: &str) -> bool {
     let text = provider_text.trim();
     text == "An unknown error occurred"
+        || text == "The model refused to complete the request"
         || text == "Provider finish_reason: content_filter"
         || text
             .strip_prefix("Provider stopped with: ")
@@ -1129,6 +1130,7 @@ mod tests {
             "Provider stopped with: guardrail_intervened",
             "Provider finish_reason: content_filter",
             "An unknown error occurred",
+            "The model refused to complete the request",
         ] {
             let error = terminal(stopped);
             assert_eq!(error.class, ErrorClass::Permanent, "{stopped}");
@@ -1145,6 +1147,9 @@ mod tests {
             "Provider stopped with: ",
             "upstream: Provider stopped with: content_filtered",
             "An unknown error occurred while connecting",
+            // A refusal in the provider's own words keeps the plain error message.
+            "I cannot help with this request.",
+            "The model refused to complete the request for policy reasons",
         ] {
             let error = terminal(other);
             assert!(!backend::is_provider_stop(&error.message), "{other}");
