@@ -2021,3 +2021,19 @@ enforces as `output_too_large`
 WP-P15 bounds work at a fixed window and gives no constant-cost claim for
 whole-array native submission. WP-P01 carries the qualifier; line anchors in
 its qualifier are at `07ea883b5`.
+
+## Dated note (2026-11-24, #1232)
+
+Dated note, 2026-11-24, #1232: the transform client has one recheck mode. The
+`privateWindow` option of a pass source, the identity recheck it selected, and
+that recheck's `sameMembers` helper are removed. Every pass, Pi's included,
+asks for the tapes of the members its retained digest verifies
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1410`)
+and runs WP-P12's content rechecks through `capturedMessagesUnchanged`
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1437`).
+The sentence of the 2026-10-13 note that Pi's private window rechecks member
+identity is invalidated. The witnesses are "rechecks a window's contents",
+"keeps a window's verified tapes", and "declines a window whose slot now holds
+another value"
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:325`,
+`:334`, `:421`), each run at the #1232 head and unaudited.

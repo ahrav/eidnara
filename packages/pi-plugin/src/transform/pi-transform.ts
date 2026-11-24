@@ -266,7 +266,6 @@ export function createPiTransform(options: PiTransformOptions) {
         if ("declined" in admitted) return { branchEntriesVisited, entriesAligned: 0 };
         declined.add(inputs.sessionId);
         const alignment = new PiAlignment(inputs.messages, branch, inputs.reader);
-        // The client's capture rechecks compare slot references, so a slot keeps one row.
         const slotRows = new Map<number, PiRow>();
         const allowance = new ReferenceableAllowance();
         const rows = (start: number, end: number, fresh: boolean): PiRow[] | undefined => {
