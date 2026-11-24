@@ -82,7 +82,7 @@ pub(crate) fn trim_memories_to_budget(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> (Vec<CanonicalMemory>, u64) {
     let budget = budget_tokens.max(1.0);
-    let wrapper = estimate_tokens(&delivered_memory_frame());
+    let wrapper = estimate_tokens(delivered_memory_frame());
     if wrapper as f64 > budget {
         return (Vec::new(), 0);
     }
@@ -318,7 +318,7 @@ mod trim_memories_tests {
         let budget = budget_tokens.max(1.0);
         let mut selected = Vec::new();
         let mut categories = std::collections::HashSet::<&str>::new();
-        let mut used = estimate_tokens(&delivered_memory_frame()) as f64;
+        let mut used = estimate_tokens(delivered_memory_frame()) as f64;
         for memory in memories
             .iter()
             .filter(|memory| is_positive_memory_category(&memory.category))
@@ -352,7 +352,7 @@ mod trim_memories_tests {
             3,
             "the positive rows are admitted under a generous budget"
         );
-        let wrapper = bytes(&delivered_memory_frame()) as f64;
+        let wrapper = bytes(delivered_memory_frame()) as f64;
         for budget in [
             f64::NAN,
             -3.0,
