@@ -65,6 +65,7 @@ pub(crate) fn evaluate(
     }
 
     let input_is_ascii = input.is_ascii();
+    let mut literal_starts = LiteralStarts::new(bytes);
 
     'rules: for rule in rules.preselect(profile, bytes) {
         if add_work(&mut work, bytes.len(), limits.max_work_bytes).is_err() {
@@ -109,6 +110,27 @@ pub(crate) fn evaluate(
                         debug_assert!(next > at, "a probe must advance past its anchor");
                         cursor = next;
                     }
+                }
+            }
+            continue;
+        }
+        if let Some(literals) = rule.line_literals {
+            let gated = LineGatedCaptures::new(&rule.regex, literals, &mut literal_starts);
+            for captures in gated {
+                if candidates >= limits.max_candidates {
+                    limits_hit = Some(LimitExhausted::Candidates);
+                    break 'rules;
+                }
+                candidates += 1;
+                match evaluate_candidate(rules, rule, &captures, input, &mut work, limits) {
+                    Ok(Some(finding)) => findings.push(finding),
+                    Ok(None) => {}
+                    Err(Abort::Work) => {
+                        limits_hit = Some(LimitExhausted::Work);
+                        break 'rules;
+                    }
+                    Err(Abort::Match) => record_skipped_match(&mut limits_hit),
+                    Err(Abort::Invalid(error)) => return Err(error),
                 }
             }
             continue;
@@ -166,6 +188,149 @@ pub(crate) fn evaluate(
 fn record_skipped_match(limits_hit: &mut Option<LimitExhausted>) {
     if limits_hit.is_none() {
         *limits_hit = Some(LimitExhausted::Match);
+    }
+}
+
+/// Start offsets of line literals in one scan's input under ASCII case folding, cached per
+/// literal on its first query.
+struct LiteralStarts<'h> {
+    input: &'h [u8],
+    folded: Option<Vec<u8>>,
+    found: Vec<(&'static str, Vec<usize>)>,
+}
+
+impl<'h> LiteralStarts<'h> {
+    fn new(input: &'h [u8]) -> Self {
+        Self {
+            input,
+            folded: None,
+            found: Vec::new(),
+        }
+    }
+
+    /// The first start at or after `from` of any of `literals`, each lower case.
+    fn first(&mut self, literals: &[&'static str], from: usize) -> Option<usize> {
+        literals
+            .iter()
+            .filter_map(|literal| {
+                let starts = self.starts(literal);
+                starts
+                    .get(starts.partition_point(|start| *start < from))
+                    .copied()
+            })
+            .min()
+    }
+
+    /// Every start of `literal`, overlapping ones included, in ascending order.
+    fn starts(&mut self, literal: &'static str) -> &[usize] {
+        let index = match self.found.iter().position(|(known, _)| *known == literal) {
+            Some(index) => index,
+            None => {
+                let input = self.input;
+                let folded = self
+                    .folded
+                    .get_or_insert_with(|| input.to_ascii_lowercase());
+                let finder = memchr::memmem::Finder::new(literal.as_bytes());
+                let mut starts = Vec::new();
+                let mut from = 0;
+                while let Some(offset) = finder.find(&folded[from..]) {
+                    starts.push(from + offset);
+                    from += offset + 1;
+                }
+                self.found.push((literal, starts));
+                self.found.len() - 1
+            }
+        };
+        &self.found[index].1
+    }
+}
+
+/// The gated search extends its window through the next literal's line when the literal
+/// starts within `GATED_LINE_GAP` bytes of the current window end.
+const GATED_LINE_GAP: usize = 1024;
+
+/// `gated_window` returns `(start, end)`. `start` begins the line containing the first
+/// literal start at or after `from`. The exclusive `end` points to the final line's `\n` or
+/// equals `input.len()`.
+fn gated_window(
+    starts: &mut LiteralStarts<'_>,
+    literals: &[&'static str],
+    from: usize,
+) -> Option<(usize, usize)> {
+    let input = starts.input;
+    let line_end =
+        |at: usize| memchr::memchr(b'\n', &input[at..]).map_or(input.len(), |end| at + end);
+    let hit = starts.first(literals, from)?;
+    let start = memchr::memrchr(b'\n', &input[..hit]).map_or(0, |at| at + 1);
+    let mut end = line_end(hit);
+    while let Some(next) = starts
+        .first(literals, end)
+        .filter(|next| next - end <= GATED_LINE_GAP)
+    {
+        // Each extension at least doubles `end - start` or reaches `input.len()`, keeping the extension query count logarithmic in the final window span.
+        end = line_end(next.max(end.saturating_add(end - start)).min(input.len()));
+    }
+    Some((start, end))
+}
+
+/// The captures of `regex` over the input in `captures_iter` order, for a pattern whose every
+/// match fits on one line and contains one of `literals`. The pattern runs on the lines that
+/// contain a literal, with the input before each line as look-behind context.
+struct LineGatedCaptures<'s, 'h> {
+    regex: &'s regex::bytes::Regex,
+    literals: &'static [&'static str],
+    starts: &'s mut LiteralStarts<'h>,
+    /// The next match starts at or after this offset.
+    at: usize,
+    /// The search can skip `at..clear` and preserve the next match.
+    clear: usize,
+    /// End of the lines under search: the offset of a line feed or the end of the input.
+    line_end: Option<usize>,
+}
+
+impl<'s, 'h> LineGatedCaptures<'s, 'h> {
+    fn new(
+        regex: &'s regex::bytes::Regex,
+        literals: &'static [&'static str],
+        starts: &'s mut LiteralStarts<'h>,
+    ) -> Self {
+        Self {
+            regex,
+            literals,
+            starts,
+            at: 0,
+            clear: 0,
+            line_end: None,
+        }
+    }
+}
+
+impl<'h> Iterator for LineGatedCaptures<'_, 'h> {
+    type Item = Captures<'h>;
+
+    fn next(&mut self) -> Option<Captures<'h>> {
+        let input: &'h [u8] = self.starts.input;
+        loop {
+            let line_end = match self.line_end {
+                Some(end) => end,
+                None => {
+                    let (line_start, end) = gated_window(self.starts, self.literals, self.clear)?;
+                    self.at = self.at.max(line_start);
+                    self.line_end = Some(end);
+                    end
+                }
+            };
+            match self.regex.captures_at(&input[..line_end], self.at) {
+                Some(captures) => {
+                    self.at = captures.get(0).map_or(line_end, |whole| whole.end());
+                    return Some(captures);
+                }
+                None => {
+                    self.clear = line_end;
+                    self.line_end = None;
+                }
+            }
+        }
     }
 }
 
@@ -2847,6 +3012,9 @@ mod kernels;
 
 #[cfg(test)]
 mod credential_forms;
+
+#[cfg(test)]
+mod line_gate;
 
 #[cfg(test)]
 mod tests {

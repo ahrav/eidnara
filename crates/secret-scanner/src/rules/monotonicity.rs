@@ -112,6 +112,7 @@ fn compiled(rule: &Rule) -> impl PartialEq + std::fmt::Debug + '_ {
         rule.confidence_bonus,
         rule.code_reference_gate,
         rule.declaration.credential_form,
+        rule.line_literals,
     )
 }
 

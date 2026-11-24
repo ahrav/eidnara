@@ -241,6 +241,9 @@ pub(crate) struct Rule {
     /// Which source-code value shapes the evaluator rejects for this rule.
     pub code_reference_gate: Option<CodeReferenceGate>,
     pub encoded_declaration: Vec<u8>,
+    /// When set, every match of `regex` fits on one line and contains one of these literals
+    /// under ASCII case folding.
+    pub line_literals: Option<&'static [&'static str]>,
 }
 
 /// Keyed rules whose unquoted value can be source code naming a secret, as in
@@ -677,6 +680,7 @@ pub(crate) fn compile_rule(
     };
     let encoded_declaration =
         serde_json::to_vec(&declaration).map_err(|_| ConstructionError::InvalidRulePolicy)?;
+    let line_literals = line_literals(&declaration.name);
     Ok(Rule {
         source,
         declaration,
@@ -689,7 +693,20 @@ pub(crate) fn compile_rule(
         confidence_bonus,
         code_reference_gate,
         encoded_declaration,
+        line_literals,
     })
+}
+
+/// Unicode case folding maps `\u{17f}` to `s` and `\u{212a}` to `k`; each list includes the
+/// variants its key words can match.
+fn line_literals(name: &str) -> Option<&'static [&'static str]> {
+    const KEY_WORDS: &[&str] = &["password", "secret", "token", "key", "\u{17f}", "\u{212a}"];
+    const MEMORIZED_WORDS: &[&str] = &["password", "secret", "\u{17f}"];
+    match name {
+        "magic-value-option" | "magic-value-field" => Some(KEY_WORDS),
+        "magic-value-digits" | "magic-value-digits-quoted" => Some(MEMORIZED_WORDS),
+        _ => None,
+    }
 }
 
 fn build_case_insensitive_matcher(patterns: &[String]) -> Result<AhoCorasick, ConstructionError> {
