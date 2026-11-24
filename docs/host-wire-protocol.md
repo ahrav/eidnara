@@ -1638,8 +1638,8 @@ after it their own time. Four jobs wait in a queue beside the one
 the thread works on, and a pass that finds the queue full asks nothing. A
 repository that blocks or spins a read, such as one whose `HEAD` is a
 pipe, therefore costs the passes of the daemon that half second each
-until the queue is full, and holds the one thread until the daemon stops;
-the daemon says so once on its standard error. For every job the thread
+until the queue is full, and holds the one thread until the daemon stops.
+For every job the thread
 reads HEAD and checks that the repository's work tree is the directory the
 pass opened. It
 keeps the answers that a HEAD settles, which are a commit time, a path
