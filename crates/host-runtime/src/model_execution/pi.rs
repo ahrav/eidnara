@@ -828,16 +828,21 @@ fn names_provider_stop(provider_text: &str) -> bool {
             .is_some_and(|reason| !reason.starts_with("error"))
 }
 
-/// The events of a completed answer: the model id the message reports, when it is a string within [`protocol::MAX_ANSWERING_MODEL_BYTES`], then the text.
+/// A completed answer selects the first nonempty string from `responseModel`, then `model`. If the selected id fits within [`protocol::MAX_ANSWERING_MODEL_BYTES`], the answer emits `AnsweringModel` before `AssistantText`. Otherwise, the answer emits only `AssistantText`.
 fn answer_events(
     message: &serde_json::Value,
     text: String,
     finish_reason: Option<FinishReason>,
 ) -> Vec<BackendEvent> {
-    let model = message
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .filter(|model| !model.is_empty() && model.len() <= protocol::MAX_ANSWERING_MODEL_BYTES);
+    let id = |field: &str| {
+        message
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+    };
+    let model = id("responseModel")
+        .or_else(|| id("model"))
+        .filter(|model| model.len() <= protocol::MAX_ANSWERING_MODEL_BYTES);
     model
         .map(|model| BackendEvent::AnsweringModel {
             model: model.to_owned(),
@@ -1104,6 +1109,41 @@ mod tests {
             let (events, _) =
                 parse_pi_transcript(line(unnamed).as_bytes()).expect("a clean transcript");
             assert_eq!(events, std::slice::from_ref(&text));
+        }
+        // Pi stores the requested model id in `model` and a differing provider-reported id in `responseModel`. A nonempty `responseModel` string names the answer up to `protocol::MAX_ANSWERING_MODEL_BYTES` bytes; a longer string leaves the answer unnamed. The parser falls back to `model` when `responseModel` is absent, empty, or not a string.
+        let reported = |response_model: serde_json::Value| {
+            let line = serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "stop",
+                    "model": "requested",
+                    "responseModel": response_model,
+                    "content": [{"type": "text", "text": "answer"}],
+                },
+            })
+            .to_string();
+            parse_pi_transcript(line.as_bytes())
+                .expect("a clean transcript")
+                .0
+        };
+        let named = |model: &str| {
+            vec![
+                BackendEvent::AnsweringModel {
+                    model: model.to_owned(),
+                },
+                text.clone(),
+            ]
+        };
+        let longest = "r".repeat(protocol::MAX_ANSWERING_MODEL_BYTES);
+        assert_eq!(reported("other".into()), named("other"));
+        assert_eq!(reported(longest.clone().into()), named(&longest));
+        assert_eq!(
+            reported("r".repeat(protocol::MAX_ANSWERING_MODEL_BYTES + 1).into()),
+            std::slice::from_ref(&text)
+        );
+        for absent in [serde_json::Value::Null, "".into(), 7.into()] {
+            assert_eq!(reported(absent), named("requested"));
         }
     }
 
