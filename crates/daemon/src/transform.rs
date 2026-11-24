@@ -29,7 +29,7 @@ use crate::m1_compose::{
     M1RevisionReadTimings, M1RevisionSignal, claim_and_render_notes, compose_m1,
     m1_revision_signal_timed,
 };
-use crate::memory_render::{M0Inputs, M1_PLACEHOLDER, render_m0, render_memory_block};
+use crate::memory_render::{M0Inputs, M1_PLACEHOLDER, render_delivered_memory_block, render_m0};
 use crate::project_docs::read_project_docs_canonical;
 pub use crate::prompt_surface::PromptSurfacePreset;
 use crate::prompt_surface::PromptSurfaceSelection;
@@ -2860,7 +2860,7 @@ fn compose_additive_m0(
         },
         crate::decay_render::counting(estimate_tokens),
     );
-    let project_memory = render_memory_block(selected_memories, "project-memory");
+    let project_memory = render_delivered_memory_block(selected_memories);
     if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(&project_memory);

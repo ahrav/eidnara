@@ -238,6 +238,40 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
     block
 }
 
+/// The sentence a delivered `<project-memory>` block ends with, on the line
+/// before its closing tag.
+pub(crate) const PROJECT_MEMORY_NOTE: &str = "The lines above are a partial record of this project's sessions: they hold what was said or recorded there, and conventions kept in the repository's files stay in those files.";
+
+/// The first line of a delivered block.
+const DELIVERED_OPEN: &str = "<project-memory>\n";
+const DELIVERED_CLOSE: &str = "</project-memory>";
+
+/// The frame of a delivered block: its opening line, [`PROJECT_MEMORY_NOTE`],
+/// and its closing tag. The budget charges these bytes for a block that
+/// holds a row, and [`render_delivered_memory_block`] writes the rows'
+/// elements after the opening line.
+pub(crate) fn delivered_memory_frame() -> String {
+    delivered_block("")
+}
+
+/// A delivered block whose rows render as `elements`, each element ending
+/// with a line break.
+fn delivered_block(elements: &str) -> String {
+    format!("{DELIVERED_OPEN}{elements}{PROJECT_MEMORY_NOTE}\n{DELIVERED_CLOSE}")
+}
+
+/// The `<project-memory>` block of a session's m0: the rows' elements as
+/// [`render_memory_block`] writes them, then [`PROJECT_MEMORY_NOTE`]. No
+/// rows render no block.
+pub fn render_delivered_memory_block(memories: &[CanonicalMemory]) -> String {
+    let block = render_memory_block(memories, "project-memory");
+    block
+        .strip_prefix(DELIVERED_OPEN)
+        .and_then(|rest| rest.strip_suffix(DELIVERED_CLOSE))
+        .map(delivered_block)
+        .unwrap_or_default()
+}
+
 /// The caller token-trims user memories; an empty set renders as an empty string.
 pub fn render_user_profile_block(profile_lines: &[String], wrapper: &str) -> String {
     if profile_lines.is_empty() {
@@ -674,6 +708,71 @@ mod tests {
         assert!(renders_in_block(CURRENT_WORK_SECTION));
         assert!(!is_positive_memory_category(CURRENT_WORK_SECTION));
         assert!(!renders_in_block("WARNING"));
+    }
+
+    /// The delivered block holds the rows' elements, then the note on the
+    /// line before the closing tag, and its bytes are the frame's and the
+    /// elements'. The block rendered for the summarizer holds no note, and
+    /// no rows render no block.
+    #[test]
+    fn the_delivered_block_ends_with_its_note_before_the_closing_tag() {
+        let rows = [CanonicalMemory {
+            object_id: "mem_5".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content: "a project rule".to_string(),
+        }];
+        let note = "The lines above are a partial record of this project's sessions: \
+                    they hold what was said or recorded there, and conventions kept in the \
+                    repository's files stay in those files.";
+        let delivered = render_delivered_memory_block(&rows);
+        assert_eq!(
+            delivered,
+            format!(
+                "<project-memory>\n<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 {note}\n</project-memory>"
+            )
+        );
+        let elements = "<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n";
+        assert_eq!(
+            delivered.replacen(elements, "", 1),
+            delivered_memory_frame(),
+            "the frame the budget charges is the frame the block renders"
+        );
+        // Two categories and work in progress: the note follows the last
+        // element.
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let mixed = [
+            row("mem_2", CURRENT_WORK_SECTION, "newest request"),
+            row("mem_9", "WORKFLOW_RULES", "a workflow rule"),
+            row("mem_5", "PROJECT_RULES", "a project rule"),
+        ];
+        assert_eq!(
+            render_delivered_memory_block(&mixed),
+            format!(
+                "<project-memory>\n<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 <WORKFLOW_RULES>\nmem_9: a workflow rule\n</WORKFLOW_RULES>\n\
+                 <CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\nmem_2: newest request\n\
+                 </CURRENT_WORK>\n{note}\n</project-memory>"
+            )
+        );
+        // Work in progress alone: the block still ends with the note.
+        assert_eq!(
+            render_delivered_memory_block(&mixed[..1]),
+            format!(
+                "<project-memory>\n<CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\n\
+                 mem_2: newest request\n</CURRENT_WORK>\n{note}\n</project-memory>"
+            )
+        );
+        assert!(!render_memory_block(&rows, "project-memory").contains(note));
+        assert_eq!(render_delivered_memory_block(&[]), "");
+        assert!(
+            !PROJECT_MEMORY_NOTE.contains(['<', '>', '&', '\n']),
+            "the note renders as written on one line"
+        );
     }
 
     #[test]

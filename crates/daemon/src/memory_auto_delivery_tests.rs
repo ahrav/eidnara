@@ -250,15 +250,21 @@ async fn serve(handler: &Handler, channel: u16, session: &str) -> Value {
     call_transform_request_on_channel(handler, channel, request).await
 }
 
+const BLOCK_CLOSE: &str = "</project-memory>";
+
+/// The tokens of a served block that [`delivered_block`] returned: the
+/// count of the delivered bytes through the block's closing tag.
+fn block_tokens(block: &str) -> f64 {
+    assert!(block.ends_with(BLOCK_CLOSE), "{block}");
+    crate::token_cache::cached_estimate_tokens(block) as f64
+}
+
+/// The served block's text before its closing tag: the view of
+/// [`delivered_block`] that the assertions about a block's lines and its
+/// last line read.
 fn project_memory_block(response: &Value) -> Option<String> {
-    let served = serde_json::to_string(response).unwrap();
-    let start = served.find("<project-memory>")?;
-    let end = served[start..].find("</project-memory>")? + start;
-    Some(
-        served[start..end]
-            .replace("\\n", "\n")
-            .replace("\\\"", "\""),
-    )
+    let block = delivered_block(response)?;
+    Some(block[..block.len() - BLOCK_CLOSE.len()].to_owned())
 }
 
 async fn explicit_search(
@@ -1210,7 +1216,7 @@ async fn a_long_session_carries_one_bounded_block_that_changes_only_with_other_s
         let block = project_memory_block(&response).expect("every pass carries the block");
         rows.push((
             turn,
-            crate::token_cache::cached_estimate_tokens(&block),
+            block_tokens(&delivered_block(&response).unwrap()) as usize,
             block,
             response["action"].as_str().unwrap_or_default().to_string(),
             response["materialize_reason"]
@@ -1329,11 +1335,10 @@ async fn hundreds_of_statements_across_projects_are_all_approved_and_delivered_w
         );
         assert_eq!(live_statement_records(&handler, root).len(), PER_PROJECT);
 
-        let block = project_memory_block(&serve(&handler, reader, &session).await)
+        let block = delivered_block(&serve(&handler, reader, &session).await)
             .expect("a later session carries the block");
         assert!(
-            crate::token_cache::cached_estimate_tokens(&block) as f64
-                <= config.memory_budget_tokens,
+            block_tokens(&block) <= config.memory_budget_tokens,
             "{subject}: {block}"
         );
         let delivered = block.matches("User stated: ").count();
@@ -1361,12 +1366,9 @@ async fn hundreds_of_statements_across_projects_are_all_approved_and_delivered_w
                 ..config.clone()
             },
         );
-        let block = project_memory_block(&serve(&handler, tight, &session).await)
+        let block = delivered_block(&serve(&handler, tight, &session).await)
             .expect("a smaller budget still carries a block");
-        assert!(
-            crate::token_cache::cached_estimate_tokens(&block) as f64 <= SMALL_BUDGET,
-            "{subject}: {block}"
-        );
+        assert!(block_tokens(&block) <= SMALL_BUDGET, "{subject}: {block}");
         let newest = format!("The {subject} service number {} listens", PER_PROJECT - 1);
         let oldest = format!("The {subject} service number 0 listens");
         assert!(block.contains(&newest), "{block}");
@@ -5077,23 +5079,26 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
         }
     };
 
-    let block = project_memory_block(&serve(&handler, SECOND, "s2").await)
+    let block = delivered_block(&serve(&handler, SECOND, "s2").await)
         .expect("a later session carries the block");
-    assert!(tokens(&block) <= config.memory_budget_tokens, "{block}");
-    let control = project_memory_block(&serve(&handler, WORK, "work").await)
+    assert!(
+        block_tokens(&block) <= config.memory_budget_tokens,
+        "{block}"
+    );
+    let control = delivered_block(&serve(&handler, WORK, "work").await)
         .expect("the plans' own session carries the lasting statements");
     assert_eq!(block_element(&control, "CURRENT_WORK"), None, "{control}");
     for (_, rule) in &rules {
         assert!(control.contains(&stated(rule)), "{rule}: {control}");
     }
     assert_eq!(lasting_sections(&block), control);
-    let work = block_element(&block, "CURRENT_WORK").expect("the section renders");
-    // The section's share counts the whole element, its closing tag too.
-    let section = format!("{work}</CURRENT_WORK>");
+    // The section's share counts the delivered element through the line
+    // break that follows its closing tag.
+    let section = current_work_section(&block).expect("the section renders");
     assert!(
-        tokens(&section) <= config.memory_budget_tokens / 4.0,
+        tokens(section) <= config.memory_budget_tokens / 4.0,
         "{}",
-        tokens(&section)
+        tokens(section)
     );
     let delivered = delivered_plans(&block);
     assert!(
@@ -5113,15 +5118,18 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
     let more_rules = numbered(95, "search");
     capture_statements(&handler, FIRST, "s1", &more_rules).await;
     let pressed =
-        project_memory_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
-    assert!(tokens(&pressed) <= config.memory_budget_tokens, "{pressed}");
-    let control = project_memory_block(&serve(&handler, WORK, "work").await)
+        delivered_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
+    assert!(
+        block_tokens(&pressed) <= config.memory_budget_tokens,
+        "{pressed}"
+    );
+    let control = delivered_block(&serve(&handler, WORK, "work").await)
         .expect("the plans' own session carries the lasting statements");
     assert_eq!(block_element(&control, "CURRENT_WORK"), None, "{control}");
     for (_, rule) in rules.iter().chain(&more_rules) {
         assert!(control.contains(&stated(rule)), "{rule}: {control}");
     }
-    let left_over = config.memory_budget_tokens - tokens(&control);
+    let left_over = config.memory_budget_tokens - block_tokens(&control);
     assert!(
         0.0 < left_over && left_over < config.memory_budget_tokens / 4.0,
         "the lasting statements leave {left_over} tokens"
@@ -5143,9 +5151,9 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
     let extra_rules = numbered(80, "ledger");
     capture_statements(&handler, FIRST, "s1", &extra_rules).await;
     let full =
-        project_memory_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
-    assert!(tokens(&full) <= config.memory_budget_tokens, "{full}");
-    let control = project_memory_block(&serve(&handler, WORK, "work").await)
+        delivered_block(&serve(&handler, THIRD, "s3").await).expect("the block is delivered");
+    assert!(block_tokens(&full) <= config.memory_budget_tokens, "{full}");
+    let control = delivered_block(&serve(&handler, WORK, "work").await)
         .expect("the plans' own session carries the lasting statements");
     let kept = more_rules
         .iter()
@@ -5155,6 +5163,21 @@ async fn work_in_progress_fills_a_quarter_of_the_budget_and_displaces_no_lasting
     assert!(
         kept < more_rules.len() + extra_rules.len(),
         "the lasting statements exceed the budget: {kept}"
+    );
+    // The third load is the one counted: statements of the newest batch
+    // are served, and they displace statements the second load served.
+    assert!(
+        extra_rules
+            .iter()
+            .any(|(_, rule)| control.contains(&stated(rule))),
+        "the newest statements are served: {control}"
+    );
+    assert!(
+        rules
+            .iter()
+            .chain(&more_rules)
+            .any(|(_, rule)| !control.contains(&stated(rule))),
+        "the newest statements displace older ones: {control}"
     );
     assert_eq!(lasting_sections(&full), control);
     assert!(delivered_plans(&full).len() <= left.len(), "{full}");
@@ -9120,4 +9143,125 @@ async fn a_widened_statement_takes_the_approved_copy_of_its_own_delivery_class()
         };
         the_rule_outlives_the_plan(&handler, &project, (rule, plan), done, &case).await;
     }
+}
+
+/// A later session's block ends with the sentence about what the block
+/// holds, once, on the line before the closing tag.
+#[tokio::test]
+async fn the_delivered_block_ends_with_the_sentence_about_what_it_holds() {
+    let (handler, _store, _dir, _project) = delivery_handler(capture_config()).await;
+    capture(&handler, FIRST, "s1", &[("m1", "user", PNPM)], |_, _| {
+        vec![fact(PNPM)]
+    })
+    .await;
+    let served = serve(&handler, SECOND, "s2").await;
+    let block = project_memory_block(&served).expect("the statement is delivered");
+    assert!(block.contains(&stated(PNPM)), "{block}");
+    assert!(
+        block.ends_with(&format!("\n{}\n", memory_render::PROJECT_MEMORY_NOTE)),
+        "{block}"
+    );
+    assert_eq!(
+        block.matches(memory_render::PROJECT_MEMORY_NOTE).count(),
+        1,
+        "{block}"
+    );
+}
+
+/// The project-memory block of `text`: its bytes from `<project-memory>`
+/// through the first `</project-memory>`.
+fn block_in(text: &str) -> Option<&str> {
+    let block = &text[text.find("<project-memory>")?..];
+    Some(&block[..block.find(BLOCK_CLOSE)? + BLOCK_CLOSE.len()])
+}
+
+/// The block `response` delivers, read from the decoded text of its m0, the
+/// first synthetic message. A response whose m0 holds no whole block holds
+/// the block's opening tag in no field.
+fn delivered_block(response: &Value) -> Option<String> {
+    let block = response["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["meta"]["synthetic"] == json!(true))
+        })
+        .and_then(|m0| m0["content"][0]["kind"]["text"].as_str())
+        .and_then(block_in);
+    if block.is_none() {
+        assert!(
+            !response.to_string().contains("<project-memory>"),
+            "the block is served whole in m0: {response}"
+        );
+    }
+    block.map(str::to_owned)
+}
+
+/// The `CURRENT_WORK` element of `block`, through the line break that
+/// follows its closing tag.
+fn current_work_section(block: &str) -> Option<&str> {
+    const CLOSE: &str = "</CURRENT_WORK>\n";
+    let start = block.find("<CURRENT_WORK")?;
+    let end = block[start..].find(CLOSE)? + start + CLOSE.len();
+    Some(&block[start..end])
+}
+
+/// The budget oracle counts the bytes the decoded m0 delivers. A block whose
+/// row holds a carriage return, a tab, and a backslash before `n` comes
+/// back byte for byte from the m0 of a response that crossed the wire's
+/// JSON encoding, ends at the first closing tag, and counts what its
+/// rendered text counts. The wire's JSON text of the same block, with its
+/// line feeds and quotes decoded and its other escapes as spelled, is other
+/// text and counts more, and one more word in the row exceeds a budget of
+/// the block's own count.
+#[test]
+fn the_budget_oracle_counts_the_decoded_bytes_of_the_delivered_block() {
+    let tokens = |text: &str| crate::token_cache::cached_estimate_tokens(text) as f64;
+    let block = |row: &str| {
+        format!(
+            "<project-memory>\n<PROJECT_RULES>\n{row}\n</PROJECT_RULES>\n{}\n</project-memory>",
+            memory_render::PROJECT_MEMORY_NOTE
+        )
+    };
+    let served = |block: &str| -> Value {
+        let m0 = format!(
+            "<session-history>\n</session-history>\n\n{block}\n\n<project-docs>\nA document that quotes </project-memory>.\n</project-docs>"
+        );
+        let wire = json!({
+            "diagnostic": "<project-memory>\nmem_0: a row of another field\n</project-memory>",
+            "messages": [
+                {"meta": {"synthetic": true}, "content": [{"kind": {"type": "text", "text": m0}}]},
+                {"content": [{"kind": {"type": "text", "text": "Please tidy the README headings."}}]},
+            ],
+        });
+        serde_json::from_slice(&serde_json::to_vec(&wire).unwrap()).unwrap()
+    };
+    let row = "mem_1: User stated: Keep `docs\\notes\\a.md` as written;\tretry limit 3.\r";
+    let expected = block(row);
+    let response = served(&expected);
+
+    let delivered = delivered_block(&response).expect("the m0 holds the block");
+    assert_eq!(delivered, expected);
+    assert_eq!(
+        project_memory_block(&response).as_deref(),
+        expected.strip_suffix(BLOCK_CLOSE)
+    );
+    let budget = tokens(&expected);
+    assert_eq!(block_tokens(&delivered), budget);
+
+    // The wire's JSON text of the block with its line feeds and quotes
+    // decoded, and its other escapes as the wire spells them.
+    let spelled = serde_json::to_string(&expected).unwrap();
+    let spelled = spelled
+        .trim_matches('"')
+        .replace("\\n", "\n")
+        .replace("\\\"", "\"");
+    assert!(
+        spelled.contains("\\r") && spelled.contains("\\t") && !spelled.contains("docs\\notes"),
+        "{spelled}"
+    );
+    assert!(tokens(&spelled) > budget, "{spelled}");
+
+    let longer = served(&block(&row.replace("retry limit 3", "retry limit 3 now")));
+    assert!(block_tokens(&delivered_block(&longer).unwrap()) > budget);
 }
