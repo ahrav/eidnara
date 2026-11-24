@@ -23,6 +23,7 @@ use crate::{MemoriesAuthority, RouteBindings, SessionBinding, memories_authority
 
 use super::activation::{self, Activation, Closed, LiveIdentity};
 use super::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
+use super::classifier::{CLASSIFY_WAIT, ClassifierExchange, ClassifierRoute};
 use super::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, Rejection, StageOne,
 };
@@ -34,7 +35,7 @@ use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use super::review_cycle::{self, Applied, ApplyScope, SelectionScope};
 use super::settlement::Settled;
 use super::settlement::TaskClaim;
-use super::stage_one::StageOneBook;
+use super::stage_one::{Decider, StageOneBook};
 use crate::HistorySummarizerProducerFactory;
 use crate::claim_sources::ClaimProgress;
 use crate::config::{ReviewApply, Stage1Model};
@@ -101,6 +102,8 @@ pub struct ReviewSwitch {
     /// The chat model that decides stage 1 of each review.
     pub stage1_model: Stage1Model,
     pub apply: ReviewApply,
+    /// The `provider/model` of the typed classifier that decides stage 1 in the chat model's place, when the user tier names one.
+    pub classifier: Option<String>,
     pub harness: String,
     pub credential_fingerprints: BTreeMap<String, String>,
 }
@@ -115,6 +118,8 @@ pub struct SwitchedReview {
     claims: Mutex<ClaimProgress>,
     /// One pass runs at a time, whether the loop or a caller of [`Worker::drain`] started it.
     serial: tokio::sync::Mutex<()>,
+    /// Where typed-classifier requests wait for the harness; the daemon's `memory.review.classify` handlers hold the same exchange.
+    pub classifiers: Arc<ClassifierExchange>,
     /// Each review's stage-1 record until its proposal is applied, and each project's last stage-1 failure.
     stage_one: Arc<StageOneBook>,
     derived_defaults: Mutex<DerivedDefaults>,
@@ -132,14 +137,16 @@ impl SwitchedReview {
             .walk_within(walk);
     }
 
-    /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer.
+    /// Reviews switched projects through `producers`. `claims_published` reports whether another owner runs the claim consumer, and `classifiers` is the exchange the host's `memory.review.classify` handlers answer.
     pub fn through(
         producers: Arc<dyn HistorySummarizerProducerFactory>,
         claims_published: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        classifiers: Arc<ClassifierExchange>,
     ) -> Self {
         Self {
             producers: Some(producers),
             claims_published,
+            classifiers,
             ..Self::default()
         }
     }
@@ -252,7 +259,7 @@ pub(crate) fn module_projects(
     let mut projects: BTreeMap<String, ProjectRoute> = BTreeMap::new();
     for (_, binding) in roots {
         let root = binding.project_root.to_string_lossy().to_string();
-        // The four `memory_reviewer` keys are the user tier's alone. The tier as it reads now decides them, so a switch turned off stops the reviews of a root whose routes have closed; without it the binding's own load stands.
+        // The five `memory_reviewer` keys are the user tier's alone. The tier as it reads now decides them, so a switch turned off stops the reviews of a root whose routes have closed; without it the binding's own load stands.
         let config = user_tier.unwrap_or(&binding.config);
         // A root whose own tier file the load refused is reviewed by no one, as it is folded by no one.
         let admitted = binding.config.admission == crate::config::ConfigAdmission::Admitted;
@@ -264,6 +271,7 @@ pub(crate) fn module_projects(
                 model_ref: model.to_string(),
                 stage1_model,
                 apply: config.memory_reviewer.apply,
+                classifier: config.memory_reviewer_classifier().map(str::to_string),
                 harness: binding.harness.clone(),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
@@ -457,7 +465,7 @@ impl Worker {
         }
     }
 
-    /// Stage 1 of a switched project's reviews: a small chat model decides through the host's model execution. `None` when the stage-1 model reference names no host route.
+    /// Stage 1 of a switched project's reviews: a small chat model decides through the host's model execution, and the typed classifier the project names decides in its place while a harness answers classifier work. `None` when the stage-1 model reference names no host route.
     fn stage_one(
         &self,
         producers: &Arc<dyn HistorySummarizerProducerFactory>,
@@ -494,6 +502,15 @@ impl Worker {
                 memstore_incarnation: memstore_incarnation.to_string(),
             },
             sender,
+            classifier: switch
+                .classifier
+                .as_ref()
+                .map(|classifier| ClassifierRoute {
+                    exchange: Arc::clone(&self.switched.classifiers),
+                    classifier: classifier.clone(),
+                    project: root.project_digest.clone(),
+                    wait: CLASSIFY_WAIT,
+                }),
             book: Arc::clone(&self.switched.stage_one),
             project: root.project_digest.clone(),
             retry_pause: STAGE_ONE_RETRY_PAUSE,
@@ -729,9 +746,9 @@ impl Worker {
                 }
                 // The run's stage-1 record is taken here whether or not the run published a proposal, so the book holds none of a job that ended.
                 let stage_one = self.switched.stage_one.take_record(&job.causal_identity);
-                let answered = stage_one
-                    .as_ref()
-                    .is_some_and(|record| record.model == switch.stage1_model.reference);
+                let answered = stage_one.as_ref().is_some_and(|record| {
+                    record.decider == Decider::ChatModel(switch.stage1_model.reference.clone())
+                });
                 // The run reports a default that failed before any answer; the worker then sends the project's stage 1 to the review model, for the reviews left in this pass too.
                 let failed = self
                     .switched
@@ -1233,6 +1250,7 @@ mod tests {
                 derived,
             },
             apply: ReviewApply::Contest,
+            classifier: None,
             harness: "pi".to_string(),
             credential_fingerprints: BTreeMap::new(),
         }

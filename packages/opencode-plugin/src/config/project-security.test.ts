@@ -123,6 +123,7 @@ describe("stripUnsafeProjectConfigFields", () => {
             { enabled: false },
             { model: "provider/model" },
             { apply: "apply" },
+            { classifier: "typesafe/jev-latest" },
             { stage1_model: "provider/small" },
         ]) {
             const raw: Record<string, unknown> = { protected_tags: 3, memory_reviewer: reviewer };

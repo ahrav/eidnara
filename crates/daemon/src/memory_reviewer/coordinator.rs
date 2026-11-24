@@ -31,6 +31,7 @@ use super::broker::{
     Alias, EvidenceBroker, QuestionTemplate, ReferenceExpectation, Refusal, RefusalCode,
     RenderedBuffer, RunBinding, decision_derived, originating_decision, refuse,
 };
+use super::classifier::ClassifierRoute;
 use super::disclosure::{
     Disclosed, Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, prepare_body,
 };
@@ -40,7 +41,7 @@ use super::project_text::{ProjectText, SearchQuery};
 use super::related_memories::RelatedMemoryDiscovery;
 use super::settlement::{RunResult, Settled, Settlement, SettlementError, TaskClaim};
 use super::stage_one::{
-    self, ReviewState, Stage1, Stage1Record, StageOneBook, StateReference, Writer,
+    self, Decider, ReviewState, Stage1, Stage1Record, StageOneBook, StateReference, Writer,
 };
 use super::steps::{Operation, ProposedOutcome, SearchBy, Step};
 
@@ -136,12 +137,14 @@ pub struct Coordinator {
     pub stage_one: Option<StageOne>,
 }
 
-/// Stage 1 of one project's memory reviews: the small chat model that answers it, where its records and failures are kept, and how long a run pauses after a failed request.
+/// Stage 1 of one project's memory reviews: who answers it, where its records and failures are kept, and how long a run pauses after a failed request.
 pub struct StageOne {
     /// The sender that reaches the stage-1 model through the host's model execution.
     pub sender: Arc<super::model_request::Sender>,
     /// The approval of that sender's requests; its `model` is the stage-1 model's `provider/model`.
     pub approval: DisclosureApproval,
+    /// The typed classifier the project names. It decides each attempt made while a harness of the project answers classifier work, in the stage-1 model's place.
+    pub classifier: Option<ClassifierRoute>,
     pub book: Arc<StageOneBook>,
     /// The Kernel project digest the book records failures under.
     pub project: String,
@@ -870,7 +873,7 @@ impl Run<'_> {
             &self.context.job.causal_identity,
             Stage1Record {
                 decision,
-                model: String::new(),
+                decider: Decider::Host,
                 later: self.later_evidence.clone(),
             },
         );
@@ -885,7 +888,7 @@ impl Run<'_> {
         Classified::Ended(RunResult::Refused(code))
     }
 
-    /// One stage-1 attempt. A review with no later reference that may change it is a keep by the flag rule, which the host records without a request. Otherwise the state is disclosed to the stage-1 model under an attempt marker, as a proposal request is, and its answers decide. An answer outside the closed form flags the review, and so does a state too large for one request. The state's bytes are charged against the run's model-visible bound like a resend, and the charge returns when no request byte left the host.
+    /// One stage-1 attempt. A review with no later reference that may change it is a keep by the flag rule, which the host records without a request. Otherwise the state is disclosed to the project's decider under an attempt marker, as a proposal request is, and its answers decide. A chat answer outside the closed form flags the review, and so does a state too large for one request. The request's bytes are charged against the run's model-visible bound like a resend, and the charge returns when no request byte left the host.
     async fn stage_one(
         &mut self,
         cancel: &CancellationToken,
@@ -902,45 +905,107 @@ impl Run<'_> {
             return Ok(Classified::Keep);
         }
         // A request to an unproven default that failed moved this run's stage 1 to the review model.
-        let (sender, approval) = match (&coordinator.approval, self.stage_one_by_review_model) {
-            (Some(approval), true) => (&coordinator.sender, approval),
+        let by_review_model = self.stage_one_by_review_model;
+        let (sender, approval) = match (&coordinator.approval, by_review_model) {
+            (Some(review_model), true) => (&coordinator.sender, review_model),
             _ => (&stage.sender, &stage.approval),
         };
+        // The project's classifier decides this attempt while a harness answers its work. Its request is the state with the four questions.
+        let classifier = stage
+            .classifier
+            .as_ref()
+            .filter(|route| route.present())
+            .map(|route| (route, review.request_json()));
+        let (decider, request_bytes) = match &classifier {
+            Some((route, request)) => {
+                (Decider::Classifier(route.classifier.clone()), request.len())
+            }
+            None => (
+                Decider::ChatModel(approval.model.clone()),
+                review.state_json().len(),
+            ),
+        };
+        let request_bytes = u64::try_from(request_bytes).unwrap_or(u64::MAX);
         let cutoff = self.cutoff;
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(MEMORY_REVIEWER_ATTEMPT_MAX_MS as u64))
-            .map_or(cutoff, |attempt| attempt.min(cutoff));
-        let state_bytes = u64::try_from(review.state_json().len()).unwrap_or(u64::MAX);
         let mut broker = self.broker.lock().await;
-        if broker.accounting.charge_render(None, state_bytes).is_err() {
+        if broker
+            .accounting
+            .charge_render(None, request_bytes)
+            .is_err()
+        {
             drop(broker);
             self.decided_by_host(stage, Stage1::Flagged);
             return Ok(Classified::Flagged);
         }
-        let disclosure = Disclosure {
+        let now_ms = || (coordinator.now_ms)();
+        let disclosure = |approval| Disclosure {
             store: &coordinator.store,
             ledger: &coordinator.ledger,
             project: &self.context.job.project,
             broker: &broker,
             sender,
-            approval: Some(approval),
+            approval,
             claim_id: &self.context.claim.claim_id,
-            now_ms: &|| (coordinator.now_ms)(),
+            now_ms: &now_ms,
         };
-        let screened = disclosure.screen(review, cancel, deadline).await;
+        let by_classifier = classifier.is_some();
+        // Each arm yields the decision, the answers as the log names them, and the request's digest.
+        let decided = match classifier {
+            None => {
+                let deadline = Instant::now()
+                    .checked_add(Duration::from_millis(MEMORY_REVIEWER_ATTEMPT_MAX_MS as u64))
+                    .map_or(cutoff, |attempt| attempt.min(cutoff));
+                disclosure(Some(approval))
+                    .screen(review, cancel, deadline)
+                    .await
+                    .map(|(answers, request)| {
+                        let decision = stage_one::decide(review, answers.as_ref());
+                        let shown = match &answers {
+                            Some(answers) => format!(
+                                "changes={} relation={} work_ended={} strongest={}",
+                                answers.changes.as_str(),
+                                answers.relation.as_str(),
+                                answers.work_ended.as_str(),
+                                answers.strongest.as_deref().unwrap_or("none"),
+                            ),
+                            None => "changes=malformed relation=none work_ended=malformed strongest=none".to_string(),
+                        };
+                        (decision, shown, request)
+                    })
+            }
+            Some((route, request)) => {
+                let deadline = Instant::now()
+                    .checked_add(route.wait)
+                    .map_or(cutoff, |wait| wait.min(cutoff));
+                disclosure(None)
+                    .classify(route, review, request, cancel, deadline)
+                    .await
+                    .map(|(answers, request)| {
+                        let decision = super::classifier::decide(review, &answers);
+                        let shown = format!(
+                            "changes={:.2} relation={} work_ended={:.2} strongest={}",
+                            answers.changes,
+                            answers.relation.as_str(),
+                            answers.work_ended,
+                            answers.strongest.as_deref().unwrap_or("none"),
+                        );
+                        (decision, shown, request)
+                    })
+            }
+        };
         // Only a request that left the host keeps its charge.
-        if !screened
+        if !decided
             .as_ref()
             .map_or_else(DisclosureRefusal::left_host, |_| true)
         {
-            broker.accounting.refund_render(state_bytes);
+            broker.accounting.refund_render(request_bytes);
         }
         drop(broker);
         if cancel.is_cancelled() {
             return Err(InvestigationError::Cancelled);
         }
-        let (answers, request) = match screened {
-            Ok(screened) => screened,
+        let (decision, shown, request) = match decided {
+            Ok(decided) => decided,
             Err(DisclosureRefusal::Cancelled) => return Err(InvestigationError::Cancelled),
             Err(DisclosureRefusal::Unavailable) => return Err(InvestigationError::Unavailable),
             Err(DisclosureRefusal::Store(error)) => return Err(InvestigationError::Store(error)),
@@ -964,7 +1029,7 @@ impl Run<'_> {
                     _ => Ok(Classified::Spent),
                 };
             }
-            // A state over the request bound has no stage-1 answer to wait for; the review model decides it.
+            // A state over the decider's request bound has no stage-1 answer to wait for; the review model decides it.
             Err(DisclosureRefusal::Send {
                 error: SendError::RequestTooLarge,
                 ..
@@ -979,16 +1044,17 @@ impl Run<'_> {
                 | DisclosureRefusal::PolicyUnion,
             ) => return Err(InvestigationError::Kernel(RefusalCode::Unsupported)),
             Err(refusal) => {
-                let moves = stage.unproven_default && !self.stage_one_by_review_model;
+                let moves = stage.unproven_default && !by_review_model && !by_classifier;
                 // A refused credential or an answer from another model ends review for the process, as on a proposal request. An unproven default is a guess at the host's catalog, so its failure of any kind moves the run to the review model instead.
                 if !moves && let Some(rejection) = Rejection::of(&refusal) {
                     return Err(InvestigationError::Rejected(rejection));
                 }
                 eprintln!(
-                    "daemon: memory_reviewer stage 1 request ended without an answer: job={} decider=chat_model model={} {refusal}",
+                    "daemon: memory_reviewer stage 1 request ended without an answer: job={} decider={} model={} {refusal}",
                     &self.context.job.causal_identity
                         [..16.min(self.context.job.causal_identity.len())],
-                    approval.model,
+                    decider.kind(),
+                    decider.model(),
                 );
                 if moves {
                     // The review model answers this run's next stage-1 attempt, and the worker sends the project's later reviews to it.
@@ -996,7 +1062,7 @@ impl Run<'_> {
                     self.stage_one_by_review_model = true;
                     return Ok(Classified::Spent);
                 }
-                // The attempt was charged and ended without an answer. The project's other reviews wait out the failure, and this run pauses before its next attempt, so an outage of the stage-1 model spends this job's attempts alone.
+                // The attempt was charged and ended without an answer. The project's other reviews wait out the failure, and this run pauses before its next attempt, so an outage of the decider spends this job's attempts alone.
                 stage.book.note_failure(&stage.project);
                 tokio::select! {
                     biased;
@@ -1006,23 +1072,11 @@ impl Run<'_> {
                 return Ok(Classified::Spent);
             }
         };
-        let decision = stage_one::decide(review, answers.as_ref());
-        let shown = match &answers {
-            Some(answers) => format!(
-                "changes={} relation={} work_ended={} strongest={}",
-                answers.changes.as_str(),
-                answers.relation.as_str(),
-                answers.work_ended.as_str(),
-                answers.strongest.as_deref().unwrap_or("none"),
-            ),
-            None => {
-                "changes=malformed relation=none work_ended=malformed strongest=none".to_string()
-            }
-        };
         eprintln!(
-            "daemon: memory_reviewer stage 1 job={} decider=chat_model model={} request={} decision={} {shown} later={}",
+            "daemon: memory_reviewer stage 1 job={} decider={} model={} request={} decision={} {shown} later={}",
             &self.context.job.causal_identity[..16.min(self.context.job.causal_identity.len())],
-            approval.model,
+            decider.kind(),
+            decider.model(),
             &request[..16.min(request.len())],
             decision.as_str(),
             review.later.len(),
@@ -1031,7 +1085,7 @@ impl Run<'_> {
             &self.context.job.causal_identity,
             Stage1Record {
                 decision,
-                model: approval.model.clone(),
+                decider,
                 later: self.later_evidence.clone(),
             },
         );

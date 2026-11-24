@@ -104,6 +104,10 @@ describe("EidnaraConfigSchema", () => {
                 apply: "apply",
             });
             expect(
+                parse({ enabled: true, classifier: "typesafe/jev-latest" }).data?.memory_reviewer,
+            ).toEqual({ enabled: true, apply: "contest", classifier: "typesafe/jev-latest" });
+            expect(parse({ classifier: 1 }).success).toBe(false);
+            expect(
                 parse({ enabled: true, stage1_model: "provider/small", apply: "propose" }).data
                     ?.memory_reviewer,
             ).toEqual({ enabled: true, stage1_model: "provider/small", apply: "propose" });

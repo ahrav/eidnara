@@ -313,6 +313,7 @@ export interface EidnaraConfig {
         model?: string;
         stage1_model?: string;
         apply: "propose" | "contest" | "apply";
+        classifier?: string;
     };
     /**
      * User-only list of repository documents the daemon reads for the prompt block and, when
@@ -654,6 +655,12 @@ export const EidnaraConfigSchema = z
                     .default("contest")
                     .describe(
                         "User-only: what the daemon does with a change proposal that stage 1 flagged, that states low uncertainty, and that cites a later message. contest marks a replaced memory as disputed, which moves it from automatic delivery to explicit search and can be undone; apply retires or revises it; propose leaves every proposal for review.accept. In contest and apply, a user statement that a later statement replaces in part stays delivered and its line names the later statement (default: contest).",
+                    ),
+                classifier: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "User-only: the provider/model of a typed classifier that decides stage 1 in place of the small chat model, for example typesafe/jev-latest. A harness that can call it answers the daemon's classifier work, which sends the memory and the messages under review to the classifier's provider. Absent, or on a harness that cannot call a classifier, the small chat model decides.",
                     ),
             })
             .default({ enabled: false, apply: "contest" })

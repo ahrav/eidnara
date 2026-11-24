@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -43,8 +43,14 @@ function contextFor(sessionId: string) {
     return { sessionManager: { getSessionId: () => sessionId } };
 }
 
-async function registeredHandlers() {
+/** Loads the extension under an isolated user tier, which holds `userConfig` when one is given. */
+async function registeredHandlers(userConfig?: unknown) {
     isolateXdgEnv();
+    if (userConfig !== undefined) {
+        const configDir = join(process.env.XDG_CONFIG_HOME ?? "", "eidnara");
+        mkdirSync(configDir, { recursive: true });
+        writeFileSync(join(configDir, "eidnara.jsonc"), JSON.stringify(userConfig));
+    }
     delete process.env[EIDNARA_PI_SUBAGENT_ENV];
     __test.clearPiEidnaraActive();
     const registrations = createCountingPi();
@@ -194,6 +200,77 @@ describe("Pi daemon transport across runtime teardown", () => {
                 "memory.capture.next",
                 "memory.capture.next",
             ]);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it.each([
+        ["a registry that can call the named classifier", true],
+        ["a Pi from before the classifier surface", false],
+    ] as const)("asks for classifier work from session_start only with %s", async (_name, classifies) => {
+        const methods: string[] = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                methods.push(input.method);
+                return { state: "disabled" };
+            },
+        );
+        try {
+            const { registrations, shutdown } = await registeredHandlers({
+                memory_reviewer: { enabled: true, classifier: "typesafe/jev-latest" },
+            });
+            const sessionStart = registrations.handlers.get("session_start");
+            if (typeof sessionStart !== "function") throw new Error("session_start not registered");
+            const ctx = {
+                ...captureContext({}),
+                modelRegistry: classifies
+                    ? {
+                          getModelOfType: () => ({}),
+                          hasConfiguredAuth: () => true,
+                          classify: async () => ({}),
+                      }
+                    : { find: () => undefined },
+            };
+            await sessionStart({ reason: "startup" }, ctx);
+            await shutdown({ reason: "quit" }, ctx);
+            expect(methods.includes("memory.review.classify.next")).toBe(classifies);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("stops asking for classifier work once the classifier's credential is gone", async () => {
+        const methods: string[] = [];
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                methods.push(input.method);
+                return { state: "ready" };
+            },
+        );
+        try {
+            const { registrations, shutdown } = await registeredHandlers({
+                memory_reviewer: { enabled: true, classifier: "typesafe/jev-latest" },
+            });
+            const sessionStart = registrations.handlers.get("session_start");
+            if (typeof sessionStart !== "function") throw new Error("session_start not registered");
+            let configured = true;
+            const ctx = {
+                ...captureContext({}),
+                modelRegistry: {
+                    getModelOfType: () => ({}),
+                    hasConfiguredAuth: () => configured,
+                    classify: async () => ({}),
+                },
+            };
+            await sessionStart({ reason: "startup" }, ctx);
+            configured = false;
+            await sessionStart({ reason: "startup" }, ctx);
+            // The loop's pause between two calls is two seconds; a stopped loop makes no second call.
+            await new Promise((resolve) => setTimeout(resolve, 2_300));
+            const asked = methods.filter((method) => method === "memory.review.classify.next");
+            expect(asked).toHaveLength(1);
+            await shutdown({ reason: "quit" }, ctx);
         } finally {
             call.mockRestore();
         }

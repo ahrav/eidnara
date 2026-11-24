@@ -845,6 +845,8 @@ export type ModuleMethod =
     | "memory.capture.next"
     | "memory.capture.submit"
     | "memory.capture.status"
+    | "memory.review.classify.next"
+    | "memory.review.classify.submit"
     | "transform"
     | "transform.boundary"
     | "session.status"
