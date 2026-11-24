@@ -797,9 +797,11 @@ impl Worker {
                                 .await
                                 .unwrap_or_else(|error| Applied::Refused(error.to_string()))
                             };
-                            // A change proposal a reader has yet to settle holds its memory: new evidence waits for it.
-                            if matches!(applied, Applied::Left | Applied::Disputed { .. })
-                                && let ReviewTarget::Memory { object_id, .. } = &job.target
+                            // A change proposal a reader has yet to settle holds its memory: new evidence waits for it. A proposal the write refused keeps its review hold too.
+                            if matches!(
+                                applied,
+                                Applied::Left | Applied::Disputed { .. } | Applied::Refused(_)
+                            ) && let ReviewTarget::Memory { object_id, .. } = &job.target
                             {
                                 self.switched
                                     .selection
