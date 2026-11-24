@@ -10335,7 +10335,7 @@ Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
 Open questions:
 
-- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3750`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
+- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3782`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
 
 ### model_execution-child-environment-carries-only-the-provider-row
 

@@ -2071,13 +2071,13 @@ console.log(JSON.stringify([
         serde_json::json!([null, null])
     );
     // Pi catches a handler's throw and sends the request as it stands, so the driver catches errors the same way. A flagged run whose agent start carried no custom prompt ends the process with a failing status before any request is sent; once the text was replaced, and in an unflagged run, the request passes.
-    let request = |replaced: bool| {
+    let request = |replaced: bool, system: &str| {
         format!(
             r#"const handlers = {{}};
 hook({{ on(name, fn) {{ handlers[name] = fn; }} }});
 const send = () => {{
   try {{
-    handlers.before_provider_request({{ payload: {{ modelId: "m", inferenceConfig: {{ maxTokens: 1 }}, system: [], messages: [] }} }});
+    handlers.before_provider_request({{ payload: {{ modelId: "m", inferenceConfig: {{ maxTokens: 1 }}, {system} messages: [] }} }});
   }} catch (error) {{}}
   return "sent";
 }};
@@ -2092,24 +2092,56 @@ console.log(send());"#,
     };
     let limit = (MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "64");
     let flag = (MODEL_EXECUTION_PLAIN_SYSTEM_ENV, "1");
-    let unreplaced = hook_driver_output(&request(false), &[limit, flag]);
-    assert_eq!(unreplaced.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8_lossy(&unreplaced.stdout),
-        "",
-        "no request was sent"
+    let ends_unsent = |driver: &str, envs: &[(&str, &str)], case: &str| {
+        let output = hook_driver_output(driver, envs);
+        assert_eq!(output.status.code(), Some(1), "{case}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "",
+            "{case}: no request was sent"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("the system text could not be sent as written"),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let anthropic = r#"system: [{ type: "text", text: "Review the memory.", cache_control: { type: "ephemeral" } }],"#;
+    let bedrock =
+        r#"system: [{ text: "Review the memory." }, { cachePoint: { type: "default" } }],"#;
+    ends_unsent(
+        &request(false, anthropic),
+        &[limit, flag],
+        "no custom prompt",
     );
-    assert!(
-        String::from_utf8_lossy(&unreplaced.stderr)
-            .contains("the system text could not be sent as written"),
-        "{}",
-        String::from_utf8_lossy(&unreplaced.stderr)
-    );
     assert_eq!(
-        run_hook_driver(&request(true), &[limit, flag]).trim(),
+        run_hook_driver(&request(false, anthropic), &[limit]).trim(),
         "sent"
     );
-    assert_eq!(run_hook_driver(&request(false), &[limit]).trim(), "sent");
+    for written in [anthropic, bedrock, ""] {
+        assert_eq!(
+            run_hook_driver(&request(true, written), &[limit, flag]).trim(),
+            "sent",
+            "{written}"
+        );
+    }
+    // With `MODEL_EXECUTION_PLAIN_SYSTEM_ENV` set to `1`, the hook checks a present `system` array against the caller's `customPrompt`. Extra text or an empty array makes the process exit with status 1 before sending.
+    let identity = r#"system: [{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." }, { type: "text", text: "Review the memory." }],"#;
+    let appended = r#"system: [{ text: "Review the memory.\nCurrent date: 2026-03-01" }],"#;
+    let absent = "system: [],";
+    for (added, case) in [
+        (identity, "identity block"),
+        (appended, "appended line"),
+        (absent, "no system text"),
+    ] {
+        ends_unsent(&request(true, added), &[limit, flag], case);
+        assert_eq!(
+            run_hook_driver(&request(true, added), &[limit]).trim(),
+            "sent",
+            "{case}"
+        );
+    }
 }
 
 /// The hook removes cache markers from user messages and keeps the system prompt's marker, in the Bedrock Converse, Anthropic Messages, and OpenAI-completions payload shapes.
