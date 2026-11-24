@@ -160,24 +160,47 @@ describe("createReviewClassifierPump", () => {
         expect(submitted?.body.error).toBe("provider_unavailable");
     });
 
-    it("bounds a classifier call that ignores its abort signal and ends the loop beside it", async () => {
-        const fake = daemon([work({ max_duration_ms: 5 }), { state: "ready" }, { state: "ready" }]);
-        const pump = createReviewClassifierPump(fake.client, () => new Promise(() => undefined), {
-            settleGraceMs: 5,
-            pollIntervalMs: 1,
-        });
+    it("bounds a classifier call that ignores its abort signal and waits for it before the next call", async () => {
+        const fake = daemon(Array.from({ length: 50 }, () => work({ max_duration_ms: 5 })));
+        let executions = 0;
+        const release = Promise.withResolvers<Record<string, unknown>>();
+        const pump = createReviewClassifierPump(
+            fake.client,
+            () => {
+                executions += 1;
+                return release.promise;
+            },
+            { settleGraceMs: 5, pollIntervalMs: 1 },
+        );
         pump.start(SCOPE);
-        await pump.idle();
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        // A start for another session of the project reuses the loop, so one call runs.
+        pump.start({ ...SCOPE, sessionId: "s2" });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(executions).toBe(1);
         expect(fake.calls.map((call) => call.method)).toEqual([
             "memory.review.classify.next",
             "memory.review.classify.submit",
         ]);
         expect(fake.calls[1]?.body.error).toBe("provider_unavailable");
-        // A later start begins another loop.
-        pump.start(SCOPE);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        expect(fake.calls.length).toBeGreaterThan(2);
+        // Once the call settles the loop goes on, for the session that took it over.
+        release.resolve({});
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(fake.calls[2]?.method).toBe("memory.review.classify.next");
+        expect(fake.calls[2]?.body.session_id).toBe("s2");
         await pump.close();
+    });
+
+    it("closes while a classifier call that ignores its abort signal is still running", async () => {
+        const fake = daemon([work({ max_duration_ms: 5 })]);
+        const pump = createReviewClassifierPump(fake.client, () => new Promise(() => undefined), {
+            settleGraceMs: 5,
+        });
+        pump.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        const started = Date.now();
+        await pump.close();
+        expect(Date.now() - started).toBeLessThan(1_000);
     });
 
     it("leaves work unanswered that arrives for a session released during the call", async () => {
@@ -202,8 +225,34 @@ describe("createReviewClassifierPump", () => {
         expect(methods).toEqual(["memory.review.classify.next"]);
     });
 
+    it("answers work under the session that took the loop over during the call", async () => {
+        const answered = Promise.withResolvers<unknown>();
+        const calls: Array<[string, string]> = [];
+        const client = {
+            call: async (args: { method: string; sessionId: string }) => {
+                calls.push([args.method.replace("memory.review.classify.", ""), args.sessionId]);
+                if (calls.length === 1) return answered.promise;
+                return args.method.endsWith("submit")
+                    ? { state: "processed" }
+                    : { state: "disabled" };
+            },
+        };
+        const pump = createReviewClassifierPump(client, async () => ({}));
+        pump.start(SCOPE);
+        pump.stop(SCOPE.sessionId);
+        pump.start({ ...SCOPE, sessionId: "s2" });
+        answered.resolve(work());
+        await pump.idle();
+        expect(calls).toEqual([
+            ["next", "s1"],
+            ["submit", "s2"],
+            ["next", "s2"],
+        ]);
+    });
+
     it("goes on for the session that started while the old session's call ended the loop", async () => {
-        for (const ending of [{ state: "disabled" }, new Error("unreachable")]) {
+        // A `disabled` answer to the old session's call.
+        {
             const pending = Promise.withResolvers<unknown>();
             const sessions: string[] = [];
             const client = {
@@ -213,13 +262,32 @@ describe("createReviewClassifierPump", () => {
                     return { state: "disabled" };
                 },
             };
-            const pump = createReviewClassifierPump(client, async () => ({}), { retryDelayMs: 1 });
+            const pump = createReviewClassifierPump(client, async () => ({}));
             pump.start(SCOPE);
             pump.start({ ...SCOPE, sessionId: "s2" });
-            if (ending instanceof Error) pending.reject(ending);
-            else pending.resolve(ending);
+            pending.resolve({ state: "disabled" });
             await pump.idle();
             expect(sessions).toEqual(["s1", "s2"]);
+        }
+        // The fifth failed call in a row of the old session.
+        {
+            const fifth = Promise.withResolvers<unknown>();
+            const sessions: string[] = [];
+            const client = {
+                call: async (args: { sessionId: string }) => {
+                    sessions.push(args.sessionId);
+                    if (sessions.length < 5) throw new Error("unreachable");
+                    if (sessions.length === 5) return fifth.promise;
+                    return { state: "disabled" };
+                },
+            };
+            const pump = createReviewClassifierPump(client, async () => ({}), { retryDelayMs: 1 });
+            pump.start(SCOPE);
+            while (sessions.length < 5) await new Promise((resolve) => setTimeout(resolve, 2));
+            pump.start({ ...SCOPE, sessionId: "s2" });
+            fifth.reject(new Error("unreachable"));
+            await pump.idle();
+            expect(sessions).toEqual(["s1", "s1", "s1", "s1", "s1", "s2"]);
         }
     });
 

@@ -31,6 +31,11 @@ use super::model_request::{
 use super::model_response::StopReason;
 use super::stage_one::{self, ChatAnswers, MAX_REQUEST_BYTES, ReviewState};
 
+/// Whether a classifier's answers of `answer_bytes` fit the raw response bytes the job has left.
+fn within_allowance(answer_bytes: usize, allowance: ResponseAllowance) -> bool {
+    u64::try_from(answer_bytes).is_ok_and(|bytes| bytes <= allowance.raw_response_bytes)
+}
+
 /// The provider identity an attempt marker records for a classifier request, which the harness sends under its own registry and credential.
 pub const CLASSIFIER_PROVIDER: &str = "harness-classifier";
 /// The credential a classifier request's marker names: the one the harness's model registry holds for the classifier.
@@ -854,16 +859,16 @@ impl Disclosure<'_> {
             raw_response_bytes: u64::try_from(answer_bytes).ok(),
             decoded_text_bytes: Some(0),
         };
-        // The job's remaining response allowance bounds a classifier's answers as it bounds a chat answer.
-        if usage
-            .raw_response_bytes
-            .is_none_or(|bytes| bytes > allowance.raw_response_bytes)
-        {
+        // The job's remaining response allowance bounds a classifier's answers as it bounds a chat answer: answers past it spend the whole remainder, so the job's next request is refused as exhausted.
+        if !within_allowance(answer_bytes, allowance) {
             return Err(self.end(
                 attempt_index,
                 MemoryReviewerAttemptTerminal::Failed,
-                ResponseUsage::NONE,
-                failed(SendError::Transport, true),
+                ResponseUsage {
+                    raw_response_bytes: Some(allowance.raw_response_bytes),
+                    decoded_text_bytes: Some(0),
+                },
+                failed(SendError::ResponseTooLarge, true),
             ));
         }
         let answers = match Answers::parse(review, &value) {
@@ -1030,6 +1035,19 @@ mod tests {
     use super::*;
     use crate::memory_reviewer::stage_one::tests::{reference, user_statement};
     use crate::memory_reviewer::stage_one::{StateReference, Writer};
+
+    /// A classifier's answers fit the job's remaining raw response bytes up to the last byte, and one byte more is past it.
+    #[test]
+    fn answers_fit_the_remaining_allowance_to_the_byte() {
+        let left = |raw_response_bytes| ResponseAllowance {
+            raw_response_bytes,
+            decoded_text_bytes: 0,
+        };
+        assert!(within_allowance(0, left(0)));
+        assert!(within_allowance(512, left(512)));
+        assert!(!within_allowance(513, left(512)));
+        assert!(!within_allowance(1, left(0)));
+    }
 
     /// A stage-1 request is refused whole when any text in it holds a credential, whichever decider it is written for, and when it is larger than the bound. The state the broker's reads produce passes.
     #[test]

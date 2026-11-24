@@ -125,6 +125,9 @@ export function createReviewClassifierPump(
         done: Promise<void>;
     }
     const closing = new AbortController();
+    const closed = new Promise<void>((resolve) => {
+        closing.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
     const loops = new Map<string, Loop>();
     const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
     const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -143,12 +146,13 @@ export function createReviewClassifierPump(
             closing.signal.addEventListener("abort", wake, { once: true });
         });
 
-    /** Runs one classifier call and reports its outcome. `false` means the call ignored its abort signal and is still running. */
+    /** Runs one classifier call and reports its outcome. A call that ignored its abort signal is returned still running, in an object so that awaiting the answer leaves the call unawaited. */
     async function answer(
         scope: ReviewClassifierScope,
         work: ReviewClassifierWork,
-    ): Promise<boolean> {
-        let settled = true;
+    ): Promise<{ call: Promise<unknown> } | undefined> {
+        let running: Promise<unknown> | undefined;
+        let stuck: { call: Promise<unknown> } | undefined;
         const controller = new AbortController();
         const cancel = () => controller.abort();
         closing.signal.addEventListener("abort", cancel, { once: true });
@@ -160,15 +164,16 @@ export function createReviewClassifierPump(
         let outcome: Record<string, unknown>;
         try {
             if (closing.signal.aborted) throw new ReviewClassifierError("cancelled");
+            running = execute(work, controller.signal);
             outcome = {
                 answers: await withTimeout(
-                    execute(work, controller.signal),
+                    running,
                     work.maxDurationMs + settleGraceMs,
                     "memory review classifier call",
                 ),
             };
         } catch (error) {
-            settled = !(error instanceof TimeoutError);
+            if (error instanceof TimeoutError && running) stuck = { call: running };
             const code = closing.signal.aborted
                 ? "cancelled"
                 : timedOut
@@ -198,7 +203,7 @@ export function createReviewClassifierPump(
                 },
             })
             .catch(() => undefined);
-        return settled;
+        return stuck;
     }
 
     async function run(loop: Loop): Promise<void> {
@@ -246,8 +251,10 @@ export function createReviewClassifierPump(
                 const work = reviewClassifierWork(response);
                 // Work outside the contract, and work that arrives for a session released during the call, stays unanswered; its review's wait ends the attempt.
                 if (!work || loop.stopped) continue;
-                // A call that ignored its abort signal is still running in the harness. The loop ends beside it, and a later start begins another.
-                if (!(await answer(scope, work))) return;
+                // The lease belongs to the project, so the session the loop serves now answers it.
+                const stuck = await answer(loop.scope, work);
+                // A call that ignored its abort signal is still running in the harness. The loop waits for it, so a project has one such call at a time.
+                if (stuck) await Promise.race([stuck.call.catch(() => undefined), closed]);
             }
         } finally {
             if (loops.get(loop.scope.projectRoot) === loop) loops.delete(loop.scope.projectRoot);
