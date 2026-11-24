@@ -190,6 +190,13 @@ pub(crate) struct Observed {
     deletes: u64,
 }
 
+#[cfg(test)]
+impl Observed {
+    pub(crate) fn paths(&self) -> &[String] {
+        &self.paths
+    }
+}
+
 /// SHA-256 over `parts`, each framed by its length.
 fn digest(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
@@ -346,13 +353,18 @@ impl Answers {
     }
 }
 
+/// `message_member` treats `key` literally, including `/` and `~`.
+fn message_member<'r>(row: &'r Value, key: &str) -> Option<&'r Value> {
+    row.get("message")?.get(key)
+}
+
 /// The ids Pi wrote on the tool calls of an assistant row, in the order of
 /// its `toolCall` parts: a part's string `id`, else its string `callId`, as
 /// the codec reads them. `None` for a part that holds neither: the codec
 /// gives such a call an id of its own making, which pairs it with nothing
 /// here.
 fn call_ids(row: &Value) -> Vec<Option<&str>> {
-    let parts = row.pointer("/message/content").and_then(Value::as_array);
+    let parts = message_member(row, "content").and_then(Value::as_array);
     parts
         .into_iter()
         .flatten()
@@ -383,7 +395,7 @@ fn identified<'m>(
                 found.extend(id.map(|id| (id, &**row, kind)));
             }
         }
-        let result = row.pointer("/message/toolCallId").and_then(Value::as_str);
+        let result = message_member(row, "toolCallId").and_then(Value::as_str);
         for kind in kinds().filter(|kind| matches!(kind, BlockKind::ToolResult { .. })) {
             found.extend(result.map(|id| (id, &**row, kind)));
         }
@@ -397,8 +409,8 @@ fn identified<'m>(
 /// still renders; the recorder takes such a result as one whose outcome is
 /// unknown, and it shows no use.
 fn states_success(row: &Value) -> bool {
-    row.pointer("/message/isError") == Some(&Value::Bool(false))
-        && row.pointer("/message/content").is_some_and(Value::is_array)
+    message_member(row, "isError") == Some(&Value::Bool(false))
+        && message_member(row, "content").is_some_and(Value::is_array)
 }
 
 /// The files of `named` that the calls of `messages` used. A call of Pi's
@@ -824,10 +836,7 @@ impl HandlerCore {
         let opener = (0..request.messages.len()).rev().find(|index| {
             let message = &request.messages[*index].ck;
             message.role == "user"
-                && native[*index]
-                    .pointer("/message/role")
-                    .and_then(Value::as_str)
-                    == Some("user")
+                && message_member(&native[*index], "role").and_then(Value::as_str) == Some("user")
                 && !message.meta.synthetic
                 && !message.meta.summary
         })?;
@@ -835,16 +844,16 @@ impl HandlerCore {
         if calls.is_empty() {
             return None;
         }
-        let named = named_paths(project.root(), &request.messages[opener]);
+        let mut named = named_paths(project.root(), &request.messages[opener]);
+        if !named.is_empty() {
+            let owner = NamedFiles::owner(project, &binding.session);
+            let memo = self.named_files.memo();
+            named.retain(|path| !memo.recorded(&owner, path));
+        }
         if named.is_empty() {
             return None;
         }
-        let mut paths = used_by_calls(project.root(), calls, &native[opener + 1..], &named);
-        let owner = NamedFiles::owner(project, &binding.session);
-        {
-            let memo = self.named_files.memo();
-            paths.retain(|path| !memo.recorded(&owner, path));
-        }
+        let paths = used_by_calls(project.root(), calls, &native[opener + 1..], &named);
         (!paths.is_empty()).then_some(Observed { paths, deletes })
     }
 
@@ -1830,6 +1839,35 @@ mod bounds_tests {
             ["docs/b.md"]
         );
         assert!(named_paths(root(), &parts(&[&injected(65_522), typed])).is_empty());
+    }
+
+    /// A member of a Pi row's `message` is the value the JSON pointer
+    /// `/message/<key>` reads, for each key the recorder reads and for
+    /// rows and messages of every JSON kind.
+    #[test]
+    fn a_member_of_a_rows_message_is_the_value_its_json_pointer_reads() {
+        let rows = [
+            json!({"message": {"role": "user", "content": [], "isError": false}}),
+            json!({"message": {"toolCallId": "c1", "content": "text", "isError": null}}),
+            json!({"message": ["role", {"role": "user"}]}),
+            json!({"message": "role"}),
+            json!({"message": null}),
+            json!({"role": "user"}),
+            json!([{"message": {"role": "user"}}]),
+            json!("message"),
+            Value::Null,
+        ];
+        for row in &rows {
+            for key in ["role", "content", "toolCallId", "isError", "absent"] {
+                assert_eq!(
+                    message_member(row, key),
+                    row.pointer(&format!("/message/{key}")),
+                    "{key} of {row}"
+                );
+            }
+        }
+        assert_eq!(message_member(&rows[0], "role"), Some(&json!("user")));
+        assert_eq!(message_member(&rows[1], "toolCallId"), Some(&json!("c1")));
     }
 
     /// The memo holds the 256 sessions that recorded a path last, and a

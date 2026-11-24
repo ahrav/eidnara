@@ -434,6 +434,36 @@ async fn a_session_records_each_path_once_over_its_turns() {
     );
 }
 
+/// An observation holds the paths the message names that the session has yet to record, in
+/// the order the calls use them, and is none once the session has recorded each of them.
+#[tokio::test]
+async fn an_observation_holds_the_unrecorded_paths_in_the_order_of_their_use() {
+    let (handler, _dir, project) =
+        project_with(&[(NOTES, BODY), ("docs/plan.md", "Plan.\n")]).await;
+    let binding = session_binding(&project, "s1");
+    let said = format!("Compare {NOTES} with docs/plan.md and docs/later.md.");
+    let mut messages = vec![ck("s1-u1", 1, &said)];
+    messages.extend(read("a1", 2, "docs/later.md"));
+    messages.extend(read("a2", 3, "docs/plan.md"));
+    messages.extend(read("a3", 4, NOTES));
+    let request = window("s1", &messages);
+    let observed = || {
+        handler
+            .observe_named_files(&binding, &request)
+            .map(|observed| observed.paths().to_vec())
+    };
+    assert_eq!(
+        observed().unwrap(),
+        ["docs/later.md", "docs/plan.md", NOTES]
+    );
+    // The pass records the two paths that name files.
+    assert_eq!(pass(&handler, &binding, &request), 2);
+    assert_eq!(observed().unwrap(), ["docs/later.md"]);
+    std::fs::write(project.join("docs/later.md"), "Later.\n").unwrap();
+    assert_eq!(pass(&handler, &binding, &request), 1);
+    assert_eq!(observed(), None);
+}
+
 /// A file is used by a call that follows the last message the user typed, when that message
 /// names the file. The rows before that message show nothing: a fork copies its parent's rows
 /// into a session of another id.
