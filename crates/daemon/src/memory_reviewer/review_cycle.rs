@@ -312,12 +312,25 @@ impl SelectionMemory {
     }
 
     /// Records that the memory `target` waits for the change proposal of the job `causal_identity`.
-    pub fn note_pending(&mut self, ledger_project: &str, target: &str, causal_identity: &str) {
-        self.pending
+    pub fn note_pending(
+        &mut self,
+        ledger_project: &str,
+        target: &str,
+        causal_identity: &str,
+        keep_earlier: bool,
+    ) {
+        let waiting = &mut self
+            .pending
             .entry(ledger_project.to_string())
             .or_default()
-            .waiting
-            .insert(target.to_string(), causal_identity.to_string());
+            .waiting;
+        if keep_earlier {
+            waiting
+                .entry(target.to_string())
+                .or_insert_with(|| causal_identity.to_string());
+        } else {
+            waiting.insert(target.to_string(), causal_identity.to_string());
+        }
     }
 }
 
@@ -1042,6 +1055,11 @@ pub enum Applied {
 }
 
 impl Applied {
+    /// Whether the proposal still holds its memory after this outcome: it waits for a reader, its target is disputed, or the write was refused and its review hold stands.
+    pub fn holds_memory(&self) -> bool {
+        matches!(self, Self::Left | Self::Disputed { .. } | Self::Refused(_))
+    }
+
     /// The outcome's name for the worker's log: a closed word, never proposal text.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -1442,6 +1460,40 @@ mod tests {
     }
 
     /// The subject terms of a statement leave out who said it and the words every rule uses, and cut each term to its stem, so two statements about one subject share terms whatever their wording around it.
+    /// A proposal that waits for a reader, a disputed target, and a refused write each hold their memory; every other outcome frees it.
+    #[test]
+    fn the_outcomes_that_hold_a_memory() {
+        assert!(Applied::Left.holds_memory());
+        assert!(
+            Applied::Disputed {
+                disposition: "disputed".to_string()
+            }
+            .holds_memory()
+        );
+        assert!(Applied::Refused("the store is busy".to_string()).holds_memory());
+        assert!(!Applied::Dropped.holds_memory());
+        assert!(!Applied::Standing.holds_memory());
+        assert!(
+            !Applied::Contested {
+                by: "mem_1".to_string()
+            }
+            .holds_memory()
+        );
+    }
+
+    /// A refused proposal takes its memory's pending place only when no earlier proposal holds it; a proposal left for a reader replaces the entry.
+    #[test]
+    fn a_refused_proposal_keeps_an_earlier_pending_one() {
+        let mut memory = SelectionMemory::default();
+        memory.note_pending("project", "mem_1", "job-a", false);
+        memory.note_pending("project", "mem_1", "job-b", true);
+        assert_eq!(memory.pending["project"].waiting["mem_1"], "job-a");
+        memory.note_pending("project", "mem_2", "job-c", true);
+        assert_eq!(memory.pending["project"].waiting["mem_2"], "job-c");
+        memory.note_pending("project", "mem_1", "job-d", false);
+        assert_eq!(memory.pending["project"].waiting["mem_1"], "job-d");
+    }
+
     #[test]
     fn subject_terms_keep_what_a_statement_is_about() {
         let terms = subject_terms("User stated: Always name test files with the suffix _spec.");

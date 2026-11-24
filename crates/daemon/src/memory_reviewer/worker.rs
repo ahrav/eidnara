@@ -797,17 +797,20 @@ impl Worker {
                                 .await
                                 .unwrap_or_else(|error| Applied::Refused(error.to_string()))
                             };
-                            // A change proposal a reader has yet to settle holds its memory: new evidence waits for it. A proposal the write refused keeps its review hold too.
-                            if matches!(
-                                applied,
-                                Applied::Left | Applied::Disputed { .. } | Applied::Refused(_)
-                            ) && let ReviewTarget::Memory { object_id, .. } = &job.target
+                            // A change proposal a reader has yet to settle holds its memory: new evidence waits for it. A proposal the write refused keeps its review hold too, and takes the memory's place only when no earlier proposal holds it.
+                            if applied.holds_memory()
+                                && let ReviewTarget::Memory { object_id, .. } = &job.target
                             {
                                 self.switched
                                     .selection
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .note_pending(&route.project, object_id, &job.causal_identity);
+                                    .note_pending(
+                                        &route.project,
+                                        object_id,
+                                        &job.causal_identity,
+                                        matches!(applied, Applied::Refused(_)),
+                                    );
                             }
                             match &applied {
                                 Applied::Left => eprintln!(
