@@ -20,6 +20,7 @@
 //! wait and the line its commit time. The pass's own reads of the listed
 //! files have no deadline, as its reads of the project's documents have
 //! none. The reader takes HEAD through
+//! [`crate::memory_capture::observe_head_in`], the read behind
 //! [`crate::memory_capture::observe_head`], which capture calls for every
 //! session it captures, and each commit and tree through the attestation
 //! verifier's object reader, which returns an object whose bytes hash to
@@ -41,7 +42,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 use crate::attestation_verifier::{ALLOCATION_LIMIT, INDEX_SLOTS, ObjectClass, Objects};
-use crate::memory_capture::{FrozenHead, observe_head};
+use crate::memory_capture::{FrozenHead, observe_head_in};
 
 /// When a file last changed, as one delivery reads it. A time is in
 /// milliseconds since the Unix epoch.
@@ -147,6 +148,21 @@ struct Answers {
 }
 
 impl Answers {
+    fn holds_every(
+        &self,
+        root: &Path,
+        directory: Directory,
+        head: gix::ObjectId,
+        files: &[(String, gix::ObjectId)],
+    ) -> bool {
+        self.roots.get(root).is_some_and(|kept| {
+            (kept.directory, kept.head) == (directory, head)
+                && files
+                    .iter()
+                    .all(|(path, blob)| kept.files.get(path).is_some_and(|(held, _)| held == blob))
+        })
+    }
+
     /// The answers kept for `root`, made the root answered last: those
     /// read in `directory` at `head`, or none after another directory or
     /// HEAD. A 65th root takes the place of the one answered longest ago.
@@ -274,13 +290,16 @@ fn read_jobs(queued: &Receiver<Job>) {
 /// The answer to `job`: for each file the kept answer of its path and
 /// blob at the HEAD commit read now, or what a walk from that commit
 /// finds, which is kept when it is settled. Every file is
-/// [`Found::NotHeld`] when [`observe_head`] reads no SHA-1 commit at HEAD,
-/// and when `root` opens as no SHA-1 repository whose work tree is the
-/// directory the pass opened, whatever the reader keeps for the root. No
-/// file has an answer when the job's time ended while HEAD was read.
+/// [`Found::NotHeld`] when [`observe_head_in`] reads no SHA-1 commit at
+/// HEAD. A mismatch between `work_tree(&observed)` and
+/// `Some(job.directory)` yields `Some(Found::NotHeld)` for every file,
+/// before the reader checks any kept answer. [`work_tree_repository`] runs
+/// only for a job with a file to walk, and its `None` yields
+/// `Some(Found::NotHeld)` for every file. If the job expires during the
+/// HEAD read, every file's answer is `None`.
 fn answer(answers: &mut Answers, job: &Job) -> Vec<Option<Found>> {
     let not_held = || vec![Some(Found::NotHeld); job.files.len()];
-    let FrozenHead::Commit(head) = observe_head(&job.root) else {
+    let (FrozenHead::Commit(head), Some(observed)) = observe_head_in(&job.root) else {
         return not_held();
     };
     let Some(head) = crate::git_sources::parse_oid(&head, gix::hash::Kind::Sha1) else {
@@ -290,8 +309,17 @@ fn answer(answers: &mut Answers, job: &Job) -> Vec<Option<Found>> {
     if Instant::now() >= end {
         return vec![None; job.files.len()];
     }
-    let Some(repo) = work_tree_repository(&job.root, job.directory) else {
+    if work_tree(&observed) != Some(job.directory) {
         return not_held();
+    }
+    drop(observed);
+    let walked_repo = if answers.holds_every(&job.root, job.directory, head, &job.files) {
+        None
+    } else {
+        let Some(repo) = work_tree_repository(&job.root, job.directory) else {
+            return not_held();
+        };
+        Some(repo)
     };
     let kept = answers.at(&job.root, job.directory, head);
     let mut found: Vec<Option<Walked>> = job
@@ -303,14 +331,14 @@ fn answer(answers: &mut Answers, job: &Job) -> Vec<Option<Found>> {
                 .map(|(_, found)| Walked::Settled(*found))
         })
         .collect();
-    if found.iter().any(Option::is_none) {
+    if let Some(repo) = &walked_repo {
         let asked: Vec<&(String, gix::ObjectId)> = job
             .files
             .iter()
             .zip(&found)
             .filter_map(|(file, found)| found.is_none().then_some(file))
             .collect();
-        let mut walked = read_history(&job.root, &repo, head, &asked, end).into_iter();
+        let mut walked = read_history(&job.root, repo, head, &asked, end).into_iter();
         for ((path, blob), slot) in job.files.iter().zip(&mut found) {
             if slot.is_none() {
                 let walked = walked.next().expect("an answer for each file asked");
@@ -470,16 +498,18 @@ impl Reader<'_> {
     }
 }
 
+fn work_tree(repo: &gix::Repository) -> Option<Directory> {
+    let status = std::fs::metadata(repo.workdir()?).ok()?;
+    Some((status.dev(), status.ino()))
+}
+
 /// The SHA-1 repository that opens at `root`, when its work tree is
 /// `directory`, the directory a pass opened as the root.
 fn work_tree_repository(root: &Path, directory: Directory) -> Option<gix::Repository> {
     let slots = gix::odb::store::init::Slots::Given(INDEX_SLOTS);
     let repo = crate::git_sources::open_with_slots(root, ALLOCATION_LIMIT, slots).ok()?;
-    let work_tree = repo
-        .workdir()
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|status| (status.dev(), status.ino()));
-    (repo.object_hash() == gix::hash::Kind::Sha1 && work_tree == Some(directory)).then_some(repo)
+    (repo.object_hash() == gix::hash::Kind::Sha1 && work_tree(&repo) == Some(directory))
+        .then_some(repo)
 }
 
 /// When the walk of the next of `files_left` files ends: an equal share of
@@ -1562,6 +1592,11 @@ mod tests {
             elsewhere.path().display()
         ));
         std::fs::write(&config, text).unwrap();
+        // The kept answer for `a.md` covers the entire single-file job.
+        assert_eq!(
+            changes_of(&history, root, &["a.md"]),
+            [on_disk(root, "a.md")]
+        );
         assert_eq!(
             changes_of(&history, root, &["a.md", "b.md"]),
             [on_disk(root, "a.md"), on_disk(root, "b.md")]
@@ -1604,6 +1639,24 @@ mod tests {
             Found::Unread,
         );
         assert!(answers.at(&root(2), (1, 2), id(8)).is_empty());
+
+        // The kept answers cover a job when the root keeps, for the job's
+        // directory and HEAD, each of its paths with the blob the pass read.
+        let kept = |path: &str, blob: u8| (path.to_owned(), id(blob));
+        keep(
+            answers.at(&root(2), here, id(8)),
+            "a.md",
+            id(1),
+            Found::Unread,
+        );
+        let one = [kept("a.md", 1)];
+        assert!(answers.holds_every(&root(2), here, id(8), &one));
+        assert!(!answers.holds_every(&root(2), (1, 2), id(8), &one));
+        assert!(!answers.holds_every(&root(2), here, id(9), &one));
+        assert!(!answers.holds_every(&root(1), here, id(8), &one));
+        assert!(!answers.holds_every(&root(2), here, id(8), &[kept("a.md", 4)]));
+        let two = [kept("a.md", 1), kept("b.md", 1)];
+        assert!(!answers.holds_every(&root(2), here, id(8), &two));
 
         // A path's new blob takes the place of its old one, and the 65th
         // path of a root starts the root anew.

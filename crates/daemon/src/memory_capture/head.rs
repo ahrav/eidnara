@@ -30,20 +30,20 @@ pub(crate) enum FrozenHead {
 static LAST_HEAD_INDEX: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub(crate) fn observe_head(root: &Path) -> FrozenHead {
-    let slots = Slots::Given(HEAD_INDEX_SLOTS);
-    let Ok(repo) = git_sources::open_with_slots(root, HEAD_OBJECT_BYTES, slots) else {
-        return FrozenHead::HeadUnavailable;
-    };
+    observe_head_in(root).0
+}
+
+fn head_of(root: &Path, repo: &gix::Repository) -> FrozenHead {
     let hash = repo.object_hash();
     if git_sources::object_format(hash).is_err() {
         return FrozenHead::HeadUnavailable;
     }
-    let Some(id) = head_id(&repo) else {
+    let Some(id) = head_id(repo) else {
         return FrozenHead::HeadUnavailable;
     };
-    let kind = match git_sources::file_object_kind(&repo, &id, &LAST_HEAD_INDEX) {
+    let kind = match git_sources::file_object_kind(repo, &id, &LAST_HEAD_INDEX) {
         Ok(Some(kind)) => Some(kind),
-        Ok(None) => git_sources::store_object_kind(&repo, &id)
+        Ok(None) => git_sources::store_object_kind(repo, &id)
             .unwrap_or_else(|SlotsExhausted| reopened_kind(root, &id)),
         Err(PackCorruption::CyclicDeltaChain | PackCorruption::MismatchedIndex) => None,
     };
@@ -729,5 +729,20 @@ mod tests {
             let text = serde_json::to_string(&value).unwrap();
             assert_eq!(serde_json::from_str::<FrozenHead>(&text).unwrap(), value);
         }
+    }
+}
+
+// Placed after the test module so the cited lines above keep their numbers.
+/// The head [`observe_head`] reads at `root`, with the repository that read
+/// opened: `None` for a root `git_sources::open_with_slots` refuses. A
+/// caller that also needs the repository's work tree takes it from this
+/// repository, which opens with the object bound and index slots of the
+/// head read.
+#[allow(clippy::items_after_test_module)]
+pub(crate) fn observe_head_in(root: &Path) -> (FrozenHead, Option<gix::Repository>) {
+    let slots = Slots::Given(HEAD_INDEX_SLOTS);
+    match git_sources::open_with_slots(root, HEAD_OBJECT_BYTES, slots) {
+        Ok(repo) => (head_of(root, &repo), Some(repo)),
+        Err(_) => (FrozenHead::HeadUnavailable, None),
     }
 }
