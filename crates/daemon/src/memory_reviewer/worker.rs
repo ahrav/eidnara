@@ -672,7 +672,12 @@ impl Worker {
                             project_digest: &root.project_digest,
                             ledger_project: &route.project,
                         },
-                        review_cycle::room(pending.len(), JOBS_PER_PASS, holds_left),
+                        // A fact-set job of the project waits for the owner's record and its pass, so the switch's allowance counts the memory reviews alone. The store bounds the project's pending jobs of every kind at reservation.
+                        review_cycle::room(
+                            pending.iter().filter(|job| reviews_memory(job)).count(),
+                            JOBS_PER_PASS,
+                            holds_left,
+                        ),
                         now,
                     )
                     .map_err(|error| error.to_string())?;

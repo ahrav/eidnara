@@ -1718,6 +1718,52 @@ async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
             now,
         )
         .unwrap();
+    // Seven more fact-set jobs fill a pass's whole allowance of jobs. They wait for the owner's record, so the switch's own allowance counts the memory reviews alone.
+    for index in 0..7 {
+        let producer = ProducerBinding {
+            producer: "history_summarizer".to_string(),
+            firing_id: format!("{}#{}", "6".repeat(32), index),
+            ordinal: 0,
+        };
+        let target = ReviewTarget::StagedSubject {
+            kernel_incarnation: kernel
+                .database_incarnation_id_within_budget(&budget)
+                .unwrap(),
+            candidate_id: format!("hs-ses-{index:032}"),
+            payload_digest: "0d".repeat(32),
+        };
+        let ReserveOutcome::Reserved(waiting) = rig
+            .store
+            .reserve_memory_reviewer_job(
+                &root,
+                &producer,
+                &CausalInputs {
+                    target: target.clone(),
+                    question_template: "extracted_facts".to_string(),
+                    signals: Vec::new(),
+                    required_evidence: Vec::new(),
+                    policy_versions: crate::memory_reviewer::handoff::review_policy_versions(),
+                },
+                now,
+            )
+            .unwrap()
+        else {
+            panic!("fresh inputs reserve a job")
+        };
+        rig.store
+            .activate_memory_reviewer_job(
+                &root,
+                &waiting.causal_identity,
+                &producer,
+                &MemoryReviewerJobInput {
+                    subject: target,
+                    starting_references: Vec::new(),
+                    question_template: "extracted_facts".to_string(),
+                },
+                now,
+            )
+            .unwrap();
+    }
     rig.user_says_later(
         "later-2",
         1_700_000_100_000,
@@ -1736,10 +1782,14 @@ async fn the_switched_pass_leaves_a_fact_set_job_for_the_owners_record() {
         .unwrap();
     assert_eq!(
         ready.len(),
-        1,
-        "the fact-set job waits for the owner's record"
+        8,
+        "the fact-set jobs wait for the owner's record"
     );
-    assert_eq!(ready[0].causal_identity, job.causal_identity);
+    assert!(
+        ready
+            .iter()
+            .any(|waiting| waiting.causal_identity == job.causal_identity)
+    );
 }
 
 /// A review the worker's owner cancels while its request is with the model leaves no session behind: the request's child session is deleted although the request never returned.

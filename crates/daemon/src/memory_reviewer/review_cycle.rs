@@ -20,6 +20,7 @@ use memory_store::memory_reviewer_jobs::{
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MemoryReviewerJobError, MemoryReviewerJobInput,
     MemoryReviewerJobRefusal, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
+use memory_store::memory_reviewer_ledger::MAX_RECEIPT_PAGE;
 use memory_store::{MemoryStore, MemoryStoreError};
 use sha2::{Digest, Sha256};
 
@@ -350,7 +351,7 @@ impl PendingProposals {
                 .list_completed_memory_reviewer_receipts(
                     scope.ledger_project,
                     after.as_deref(),
-                    256,
+                    MAX_RECEIPT_PAGE,
                 )
                 .map_err(|error| CycleError::Ledger(error.to_string()))?;
             read += page.len();
@@ -372,7 +373,8 @@ impl PendingProposals {
                 }
             }
             match last {
-                Some(last) if page.len() == 256 => after = Some(last),
+                // The ledger serves at most one page a call, so a full page is the sign that more follow.
+                Some(last) if page.len() == MAX_RECEIPT_PAGE => after = Some(last),
                 _ => break,
             }
         }
