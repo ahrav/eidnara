@@ -186,3 +186,222 @@ rules:
   value_group: value
   reject_scalars: true
   value_suppressors_any: *overlay_value_suppressors
+# Credential forms that the rules above leave in the text. Every rule from here on is an
+# addition: the rules above are evaluated as they are, and a finding of this document is the
+# union of what each rule reports. The added rules are named `magic-value-*`, which sorts
+# after every rule above, so the evaluator runs each rule above before the first added rule.
+#
+# Value grammar. `SEP` is the separator set of the keyed rules above; a line break is one of
+# LF, VT, FF, CR, U+2028, U+2029, and a blank is any other member of `SEP`.
+#
+# The option, field, password-assignment, client, Basic, and key-body rules match the lead
+# of their form (the name and what separates it from the value) and capture the one
+# character before the value. `credential_form` names how the evaluator reads the value WORD from there
+# (`read_word` in `evaluator.rs`), so the word of a lead is the same whatever precedes the
+# lead. The WORD is reported whole, quotes included. It is read left to right in one pass:
+#   - at its start, sections in double quotes, single quotes, or backquotes, each closed on
+#     its line by the first quote of its kind that no backslash escapes, and the
+#     double-quoted section that text serialized once writes (`\"...\"`); blanks inside a
+#     section belong to the word; a quote whose section stays open is a character of the
+#     word, and a section still open more than 32 KiB after its opening quote fails the
+#     scan closed;
+#   - then every character outside `SEP` (a quote, `$`, `;`, a bracket); a backslash takes
+#     the blank or the backslash after it into the word.
+# A word therefore ends at a blank, a line break, or the end of the text. In serialized
+# text the word runs through an escaped line break (`\n`, `\r`, `\u000a`, `\u000d`) to
+# the next blank, and a word longer than 32 KiB fails the scan closed.
+#
+# | Rule | Reads | Value |
+# | --- | --- | --- |
+# | magic-value-option | `--name WORD`, `-name WORD` on one line | WORD that begins with a character other than `-` |
+# | magic-value-field | `name: WORD` | WORD that ends its line (blanks and then a `#` comment or a serialized line break may follow it; 1,008 bytes of blanks count as the line's end), or WORD whose part after the sections holds a serialized line break after any run of backslashes (text serialized twice writes `\\n`) |
+# | magic-value-password-assignment | `XPASSWORD=WORD`, the name ending in `PASSWORD` or `password` joined to a letter of the same case or a digit | WORD, which for this rule also ends at a serialized line break |
+# | magic-value-digits | `name=DIGITS`, `name: DIGITS` with a blank after `:`, `"name": DIGITS`, the name ending in `password` or `secret` | 4 or more digits that are the whole assigned word: only quotes, `,`, `;`, and closing brackets, fewer than 1,008 bytes of them, follow the digits up to the next blank, `&`, or serialized line break |
+# | magic-value-digits-quoted | the same names before `=` or `:` and digits in quotes (`"name": "DIGITS"`, `name='DIGITS'`) | 4 or more digits between two quotes of one kind |
+# | magic-value-url-userinfo | `scheme://user:VALUE@` | from the first `:` of the authority to its last `@`; no separator, `/`, `?`, `#`, quote, backquote, angle bracket, or backslash |
+# | magic-value-basic-authorization | `Authorization: Basic VALUE` on one line | 4 or more Base64 characters of either alphabet and up to two `=`, decoding to `user:password` |
+# | magic-value-client-attached | `mysql ... -pWORD` (MySQL and MariaDB clients) | WORD |
+# | magic-value-client-option | `sshpass -p WORD`, `<client> login ... -p WORD`, attached or after at most 8 blanks | WORD that begins with a character other than `-` |
+# | magic-value-private-key-body | the lines under a `-----BEGIN ... PRIVATE KEY-----` header | the Base64 runs of 16 or more characters that begin the body lines, then one shorter line that is a whole line |
+#
+# A name counts for the option and field rules when its last word is `password`, `secret`,
+# `token`, or a `key` qualified as `api`, `auth`, `access`, `account`, or `secret`: a plural
+# names a count (`--max-tokens`), and a trailing word such as `-file` names a reference.
+# A key may follow a line break or a tab that serialized text writes as `\n`, `\r`,
+# `\t`, `\u000a`, `\u000d`, or `\u0009`, after any run of backslashes: text serialized
+# twice writes a line break as `\\n`.
+#
+# Gates. The gates read the word's text. For a word that begins with a quoted section the
+# text is what that section holds, as the word reader delimits it. For any other word the
+# text is the word up to its first serialized line break or the first quote that closes a
+# string around the value (an unescaped quote at the end of the word, or before `,`, `;`,
+# `:`, or closing brackets that the end of the word, another quote, or an opening `{` or `[` follows), with the
+# `,`, `;`, surplus closing brackets, closing backquotes, and one unpaired final backslash that end it taken off. The rest of the word is replaced with the
+# value and decides nothing. A text of blanks and serialized breaks alone is empty. A word
+# whose text is one of these stand-ins is left as written, whole:
+#   - every form: a mask (`***`, punctuation alone), a reference (`$NAME`, `%NAME%`, a
+#     backquoted command, `os.environ/DB_PASSWORD`), a template (`%s`, or bracketed names
+#     such as `<name>`, `{name}`, `[name]`, `<file>|<text>`: each bracket closed by its
+#     own kind, ASCII letters, digits, `_`, `-`, `.`, and blanks inside, and only
+#     punctuation between and after them), and the stand-in words of
+#     `value_suppressors_any`;
+#   - option, field, client, and URL forms: plain words (ASCII letters, `_`, `-`, blanks
+#     inside quotes, and characters outside ASCII other than the symbols a keyboard types,
+#     U+00A1 to U+00BF, U+00D7, U+00F7, and the currency signs U+20A0 to U+20CF; a closing
+#     `.`, `:`, `,`, or bracket may follow), a file path, a URL, an attribute list
+#     in which every member is `name=value` (`id=npm,src=.npmrc`), and a port with a
+#     property list in which every segment is `name=value` (`1433;database=sales`);
+#   - option, field, password-assignment, and client forms: a scalar (a number, a boolean,
+#     a null, a duration). A PIN of 4 or more digits is a value under a name that ends in
+#     `password` or `secret` and after a client's `-p`;
+#   - bare text of the option, field, and password-assignment forms: a member path
+#     (`config.token`);
+#   - bare text of the field form: text followed directly by `,`, `;`, or a closing bracket,
+#     text that holds a bracket, `,`, `;`, or a backquote, text that begins with a YAML
+#     indicator (`& * ! | > % @ #`), and a GraphQL non-null scalar (`String!`);
+#   - the option form: the word after an option whose name's first word is `no`
+#     (`--no-password`);
+#   - the client forms: a port mapping (`8080:80`).
+# A bare word of the option, password-assignment, and client forms can carry a shell
+# operator and what follows it (`-pVALUE>out.sql`, `XPASSWORD=VALUE&&./run.sh`): `&`,
+# `|`, `<`, or `>` after the first character or after a leading `<name>`, or a serialized tab (`\t`), with backslashes
+# read in pairs. Such a word is left as written when both its text and the part before the
+# operator are stand-ins. When the part before the operator is a credential, the word list
+# of `value_suppressors_any` reads that part.
+
+# A command-line option; its value is the next word of the line.
+- name: magic-value-option
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\B))--?(?P<key>(?i:[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key)))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
+  anchors: [key, token, secret, password, auth, bearer, credential]
+  radius: 256
+  unicode: true
+  key_group: key
+  value_group: value
+  value_suppressors_any: *overlay_value_suppressors
+  credential_form: option_value
+# A `name: value` line of a configuration file, a header dump, or a program's report, real
+# or serialized.
+- name: magic-value-field
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>(?i:[A-Za-z0-9_.-]*?(?:password|secret|token|(?:api|auth|access|account|secret)[-_.]?key)))[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
+  anchors: [key, token, secret, password, auth, bearer, credential]
+  radius: 256
+  unicode: true
+  key_group: key
+  value_group: value
+  value_suppressors_any: *overlay_value_suppressors
+  credential_form: field_value
+# An assignment whose name ends in `password` joined to the letters before it, as in
+# `PGPASSWORD=VALUE psql`. The key gate of the keyed rules reads such a name as one word
+# and declines it unless a credential qualifier precedes `password`. The join holds one
+# letter case (`PGPASSWORD`, `pgpassword`); the keyed rules read a camel-case name
+# (`userPassword`) word by word. The word of this form also ends at a serialized line
+# break, which separates the lines of a serialized environment file, so a name on the next
+# serialized line has its own match. The pattern takes the run after the `=` up to that
+# end, so a second such name inside the run (`APASSWORD=$x;BPASSWORD=y`, or after an
+# escaped blank) is text of the first name's word and the runs this rule reads are
+# disjoint. A quoted section of the word is read whole, and the gates of this form read its
+# text up to the first serialized line break. The run and the word end at the same place (`ends_an_assignment_run` in
+# `evaluator.rs`): before `\n`, `\r`, `\u000a`, `\u000d`, and before a `\u` whose next
+# four characters hold a separator or a backslash.
+- name: magic-value-password-assignment
+  regex: '(?-u:\b)[A-Za-z0-9_.-]*(?:[A-Z0-9]PASSWORD|[a-z0-9]password)(?P<value>=)(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}\\]|\\[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]|\\[^nru\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|\\u(?:[^0\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|0[^0\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|00[^0\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]|000[^aAdD\\\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]))*'
+  anchors: [password]
+  radius: 256
+  unicode: true
+  value_group: value
+  value_suppressors_any: *overlay_value_suppressors
+  credential_form: password_assignment
+# Digits under a key whose last word is `password` or `secret`: a PIN or a numeric
+# password. The keyed rules above read a number as a scalar, which it is under `token` and
+# `key` (`max_tokens=4096`). The form reports the digits when they are the whole assigned
+# word: up to the next blank or `&`, only quotes, `,`, `;`, and closing brackets follow
+# them. `1234.5`, `1234-abcd`, and `1234,Zx9` stay with the rules above.
+- name: magic-value-digits
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>(?i:[A-Za-z0-9_.-]*(?:password|secret)))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*=[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]+|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)(?P<value>[0-9]{4,})'
+  anchors: [key, token, secret, password, auth, bearer, credential]
+  radius: 256
+  unicode: true
+  key_group: key
+  value_group: value
+  credential_form: digits
+# The same digits between two quotes of one kind (`"`, `'`, or the serialized `\"`). The
+# closing quote follows the last digit, so a quoted text that only begins with digits
+# (`"1234 abcd"`, `"1234'abcd"`) stays with the rules above.
+- name: magic-value-digits-quoted
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|(?-u:\b))(?P<key>(?i:[A-Za-z0-9_.-]*(?:password|secret)))(?:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*[=:][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*|\\?["''][\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*)\\?["''](?P<value>[0-9]{4,})'
+  anchors: [key, token, secret, password, auth, bearer, credential]
+  radius: 256
+  unicode: true
+  key_group: key
+  value_group: value
+  credential_form: digits_quoted
+# RFC 7617 credentials: the Base64 of `user:password`, which anyone can decode. The form
+# requires that decoding, so `Basic authentication` in prose is left alone. The pattern
+# matches the header up to the blank before its value, and the form reads the value from
+# there, so each header on a line is read on its own.
+- name: magic-value-basic-authorization
+  regex: '(?:\\(?:[nrt]|u000[aAdD9])|\b)(?i:Authorization)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*:[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?i:Basic)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]*(?P<value>[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])'
+  anchors: [authorization]
+  radius: 256
+  unicode: true
+  value_group: value
+  credential_form: basic_authorization
+# RFC 3986 userinfo with a password. The user name runs to the first `:` and the password
+# ends at the last `@` of the authority. A leading `$`, `[`, or `{` marks a variable or a
+# template, and a leading `%` opens a percent-encoded octet.
+- name: magic-value-url-userinfo
+  regex: '[A-Za-z][A-Za-z0-9+.-]*://[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#:''"`<>\\]*:(?P<value>(?:%[0-9A-Fa-f]{2}|[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#''"`<>\\$%\[{])[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}/?#''"`<>\\]*)@'
+  anchors: ['://']
+  radius: 256
+  unicode: true
+  value_group: value
+  value_suppressors_any: *overlay_value_suppressors
+  credential_form: url_password
+# `-p` names a password only for a program that defines it so; elsewhere it is a port, a
+# path, or a process id. The MySQL and MariaDB clients read the password attached to the
+# option. The program stands as a command word (at the start of the text or after a
+# separator, a quote, or a shell operator), bare or under a `bin/` or `./` path. The option
+# is the first ` -p` after it within 256 units of one command, where a unit is one character
+# (a blank included) or a backslash and the character after it. A line break, `|`, `;`,
+# `&`, and the escapes `\n`, `\r`, and `\u` end the command.
+- name: magic-value-client-attached
+  regex: '(?:^|[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]|\\(?:[nrt]|u000[aAdD9]))(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]*bin/|\./)?(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump|mariadb-admin)(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}](?:(?:[^\n\x0B\f\r\x{2028}\x{2029}\x{85}|;&\\]|\\[^nru\n\x0B\f\r\x{2028}\x{2029}\x{85}]){0,255}?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])??-(?P<value>p)'
+  anchors: [mysql, mariadb]
+  radius: 256
+  unicode: true
+  value_group: value
+  value_suppressors_any: *overlay_value_suppressors
+  credential_form: client_password
+# `sshpass -p`, at most 8 blanks after `sshpass`, and the `login` subcommand of the
+# registry and platform clients listed here, with `-p` within 256 units after `login`, take
+# the password attached or after at most 8 blanks.
+- name: magic-value-client-option
+  regex: '(?:^|[\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]|\\(?:[nrt]|u000[aAdD9]))(?:[^\t\n\x0B\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}"''`(;&|=]*bin/|\./)?(?:sshpass(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8}|(?:docker|podman|nerdctl|buildah|skopeo|oras|crane|helm|oc|cf|az)(?:\.exe)?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8}(?:(?:registry|auth|acr)[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}]{1,8})?login(?-u:\b)(?:[^\n\x0B\f\r\x{2028}\x{2029}\x{85}|;&\\]|\\[^nru\n\x0B\f\r\x{2028}\x{2029}\x{85}]){0,256}?[\t \x{a0}\x{1680}\x{2000}-\x{200a}\x{202f}\x{205f}\x{3000}\x{feff}])-(?P<value>p)'
+  anchors: [sshpass, login]
+  radius: 256
+  unicode: true
+  value_group: value
+  value_suppressors_any: *overlay_value_suppressors
+  credential_form: client_password_option
+# The body lines under a private-key header. The corpus `private-key` rule reports a whole
+# block, header to footer; a block cut short by `head` or by an output limit ends before
+# its footer, and its body lines are key material all the same. The pattern matches the
+# header, and the form reads the body from there (`read_key_body` in `evaluator.rs`):
+#   - a line break after the header, then up to four `Name: value` lines of at most 232
+#     bytes (PGP armor headers, `Proc-Type` and `DEK-Info` of an encrypted PEM), each
+#     name an ASCII letter and up to 30 more letters, digits, or `-`, and one blank line;
+#   - body lines that begin with 16 or more Base64 characters, which are the reported part
+#     of the line: an output limit can cut the last line and append its own marker;
+#   - one last line of 1 to 15 Base64 characters when it is a whole line: a line break, the
+#     end of the text, or a quote that closes a serialized string follows it.
+# A line break is LF or CR LF, each written raw or serialized (`\n`, `\r`, `\u000a`,
+# `\u000d`). At most 256 spaces or tabs may stand before and after a line break and after
+# the last line. When no body follows the `Name: value` lines, the lines under the header
+# are read as the body. A header followed by `...` or by prose of shorter words stays as
+# written.
+- name: magic-value-private-key-body
+  regex: '(?i:-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?----)(?P<value>-)'
+  anchors: ['-----begin']
+  radius: 256
+  value_group: value
+  credential_form: private_key_body

@@ -42,7 +42,7 @@ resolve.
 ## Timing windows and dependencies
 
 None in time. The result depends on the scanner's embedded rule set
-(`crates/secret-scanner/src/rules.rs:31`, `:299-306`); a rule change can
+(`crates/secret-scanner/src/rules.rs:31`, `:331-338`); a rule change can
 move a path from accepted to refused.
 
 ## What a test must construct
