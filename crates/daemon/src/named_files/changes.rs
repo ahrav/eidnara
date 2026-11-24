@@ -37,7 +37,6 @@ use std::os::fd::BorrowedFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -256,22 +255,7 @@ impl History {
                 .recv_timeout(until.saturating_duration_since(Instant::now()))
                 .ok()
         });
-        answers.unwrap_or_else(|| {
-            say_once_unanswered();
-            vec![None; files.len()]
-        })
-    }
-}
-
-/// Says on standard error, the first time in the daemon's life, that a
-/// pass went without the reader's answer: the queue was full, the reader
-/// thread is gone, or the pass's wait ended.
-fn say_once_unanswered() {
-    static SAID: AtomicBool = AtomicBool::new(false);
-    if !SAID.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "daemon: the named file history reader gave a pass no answer within its wait; the pass's lines show times on disk"
-        );
+        answers.unwrap_or_else(|| vec![None; files.len()])
     }
 }
 
