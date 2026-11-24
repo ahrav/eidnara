@@ -767,7 +767,7 @@ pub struct MemoryReviewerStatusFacts {
     pub attempts_open: u64,
     pub receipts_in_progress: u64,
     pub receipts_complete: u64,
-    /// Permanent receipt charges every admitted job keeps; these never shrink for the incarnation.
+    /// Receipt charges of the jobs and frozen selection pages the store holds; a charge returns when the retirement sweep deletes its row.
     pub receipt_charge_bytes: u64,
     /// Temporary allowances still held by non-terminal jobs and frozen selection pages; released when the work is terminal.
     pub allowance_bytes: u64,
@@ -907,7 +907,7 @@ impl MemoryStore {
                     "SELECT state, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
                      FROM memory_reviewer_frozen_selections GROUP BY state",
                     |state, row| {
-                        // A page's receipt charge is permanent whatever its state; only its allowance is released at a terminal.
+                        // A page keeps its receipt charge in every state until the retirement sweep deletes it; only its allowance is released at a terminal.
                         facts.receipt_charge_bytes = facts
                             .receipt_charge_bytes
                             .saturating_add(unsigned(row.get(2)?));
@@ -945,7 +945,7 @@ impl MemoryStore {
                     },
                 )?;
                 facts.metadata_bytes = memory_reviewer_jobs::metadata_bytes(conn, None)?;
-                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
+                // Everything charged that is not a receipt charge is a temporary allowance: job allowances plus the frozen pages' charges.
                 facts.allowance_bytes = facts
                     .metadata_bytes
                     .saturating_sub(facts.receipt_charge_bytes);
@@ -29056,9 +29056,9 @@ mod tests {
         }
     }
 
-    /// A frozen page's receipt charge is permanent and its allowance temporary; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
+    /// A frozen page's receipt charge outlasts its allowance; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
     #[test]
-    fn frozen_page_receipt_charges_are_permanent_not_allowances_in_the_sample() {
+    fn frozen_page_receipt_charges_are_receipts_not_allowances_in_the_sample() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let receipt = memory_reviewer_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;
