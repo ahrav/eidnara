@@ -295,7 +295,7 @@ impl Rig {
 
     /// The next session's block, or an empty string when the session receives none.
     async fn block(&self) -> String {
-        memory_auto_delivery_tests::delivered_block(&self.handler, THIRD, "s3")
+        memory_auto_delivery_tests::reviewer_rig_block(&self.handler, THIRD, "s3")
             .await
             .unwrap_or_default()
     }
@@ -1135,10 +1135,11 @@ async fn a_statement_replaced_in_part_stays_delivered_and_is_marked_contested() 
             ActivationState::Open,
             "{apply:?}"
         );
-        // A row's id and the dates of its contest belong to the rig, so the two modes are compared by the statements they deliver.
+        // A row's id and the dates of its contest belong to the rig, so the two modes are compared by the statements they deliver. A delivered statement's line opens with its memory id, which starts with `mem_`, and the statement follows the first `": "`.
         let mut statements: Vec<String> = block
             .lines()
             .filter_map(|line| line.split_once(": "))
+            .filter(|(id, _)| id.starts_with("mem_"))
             .map(|(_, statement)| {
                 statement
                     .split(" (stated ")

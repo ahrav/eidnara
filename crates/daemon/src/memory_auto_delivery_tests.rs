@@ -235,8 +235,8 @@ pub(super) fn body(outcome: PreparedOutcome) -> Value {
     }
 }
 
-/// The memory block a new session of `channel` is served, when it is served one.
-pub(super) async fn delivered_block(
+/// The memory block a new session of `channel` is served, when it is served one. The rig of the reviewer switch tests reads it as the next session's block.
+pub(super) async fn reviewer_rig_block(
     handler: &Handler,
     channel: u16,
     session: &str,
