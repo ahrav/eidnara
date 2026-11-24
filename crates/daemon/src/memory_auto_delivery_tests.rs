@@ -235,6 +235,15 @@ pub(super) fn body(outcome: PreparedOutcome) -> Value {
     }
 }
 
+/// The memory block a new session of `channel` is served, when it is served one.
+pub(super) async fn delivered_block(
+    handler: &Handler,
+    channel: u16,
+    session: &str,
+) -> Option<String> {
+    project_memory_block(&serve(handler, channel, session).await)
+}
+
 fn ids_containing(existing: &[Value], needle: &str) -> Vec<String> {
     existing
         .iter()
@@ -243,7 +252,7 @@ fn ids_containing(existing: &[Value], needle: &str) -> Vec<String> {
         .collect()
 }
 
-pub(super) async fn serve(handler: &Handler, channel: u16, session: &str) -> Value {
+async fn serve(handler: &Handler, channel: u16, session: &str) -> Value {
     let messages = vec![
         ck("00000001", 1, "Please tidy the README headings."),
         wire_with_role(
@@ -258,7 +267,7 @@ pub(super) async fn serve(handler: &Handler, channel: u16, session: &str) -> Val
     call_transform_request_on_channel(handler, channel, request).await
 }
 
-pub(super) fn project_memory_block(response: &Value) -> Option<String> {
+fn project_memory_block(response: &Value) -> Option<String> {
     let served = serde_json::to_string(response).unwrap();
     let start = served.find("<project-memory>")?;
     let end = served[start..].find("</project-memory>")? + start;
