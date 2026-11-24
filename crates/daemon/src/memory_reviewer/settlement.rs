@@ -931,6 +931,36 @@ fn copy_selection(
     })
 }
 
+/// Ends the review hold of the proposal `receipt` selects, after the Kernel settled that proposal: the settlement is the decision the hold kept the evidence for, so the hold's place in the project's allowance returns at once. Returns whether a live hold was released; a hold that already ended is left as it is.
+pub fn release_settled_review_hold(
+    store: &KernelStore,
+    receipt: MemoryReviewerReceipt,
+    live_memstore: &str,
+    causal_identity: &str,
+    now: i64,
+) -> Result<bool, String> {
+    let CopiedSelection { reference, run, .. } =
+        copy_selection(receipt, live_memstore, causal_identity)
+            .map_err(|refusal| refusal.to_string())?;
+    let review = MemoryReviewerHoldBinding {
+        subject: reference.candidate_id,
+        ..run
+    };
+    let Some(hold) = store
+        .lookup_review_hold(&review, now)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    match store.release_review_hold(&hold.hold_id, &review) {
+        Ok(()) => Ok(true),
+        Err(MemoryReviewerHoldError::Refused(
+            MemoryReviewerHoldRefusal::Released | MemoryReviewerHoldRefusal::Expired,
+        )) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. The row's queue deadline is judged against the receipt's completion time, which the Memory Store fenced against that same deadline, so a result selected while its queue was live stays readable afterward exactly as long as its review hold is live and every disclosed input still passes local policy.
 pub fn read_selected_proposal(
     store: &KernelStore,
@@ -1115,13 +1145,23 @@ pub fn accept_selected_proposal(
         return Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch));
     }
     let scope_id = format!("project:{}", run.project_digest);
+    // The acceptance names the revision of the template the proposal was written under, which the selected row records. A settled proposal replays before any revision is compared, so a row that can no longer be read falls back to the fact-set template.
+    let question = match store.read_selected_review_input(&reference, selected_at) {
+        Ok(row) => match row.payload {
+            ReviewPayload::Proposal(proposal) => {
+                QuestionTemplate::of_staged(proposal.policy_dependencies.question_template)
+            }
+            _ => QuestionTemplate::ExtractedFacts,
+        },
+        Err(_) => QuestionTemplate::ExtractedFacts,
+    };
     let acceptance = kernel::ProposalAcceptance {
         intent: caller_intent(&run, causal_identity, operation_key, target),
         run,
         proposal: reference,
         selected_at,
         target: target.clone(),
-        question_template_revision: QuestionTemplate::ExtractedFacts.revision(),
+        question_template_revision: question.revision(),
         scope_id: Some(scope_id),
     };
     store

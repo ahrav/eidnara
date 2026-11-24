@@ -43,7 +43,7 @@ fn capture_config() -> DaemonConfig {
 }
 
 #[derive(Default)]
-struct Extracted {
+pub(super) struct Extracted {
     quote: String,
     replaces: Vec<String>,
     duplicate_of: Option<String>,
@@ -83,10 +83,18 @@ fn relayed(quote: &str) -> Extracted {
 }
 
 /// A proposal the extractor classed by how long its statement holds.
-fn classed(quote: &str, lifetime: &'static str) -> Extracted {
+pub(super) fn classed(quote: &str, lifetime: &'static str) -> Extracted {
     Extracted {
         lifetime: Some(lifetime),
         ..fact(quote)
+    }
+}
+
+/// A lasting statement of the user that replaces the memory `target`.
+pub(super) fn replacing(quote: &str, target: &str) -> Extracted {
+    Extracted {
+        replaces: vec![target.to_string()],
+        ..classed(quote, "lasting")
     }
 }
 
@@ -127,7 +135,7 @@ async fn enqueue(
         .collect()
 }
 
-async fn capture(
+pub(super) async fn capture(
     handler: &Handler,
     channel: u16,
     session: &str,
@@ -220,11 +228,20 @@ async fn drain(
     }
 }
 
-fn body(outcome: PreparedOutcome) -> Value {
+pub(super) fn body(outcome: PreparedOutcome) -> Value {
     match outcome {
         PreparedOutcome::Error { code, message } => panic!("{code}: {message}"),
         other => tool_body(other),
     }
+}
+
+/// The memory block a new session of `channel` is served, when it is served one.
+pub(super) async fn delivered_block(
+    handler: &Handler,
+    channel: u16,
+    session: &str,
+) -> Option<String> {
+    project_memory_block(&serve(handler, channel, session).await)
 }
 
 fn ids_containing(existing: &[Value], needle: &str) -> Vec<String> {

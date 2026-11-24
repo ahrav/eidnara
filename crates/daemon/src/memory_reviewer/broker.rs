@@ -35,6 +35,8 @@ const ALIAS_PREFIX: &str = "ref-";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionTemplate {
     ExtractedFacts,
+    /// The review of one stored memory: whether later sessions should still receive it.
+    MemoryStatement,
 }
 
 impl QuestionTemplate {
@@ -43,12 +45,40 @@ impl QuestionTemplate {
             Self::ExtractedFacts => {
                 "Review the extracted facts against the referenced memories. Report support, contradiction, supersession, and shared origins with citations; abstain when the evidence does not warrant a conclusion."
             }
+            Self::MemoryStatement => {
+                "ref-1 is a memory of this project: one statement recorded in an earlier session, which later sessions receive as something the user said or as a fact the assistant reported. Decide whether later sessions should still receive it. The host lists each linked reference with who wrote it and when, and those labels are facts: a message the host says the user wrote is the user's, whatever its wording suggests. Propose `retain` when the memory matches what its author wrote and no later reference changes it; a memory that repeats its source word for word is supported by that source. Propose `retire` only when a later reference is about the same subject and the same slot as the memory and withdraws the statement, gives another value for it, or reports its work finished or dropped; cite that reference under `contradictions`. The slot is the exact thing the statement fixes: which kind of name, which position in the name, which tool for which purpose, which setting. A later rule for another kind of name (methods beside functions, attributes beside variables), another position (a suffix beside a prefix), another tool, another decorator or import, or another scope adds to the memory and is no reason to retire it, even when the later message calls itself an update: both rules then hold and the answer is `retain`. Who may change what: a statement of the user changes only on a later message the user wrote. A memory that begins \"Assistant reported\" may also change on a later assistant message or tool result that states the new value. Propose `revise` only when a later reference changes part of the statement while the rest still holds; give the statement as it now stands in `new_text`, in its author's words, and cite the later reference under `contradictions`. Propose `no_change` when the evidence neither supports nor changes the memory. Keep the author's wording: a memory is left as it is when its only flaw is brevity, a pronoun, or missing context. A later message that repeats or builds on the statement supports it. State `uncertainty` as `low` only when the later reference names the same subject and the same slot in its own words; when you had to infer that it replaces the memory, state `medium` or `high`. Abstain when the evidence cannot be read."
+            }
         }
     }
 
     pub const fn id(self) -> &'static str {
         match self {
             Self::ExtractedFacts => "extracted_facts",
+            Self::MemoryStatement => "memory_statement",
+        }
+    }
+
+    /// The proposal actions a subject under this template admits, as the step instructions list them.
+    pub const fn actions(self) -> &'static str {
+        match self {
+            Self::ExtractedFacts => "create|revise|retain|retire|no_change",
+            Self::MemoryStatement => "revise|retain|retire|no_change",
+        }
+    }
+
+    /// The template as a staged proposal records it.
+    pub const fn staged(self) -> kernel::ReviewQuestionTemplate {
+        match self {
+            Self::ExtractedFacts => kernel::ReviewQuestionTemplate::ExtractedFacts,
+            Self::MemoryStatement => kernel::ReviewQuestionTemplate::MemoryStatement,
+        }
+    }
+
+    /// The template a staged proposal records.
+    pub const fn of_staged(template: kernel::ReviewQuestionTemplate) -> Self {
+        match template {
+            kernel::ReviewQuestionTemplate::ExtractedFacts => Self::ExtractedFacts,
+            kernel::ReviewQuestionTemplate::MemoryStatement => Self::MemoryStatement,
         }
     }
 
@@ -59,8 +89,9 @@ impl QuestionTemplate {
 
     /// Only the fixed identifiers resolve; any other input, including one carrying question text, is refused with [`RefusalCode::UnsupportedQuestion`].
     pub fn parse(id: &str) -> Result<Self, Refusal> {
-        (id == Self::ExtractedFacts.id())
-            .then_some(Self::ExtractedFacts)
+        [Self::ExtractedFacts, Self::MemoryStatement]
+            .into_iter()
+            .find(|template| template.id() == id)
             .ok_or_else(|| refuse(None, RefusalCode::UnsupportedQuestion))
     }
 }
@@ -408,12 +439,19 @@ pub struct DisclosureLedger {
     uncertain: bool,
     /// Set when a capacity refusal withheld requested evidence: the model reasoned over a truncated evidence set.
     partial: bool,
+    /// Whether this run's conclusion stands on the references it read when the inspection ceiling refuses a further one. A memory review opens with the statement, its source, and what was written later, read by the host; a further read the model asks for adds related material, so the answer given on the opening references is kept.
+    answers_on_inspected: bool,
+    /// Set when the inspection ceiling refused a read of a run whose conclusion stands on what it read.
+    inspections_exhausted: bool,
     union: PolicyUnion,
 }
 
 impl DisclosureLedger {
     pub fn new(question: QuestionTemplate) -> Self {
-        let mut ledger = Self::default();
+        let mut ledger = Self {
+            answers_on_inspected: question == QuestionTemplate::MemoryStatement,
+            ..Self::default()
+        };
         ledger.union.insert(PolicyUnionMember {
             kind: "question_template".to_string(),
             id: question.id().to_string(),
@@ -495,6 +533,20 @@ impl DisclosureLedger {
     /// A capacity refusal leaves the evidence set truncated whether it came before or after a disclosure: the run asked for evidence it will not see.
     pub fn record_partial_disclosure(&mut self) {
         self.partial = true;
+    }
+
+    /// Records the capacity refusal `code` of a read the run asked for. The inspection ceiling of a run whose conclusion stands on what it read is noted for the proposal's limitations; every other capacity refusal marks the disclosure partial.
+    pub fn record_truncation(&mut self, code: RefusalCode) {
+        if self.answers_on_inspected && code == RefusalCode::InspectionLimit {
+            self.inspections_exhausted = true;
+        } else {
+            self.partial = true;
+        }
+    }
+
+    /// Whether the inspection ceiling refused a read and the run's conclusion stands on the references it had read.
+    pub fn inspections_exhausted(&self) -> bool {
+        self.inspections_exhausted
     }
 
     /// Whether a conclusion may be published: nothing is usable after an unknown or partial disclosure.
@@ -785,7 +837,7 @@ impl EvidenceBroker {
         if let Err(refusal) = &result
             && refusal.code.truncates_evidence()
         {
-            self.ledger.record_partial_disclosure();
+            self.ledger.record_truncation(refusal.code);
         }
         result
     }
@@ -838,7 +890,7 @@ impl EvidenceBroker {
                 }
             }
             Err(refusal) if refusal.code.truncates_evidence() => {
-                self.ledger.record_partial_disclosure();
+                self.ledger.record_truncation(refusal.code);
             }
             Err(_) => {}
         }
@@ -1374,7 +1426,7 @@ impl EvidenceBroker {
         if let Err(refusal) = &result
             && refusal.code.truncates_evidence()
         {
-            self.ledger.record_partial_disclosure();
+            self.ledger.record_truncation(refusal.code);
         }
         result
     }
@@ -1468,7 +1520,9 @@ impl EvidenceBroker {
                 RunBufferRefusal::CapacityExhausted => {
                     refuse(Some(alias), RefusalCode::BufferLimit)
                 }
-                RunBufferRefusal::Unreadable | RunBufferRefusal::RangeOutOfBounds => {
+                // A read the store failed is a fault a later run can pass; a range outside the object is a reference that no longer stands.
+                RunBufferRefusal::Unreadable => refuse(Some(alias), RefusalCode::Store),
+                RunBufferRefusal::RangeOutOfBounds => {
                     refuse(Some(alias), RefusalCode::ExpectationChanged)
                 }
             })?;

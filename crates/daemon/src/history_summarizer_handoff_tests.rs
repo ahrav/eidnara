@@ -1038,6 +1038,7 @@ fn publish_accepted_chunk(
         output: ProducerOutput {
             text,
             length_capped: false,
+            model: None,
         },
         observed_chunk_fingerprint: "fp",
         validation_chunk: &chunk,
@@ -1395,6 +1396,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
 </PROJECT_RULES></facts><meta><unprocessed_from>4</unprocessed_from></meta></output>"#
         ),
         length_capped: false,
+        model: None,
     };
     let target = rig.target();
     let publish = |output: ProducerOutput,
@@ -1512,6 +1514,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
         ProducerOutput {
             text: rejected,
             length_capped: false,
+            model: None,
         },
         &later,
         &[StoredHistorySegmentRange {
@@ -1798,6 +1801,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
 </PROJECT_RULES></facts><meta><unprocessed_from>4</unprocessed_from></meta></output>"#
                 .to_string(),
             length_capped: false,
+            model: None,
         },
         observed_chunk_fingerprint: "fp",
         validation_chunk: &chunk,
@@ -3352,12 +3356,15 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
     });
     let kernel = Arc::clone(&rig.kernel);
     let route = ProjectRoute {
+        review: None,
+        recorded: true,
         project: PROJECT.to_string(),
         authority_generation: generation,
         roots: vec![RootScope {
             project_root: project_root.clone(),
             project_digest: PROJECT_DIGEST.to_string(),
             scope_id: format!("project:{PROJECT_DIGEST}"),
+            bound: true,
         }],
     };
     let status = Arc::new(MemoryReviewerStatus::default());
@@ -3371,6 +3378,7 @@ async fn a_published_conversation_candidate_reaches_owner_sensitive_with_no_send
         permits: Arc::new(InvestigationPermits::default()),
         providers: providers.clone(),
         rejection: Default::default(),
+        switched: Default::default(),
     });
     let cancel = tokio_util::sync::CancellationToken::new();
 

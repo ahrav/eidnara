@@ -289,7 +289,7 @@ fn linked_evidence(
 }
 
 /// The causal inputs one live descriptor is reviewed under, with their identity: the memory at its live revision, the fixed question, no signals until a producer records one, the descriptor's evidence as required and available together with each `linked` row and its liveness, and the caller's policy versions. The descriptor's own evidence is live while the descriptor is, so it keeps that availability when its decision also cites it. A linked id longer than the ledger's identity bound is left out, since no job could carry it, so one such citation cannot hide a reviewable target. `None` when the ledger cannot bind them (an unparseable revision, an id past the ledger's identity bound): such a descriptor has no job to look up or reserve, so it is passed rather than held as a ledger failure the slot would retry every poll.
-fn causal_inputs(
+pub(super) fn causal_inputs(
     row: &LiveDescriptor,
     linked: &[LinkedEvidence],
     policy_versions: &std::collections::BTreeMap<String, String>,

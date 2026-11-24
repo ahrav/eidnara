@@ -247,8 +247,11 @@ fn parse_send(params: SendParams) -> Result<Request, RequestError> {
     let system = match params.system {
         None => None,
         Some(system) => {
-            // Reject empty `system`: producers omit it, so accepting `""` would create a second encoding for absence.
+            // Reject empty `system`: producers omit it, so accepting `""` would create a second encoding for absence. A directive with no text after it is the same absence.
             check_string("system", &system, MAX_SEND_BODY_BYTES, true).map_err(schema)?;
+            if super::backend::plain_system(&system).1.is_empty() {
+                return Err(schema("system must hold text after its directive"));
+            }
             Some(system)
         }
     };
@@ -305,6 +308,18 @@ pub fn harness_dispatch_unit(run_id: &str, harness: Harness) -> Vec<u8> {
         "type": "harness_dispatch",
         "run_id": run_id,
         "harness": harness.as_str(),
+    }))
+}
+
+/// The longest model id an `answering_model` unit carries; the unit is appended from the terminal headroom, so its size is bounded.
+pub const MAX_ANSWERING_MODEL_BYTES: usize = 256;
+
+/// The unit that names the model the harness's deciding assistant message reports. It precedes that message's `assistant_message` unit.
+pub fn answering_model_unit(run_id: &str, model: &str) -> Vec<u8> {
+    control_event(serde_json::json!({
+        "type": "answering_model",
+        "run_id": run_id,
+        "model": model,
     }))
 }
 

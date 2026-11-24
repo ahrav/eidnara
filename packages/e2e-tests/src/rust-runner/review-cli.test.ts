@@ -251,6 +251,38 @@ describe("review command against the direct host", () => {
                     items: witness.outcomes,
                     next: null,
                 });
+                // The host's own worker answers the drain control. This root's user tier leaves the review switch off and the witness settled every job, so the drain settles no run and the ledger reads as before.
+                expect(await stack.reviewDrain(60_000)).toBe(0);
+                expect(
+                    JSON.parse(
+                        await review(
+                            ["list", "--project", projectRoot, "--limit", "64", "--json"],
+                            0,
+                        ),
+                    ),
+                ).toEqual(JSON.parse(listed));
+                // The host answers the classifier methods on the Context route. This root's user tier names no classifier, so a harness that asks for classifier work is told the review has none, and a submit under any lease answers the same.
+                const classifierIdentity = {
+                    project_root: projectRoot,
+                    harness: "pi",
+                    session: "classifier-session",
+                };
+                expect(
+                    await stack.contextRequest(classifierIdentity, {
+                        method: "memory.review.classify.next",
+                        session_id: "classifier-session",
+                        classifier: "typesafe/jev-latest",
+                    }),
+                ).toEqual({ state: "disabled" });
+                expect(
+                    await stack.contextRequest(classifierIdentity, {
+                        method: "memory.review.classify.submit",
+                        session_id: "classifier-session",
+                        classifier: "typesafe/jev-latest",
+                        lease: "0123456789abcdef0123456789abcdef",
+                        error: "provider_unavailable",
+                    }),
+                ).toEqual({ state: "disabled" });
 
                 for (const { read, requiredEvidence } of witness.fixture) {
                     const shown = JSON.parse(

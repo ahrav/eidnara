@@ -5,8 +5,7 @@
 use context_core::memory_reviewer_policy_union::{PolicyUnion, PolicyUnionMember};
 use kernel::{
     KernelStore, MemoryReviewerHoldBinding, REVIEW_DEPENDENCIES_VERSION, ReviewBinding,
-    ReviewDependencies, ReviewOwner, ReviewQuestionTemplate, ReviewStagedReference,
-    ReviewStagedRow,
+    ReviewDependencies, ReviewOwner, ReviewStagedReference, ReviewStagedRow,
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, MemoryReviewerAttempt, MemoryReviewerAttemptTerminal,
@@ -149,9 +148,7 @@ pub fn revalidate(
     if !marker_matches {
         return Err(Verdict::changed());
     }
-    let question = match proposal.policy_dependencies.question_template {
-        ReviewQuestionTemplate::ExtractedFacts => QuestionTemplate::ExtractedFacts,
-    };
+    let question = QuestionTemplate::of_staged(proposal.policy_dependencies.question_template);
     let mut broker = EvidenceBroker::new(
         RunBinding {
             hold: revalidation.run.clone(),

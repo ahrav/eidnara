@@ -166,10 +166,15 @@ pub struct ArtifactHandle {
 pub enum ArtifactDestination {
     Local,
     Remote,
+    /// The model the user configured for memory work on this deployment. Memory capture and the
+    /// History Summarizer already send conversation and memory text to that model through the
+    /// host, so this destination receives every class a local reader does and refuses `Secret`
+    /// alone. The provider-egress class binds `Remote`, the destination nobody configured.
+    ConfiguredModel,
 }
 
 impl ArtifactDestination {
-    /// Egress proofs derive destinations from this list.
+    /// The destinations a route can name; egress proofs derive destinations from this list. [`Self::ConfiguredModel`] is the daemon's own and has its own table in `kernel_cas`.
     pub const ALL: &'static [Self] = &[Self::Local, Self::Remote];
 }
 

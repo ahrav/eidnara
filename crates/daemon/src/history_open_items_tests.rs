@@ -1100,6 +1100,7 @@ async fn a_fold_that_settles_open_items_reaches_the_next_request_and_the_next_ba
             Ok(ProducerOutput {
                 text,
                 length_capped: false,
+                model: None,
             })
         }));
     let (handler, store, _dir, _project) =

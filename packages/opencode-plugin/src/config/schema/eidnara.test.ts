@@ -89,6 +89,34 @@ describe("EidnaraConfigSchema", () => {
             expect(parse({ enabled: true, extra: 1 }).success).toBe(false);
         });
 
+        it("keeps the memory reviewer off and contesting unless its keys say otherwise", () => {
+            const parse = (value: unknown) =>
+                EidnaraConfigSchema.safeParse({ memory_reviewer: value });
+            const off = { enabled: false, apply: "contest" };
+            expect(EidnaraConfigSchema.parse({}).memory_reviewer).toEqual(off);
+            expect(parse({}).data?.memory_reviewer).toEqual(off);
+            expect(
+                parse({ enabled: true, model: "provider/model", apply: "contest" }).data
+                    ?.memory_reviewer,
+            ).toEqual({ enabled: true, model: "provider/model", apply: "contest" });
+            expect(parse({ enabled: true, apply: "apply" }).data?.memory_reviewer).toEqual({
+                enabled: true,
+                apply: "apply",
+            });
+            expect(
+                parse({ enabled: true, classifier: "typesafe/jev-latest" }).data?.memory_reviewer,
+            ).toEqual({ enabled: true, apply: "contest", classifier: "typesafe/jev-latest" });
+            expect(parse({ classifier: 1 }).success).toBe(false);
+            expect(
+                parse({ enabled: true, stage1_model: "provider/small", apply: "propose" }).data
+                    ?.memory_reviewer,
+            ).toEqual({ enabled: true, stage1_model: "provider/small", apply: "propose" });
+            expect(parse({ stage1_model: 1 }).success).toBe(false);
+            expect(parse({ enabled: "yes" }).success).toBe(false);
+            expect(parse({ apply: "always" }).success).toBe(false);
+            expect(parse({ enabled: true, extra: 1 }).success).toBe(false);
+        });
+
         it("keeps the verifier off unless the key enables it", () => {
             const parse = (value: unknown) => EidnaraConfigSchema.safeParse({ verifier: value });
             expect(EidnaraConfigSchema.parse({}).verifier).toEqual({ enabled: false });
@@ -167,6 +195,10 @@ describe("EidnaraConfigSchema", () => {
                 },
                 verifier: {
                     enabled: false,
+                },
+                memory_reviewer: {
+                    enabled: false,
+                    apply: "contest",
                 },
                 terse_text_compression: {
                     enabled: false,

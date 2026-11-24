@@ -80,6 +80,18 @@ pub struct ReviewBinding {
 pub enum ReviewQuestionTemplate {
     /// Review extracted facts against existing memories for support, contradiction, and supersession.
     ExtractedFacts,
+    /// Review one stored memory against the messages it cites and the source text recorded after it.
+    MemoryStatement,
+}
+
+impl ReviewQuestionTemplate {
+    /// The template's id as a policy-union member names it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::ExtractedFacts => "extracted_facts",
+            Self::MemoryStatement => "memory_statement",
+        }
+    }
 }
 
 /// Byte range inside a frozen source alias.
