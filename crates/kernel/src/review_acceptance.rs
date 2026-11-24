@@ -22,10 +22,9 @@ use super::{
     EventKind, HeldEvidence, KernelError, KernelStore, MEMORY_REVIEWER_CAPTURE_RETENTION_CLASS,
     MemoryReviewerHoldBinding, MemoryReviewerHoldError, MemoryReviewerHoldRefusal, ObjectState,
     ProjectScope, ProposalAction, ProposalTarget, REVIEW_DEPENDENCIES_VERSION, ReviewOwner,
-    ReviewPayload, ReviewProposal, ReviewQuestionTemplate, ReviewReadError, ReviewReadRefusal,
-    ReviewStagedReference, SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND, Sensitivity,
-    SourceClass, SourceDescriptorDetail, TaintClass, current_time_ms, map_sqlite,
-    provisional_result_identity,
+    ReviewPayload, ReviewProposal, ReviewReadError, ReviewReadRefusal, ReviewStagedReference,
+    SOURCE_DESCRIPTOR_DETAIL_VERSION, SOURCE_DESCRIPTOR_KIND, Sensitivity, SourceClass,
+    SourceDescriptorDetail, TaintClass, current_time_ms, map_sqlite, provisional_result_identity,
 };
 use crate::scope::load_scope_terms;
 use crate::slice::load_observation_for_object;
@@ -832,9 +831,7 @@ fn member_stands(
         member.owner_revision.as_deref(),
     ) {
         ("question_template", None, None) => {
-            let ReviewQuestionTemplate::ExtractedFacts =
-                proposal.policy_dependencies.question_template;
-            if member.id != "extracted_facts"
+            if member.id != proposal.policy_dependencies.question_template.id()
                 || member.revision != acceptance.question_template_revision
             {
                 return changed();

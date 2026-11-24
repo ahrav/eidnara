@@ -811,6 +811,7 @@ impl HistorySummarizerProducerDriver for PlaceholderProducer {
         Ok(ProducerOutput {
             text: self.output.clone(),
             length_capped: false,
+            model: None,
         })
     }
 

@@ -1295,7 +1295,7 @@ const FUNCTION_WORDS: [&str; 24] = [
 ];
 
 /// Stored text after the attribution label capture gives a quotation.
-fn unattributed(content: &str) -> &str {
+pub(crate) fn unattributed(content: &str) -> &str {
     [USER_STATED, ASSISTANT_REPORTED]
         .iter()
         .find_map(|attribution| after_label(content, attribution))
@@ -2319,6 +2319,8 @@ pub(crate) const USER_STATED: &str = "User stated";
 /// The attribution native capture prefixes to an assistant message's
 /// quotation.
 const ASSISTANT_REPORTED: &str = "Assistant reported";
+/// The attributions a stored statement opens with, the user's first.
+pub(crate) const STATEMENT_WRITERS: [&str; 2] = [USER_STATED, ASSISTANT_REPORTED];
 
 /// The plain-prose paragraphs of one message, parsed when first needed, so
 /// every check of one job's memories shares a single parse.
@@ -4056,6 +4058,26 @@ pub(crate) fn capture_rationale(decision: &kernel::DecisionRow) -> CaptureRation
     serde_json::from_str(&decision.payload.rationale).unwrap_or_default()
 }
 
+/// Whether an observation contests the statement `decision` records.
+pub(crate) fn is_contested(decision: &kernel::DecisionRow) -> bool {
+    decision.payload.rationale.contains("contested_by")
+        && capture_rationale(decision).contested_by.is_some()
+}
+
+/// Whether `decision` is a statement the user settled after a contest: the
+/// settlement rewrote its row, which keeps the commit that first recorded the
+/// statement.
+pub(crate) fn is_settled(decision: &kernel::DecisionRow) -> bool {
+    let recorded = capture_rationale(decision);
+    recorded.stated_seq.is_some() && recorded.contested_by.is_none()
+}
+
+/// Whether `decision` records work the user left in progress.
+pub(crate) fn states_current_work(decision: &kernel::DecisionRow) -> bool {
+    decision.payload.rationale.contains("current_work")
+        && capture_rationale(decision).lifetime == Some(Lifetime::CurrentWork)
+}
+
 /// Retires the live memory a replaced statement recorded as restated, when
 /// it belongs to the project and to a source a correction may replace, is
 /// not approved, and states the statement's fact: each holds at least half
@@ -4124,13 +4146,12 @@ enum Rewrite {
 /// When none is live the row records that its citation found no descriptor.
 fn rewrite_statement(
     envelope: &mut kernel::Envelope<'_>,
-    plan: &Publication<'_>,
+    (project, job_id): (&ProjectBinding, &str),
     (statement, revision): (&kernel::DecisionRow, i64),
     rewrite: Rewrite,
     recorded_at: i64,
 ) -> Result<Option<String>, kernel::KernelError> {
     use sha2::{Digest, Sha256};
-    let project = plan.project;
     let Some((_, Some(approval))) = envelope.subject_admission(&statement.object_id)? else {
         return Ok(None);
     };
@@ -4156,7 +4177,7 @@ fn rewrite_statement(
         Rewrite::Contested(contest) => {
             format!("{}:contested:{}", statement.object_id, contest.memory)
         }
-        Rewrite::Settled => format!("{}:settled:{}", statement.object_id, plan.job.job_id),
+        Rewrite::Settled => format!("{}:settled:{job_id}", statement.object_id),
         Rewrite::Ended(end) => format!("{}:ended:{}", statement.object_id, end.memory),
     };
     // A settled or ended statement keeps the commit that first recorded it.
@@ -4286,12 +4307,47 @@ fn contest_statement(
     }
     rewrite_statement(
         envelope,
-        plan,
+        (plan.project, &plan.job.job_id),
         (contested, revision),
         Rewrite::Contested(Contest {
             memory: observation.to_owned(),
             stated_seq: stated_commit(contested),
             session: Some(plan.job.session_id.clone()),
+        }),
+        recorded_at,
+    )
+}
+
+/// Marks the approved user statement `statement` contested by the live memory `later`, for a memory review that found a later statement replaces part of it. The statement stays live and delivered and its line names the later memory, so the part that still stands keeps reaching sessions with the newer statement beside the replaced part. `Ok(None)` leaves the row as it is: a statement capture did not write, one the Kernel serves unapproved or above normal sensitivity, or one `later` already contests. `Conflict` when the statement changed after the review read it.
+pub(crate) fn contest_reviewed_statement(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    statement: &kernel::DecisionRow,
+    later: &str,
+    recorded_at: i64,
+) -> Result<Option<String>, kernel::KernelError> {
+    let mut filter = kernel_routes::project::ScopeFilter::new(project);
+    let state =
+        kernel_routes::commit::scoped_object_state(envelope, &mut filter, &statement.object_id)?;
+    if state.object.invalidated_commit_seq.is_some()
+        || state.object.created_commit_seq != statement.created_commit_seq
+    {
+        return Err(kernel::KernelError::Conflict);
+    }
+    let contested_by_later = capture_rationale(statement)
+        .contested_by
+        .is_some_and(|contest| contest.memory == later);
+    if !is_capture_memory(&state.object) || later == statement.object_id || contested_by_later {
+        return Ok(None);
+    }
+    rewrite_statement(
+        envelope,
+        (project, ""),
+        (statement, state.object.source_revision),
+        Rewrite::Contested(Contest {
+            memory: later.to_owned(),
+            stated_seq: stated_commit(statement),
+            session: None,
         }),
         recorded_at,
     )
@@ -4803,7 +4859,14 @@ fn write_captured_memories(
                 memory: id.to_owned(),
                 session: job.session_id.clone(),
             });
-            if rewrite_statement(envelope, plan, (statement, revision), end, recorded_at)?.is_none()
+            if rewrite_statement(
+                envelope,
+                (plan.project, &plan.job.job_id),
+                (statement, revision),
+                end,
+                recorded_at,
+            )?
+            .is_none()
             {
                 envelope.retire_decision(target)?;
                 retire_statement(envelope, target)?;
@@ -4880,7 +4943,7 @@ fn write_captured_memories(
         {
             if let Some(id) = rewrite_statement(
                 envelope,
-                plan,
+                (plan.project, &plan.job.job_id),
                 (statement, revision),
                 Rewrite::Settled,
                 recorded_at,
@@ -4898,6 +4961,34 @@ fn write_captured_memories(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A statement is settled when a contest was lifted from it: its rationale keeps the commit that first recorded it and names no contest. A contested statement and one no contest ever rewrote are not.
+    #[test]
+    fn a_statement_is_settled_once_its_contest_is_lifted() {
+        let statement = |rationale: Value| kernel::DecisionRow {
+            decision_id: "decision".to_string(),
+            object_id: "memory".to_string(),
+            proposition_id: None,
+            scope_id: None,
+            anchor_id: None,
+            evidence_id: None,
+            decision_kind: "PROJECT_RULES".to_string(),
+            payload: kernel::DecisionPayload {
+                summary: "User stated: Deploy from main.".to_string(),
+                rationale: rationale.to_string(),
+            },
+            created_commit_seq: 9,
+            sensitivity: kernel::Sensitivity::Normal,
+        };
+        assert!(is_settled(&statement(json!({"stated_seq": 4}))));
+        assert!(!is_settled(&statement(json!({}))));
+        let contested = statement(json!({
+            "stated_seq": 4,
+            "contested_by": {"memory": "mem_later", "stated_seq": 4},
+        }));
+        assert!(is_contested(&contested));
+        assert!(!is_settled(&contested));
+    }
 
     /// A parse in which every user quotation counts as a statement.
     fn parse_batch(

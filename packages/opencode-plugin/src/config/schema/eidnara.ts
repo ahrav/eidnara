@@ -304,6 +304,17 @@ export interface EidnaraConfig {
      */
     verifier?: { enabled: boolean };
     /**
+     * User-only consent for the daemon to review the project's memories with the configured
+     * model, and what it does with each proposal. The daemon reads these keys itself. Defaults
+     * to off.
+     */
+    memory_reviewer?: {
+        enabled: boolean;
+        model?: string;
+        stage1_model?: string;
+        apply: "propose" | "contest" | "apply";
+    };
+    /**
      * User-only list of repository documents the daemon reads for the prompt block and, when
      * `source_capture.enabled` is set, retains. The daemon reads and validates this key itself;
      * a project value is ignored.
@@ -618,6 +629,35 @@ export const EidnaraConfigSchema = z
             })
             .default({ enabled: false })
             .describe("User-only attestation verifier."),
+        memory_reviewer: z
+            .strictObject({
+                enabled: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "User-only: review the project's memories with the configured models. The daemon selects a memory when later messages may have changed it, asks a small model whether they did, and for a memory that model flags asks the review model for a cited proposal to retain, revise, or retire it, all through the host's model execution (default: false). Also turns on source_capture and contradiction_candidates, whose rows a review reads. Project values are ignored with a warning.",
+                    ),
+                model: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "User-only: the provider/model every proposal request names, as a literal; {env:} and {file:} references are not supported. Absent, reviews use the history summarizer's model.",
+                    ),
+                stage1_model: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "User-only: the provider/model of the small chat model that decides stage 1 of each review, whether later messages may have changed the memory, as a literal; {env:} and {file:} references are not supported. A small, fast model of the provider you already use is the intended value, for example the current Claude Haiku. Absent, a Claude review model whose id names its tier after claude- gives the Haiku of the same provider and version (amazon-bedrock/global.anthropic.claude-opus-5-5 gives amazon-bedrock/global.anthropic.claude-haiku-5-5), and any other review model answers stage 1 itself. If the derived model fails its first request, stage 1 uses the review model until the daemon restarts.",
+                    ),
+                apply: z
+                    .enum(["propose", "contest", "apply"])
+                    .default("contest")
+                    .describe(
+                        "User-only: what the daemon does with a change proposal that stage 1 flagged, that states low uncertainty, and that cites a later message. contest marks a replaced memory as disputed, which moves it from automatic delivery to explicit search and can be undone; apply retires or revises it; propose leaves every proposal for review.accept. In contest and apply, a user statement that a later statement replaces in part stays delivered and its line names the later statement (default: contest).",
+                    ),
+            })
+            .default({ enabled: false, apply: "contest" })
+            .describe("User-only model review of stored memories."),
         project_docs: z
             .strictObject({
                 files: z

@@ -146,8 +146,9 @@ missing or outside its domain, never as zero; a store or activation state the
 host did not report prints as `unreported`, which is not a state the wire
 defines. Counters are overlapping
 populations over the whole data home; no total or ratio is derived. An `open`
-activation state means the deployment owner admits model disclosure; it is not
-compaction status, and it applies nothing.
+activation state means model disclosure for review is admitted, by the
+deployment owner's activation record or by the user's `memory_reviewer.enabled`
+switch; it is not compaction status, and it applies nothing.
 
 Integers print with their exact digits in text and as exact number tokens in
 JSON. Text output strips control and escape sequences; `--json` output is for

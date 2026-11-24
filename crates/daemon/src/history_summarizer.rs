@@ -3553,6 +3553,7 @@ mod tests {
         ProducerOutput {
             text,
             length_capped: false,
+            model: None,
         }
     }
 
@@ -6841,6 +6842,7 @@ mod tests {
                     r#"<output><history_segments><history_segment start="{start}" end="{end}" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments>{facts}<meta><unprocessed_from>{unprocessed_from}</unprocessed_from></meta></output>"#
                 ),
                 length_capped: false,
+                model: None,
             }
         }
         /// The published ranges so far, as the validator's prior-coverage input.
@@ -7038,6 +7040,7 @@ mod tests {
             ProducerOutput {
                 text: "<output>not a history</output>".into(),
                 length_capped: false,
+                model: None,
             },
             &chunk(8, 10),
         );

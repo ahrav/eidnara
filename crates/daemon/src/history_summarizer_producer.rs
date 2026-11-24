@@ -203,6 +203,8 @@ pub struct RunHandle {
 pub struct ProducerOutput {
     pub text: String,
     pub length_capped: bool,
+    /// The model id the host's `answering_model` unit named for the run's answer, when the harness reports one.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1280,6 +1282,7 @@ async fn drain_subscribe(
     let mut text = String::new();
     let mut last_run_started: Option<String> = None;
     let mut length_capped = false;
+    let mut model = None;
     while let Some(item) = stream.next().await? {
         let event: Value = serde_json::from_slice(&item.body)?;
         let Some(unit) = control_unit(&event) else {
@@ -1307,6 +1310,10 @@ async fn drain_subscribe(
         if unit_is_length_capped(unit) {
             length_capped = true;
         }
+        if let Some(named) = unit_answering_model(unit) {
+            // The last unit names the model of the answer the run settles on.
+            model = Some(named.to_owned());
+        }
         if terminal {
             if last_run_started.as_deref() != Some(run_id) {
                 return Err(HistorySummarizerProducerError::TerminalRunMismatch {
@@ -1326,6 +1333,7 @@ async fn drain_subscribe(
             return Ok(ProducerOutput {
                 text,
                 length_capped,
+                model,
             });
         }
     }
@@ -1441,6 +1449,12 @@ fn is_run_started_unit(unit: &Value) -> bool {
     unit_type(unit)
         .map(str::to_ascii_lowercase)
         .is_some_and(|kind| kind == "run_started" || kind == "runstarted")
+}
+
+fn unit_answering_model(unit: &Value) -> Option<&str> {
+    (unit.get("type").and_then(Value::as_str) == Some("answering_model"))
+        .then(|| unit.get("model").and_then(Value::as_str))
+        .flatten()
 }
 
 fn unit_is_length_capped(unit: &Value) -> bool {
@@ -2683,5 +2697,24 @@ mod tests {
             output.length_capped,
             "the cap travels with the text it truncated"
         );
+        assert_eq!(output.model, None);
+    }
+
+    /// A producer that holds an answer to its requested model reads the id from the run's own `answering_model` unit; another run's unit names another answer.
+    #[tokio::test]
+    async fn a_drain_returns_the_model_the_run_names_for_its_answer() {
+        let mut stream = stream_of([
+            json!({"type": "run_started", "run_id": "r1"}),
+            json!({"type": "answering_model", "run_id": "r0", "model": "another-run"}),
+            json!({"type": "answering_model", "run_id": "r1", "model": "prov-model-1"}),
+            json!({"type": "assistant_message", "run_id": "r1", "text": "answer"}),
+            json!({"type": "run_finished", "run_id": "r1"}),
+        ]);
+
+        let output = drain_subscribe(&mut stream, "r1")
+            .await
+            .expect("terminal unit completes the run");
+        assert_eq!(output.text, "answer");
+        assert_eq!(output.model.as_deref(), Some("prov-model-1"));
     }
 }

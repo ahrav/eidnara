@@ -380,6 +380,7 @@ fn scripted(outputs: Vec<String>) -> Arc<ProducerState> {
             Ok(ProducerOutput {
                 text,
                 length_capped: false,
+                model: None,
             })
         }));
     producer
@@ -2325,6 +2326,7 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
             Ok(ProducerOutput {
                 text: source.approved_example.clone(),
                 length_capped: false,
+                model: None,
             })
         }));
     let factory = Arc::new(TestProducerFactory {
@@ -2747,6 +2749,7 @@ async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
         Ok(ProducerOutput {
             text: "second".to_owned(),
             length_capped: true,
+            model: None,
         }),
     ]);
     let attempts: AttemptLog = Arc::default();
@@ -3543,6 +3546,7 @@ async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
             Ok(ProducerOutput {
                 text: real_output(source),
                 length_capped: false,
+                model: None,
             })
         }));
     let records = capture_sources(

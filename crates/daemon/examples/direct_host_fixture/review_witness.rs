@@ -75,6 +75,7 @@ fn worker(
         permits: Arc::new(InvestigationPermits::default()),
         providers: Providers::at(endpoint.clone(), endpoint, "us-east-1"),
         rejection: Default::default(),
+        switched: Default::default(),
     })
 }
 
@@ -138,12 +139,15 @@ pub async fn run(core: &daemon::HandlerCore, project_root: &str) -> Result<Value
     let retain = forms::stepping_as(MODEL, forms::RETAIN_STEP);
     let served = peer.serve_script(vec![retain.clone(), retain]);
     let route = ProjectRoute {
+        review: None,
+        recorded: true,
         project: project.to_string(),
         authority_generation: authority.generation,
         roots: vec![RootScope {
             project_root: root,
             project_digest: digest,
             scope_id,
+            bound: true,
         }],
     };
     let ran = worker(home.path(), &kernel, &store, &peer, route)

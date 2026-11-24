@@ -143,6 +143,7 @@ impl Rig {
             project_root,
             project_digest: digest.to_string(),
             scope_id: format!("project:{digest}"),
+            bound: true,
         }
     }
 
@@ -190,6 +191,8 @@ impl Rig {
         self.worker_with_projects(
             host,
             vec![ProjectRoute {
+                review: None,
+                recorded: true,
                 project: PROJECT.to_string(),
                 authority_generation: self.generation,
                 roots,
@@ -213,6 +216,7 @@ impl Rig {
             permits: Arc::new(InvestigationPermits::default()),
             providers: self.providers(),
             rejection: Default::default(),
+            switched: Default::default(),
         })
     }
 

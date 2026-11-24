@@ -640,6 +640,65 @@ fn egress_facts_carry_the_eligibility_verdict_and_the_stored_class() {
     );
 }
 
+/// The configured model is the destination a user chose for memory work. It
+/// reads every stored class a local reader does, whatever the provider-egress
+/// class, and is refused a secret and bytes that carry no stored class.
+#[test]
+fn the_configured_model_reads_every_class_short_of_secret() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let destination = ArtifactDestination::ConfiguredModel;
+    assert!(!ArtifactDestination::ALL.contains(&destination));
+    for (index, &sensitivity) in Sensitivity::ALL.iter().enumerate() {
+        assert_eq!(
+            sensitivity.denies_destination(destination),
+            (sensitivity == Sensitivity::Secret).then_some(EligibilityDeniedReason::Secret),
+            "{sensitivity:?}"
+        );
+        for (offset, &egress) in ProviderEgress::ALL.iter().enumerate() {
+            let key = format!("configured-{index}-{offset}");
+            let mut ingest = request(&key, format!("payload {key}").into_bytes());
+            ingest.asserted_sensitivity = sensitivity;
+            ingest.provider_egress = egress;
+            let handle = store.ingest_artifact(ingest).unwrap();
+            let want = if sensitivity == Sensitivity::Secret {
+                ArtifactEligibility::Denied(EligibilityDeniedReason::Secret)
+            } else {
+                ArtifactEligibility::Allowed
+            };
+            assert_eq!(
+                store.artifact_egress_facts(&handle, destination).unwrap(),
+                ArtifactEgressFacts {
+                    eligibility: want,
+                    stored_class: Some((sensitivity, egress)),
+                },
+                "{sensitivity:?} {egress:?}"
+            );
+            // The remote rule is the one the stored class had before: only normal, remote-allowed bytes pass.
+            assert_eq!(
+                store
+                    .artifact_eligibility(&handle, ArtifactDestination::Remote)
+                    .unwrap()
+                    == ArtifactEligibility::Allowed,
+                sensitivity == Sensitivity::Normal && egress == ProviderEgress::RemoteAllowed,
+                "{sensitivity:?} {egress:?} remote"
+            );
+        }
+    }
+    let unclassed = ArtifactHandle {
+        digest: "b".repeat(64),
+        evidence_id: "absent".to_string(),
+    };
+    assert_eq!(
+        store
+            .artifact_egress_facts(&unclassed, destination)
+            .unwrap()
+            .eligibility,
+        ArtifactEligibility::Denied(EligibilityDeniedReason::UnknownSensitive)
+    );
+}
+
 /// Repeated object ids and digests must produce the same per-candidate
 /// results as one read per candidate, in candidate order.
 #[test]
