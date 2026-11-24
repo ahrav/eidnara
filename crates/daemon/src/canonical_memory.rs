@@ -204,7 +204,7 @@ impl CanonicalMemoryRead {
 ///
 /// Capture rows whose rationale names `session_id` are left out: the reading session holds those statements in its own conversation. They are judged before the row and byte caps apply (see [`read_other_sessions`]), so they spend neither cap, and the token budget trims what remains.
 ///
-/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`, and so does a failed read of [`show_contests`], which rewrites the delivered line of a statement that carries a contest or a replacement record: the read of the contesting observations, and the commit-time reads of the statements it rewrites. A commit the log holds no time for renders `unknown date` and withholds nothing. Each change of the project's verdict logs one line naming the project's digest.
+/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`, and so does a failed read of [`show_contests`], which rewrites the delivered line of a statement that carries a contest or a replacement record: the read of the contesting observations, and the commit-time read of the statements it rewrites. A commit the log holds no time for renders `unknown date` and withholds nothing. Each change of the project's verdict logs one line naming the project's digest.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
@@ -526,27 +526,14 @@ fn replaced_line(statement: &str, stated_ms: Option<i64>, recorded_ms: Option<i6
     )
 }
 
-/// The recorded times of commits, each read from the store once for a pass.
-struct CommitTimes<'s> {
-    store: &'s kernel::KernelStore,
-    times: std::collections::HashMap<i64, Option<i64>>,
-}
-
-impl<'s> CommitTimes<'s> {
-    fn new(store: &'s kernel::KernelStore) -> Self {
-        Self {
-            store,
-            times: std::collections::HashMap::new(),
-        }
-    }
-
-    fn recorded(&mut self, commit_seq: i64) -> Result<Option<i64>, kernel::KernelError> {
-        if let Some(time) = self.times.get(&commit_seq) {
-            return Ok(*time);
-        }
-        let time = self.store.commit_recorded_at(commit_seq)?;
-        self.times.insert(commit_seq, time);
-        Ok(time)
+/// `mark`'s line shows the days of two commits: the statement's first
+/// commit, then the row's own commit under a shown contest or the replaced
+/// observation's commit. `None` keeps the stored text.
+fn dated_commits(mark: &Marked, contest_shown: bool) -> Option<(i64, i64)> {
+    match (contest_shown, mark.replaced_seq) {
+        (true, _) => Some((mark.stated_seq, mark.row_seq)),
+        (false, Some(replaced_seq)) => Some((mark.stated_seq, replaced_seq)),
+        (false, None) => None,
     }
 }
 
@@ -621,21 +608,16 @@ fn marked_line(
     mut recorded: impl FnMut(i64) -> Result<Option<i64>, kernel::KernelError>,
 ) -> Result<Option<String>, kernel::KernelError> {
     let shown = mark.contest.as_ref().zip(observation);
-    Ok(match (shown, mark.replaced_seq) {
-        (Some((contest, text)), _) => Some(contested_line(
-            summary,
-            recorded(mark.stated_seq)?,
-            recorded(mark.row_seq)?,
-            &contest.memory,
-            text,
-        )),
-        (None, Some(replaced_seq)) => Some(replaced_line(
-            summary,
-            recorded(mark.stated_seq)?,
-            recorded(replaced_seq)?,
-        )),
-        (None, None) => None,
-    })
+    let Some((stated_seq, other_seq)) = dated_commits(mark, shown.is_some()) else {
+        return Ok(None);
+    };
+    let (stated_ms, other_ms) = (recorded(stated_seq)?, recorded(other_seq)?);
+    Ok(Some(match shown {
+        Some((contest, text)) => {
+            contested_line(summary, stated_ms, other_ms, &contest.memory, text)
+        }
+        None => replaced_line(summary, stated_ms, other_ms),
+    }))
 }
 
 /// Rewrites the statements of `response` that carry a record, each to its
@@ -648,8 +630,8 @@ fn marked_line(
 /// search at the response's snapshot, so a contest shows the text of a
 /// memory that is live, belongs to the project, is not hidden, and has
 /// normal sensitivity there; a labeled observation, such as an assistant's
-/// report, is one. Commit times are read for the statements that are
-/// rewritten, once for each commit. A failed read fails the pass.
+/// report, is one. One read gives the commit times of the statements that
+/// are rewritten. A failed read fails the pass.
 fn show_contests(
     store: &kernel::KernelStore,
     project: &ProjectBinding,
@@ -700,19 +682,26 @@ fn show_contests(
             }
         }
     }
-    let mut times = CommitTimes::new(store);
+    let observation = |mark: &Marked| {
+        let contest = mark.contest.as_ref()?;
+        observations.get(&contest.memory).map(String::as_str)
+    };
+    let seqs: Vec<i64> = marked
+        .iter()
+        .filter_map(|mark| dated_commits(mark, observation(mark).is_some()))
+        .flat_map(|(stated_seq, other_seq)| [stated_seq, other_seq])
+        .collect();
+    let times = store.commits_recorded_at(&seqs)?;
     for mark in marked {
         let Some(decision) = response.decisions.get_mut(&mark.statement) else {
             continue;
         };
-        let observation = mark
-            .contest
-            .as_ref()
-            .and_then(|contest| observations.get(&contest.memory))
-            .map(String::as_str);
-        let line = marked_line(&decision.payload.summary, &mark, observation, |seq| {
-            times.recorded(seq)
-        })?;
+        let line = marked_line(
+            &decision.payload.summary,
+            &mark,
+            observation(&mark),
+            |seq| Ok(times.get(&seq).copied()),
+        )?;
         if let Some(line) = line {
             decision.payload.summary = line;
         }
@@ -1356,6 +1345,101 @@ mod tests {
             marked_line(stored, &unmarked, None, recorded).unwrap(),
             None
         );
+    }
+
+    /// A pass dates each line from the store's commit log: the day of a
+    /// commit the log holds, and `unknown date` for a sequence past its
+    /// tip. A pass that rewrites no statement returns while every pooled
+    /// reader is held.
+    #[test]
+    fn a_pass_dates_its_lines_from_the_commit_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = kernel::KernelStore::open(dir.path()).unwrap();
+        for name in ["first", "second"] {
+            store
+                .commit(
+                    kernel::CommitIntent {
+                        producer: "canonical-memory-test".to_string(),
+                        operation_key: name.to_string(),
+                        request_digest: "a".repeat(64),
+                        actor: "test".to_string(),
+                        cause: "test".to_string(),
+                    },
+                    |envelope| {
+                        envelope.insert_domain(kernel::DomainSpec {
+                            domain_id: name.to_string(),
+                            object_id: format!("{name}-object"),
+                            name: name.to_string(),
+                            source_kind: "test".to_string(),
+                            source_id: name.to_string(),
+                            source_revision: 1,
+                            sensitivity: Sensitivity::Normal,
+                        })?;
+                        Ok(String::new())
+                    },
+                )
+                .unwrap();
+        }
+        let tip = store.tip().unwrap();
+        let (first, second, past) = (tip - 1, tip, tip + 1);
+        let day = |commit_seq: i64| utc_day(store.commit_recorded_at(commit_seq).unwrap());
+        assert_ne!(day(first), "unknown date");
+        assert_eq!(day(past), "unknown date");
+        let statement = |object_id: &str, rationale: serde_json::Value| {
+            let mut row = visible_row(object_id, "decision", SurfaceVisibility::Visible);
+            row.object.source_id = "memory_capture".to_string();
+            let mut decision = decision(object_id, "PROJECT_RULES", "User stated: S.");
+            decision.payload.rationale = rationale.to_string();
+            (row, decision)
+        };
+        let replaced = |stated_seq: i64, recorded_seq: i64| {
+            serde_json::json!({
+                "stated_seq": stated_seq,
+                "replaces_observation": {"recorded_seq": recorded_seq},
+            })
+        };
+        let (rows, decisions): (Vec<_>, Vec<_>) = [
+            statement("stated-held", replaced(first, past)),
+            statement("recorded-held", replaced(past, second)),
+            statement("plain", serde_json::json!({"quote": "S."})),
+        ]
+        .into_iter()
+        .unzip();
+        let mut read = response(rows, decisions);
+        let project = project("/work/app");
+        show_contests(&store, &project, &mut read).unwrap();
+        let shown = |object_id: &str| read.decisions[object_id].payload.summary.as_str();
+        assert_eq!(
+            shown("stated-held"),
+            replaced_line(
+                "User stated: S.",
+                store.commit_recorded_at(first).unwrap(),
+                None
+            )
+        );
+        assert_eq!(
+            shown("recorded-held"),
+            replaced_line(
+                "User stated: S.",
+                None,
+                store.commit_recorded_at(second).unwrap()
+            )
+        );
+        assert_eq!(shown("plain"), "User stated: S.");
+
+        let (row, decision) = statement("plain", serde_json::json!({"quote": "S."}));
+        let mut unmarked = response(vec![row], vec![decision]);
+        let (done, wait) = std::sync::mpsc::channel();
+        let returned = std::thread::scope(|scope| {
+            store.with_readers_held_for_test(|| {
+                scope.spawn(|| {
+                    done.send(show_contests(&store, &project, &mut unmarked).is_ok())
+                        .unwrap()
+                });
+                wait.recv_timeout(std::time::Duration::from_secs(3))
+            })
+        });
+        assert_eq!(returned, Ok(true));
     }
 
     /// A plain id is shown as written. Any other id is caller-supplied text
