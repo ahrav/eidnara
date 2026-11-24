@@ -160,19 +160,67 @@ describe("createReviewClassifierPump", () => {
         expect(submitted?.body.error).toBe("provider_unavailable");
     });
 
-    it("bounds a classifier call that ignores its abort signal and goes on to the next call", async () => {
-        const fake = daemon([work({ max_duration_ms: 5 }), { state: "disabled" }]);
+    it("bounds a classifier call that ignores its abort signal and ends the loop beside it", async () => {
+        const fake = daemon([work({ max_duration_ms: 5 }), { state: "ready" }, { state: "ready" }]);
         const pump = createReviewClassifierPump(fake.client, () => new Promise(() => undefined), {
             settleGraceMs: 5,
+            pollIntervalMs: 1,
         });
         pump.start(SCOPE);
         await pump.idle();
         expect(fake.calls.map((call) => call.method)).toEqual([
             "memory.review.classify.next",
             "memory.review.classify.submit",
-            "memory.review.classify.next",
         ]);
         expect(fake.calls[1]?.body.error).toBe("provider_unavailable");
+        // A later start begins another loop.
+        pump.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(fake.calls.length).toBeGreaterThan(2);
+        await pump.close();
+    });
+
+    it("leaves work unanswered that arrives for a session released during the call", async () => {
+        const answered = Promise.withResolvers<unknown>();
+        const methods: string[] = [];
+        const client = {
+            call: async (args: { method: string }) => {
+                methods.push(args.method);
+                return methods.length === 1 ? answered.promise : { state: "disabled" };
+            },
+        };
+        let executed = false;
+        const pump = createReviewClassifierPump(client, async () => {
+            executed = true;
+            return {};
+        });
+        pump.start(SCOPE);
+        pump.stop(SCOPE.sessionId);
+        answered.resolve(work());
+        await pump.idle();
+        expect(executed).toBe(false);
+        expect(methods).toEqual(["memory.review.classify.next"]);
+    });
+
+    it("goes on for the session that started while the old session's call ended the loop", async () => {
+        for (const ending of [{ state: "disabled" }, new Error("unreachable")]) {
+            const pending = Promise.withResolvers<unknown>();
+            const sessions: string[] = [];
+            const client = {
+                call: async (args: { sessionId: string }) => {
+                    sessions.push(args.sessionId);
+                    if (sessions.length === 1) return pending.promise;
+                    return { state: "disabled" };
+                },
+            };
+            const pump = createReviewClassifierPump(client, async () => ({}), { retryDelayMs: 1 });
+            pump.start(SCOPE);
+            pump.start({ ...SCOPE, sessionId: "s2" });
+            if (ending instanceof Error) pending.reject(ending);
+            else pending.resolve(ending);
+            await pump.idle();
+            expect(sessions).toEqual(["s1", "s2"]);
+        }
     });
 
     it("reports answers once, and a submit the daemon does not receive is left to the review's wait", async () => {

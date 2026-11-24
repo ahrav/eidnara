@@ -1,5 +1,5 @@
 import type { RustModeModuleClient } from "../hooks/context/transform-session-client";
-import { withTimeout } from "./with-timeout";
+import { TimeoutError, withTimeout } from "./with-timeout";
 
 /** One stage-1 request of a memory review, as the daemon hands it to the harness. */
 export interface ReviewClassifierWork {
@@ -143,7 +143,12 @@ export function createReviewClassifierPump(
             closing.signal.addEventListener("abort", wake, { once: true });
         });
 
-    async function answer(scope: ReviewClassifierScope, work: ReviewClassifierWork): Promise<void> {
+    /** Runs one classifier call and reports its outcome. `false` means the call ignored its abort signal and is still running. */
+    async function answer(
+        scope: ReviewClassifierScope,
+        work: ReviewClassifierWork,
+    ): Promise<boolean> {
+        let settled = true;
         const controller = new AbortController();
         const cancel = () => controller.abort();
         closing.signal.addEventListener("abort", cancel, { once: true });
@@ -163,6 +168,7 @@ export function createReviewClassifierPump(
                 ),
             };
         } catch (error) {
+            settled = !(error instanceof TimeoutError);
             const code = closing.signal.aborted
                 ? "cancelled"
                 : timedOut
@@ -192,6 +198,7 @@ export function createReviewClassifierPump(
                 },
             })
             .catch(() => undefined);
+        return settled;
     }
 
     async function run(loop: Loop): Promise<void> {
@@ -217,7 +224,12 @@ export function createReviewClassifierPump(
                 } catch {
                     if (closing.signal.aborted) return;
                     failures += 1;
-                    if (failures >= MAX_CONSECUTIVE_FAILURES) return;
+                    if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                        // A session that started while this call was pending took the loop over; it goes on for that session.
+                        if (loop.scope === scope) return;
+                        failures = 0;
+                        continue;
+                    }
                     await pause(retryDelayMs);
                     continue;
                 }
@@ -227,10 +239,15 @@ export function createReviewClassifierPump(
                     await pause(pollIntervalMs);
                     continue;
                 }
-                if (state !== "work") return;
+                if (state !== "work") {
+                    if (loop.scope === scope) return;
+                    continue;
+                }
                 const work = reviewClassifierWork(response);
-                // Work outside the contract stays unanswered, and its review's wait ends the attempt.
-                if (work) await answer(scope, work);
+                // Work outside the contract, and work that arrives for a session released during the call, stays unanswered; its review's wait ends the attempt.
+                if (!work || loop.stopped) continue;
+                // A call that ignored its abort signal is still running in the harness. The loop ends beside it, and a later start begins another.
+                if (!(await answer(scope, work))) return;
             }
         } finally {
             if (loops.get(loop.scope.projectRoot) === loop) loops.delete(loop.scope.projectRoot);

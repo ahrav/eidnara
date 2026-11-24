@@ -339,11 +339,18 @@ impl ClassifierExchange {
 
     /// The oldest request of `project` for `classifier` that no harness holds, under a new lease. Every call marks the project's harness present.
     pub fn next(&self, project: &str, classifier: &str) -> Option<ClassifierWork> {
+        self.next_at(project, classifier, Instant::now())
+    }
+
+    fn next_at(&self, project: &str, classifier: &str, now: Instant) -> Option<ClassifierWork> {
         let mut inner = self.lock();
-        inner.pulls.insert(
-            (project.to_string(), classifier.to_string()),
-            Instant::now(),
-        );
+        // A mark past its window means nothing, so each call drops those and the map holds the harnesses of the last window.
+        inner
+            .pulls
+            .retain(|_, at| now.saturating_duration_since(*at) <= PRESENCE_WINDOW);
+        inner
+            .pulls
+            .insert((project.to_string(), classifier.to_string()), now);
         let parked = inner.parked.iter_mut().find(|parked| {
             parked.project == project
                 && parked.classifier == classifier
@@ -709,6 +716,38 @@ mod tests {
             Err(ClassifyError::Harness("cancelled".to_string()))
         );
         assert!(!exchange.present("project", "c/m"));
+    }
+
+    /// The exchange remembers the harnesses of the last presence window: a call drops the marks that window has passed.
+    #[test]
+    fn a_call_drops_the_marks_past_their_window() {
+        let exchange = ClassifierExchange::default();
+        let start = Instant::now();
+        assert_eq!(exchange.next_at("first", "c/m", start), None);
+        assert_eq!(
+            exchange.next_at("second", "c/m", start + PRESENCE_WINDOW),
+            None
+        );
+        assert_eq!(exchange.lock().pulls.len(), 2);
+        assert_eq!(
+            exchange.next_at(
+                "third",
+                "c/m",
+                start + PRESENCE_WINDOW + Duration::from_secs(1)
+            ),
+            None
+        );
+        let held: Vec<String> = {
+            let inner = exchange.lock();
+            let mut held: Vec<String> = inner
+                .pulls
+                .keys()
+                .map(|(project, _)| project.clone())
+                .collect();
+            held.sort();
+            held
+        };
+        assert_eq!(held, ["second", "third"]);
     }
 
     #[tokio::test]

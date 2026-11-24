@@ -806,7 +806,7 @@ impl Disclosure<'_> {
             credential_id: CLASSIFIER_CREDENTIAL_ID.to_string(),
             policy_union_digest: union_digest,
         };
-        let (attempt_index, attempt_deadline_ms, _) = self.begin_attempt(&marker)?;
+        let (attempt_index, attempt_deadline_ms, allowance) = self.begin_attempt(&marker)?;
         let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
         let wait = deadline
             .min(Instant::now() + Duration::from_millis(remaining))
@@ -849,12 +849,23 @@ impl Disclosure<'_> {
                 return Err(self.end(attempt_index, terminal, ResponseUsage::NONE, refusal));
             }
         };
-        // The 16 KiB bound the wire sets on a harness's answers stands for this attempt's response allowance.
         let answer_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
         let usage = ResponseUsage {
             raw_response_bytes: u64::try_from(answer_bytes).ok(),
             decoded_text_bytes: Some(0),
         };
+        // The job's remaining response allowance bounds a classifier's answers as it bounds a chat answer.
+        if usage
+            .raw_response_bytes
+            .is_none_or(|bytes| bytes > allowance.raw_response_bytes)
+        {
+            return Err(self.end(
+                attempt_index,
+                MemoryReviewerAttemptTerminal::Failed,
+                ResponseUsage::NONE,
+                failed(SendError::Transport, true),
+            ));
+        }
         let answers = match Answers::parse(review, &value) {
             Ok(answers) => answers,
             Err(_) => {
