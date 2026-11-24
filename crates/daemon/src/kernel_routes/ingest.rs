@@ -622,6 +622,10 @@ impl HandlerCore {
         if parsed.total_bytes > UPLOAD_ALLOWANCE_BYTES {
             return state_only(KernelOutcome::invalid(InvalidReason::PayloadTooLarge));
         }
+        // The failure recorder alone writes the rows of a failure lineage: it reads a command's record as the newest decision there.
+        if crate::memory_capture::is_failure_lineage(&parsed.request.source_id) {
+            return state_only(KernelOutcome::invalid(InvalidReason::InvalidInput));
+        }
         let Some(intent) = parsed.intent.into_intent(&scope.project, RECEIPT_FAMILY) else {
             return crate::invalid_params_error(format!(
                 "{BEGIN} intent.operation_key must not be blank"

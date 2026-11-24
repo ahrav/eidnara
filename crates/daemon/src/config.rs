@@ -97,11 +97,11 @@ pub struct DaemonConfig {
     /// User-only switch for the automatic `<project-memory>` and user-profile
     /// blocks.
     pub memory_auto_inject: bool,
-    /// User-only consent for unattended extraction from completed conversation text and for a Pi session's named-file records.
+    /// User-only consent for unattended extraction from completed conversation text and for a Pi session's named-file records. The failure recorder reads it as well: it records a failed command of a primary Pi session under this consent together with `memory_enabled`, `auto_promote`, and `source_capture_enabled`.
     pub memory_auto_capture: bool,
     /// User-only consent to retain the exact bytes of message text and tool results as
-    /// kernel source descriptors. Capture also requires `memory_enabled` and a session
-    /// that is not a subagent's.
+    /// kernel source descriptors. Capture also requires `memory_enabled` and a session that is not a subagent's.
+    /// With `auto_promote` and `memory_auto_capture` it is also the consent to record a failed command of a Pi session from its tool result, as a project memory fact that session deletion leaves in place and that has no retention deadline.
     pub source_capture_enabled: bool,
     /// User-only consent to score each settled source publication against the project's live
     /// memory decisions and keep the overlaps as derived candidate rows, and to sweep those rows.
