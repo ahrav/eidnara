@@ -118,6 +118,19 @@ wrong. A Pi release that marks a user message in a third spelling leaves that
 marker in place, and each run then pays the provider's cache-write premium for
 an entry only a Pi retry reads.
 
+A check in the hook throws inside Pi: the output-token variable is missing, a
+generation-control variable is empty or not finite, the payload is not an
+object, `generationConfig` or `inferenceConfig` is present but not an object,
+or the payload carries no recognized output-token field
+(`pi-model_execution-extension.mjs:38-45`, `:141-145`, `:162-166`, `:173-177`).
+Pi 0.80.2 catches the throw, reports it, and sends the payload it had
+(`pi-coding-agent/dist/core/extensions/runner.js:714-744`), so the request runs
+with the limit Pi or an earlier handler set. Current code reaches this when a
+Pi run meets one of those conditions. The adapter sets the output-token
+variable from the admitted request on every run (`pi.rs:523-526`), so the
+variable conditions need a fault outside the adapter; the payload conditions
+need a provider payload in a shape the hook does not recognize.
+
 ## Timing windows and dependencies
 
 None. The hook runs synchronously inside Pi's handler chain on every request;
@@ -141,7 +154,9 @@ run.
   user block that carries a marker beside other members.
 - Missing: the hook running inside a real Pi process rather than the driver's
   handler array; a non-numeric environment value; a payload whose
-  `generationConfig` is present but not an object.
+  `generationConfig` is present but not an object; the hook under a runner
+  that catches a handler's throw and sends the payload it had, as Pi 0.80.2
+  does, with an assertion that the run fails and no provider request is sent.
 
 ## Investigation log
 
@@ -158,13 +173,19 @@ run.
 ### Q: Does the hook trust the environment values?
 
 - Sources examined: `pi-model_execution-extension.mjs:38-45`; `pi.rs:523-532`;
-  `model_execution/protocol.rs:265-280`.
+  `model_execution/protocol.rs:265-280`; Pi 0.80.2
+  `pi-coding-agent/dist/core/extensions/runner.js:714-744`.
 - Findings: the values are formatted from the admitted request. The hook throws
   rather than defaulting when the bound is absent or either value is
   present but not finite; at Pi 0.80.2 that throw is logged and the request goes out as it stood. An absent temperature variable is the revision 2
   contract, not a fault: the hook then leaves temperature to the provider.
-- Missing evidence: no test drives the absent-bound or non-numeric path.
-- Conclusion: resolved as a mechanism; the negative paths are unexercised.
+- Missing evidence: no test drives the absent-bound or non-numeric path, and
+  no test runs the hook under a runner that catches its throw.
+- Conclusion: unresolved, needs the hook to end the child on these checks. The
+  hook's throw does not fail the request at Pi 0.80.2, so a missing or
+  non-finite value sends the request without the admitted bound. The
+  plain-system check ends the child with a failing exit status instead
+  (`pi-model_execution-extension.mjs:124-134`).
 
 ### Q: Does the hook write a temperature for a model whose API refuses it?
 

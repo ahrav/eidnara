@@ -30,10 +30,10 @@ states the intended effect: no loader, proxy, cloud-chain, `PATH`, `HOME`, or
 unrelated provider variable survives.
 
 Composition. Both adapters start `child_env` from `provider_row` and append
-only adapter-owned variables. OpenCode (`opencode.rs:116-121`, `:164-179`)
+only adapter-owned variables. OpenCode (`opencode.rs:255-266`, `:312-329`)
 adds `OPENCODE_DB`, `OPENCODE_CONFIG_CONTENT`,
 `OPENCODE_DISABLE_PROJECT_CONFIG`, `EIDNARA_MODEL_EXECUTION_CHILD`, and `HOME`. Pi
-(`pi.rs:218-223`, `:316-325`) adds `EIDNARA_PI_SUBAGENT`,
+(`pi.rs:390-401`, `:522-539`) adds `EIDNARA_PI_SUBAGENT`,
 `EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS`, `EIDNARA_MODEL_EXECUTION_TEMPERATURE`, `HOME`, and, for a request that asks for its system text as written, `EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM` (`crates/host-runtime/src/model_execution/pi.rs:533-538`, at the commit that adds the variable).
 The `OPENCODE_CONFIG_CONTENT` value is bounded before spawn by
 `MAX_OPENCODE_CONFIG_BYTES` (`opencode.rs:124-135`).
@@ -118,7 +118,7 @@ control channel and the test would still pass.
 ### Q: Does the child receive the snapshot, or only the provider row?
 
 - Sources examined: `subprocess.rs:139-165`, `:317`, `:357-359`;
-  `opencode.rs:116-121`, `:164-184`; `pi.rs:218-223`, `:316-330`; the record's
+  `opencode.rs:255-266`, `:312-334`; `pi.rs:390-401`, `:522-544`; the record's
   `Guarantee` line.
 - Findings: only the provider row plus adapter-owned variables. The record's
   phrase "the admitted snapshot with the launch identity stripped and exactly
