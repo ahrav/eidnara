@@ -1317,9 +1317,10 @@ async fn a_statement_replaced_in_part_stays_delivered_and_is_marked_contested() 
             ActivationState::Open,
             "{apply:?}"
         );
-        // A row's id and the dates of its contest belong to the rig, so the two modes are compared by the statements they deliver.
+        // A row's id and the dates of its contest belong to the rig, so the two modes are compared by the statements they deliver. The block's closing sentence is the frame's line and holds no statement.
         let mut statements: Vec<String> = block
             .lines()
+            .filter(|line| *line != crate::memory_render::PROJECT_MEMORY_NOTE)
             .filter_map(|line| line.split_once(": "))
             .map(|(_, statement)| {
                 statement
