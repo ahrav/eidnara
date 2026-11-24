@@ -1459,7 +1459,6 @@ mod tests {
         }
     }
 
-    /// The subject terms of a statement leave out who said it and the words every rule uses, and cut each term to its stem, so two statements about one subject share terms whatever their wording around it.
     /// A proposal that waits for a reader, a disputed target, and a refused write each hold their memory; every other outcome frees it.
     #[test]
     fn the_outcomes_that_hold_a_memory() {
@@ -1494,6 +1493,7 @@ mod tests {
         assert_eq!(memory.pending["project"].waiting["mem_1"], "job-d");
     }
 
+    /// The subject terms of a statement leave out who said it and the words every rule uses, and cut each term to its stem, so two statements about one subject share terms whatever their wording around it.
     #[test]
     fn subject_terms_keep_what_a_statement_is_about() {
         let terms = subject_terms("User stated: Always name test files with the suffix _spec.");
