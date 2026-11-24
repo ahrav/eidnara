@@ -304,7 +304,6 @@ describe("transform session client over plain data", () => {
 
     async function passEditedDuringPrepare(
         host: PlainHost,
-        privateWindow: boolean,
         edit: () => void,
     ): Promise<TransformPassOutcome> {
         const transport = fakeTransport({
@@ -316,7 +315,6 @@ describe("transform session client over plain data", () => {
         if (!("lease" in admitted)) throw new Error("admission declined");
         return client.run("ses", admitted.lease, {
             ...source(host),
-            privateWindow,
             prepare: async () => {
                 edit();
                 return { fields: { model_key: "test/model" } };
@@ -324,52 +322,41 @@ describe("transform session client over plain data", () => {
         });
     }
 
-    it("rechecks a shared window's contents and a private window's slots", async () => {
-        for (const privateWindow of [false, true]) {
-            const host = plainHost(4);
-            const outcome = await passEditedDuringPrepare(host, privateWindow, () => {
-                (host.values[3] as { text: string }).text = "edited in place";
-            });
-            expect(outcome.kind).toBe(privateWindow ? "applied" : "declined");
-            expect(host.published).toHaveLength(privateWindow ? 1 : 0);
-        }
+    it("rechecks a window's contents", async () => {
+        const host = plainHost(4);
+        const outcome = await passEditedDuringPrepare(host, () => {
+            (host.values[3] as { text: string }).text = "edited in place";
+        });
+        expect(outcome.kind).toBe("declined");
+        expect(host.published).toHaveLength(0);
     });
 
-    it("keeps a shared window's verified tapes and leaves a private window's out", async () => {
-        for (const privateWindow of [false, true]) {
-            const host = plainHost(6);
-            const transport = fakeTransport({
-                "transform.boundary": [() => ({ anchors: [{ mid: "m3", sequence: 1 }] })],
-                transform: [
-                    foldReply({ mid: "m3", sequence: 1 }),
-                    foldReply({ mid: "m3", sequence: 1 }),
-                ],
-            });
-            const client = createTransformSessionClient({ moduleClient: transport.client });
-            const admission = new TransformCaptureAdmission();
-            const run = () => {
-                const admitted = admission.admit("ses");
-                if (!("lease" in admitted)) throw new Error("admission declined");
-                return client.run("ses", admitted.lease, { ...source(host), privateWindow });
-            };
-            const debugSpy = spyOn(logger.sessionLog, "debug");
-            try {
-                expect((await run()).kind).toBe("applied");
-                host.values.push({ id: "m7", text: "message 7" });
-                expect((await run()).kind).toBe("applied");
-                const captures = debugSpy.mock.calls
-                    .map(([, line]) => String(line))
-                    .flatMap((line) => {
-                        const match = /phase=capture .* verified=(\d+) taped=(true|false)$/.exec(
-                            line,
-                        );
-                        return match ? [[Number(match[1]), match[2] === "true"] as const] : [];
-                    });
-                expect(captures.at(-1)?.[0]).toBeGreaterThan(0);
-                expect(captures.at(-1)?.[1]).toBe(!privateWindow);
-            } finally {
-                debugSpy.mockRestore();
-            }
+    it("keeps a window's verified tapes", async () => {
+        const host = plainHost(6);
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [{ mid: "m3", sequence: 1 }] })],
+            transform: [
+                foldReply({ mid: "m3", sequence: 1 }),
+                foldReply({ mid: "m3", sequence: 1 }),
+            ],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admission = new TransformCaptureAdmission();
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            expect((await pass(client, admission, host)).kind).toBe("applied");
+            host.values.push({ id: "m7", text: "message 7" });
+            expect((await pass(client, admission, host)).kind).toBe("applied");
+            const captures = debugSpy.mock.calls
+                .map(([, line]) => String(line))
+                .flatMap((line) => {
+                    const match = /phase=capture .* verified=(\d+) taped=(true|false)$/.exec(line);
+                    return match ? [[Number(match[1]), match[2] === "true"] as const] : [];
+                });
+            expect(captures.at(-1)?.[0]).toBeGreaterThan(0);
+            expect(captures.at(-1)?.[1]).toBe(true);
+        } finally {
+            debugSpy.mockRestore();
         }
     });
 
@@ -431,10 +418,10 @@ describe("transform session client over plain data", () => {
         }
     });
 
-    it("declines a private window whose slot now holds another value", async () => {
+    it("declines a window whose slot now holds another value", async () => {
         const host = plainHost(4);
-        const outcome = await passEditedDuringPrepare(host, true, () => {
-            host.values[3] = { id: "m4", text: "message 4" };
+        const outcome = await passEditedDuringPrepare(host, () => {
+            host.values[3] = { id: "m4", text: "another message" };
         });
         expect(outcome).toEqual({ kind: "declined", servedLastApplied: false });
         expect(host.published).toEqual([]);

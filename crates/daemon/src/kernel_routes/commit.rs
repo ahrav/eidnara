@@ -689,6 +689,20 @@ fn caller_domain(domain_id: &str) -> Result<&str, KernelError> {
     Ok(domain_id)
 }
 
+/// A caller-named source lineage for a new row; a lineage of failure records
+/// is refused as invalid input. The daemon's recorder alone starts a row
+/// there, under the capture publication gate, and reads the lineage's newest
+/// decision as the command's record, so a caller's decision or observation
+/// on the lineage would stand in that read. The check runs in the commit's
+/// transaction, after the Kernel has answered a retried commit from its
+/// stored receipt.
+fn caller_lineage(source_id: &str) -> Result<(), KernelError> {
+    if crate::memory_capture::is_failure_lineage(source_id) {
+        return Err(KernelError::InvalidInput);
+    }
+    Ok(())
+}
+
 /// Materializes the project scope, and the route-owned domain it belongs to,
 /// the first time an operation needs it; the checks and the inserts share the
 /// envelope's transaction, so two commits for a new project cannot both
@@ -999,6 +1013,7 @@ fn apply(
     for operation in &plan.operations {
         match operation {
             Operation::InsertDecision { spec } => {
+                caller_lineage(&spec.source_id)?;
                 ensure_domain(
                     envelope,
                     caller_domain(&spec.domain_id)?,
@@ -1034,6 +1049,16 @@ fn apply(
                 )?;
                 let predecessor = scoped_object_state(envelope, filter, replaced_object_id)?;
                 refuse_rewriting_user_authority(envelope, replaced_object_id)?;
+                // The recorder alone writes the rows of a failure lineage:
+                // it finds a command's record as the newest row there and
+                // orders runs by the rationale it wrote, so a caller's
+                // successor on or off the lineage would stand in that place.
+                // The MemoryReviewer forms no proposal on such a target (see
+                // `memory_reviewer::coordinator::proposal_target`).
+                let recorded = crate::memory_capture::is_failure_lineage;
+                if recorded(&predecessor.object.source_id) || recorded(&spec.source_id) {
+                    return Err(KernelError::AdmissionPolicy);
+                }
                 // An existing replacement must belong to the bound project
                 // whether or not it is live: a foreign retired id answering
                 // `already_exists` where a foreign live one answers
@@ -1045,6 +1070,12 @@ fn apply(
                         Some(state) => {
                             scoped_object_state(envelope, filter, &spec.object_id)?;
                             if state.object.invalidated_commit_seq.is_none() {
+                                // A fold keeps the survivor's stored row, so
+                                // a survivor on a failure lineage is refused
+                                // as a successor there is.
+                                if recorded(&state.object.source_id) {
+                                    return Err(KernelError::AdmissionPolicy);
+                                }
                                 // A fold discards the spec and keeps the
                                 // survivor's stored label, so the floor is
                                 // judged against that label instead.
@@ -1098,6 +1129,7 @@ fn apply(
                 result.touched.push(args.object_id.to_string());
             }
             Operation::InsertObservation { spec } => {
+                caller_lineage(&spec.source_id)?;
                 ensure_domain(
                     envelope,
                     caller_domain(&spec.domain_id)?,

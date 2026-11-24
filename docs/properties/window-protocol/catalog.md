@@ -428,7 +428,7 @@ previous entry by reference and never edits either source";
 `rust-mode-transform.test.ts:1432` "rejects mutated retained output
 ${mutationTime}"; `:1488` "keeps from the applied previous output and the
 submitted input, then acks its note deliveries";
-`crates/daemon/src/lib.rs:25500`
+`crates/daemon/src/lib.rs:29597`
 `native_previous_keeps_bind_the_applied_revision` (#879). Canonical owner:
 TE21 and `recipe-wire-switch.md`.
 Impact: High. A positional or revision error silently substitutes context.
@@ -463,10 +463,10 @@ Confidence: high -
 The three baseline witnesses were located at `328ab11c`; only the
 container-rejection test survives at `f2442b2f`, rewritten for
 `publicationRejection`. D21 accepts the weaker shrink-first failure state.
-Existing check: At `328ab11c`: `transform-capture.test.ts:1000`, `:1015`,
-`:1056`. At `f2442b2f`: `:1193` "rejects containers whose element or length
-assignment could throw" (now `publicationRejection` reasons). Successor:
-WP-P09.
+Existing check: At `328ab11c`: `transform-capture.test.ts` lines 1000, 1015,
+and 1056. At the #1232 head: `transform-capture.test.ts:1856` "rejects
+containers whose element or length assignment could throw" (now
+`publicationRejection` reasons). Successor: WP-P09.
 Impact: High. Partial publication corrupts the prompt; WP-P09 bounds the
 failure state instead.
 Open questions: None. D21 accepts the shrink-first failure state.
@@ -497,7 +497,7 @@ Confidence: high -
 located at `f2442b2f`. #883 adds the window copy and a `4·N` filter charge to
 the lease; the accounting contract is unchanged.
 Existing check:
-`packages/opencode-plugin/src/hooks/context/transform-capture.test.ts:1213`
+`packages/opencode-plugin/src/hooks/context/transform-capture.test.ts:1876`
 "keeps counts and charges equal to a reference model across generated lease
 sequences"; `:1344` "holds one lease per session, declines a newer call, and
 cancels the holder"; `:1370` "charges bytes against one aggregate budget and
@@ -534,10 +534,10 @@ Confidence: high -
 [evidence](evidence/wp-e08-ready-snapshots-reject-stale-generations.md).
 Witnesses located at `f2442b2f`. This is a generation fence, not a
 serialization test; WP-P04 owns execution order.
-Existing check: `crates/daemon/src/lib.rs:21148`
-`transform_snapshot_cache_is_generation_safe_and_lru_bounded`; `:21188`
+Existing check: `crates/daemon/src/lib.rs:23996`
+`transform_snapshot_cache_is_generation_safe_and_lru_bounded`; `:24168`
 `snapshot_lease_budget_survives_cache_churn_and_releases_exact_charge`;
-`:21230`
+`:24223`
 `ready_snapshot_holds_no_native_payload_and_a_lease_pins_its_generation`
 (#878).
 Impact: High. Wrapup can act on superseded input or retention becomes
@@ -705,8 +705,8 @@ holding only the D13 previous CK output with LRU eviction, and
 `NativeOutputStore` (`lib.rs:2368`). The per-message memo and its lookup are
 gone; every pass renders its window afresh. The D10 reset leaves handler
 caches in place and relies on the epoch bump.
-Existing check: `crates/daemon/src/lib.rs:25346`
-`native_output_store_enforces_entry_cap_lru_and_revert_epoch`; `:25297`
+Existing check: `crates/daemon/src/lib.rs:29443`
+`native_output_store_enforces_entry_cap_lru_and_revert_epoch`; `:29394`
 `handler_native_cache_adopts_the_bumped_durable_revert_epoch`;
 `crates/memory-store/src/lib.rs:26148`
 `truncate_history_segments_for_revert_deletes_suffix_and_bumps_epoch`;
@@ -763,8 +763,8 @@ supplied it is the whole array or the wire's newest half-cap suffix, whose
 head `windowStart` moves later past a tool result whose call is outside the
 suffix, or, when every newer slot is such a result, back to the message
 carrying the calls, which can carry the suffix past half the cap
-(`transform-session-client.ts:898-903`; `docs/host-wire-protocol.md:1025`;
-`packages/pi-plugin/src/transform/pi-transform.test.ts:488`). The
+(`transform-session-client.ts:885-890`; `docs/host-wire-protocol.md:1025`;
+`packages/pi-plugin/src/transform/pi-transform.test.ts:1144`). The
 implementation's folding cold window is `host[:lead] + host[head:]`, the
 cold lead slots (`coldLead`, one for a leading Pi compaction summary)
 followed by the pinned suffix, which is not a contiguous suffix when `lead`
@@ -799,25 +799,25 @@ corrected. The wire now states the authority-conditional rule
 (`docs/host-wire-protocol.md:984`, `:1011`, `:1025`); Pi supplies the sizing
 hook only while the session's project lets Eidnara fold
 (`packages/pi-plugin/src/index.ts:571`, `:586`,
-`packages/pi-plugin/src/transform/pi-transform.ts:268-275`; #1069) and
+`packages/pi-plugin/src/transform/pi-transform.ts:302-311`; #1069) and
 OpenCode only when `compactionOff` is not `true`
 (`packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts:397`;
 #1070); without it `coldHead` clears any head an earlier folding pass
 pinned and submits the whole array
-(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:860-873`;
-`packages/pi-plugin/src/transform/pi-transform.test.ts:505`,
-`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:894`).
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:847-860`;
+`packages/pi-plugin/src/transform/pi-transform.test.ts:1161`,
+`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:881`).
 A session whose stored authority is still native under a folding
 configuration dispatches one cold suffix; the client reads
 `history_summarizer.no_fire: "native_authority"` from the response, declines
-that pass with its pin cleared (`transform-session-client.ts:1669-1680`),
+that pass with its pin cleared (`transform-session-client.ts:1648-1659`),
 and sends the whole array on each later null pass while that state holds
 (`:1361`; `rust-mode-window.test.ts:1342`, `:1389`;
 `pi-delivery.test.ts:390`). One qualifier comes from the code, not the wire
 text: the folding cold window is not a contiguous suffix when lead slots
 exist. Pi sets `coldLead: 1` for a leading compaction summary
-(`packages/pi-plugin/src/transform/pi-transform.ts:280`), and `coldSource`
-serves `host[:lead]` then `host[head:]` (`transform-session-client.ts:906-913`),
+(`packages/pi-plugin/src/transform/pi-transform.ts:264`), and `coldSource`
+serves `host[:lead]` then `host[head:]` (`transform-session-client.ts:893-900`),
 while the wire text says "its newest half-cap suffix"
 (`docs/host-wire-protocol.md:984`, `:1011`). The guarantee states the wire
 rule; the lead-slot behavior is the open disagreement below. The
@@ -836,10 +836,10 @@ boundaryIndex + i", `:228` "rejects a duplicate id inside the window and ignores
 one outside it", and `:845` "declines when the host moves the discovered anchor
 before the window is copied" (#883); authority qualifier, at `07ea883b5`:
 `packages/pi-plugin/src/transform/pi-delivery.test.ts:341`, `:390`,
-`packages/pi-plugin/src/transform/pi-transform.test.ts:505` (#1069),
+`packages/pi-plugin/src/transform/pi-transform.test.ts:1161` (#1069),
 `packages/opencode-plugin/src/hooks/context/rust-mode-window.test.ts:1342`,
 `:1389`, `:1417`, and `:1444`,
-`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:894`
+`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:881`
 (#1070).
 Impact: High. An omitted tail message becomes silent context loss.
 Open questions:
@@ -848,7 +848,7 @@ Open questions:
 - The wire text names the folding null window as the newest half-cap
   suffix (`docs/host-wire-protocol.md:984`, `:1011`) while the code serves
   the cold lead slots ahead of that suffix
-  (`transform-session-client.ts:906-913`), so a folding Pi cold import that
+  (`transform-session-client.ts:893-900`), so a folding Pi cold import that
   starts with a compaction summary is not wire-conformant at `07ea883b5`.
   Unresolved, needs the wire document owner to either state the lead slots
   in the wire and every peer in one change or have the consumers drop them
@@ -857,7 +857,7 @@ Open questions:
   message on every pass until the first anchor exists
   (`docs/host-wire-protocol.md:984`, `:1011`), while the client clears the pin
   when a response names native authority
-  (`transform-session-client.ts:1673-1674`) and pins a fresh head on the
+  (`transform-session-client.ts:1652-1653`) and pins a fresh head on the
   first folding pass after that authority settles
   (`rust-mode-window.test.ts:1389`). Unresolved, needs the wire document
   owner to state the pin's reset across the authority transition or the
@@ -1260,11 +1260,11 @@ Confidence: high -
 [evidence](evidence/wp-p09-shrink-first-has-an-explicit-failure-state.md).
 Witnesses were read at `f2442b2f`; the restoration math is in `publishInPlace`
 (`:826-858`). Review P11 on #832 asked whether a test covers k inside the
-window; the `it.each` at `transform-capture.test.ts:1138` covers "a covered"
+window; the `it.each` at `transform-capture.test.ts:1801` covers "a covered"
 and "a window" slot. #883's description does not mention P11 by name.
 Existing check:
-`packages/opencode-plugin/src/hooks/context/transform-capture.test.ts:1067`,
-`:1098`, `:1153`, `:1138` (window variant, #883);
+`packages/opencode-plugin/src/hooks/context/transform-capture.test.ts:1730`,
+`:1761`, `:1816`, `:1801` (window variant, #883);
 `rust-mode-transform.test.ts:3236` "leaves exactly a shorter candidate in the
 original array object"; `:3252` "restores the captured references and promotes
 nothing when a planted slot stops the shrink".
@@ -1718,12 +1718,12 @@ and zero candidate writes.
 Fault/timing angle: none
 Required faults and enabling state: A real Bun array with the planted slot.
 Confidence: high - [evidence](evidence/wp-p20-the-shrink-actually-threw.md).
-Read at `f2442b2f` (`transform-capture.test.ts:1098`); the observed-length
+Read at `f2442b2f` (`transform-capture.test.ts:1761`); the observed-length
 probe records `[k + 1]` at the first slot define.
 Existing check:
-`packages/opencode-plugin/src/hooks/context/transform-capture.test.ts:1098`;
+`packages/opencode-plugin/src/hooks/context/transform-capture.test.ts:1761`;
 `rust-mode-transform.test.ts:3252`; window variant
-`transform-capture.test.ts:1138` (#883; ran in the #883 (head `d7712d75`) and
+`transform-capture.test.ts:1801` (#883; ran in the #883 (head `d7712d75`) and
 #884 (head `f8734c12`) `bun run check:repo` gates).
 Impact: WP-P09 passes vacuously if the shrink never fails.
 Open questions: None.
@@ -2015,9 +2015,38 @@ fold trigger and is inert under native authority. An oversized native pass
 declines through the resident reservation (`invalid_params` or `queue_full`),
 the invocation budget, or the 64 MiB reconstructed-output cap, which the
 daemon answers with `transform_output_too_large`
-(`crates/daemon/src/lib.rs:15694-15700`, `:15656-15658`) and the client
+(`crates/daemon/src/lib.rs:16300-16306`, `:16262-16264`) and the client
 enforces as `output_too_large`
 (`packages/opencode-plugin/src/hooks/context/edit-recipe.ts:429-434`).
 WP-P15 bounds work at a fixed window and gives no constant-cost claim for
 whole-array native submission. WP-P01 carries the qualifier; line anchors in
 its qualifier are at `07ea883b5`.
+
+## Dated note (2026-11-24, #1232)
+
+Dated note, 2026-11-24, #1232: the transform client has one recheck mode. The
+`privateWindow` option of a pass source, the identity recheck it selected, and
+that recheck's `sameMembers` helper are removed. Every pass, Pi's included,
+asks for the tapes of the members its retained digest verifies
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1410`)
+and runs WP-P12's content rechecks through `capturedMessagesUnchanged`
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.ts:1437`).
+The sentence of the 2026-10-13 note that Pi's private window rechecks member
+identity is invalidated. The witnesses are "rechecks a window's contents",
+"keeps a window's verified tapes", and "declines a window whose slot now holds
+another value"
+(`packages/opencode-plugin/src/hooks/context/transform-session-client.test.ts:325`,
+`:334`, `:421`), each run at the #1232 head and unaudited.
+
+Dated note, 2026-11-24, #1232: this change moves lines in
+`crates/daemon/src/lib.rs`, `transform-capture.test.ts`,
+`transform-session-client.ts`, `transform-session-client.test.ts`,
+`pi-transform.ts`, and `pi-transform.test.ts`. The line anchors of this
+catalog into the moved lines are re-resolved: each names the first line of its
+item, or the item's lines, at the #1232 head, whatever tree its row names for
+the reading. The anchors into `lib.rs`, `transform-capture.test.ts`, and the Pi
+adapter and its test were off their items before this change and are
+corrected; the anchors into the transform client and its test were current.
+The two WP-E06 witnesses located at `328ab11c` that no longer exist keep
+their line numbers at that tree, written without the anchor form. Every other
+anchor of this catalog is as of its earlier recorded head.

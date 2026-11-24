@@ -1890,14 +1890,14 @@ mod tests {
         let long_summary = "x ".repeat(2_000);
         let long = decision("long", "PROJECT_RULES", &long_summary);
         // Serving order is newest first; both rows are candidates, but only the
-        // short one fits a budget of a few dozen tokens.
+        // short one fits the budget with the block's closing sentence.
         let rows = || {
             vec![
                 visible_row("long", "decision", SurfaceVisibility::Visible),
                 visible_row("short", "decision", SurfaceVisibility::Visible),
             ]
         };
-        let budget = 60.0;
+        let budget = 120.0;
         let trimmed = injectable_snapshot(response(rows(), vec![long, short.clone()]), budget);
         assert_eq!(
             trimmed

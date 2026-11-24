@@ -2645,3 +2645,144 @@ fn an_envelope_reads_the_decisions_cited_evidence_at_the_tip_it_extends() {
         .unwrap();
     assert_eq!(read.unwrap(), expected);
 }
+
+/// The lineage read and the commit-count read each take a pooled reader
+/// under the budget's statement limit, so a budget that ends while a
+/// statement runs ends the read with `Deadline`.
+#[test]
+fn the_budgeted_lineage_and_log_reads_each_take_a_limited_reader() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let budget = kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(30)),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let limited = store.controlled_acquisitions_for_test();
+    let (_, rows) = store
+        .newest_decisions_on_lineage_within_budget(&budget, "assistant", "lineage")
+        .unwrap();
+    assert!(rows.is_empty());
+    assert_eq!(store.controlled_acquisitions_for_test(), limited + 1);
+    let count = store
+        .commit_count_in_key_range_within_budget(&budget, "writer", ("a", "b"), 1)
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(store.controlled_acquisitions_for_test(), limited + 2);
+}
+
+/// The newest decisions of a source lineage are its decisions of the
+/// greatest revisions, the greatest first, whether they are live, superseded
+/// into a later revision, or retired. Another lineage, another source kind,
+/// and an observation on the lineage leave them as they are, and two
+/// decisions of one revision are both returned, in either order of writing.
+#[test]
+fn the_newest_decisions_of_a_lineage_are_the_ones_of_its_greatest_revisions() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let budget = kernel::applicability::EvalBudget::new(
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let newest = |source_kind: &str, source_id: &str| {
+        let (tip, rows) = store
+            .newest_decisions_on_lineage_within_budget(&budget, source_kind, source_id)
+            .unwrap();
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.object_id,
+                    row.source_revision,
+                    row.invalidated_commit_seq,
+                    row.superseded_by,
+                )
+            })
+            .collect();
+        (tip, rows)
+    };
+    let id = |index: i64| format!("decision-object-{index}");
+    assert_eq!(newest("fixture", "decision").1, []);
+
+    let seeded = store
+        .commit(intent("seed", '1'), |envelope| {
+            envelope.insert_decision(decision(2))?;
+            envelope.insert_decision(decision(1))?;
+            envelope.insert_decision(DecisionSpec {
+                source_id: "other".to_string(),
+                source_revision: 9,
+                ..decision(5)
+            })?;
+            envelope.insert_observation(ObservationSpec {
+                source_id: "decision".to_string(),
+                source_revision: 99,
+                ..observation(1, "decision-object-1")
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        newest("fixture", "decision"),
+        (
+            seeded.commit_seq,
+            vec![(id(2), 2, None, None), (id(1), 1, None, None)]
+        )
+    );
+    assert_eq!(newest("fixture", "other").1, [(id(5), 9, None, None)]);
+    assert_eq!(newest("another-kind", "decision").1, []);
+
+    // A later revision that supersedes the newest one is the newest, and
+    // its predecessor reads as superseded.
+    let revised = store
+        .commit(intent("revise", '2'), |envelope| {
+            envelope.supersede_decision("decision-object-2", decision(3))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(
+        newest("fixture", "decision").1,
+        [
+            (id(3), 3, None, None),
+            (id(2), 2, Some(revised.commit_seq), Some(id(3)))
+        ]
+    );
+
+    // A retired newest revision stays the lineage's newest and reads as
+    // retired.
+    let retired = store
+        .commit(intent("retire", '3'), |envelope| {
+            envelope.retire_decision("decision-object-3")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let (tip, rows) = newest("fixture", "decision");
+    assert_eq!(tip, retired.commit_seq);
+    assert_eq!(rows[0], (id(3), 3, Some(retired.commit_seq), None));
+
+    // Two decisions of the greatest revision are both returned, whichever
+    // was written first.
+    for (lineage, first, second) in [("tied-a", 7, 8), ("tied-b", 8, 7)] {
+        let tied = |index: i64| DecisionSpec {
+            decision_id: format!("{lineage}-{index}"),
+            object_id: format!("{lineage}-object-{index}"),
+            source_id: lineage.to_string(),
+            source_revision: 4,
+            ..decision(index)
+        };
+        store
+            .commit(intent(lineage, '4'), |envelope| {
+                envelope.insert_decision(tied(first))?;
+                envelope.insert_decision(tied(second))?;
+                Ok(String::new())
+            })
+            .unwrap();
+        let rows = newest("fixture", lineage).1;
+        let mut ids: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            [format!("{lineage}-object-7"), format!("{lineage}-object-8")]
+        );
+        assert!(rows.iter().all(|row| row.1 == 4), "{rows:?}");
+    }
+}

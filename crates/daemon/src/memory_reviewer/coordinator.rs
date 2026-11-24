@@ -1217,6 +1217,12 @@ pub fn proposal_target(
     if state.object.invalidated_commit_seq.is_some() {
         return Err(refuse(None, revoked));
     }
+    // The failure recorder alone writes the rows of a failure lineage and
+    // reads a command's run from the rationale it wrote, which a revised
+    // row leaves empty.
+    if crate::memory_capture::is_failure_lineage(&state.object.source_id) {
+        return Err(refuse(None, RefusalCode::Unsupported));
+    }
     let decision_target = matches!(subject, ReferenceExpectation::CanonicalSource { .. });
     if state.object.source_revision != source_revision
         || (decision_target && state.object.object_kind != "decision")

@@ -612,6 +612,19 @@ async fn prepare_home(
     .await?
 }
 
+/// Prepares a scratch HOME that holds a cached token named `token.json`, the way a transaction prepares one for an SSO session.
+/// `aws_scratch_home_modes_forced_under_umask` in `tests/model_execution_subprocess.rs` calls it under a umask that clears every bit.
+#[cfg(feature = "test-support")]
+pub async fn prepare_sso_scratch_home(dir: &PrivateDir) -> std::io::Result<()> {
+    let sso = SsoToken {
+        path: PathBuf::new(),
+        file_name: "token.json".into(),
+        sso_region: String::new(),
+        start_url: String::new(),
+    };
+    prepare_home(dir, Some(&sso), Some(b"{}")).await
+}
+
 struct SsoToken {
     path: PathBuf,
     file_name: String,
@@ -1071,28 +1084,5 @@ mod tests {
                 .count(),
             0
         );
-    }
-
-    #[tokio::test]
-    async fn scratch_home_directories_are_owner_only_under_any_umask() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = StateRoot::resolve(Some(dir.path())).unwrap();
-        let home = PrivateDir::create_async(state, "aws-helper").await.unwrap();
-        let sso = SsoToken {
-            file_name: "token.json".into(),
-            ..session()
-        };
-        let previous = rustix::process::umask(Mode::from_raw_mode(0o777));
-        let prepared = prepare_home(&home, Some(&sso), Some(b"{}")).await;
-        rustix::process::umask(previous);
-        prepared.expect("an owner-bit-clearing umask still prepares the scratch HOME");
-        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
-        let mut path = home.path().to_path_buf();
-        for part in [".aws", "sso", "cache"] {
-            path.push(part);
-            assert_eq!(mode(&path), 0o700, "{part}");
-        }
-        assert_eq!(mode(&path.join("token.json")), 0o600);
-        home.cleanup().unwrap();
     }
 }

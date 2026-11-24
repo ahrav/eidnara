@@ -416,7 +416,8 @@ pub fn build_reference_blocks_from_stored(
     build_reference_blocks(session_id, chunk_start, &refs)
 }
 
-/// Project memory uses the same block format as the m0 `<project-memory>` block.
+/// Project memory uses the row and category format of the m0 `<project-memory>` block, without
+/// the closing sentence the delivered block ends with.
 pub fn render_history_summarizer_memory_block(memories: &[CanonicalMemory]) -> String {
     render_memory_block(memories, "project-memory")
 }

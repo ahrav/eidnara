@@ -336,6 +336,11 @@ fn main() {
             "group_record_mode_forced_under_umask",
             group_record_mode_forced_under_umask,
         ),
+        #[cfg(feature = "test-support")]
+        (
+            "aws_scratch_home_modes_forced_under_umask",
+            aws_scratch_home_modes_forced_under_umask,
+        ),
         (
             "sweep_spares_young_record_temps",
             sweep_spares_young_record_temps,
@@ -4518,6 +4523,37 @@ fn group_record_mode_forced_under_umask() {
         assert!(body.starts_with("v4\n"), "record is complete when visible");
         record.remove().expect("remove record");
     }
+}
+
+/// A transaction's scratch HOME holds the SSO token cache, so its directories stay `0700` and its token `0600` under a umask that clears every bit.
+/// The cases of this binary run one at a time, so the mask reaches this case's files alone.
+#[cfg(feature = "test-support")]
+fn aws_scratch_home_modes_forced_under_umask() {
+    use host_runtime::model_execution::aws_transaction::prepare_sso_scratch_home;
+
+    let rt = rt();
+    let home = rt
+        .block_on(PrivateDir::create_async(state_root(), "aws-helper"))
+        .expect("scratch home");
+    let prepared = {
+        let _guard = UmaskGuard::set(0o777);
+        rt.block_on(prepare_sso_scratch_home(&home))
+    };
+    prepared.expect("an owner-bit-clearing umask still prepares the scratch HOME");
+    let mode = |path: &Path| {
+        fs::metadata(path)
+            .expect("scratch home entry")
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    let mut path = home.path().to_path_buf();
+    for part in [".aws", "sso", "cache"] {
+        path.push(part);
+        assert_eq!(mode(&path), 0o700, "{part}");
+    }
+    assert_eq!(mode(&path.join("token.json")), 0o600);
+    home.cleanup().expect("scratch home cleanup");
 }
 
 /// Hosts sharing one state root sweep concurrently with each other's record writes, so the sweep

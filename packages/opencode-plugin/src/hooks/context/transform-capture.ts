@@ -1233,3 +1233,31 @@ export class TransformCaptureAdmission {
 
 /** Module-wide default owner; tests can inject a separate instance. */
 export const defaultTransformCaptureAdmission = new TransformCaptureAdmission();
+
+/**
+ * Each `ReferenceableAllowance` shares a byte budget across calls to `admits`. The default is
+ * twice the capture limit so a caller can walk both values in a comparison.
+ */
+export class ReferenceableAllowance {
+    constructor(private remaining = 2 * TRANSFORM_CAPTURE_MAX_BYTES) {}
+
+    /**
+     * `admits` returns `true` when a {@link ReferenceableWalk} accepts every value within the
+     * budget, and `false` when the walk refuses a value or the budget ends first. The walk's
+     * spend comes off the budget in both cases.
+     */
+    admits(...values: unknown[]): boolean {
+        if (this.remaining <= 0) return false;
+        const walker = new ReferenceableWalk(this.remaining, false);
+        try {
+            for (const value of values) walker.walk(value);
+            return true;
+        } catch (error) {
+            if (error instanceof SourceRejected || error instanceof CaptureBudgetExceeded)
+                return false;
+            throw error;
+        } finally {
+            this.remaining -= walker.bytes;
+        }
+    }
+}
