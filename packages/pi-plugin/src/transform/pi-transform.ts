@@ -70,7 +70,8 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
  * reads native entry identity from the wire; a row whose entry cannot be read keeps its id and
  * message alone. For a message entry, `type` and `parentId` identify a match between the
  * handler's message and the stored message: `allowance` admits both and their JSON
- * serializations match.
+ * serializations match, which {@link sameJsonText} decides from the two values.
+ * The allowance bounds the comparison's work.
  */
 export function entryRow(
     id: string,
@@ -83,8 +84,7 @@ export function entryRow(
     if (!entry) return { id, message };
     if (entry.type === "message") {
         const stored = (entry as unknown as Json).message;
-        const matches =
-            allowance.admits(message, stored) && JSON.stringify(message) === JSON.stringify(stored);
+        const matches = allowance.admits(message, stored) && sameJsonText(message, stored);
         if (!matches) return { id, message };
     }
     return { id, type: entry.type, parentId: entry.parentId ?? null, message };
@@ -431,4 +431,45 @@ export function createPiTransform(options: PiTransformOptions) {
             client.clear(sessionId);
         },
     };
+}
+
+const isRawJson: (value: unknown) => boolean =
+    (JSON as { isRawJSON?: (value: unknown) => boolean }).isRawJSON ?? (() => false);
+
+/**
+ * For values admitted by {@link ReferenceableAllowance}, `sameJsonText` tests whether
+ * `JSON.stringify` would produce identical text.
+ */
+function sameJsonText(left: unknown, right: unknown): boolean {
+    if (left === right) return true;
+    if (isRawJson(left) || isRawJson(right)) return JSON.stringify(left) === JSON.stringify(right);
+    if (typeof left !== "object" || typeof right !== "object" || left === null || right === null)
+        return false;
+    const array = Array.isArray(left);
+    if (array !== Array.isArray(right)) return false;
+    if (array) {
+        const items = left as unknown[];
+        const others = right as unknown[];
+        if (items.length !== others.length) return false;
+        for (let index = 0; index < items.length; index += 1)
+            if (!sameJsonText(items[index], others[index])) return false;
+        return true;
+    }
+    const record = left as Json;
+    const other = right as Json;
+    const keys = Object.keys(record);
+    const otherKeys = Object.keys(other);
+    let at = 0;
+    let otherAt = 0;
+    for (;;) {
+        while (at < keys.length && record[keys[at] as string] === undefined) at += 1;
+        while (otherAt < otherKeys.length && other[otherKeys[otherAt] as string] === undefined)
+            otherAt += 1;
+        if (at === keys.length || otherAt === otherKeys.length)
+            return at === keys.length && otherAt === otherKeys.length;
+        const key = keys[at] as string;
+        if (key !== otherKeys[otherAt] || !sameJsonText(record[key], other[key])) return false;
+        at += 1;
+        otherAt += 1;
+    }
 }
