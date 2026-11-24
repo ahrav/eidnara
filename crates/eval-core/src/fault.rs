@@ -344,7 +344,7 @@ pub enum Heal {
     Consumed,
     Released,
     Reopen,
-    /// Nothing in the run heals it; the refusal stands for the store incarnation.
+    /// Nothing in the run heals it; the refusal stands until the retirement sweep frees quota, ninety days on.
     Permanent,
 }
 

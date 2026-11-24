@@ -907,7 +907,7 @@ impl MemoryStore {
                     "SELECT state, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
                      FROM memory_reviewer_frozen_selections GROUP BY state",
                     |state, row| {
-                        // A page's receipt charge is permanent whatever its state; only its allowance is released at a terminal.
+                        // A page keeps its receipt charge in every state until the retirement sweep deletes it; only its allowance is released at a terminal.
                         facts.receipt_charge_bytes = facts
                             .receipt_charge_bytes
                             .saturating_add(unsigned(row.get(2)?));
@@ -29056,9 +29056,9 @@ mod tests {
         }
     }
 
-    /// A frozen page's receipt charge is permanent and its allowance temporary; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
+    /// A frozen page's receipt charge outlasts its allowance; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
     #[test]
-    fn frozen_page_receipt_charges_are_permanent_not_allowances_in_the_sample() {
+    fn frozen_page_receipt_charges_are_receipts_not_allowances_in_the_sample() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let receipt = memory_reviewer_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;

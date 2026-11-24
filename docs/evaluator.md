@@ -2702,8 +2702,8 @@ a reply `lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills, corruption,
 and R11 (the reopen's projection rebuild clears it), and `permanent` for R24,
-whose retained receipt charges refuse admission for the rest of the store
-incarnation. A restore interrupted `before_displace` or `after_displace` is
+whose retained receipt charges refuse admission until the retirement sweep
+frees them, ninety days on and so past any run. A restore interrupted `before_displace` or `after_displace` is
 rolled back by the handle before the fault returns and is `consumed`; only
 `recovery_failure` leaves the store for a `reopen`. A projection batch fault
 rolls its transaction back and is `consumed`, as are a backup that fails
@@ -2899,7 +2899,7 @@ page plus the receipt charge and the allowance per open job or frozen page,
 so no byte figure in a sample is taken on trust; `admissions_remaining` divides the remaining bytes by one admission's
 charge as a report figure, not an acceptance count. Reaching the quota is R24,
 recorded as an expected refusal, and the report does not judge whether
-permanent exhaustion is intended.
+exhaustion within a run is intended.
 
 A `ResourceSample` is everything a campaign holds at one quiescent point: per
 store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
@@ -3427,7 +3427,7 @@ and handed to the production `memory_reviewer::worker::Worker` through
 a local TLS peer on an OS-allocated port, the credential identity derived),
 and the rest go through the real reservation, staging, claim, and receipt
 path and stay pending, so the ledger holds both pending allowances and
-permanent receipt charges. The step then drains to quiescence, counting the
+receipt charges. The step then drains to quiescence, counting the
 catch-up episodes, runs `Worker::pass` directly until every handed job has
 settled or the approved `reviewer_coordinator_passes` is spent, records that
 as the next sample's `QuiescenceProgress`, and samples. The handed subjects

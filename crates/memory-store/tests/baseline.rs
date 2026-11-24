@@ -150,6 +150,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "memory_reviewer_receipts_deadlines_immutable"),
     ("trigger", "memory_reviewer_receipts_no_delete"),
     ("trigger", "memory_reviewer_receipts_reject_secret_update"),
+    ("trigger", "memory_reviewer_retired_generation_no_decrease"),
+    ("trigger", "memory_reviewer_retired_generation_no_delete"),
     (
         "trigger",
         "memory_reviewer_selection_cursors_reject_secret_insert",

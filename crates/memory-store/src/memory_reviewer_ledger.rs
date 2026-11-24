@@ -1,6 +1,6 @@
 //! The MemoryReviewer receipt and attempt ledger, and the bounded commit-then-handoff dispatch.
 //!
-//! A receipt row exists per admitted job from its first claim. The run deadline and execution cutoff are written once at generation 1 and never recomputed; a takeover advances the generation and rebinds the claim but inherits both deadlines, so no recovery path resets a budget. Every write after the first claim is fenced on the generation the caller holds, and completion selects exactly one Kernel result for the current generation in the same transaction that completes the task lease, so a losing generation cannot publish.
+//! A receipt row exists per admitted job from its first claim. The run deadline and execution cutoff are written once at the receipt's first generation and never recomputed; a takeover advances the generation and rebinds the claim but inherits both deadlines, so no recovery path resets a budget. Every write after the first claim is fenced on the generation the caller holds, and completion selects exactly one Kernel result for the current generation in the same transaction that completes the task lease, so a losing generation cannot publish.
 //!
 //! An attempt row is the marker that precedes any network disclosure. It is inserted only after the claim, module authority, receipt generation, both incarnations, cancellation, cutoff, and allowance checks hold, and the allowance is the count of committed rows across every generation evaluated inside the insert itself, so no fifth attempt can commit. A committed row stays consumed whether or not bytes were sent; a row finished `not_dispatched` proves no disclosure happened.
 //!
@@ -586,7 +586,7 @@ fn job_open_deadline(
     .optional()
 }
 
-/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The run deadline is the creation time of the first claim ever taken on the job plus [`MEMORY_REVIEWER_RUN_DEADLINE_MS`]; a begin at or after it is refused. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
+/// Writes the receipt for a Ready job at its first generation, one above the highest generation a retired receipt reached, or reports the receipt it already has. The run deadline is the creation time of the first claim ever taken on the job plus [`MEMORY_REVIEWER_RUN_DEADLINE_MS`]; a begin at or after it is refused. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
 pub fn begin_memory_reviewer_receipt_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,

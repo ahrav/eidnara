@@ -1522,8 +1522,8 @@ fn a_terminal_page_is_retired_after_the_jobs_it_enqueued() {
         store
             .retire_settled_memory_reviewer_jobs(page_retires_at)
             .unwrap(),
-        0,
-        "the sweep counts jobs"
+        1,
+        "the page"
     );
     assert_eq!(page_rows(), 0);
     assert_eq!(charged(), 0, "the page returned its charge");

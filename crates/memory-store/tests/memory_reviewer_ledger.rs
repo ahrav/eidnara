@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use memory_store::memory_reviewer_jobs::{
-    CausalInputs, EvidenceAvailability, MEMORY_REVIEWER_QUEUE_LIFETIME_MS, MemoryReviewerJobInput,
-    MemoryReviewerJobOutcome, MemoryReviewerJobState, ProducerBinding, ReserveOutcome,
-    ReviewTarget,
+    CausalInputs, EvidenceAvailability, FrozenSelectionPage, MEMORY_REVIEWER_QUEUE_LIFETIME_MS,
+    MemoryReviewerJobInput, MemoryReviewerJobOutcome, MemoryReviewerJobState, ProducerBinding,
+    ReserveOutcome, ReviewTarget,
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, AttemptMarker, DispatchOutcome, MEMORY_REVIEWER_ATTEMPT_MAX_MS,
@@ -4285,6 +4285,12 @@ fn a_retired_job_takes_the_scan_audit_of_its_writes_with_it() {
             })
             .unwrap()
     };
+    // A second job is closed by its owner; the finish write's audit is the job's own too.
+    let finished = ready_job(&fixture.store, "cand-2");
+    fixture
+        .store
+        .finish_memory_reviewer_job(PROJECT, &finished, MemoryReviewerJobOutcome::Failed, T0 + 4)
+        .unwrap();
     let copies = selection_copies();
     assert_eq!(
         copies, 2,
@@ -4303,7 +4309,7 @@ fn a_retired_job_takes_the_scan_audit_of_its_writes_with_it() {
             .store
             .retire_settled_memory_reviewer_jobs(retire_at)
             .unwrap(),
-        1
+        2
     );
     let (left, owners_left, scans_left) = audit();
     for field in JOB_FIELDS {
@@ -4332,28 +4338,38 @@ fn a_retired_job_takes_the_scan_audit_of_its_writes_with_it() {
     assert!(scans_left < scans, "{scans_left} of {scans} scans");
 }
 
-/// A job enqueued again for a retired job's inputs is a new task under a later job id, and its receipt begins above the retired receipt's generation. The Kernel names a run's holds by causal identity and generation, so the second review runs under holds of its own.
+/// A job enqueued again for a retired job's inputs is a new task under a later job id, and its receipt begins above the highest generation any retired receipt reached. The Kernel names a run's holds by causal identity and generation, so the second review runs under holds of its own. A later sweep that retires a lower generation leaves the recorded maximum.
 #[test]
 fn a_job_enqueued_again_after_retirement_begins_above_the_retired_generation() {
     use memory_store::memory_reviewer_jobs::{
         MEMORY_REVIEWER_QUEUE_LIFETIME_MS, MEMORY_REVIEWER_SETTLED_RETENTION_MS,
     };
-    let fixture = Fixture::open();
+    let mut fixture = Fixture::open();
+    let first_inputs = fixture.identity.clone();
+    // The first job's receipt is taken over once, so it completes at generation 2.
     let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
     let MemoryReviewerBeginOutcome::Begun(begun) = fixture.begin(&claim, T0) else {
         panic!("the first claim begins the receipt")
     };
-    fixture.completed_attempt(begun.generation, &claim, T0 + 1);
+    assert_eq!(begun.generation, 1);
+    let later = T0 + MEMORY_REVIEWER_TASK_LEASE_MS + 1;
+    let successor = fixture.claim("acq-2", "worker-b", later).unwrap();
+    let taken = fixture
+        .store
+        .take_over_memory_reviewer_receipt(PROJECT, &fixture.identity, 1, &successor, later)
+        .unwrap();
+    assert_eq!(taken.generation, 2);
+    fixture.completed_attempt(2, &successor, later + 1);
     complete(
         &fixture,
         &fixture.identity,
-        &claim,
+        &successor,
         "completion-1",
-        "worker-a",
-        begun.generation,
+        "worker-b",
+        2,
         MemoryReviewerReceiptTerminal::Complete,
         Some(&selection()),
-        T0 + 3,
+        later + 2,
     )
     .unwrap();
     let job_id = |fixture: &Fixture| -> i64 {
@@ -4369,25 +4385,96 @@ fn a_job_enqueued_again_after_retirement_begins_above_the_retired_generation() {
             .unwrap()
     };
     let first = job_id(&fixture);
+
+    // A second job, reserved later, completes at generation 1.
+    fixture.identity = ready_job_at(&fixture.store, "cand-2", T0 + 10);
+    let claim = fixture.claim("acq-3", "worker-a", later + 3).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(second) = fixture.begin(&claim, later + 3) else {
+        panic!("the second job's first claim begins a receipt")
+    };
+    assert_eq!(second.generation, 1);
+    fixture.completed_attempt(1, &claim, later + 4);
+    complete(
+        &fixture,
+        &fixture.identity,
+        &claim,
+        "completion-2",
+        "worker-a",
+        1,
+        MemoryReviewerReceiptTerminal::Complete,
+        Some(&selection()),
+        later + 5,
+    )
+    .unwrap();
+
+    // The first sweep retires the generation-2 receipt, and the next one the generation-1 receipt.
+    let retire_at = T0 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    for at in [retire_at, retire_at + 10] {
+        assert_eq!(
+            fixture
+                .store
+                .retire_settled_memory_reviewer_jobs(at)
+                .unwrap(),
+            1
+        );
+    }
+    let again = ready_job_at(&fixture.store, "cand-1", retire_at + 11);
+    assert_eq!(
+        again, first_inputs,
+        "the same inputs name the same identity"
+    );
+    fixture.identity = again;
+    assert!(job_id(&fixture) > first, "a later job takes a later id");
+    let claim = fixture.claim("acq-4", "worker-a", retire_at + 12).unwrap();
+    let MemoryReviewerBeginOutcome::Begun(third) = fixture.begin(&claim, retire_at + 12) else {
+        panic!("the new job's first claim begins a receipt")
+    };
+    assert_eq!(
+        third.generation, 3,
+        "one above the highest retired generation"
+    );
+}
+
+/// A terminal job whose receipt is still in progress stays, with its receipt: the sweep takes a job only once its receipt is complete or absent.
+#[test]
+fn a_terminal_job_with_a_receipt_in_progress_is_left_by_the_sweep() {
+    use memory_store::memory_reviewer_jobs::{
+        MEMORY_REVIEWER_QUEUE_LIFETIME_MS, MEMORY_REVIEWER_SETTLED_RETENTION_MS,
+    };
+    let fixture = Fixture::open();
+    let claim = fixture.claim("acq-1", "worker-a", T0).unwrap();
+    fixture.begin(&claim, T0);
+    fixture
+        .store
+        .finish_memory_reviewer_job(
+            PROJECT,
+            &fixture.identity,
+            MemoryReviewerJobOutcome::Failed,
+            T0 + 1,
+        )
+        .unwrap();
     let retire_at = T0 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
     assert_eq!(
         fixture
             .store
             .retire_settled_memory_reviewer_jobs(retire_at)
             .unwrap(),
-        1
+        0
     );
-    let again = ready_job_at(&fixture.store, "cand-1", retire_at + 1);
-    assert_eq!(
-        again, fixture.identity,
-        "the same inputs name the same identity"
+    assert!(
+        fixture
+            .store
+            .lookup_memory_reviewer_job(PROJECT, &fixture.identity)
+            .unwrap()
+            .is_some()
     );
-    assert!(job_id(&fixture) > first, "a later job takes a later id");
-    let claim = fixture.claim("acq-2", "worker-a", retire_at + 2).unwrap();
-    let MemoryReviewerBeginOutcome::Begun(second) = fixture.begin(&claim, retire_at + 2) else {
-        panic!("the new job's first claim begins a receipt")
-    };
-    assert_eq!(second.generation, begun.generation + 1);
+    assert!(
+        fixture
+            .store
+            .lookup_memory_reviewer_receipt(PROJECT, &fixture.identity)
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// One retirement sweep deletes at most its batch, oldest queue deadline first, and the next sweep takes the rest.
@@ -4398,6 +4485,31 @@ fn a_retirement_sweep_takes_one_batch_oldest_first() {
         MEMORY_REVIEWER_SETTLED_RETENTION_MS,
     };
     let fixture = Fixture::open();
+    // A page frozen at T0 is expired by the first expiry sweep below. It waits behind a full batch of jobs.
+    let page = FrozenSelectionPage {
+        references: vec![CausalInputs {
+            target: subject("cand-page"),
+            question_template: "extracted_facts".to_string(),
+            signals: vec![],
+            required_evidence: vec![EvidenceAvailability {
+                evidence_id: "ev-1".to_string(),
+                available: true,
+            }],
+            policy_versions: BTreeMap::new(),
+        }],
+        next_cursor: None,
+    };
+    fixture
+        .store
+        .freeze_selection(PROJECT, "slot-1", "attempt-1", &page, T0)
+        .unwrap();
+    let page_held = || {
+        fixture
+            .store
+            .lookup_frozen_selection(PROJECT, "slot-1", "attempt-1")
+            .unwrap()
+            .is_some()
+    };
     // The fixture's own job was reserved at T0; every job below is reserved later, in batches the queue's capacity admits, and closed by the expiry sweep.
     let extra = MEMORY_REVIEWER_RETIREMENT_BATCH + 1;
     let mut newest = String::new();
@@ -4416,9 +4528,10 @@ fn a_retirement_sweep_takes_one_batch_oldest_first() {
             .unwrap()
             .is_some()
     };
+    // One queue lifetime past the jobs' window, the page's own window has ended too.
     let retire_at = T0
         + extra as i64
-        + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+        + 2 * MEMORY_REVIEWER_QUEUE_LIFETIME_MS
         + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
     assert_eq!(
         fixture
@@ -4429,12 +4542,18 @@ fn a_retirement_sweep_takes_one_batch_oldest_first() {
     );
     assert!(!held(&fixture.identity), "the oldest job went first");
     assert!(held(&newest), "the newest waits for the next sweep");
+    assert!(
+        page_held(),
+        "a page waits while a full batch of jobs retires"
+    );
     assert_eq!(
         fixture
             .store
             .retire_settled_memory_reviewer_jobs(retire_at)
             .unwrap(),
-        2
+        3,
+        "the last two jobs and the page"
     );
     assert!(!held(&newest));
+    assert!(!page_held());
 }

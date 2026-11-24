@@ -498,6 +498,13 @@ CREATE TABLE memory_reviewer_retired_generation (
             generation INTEGER NOT NULL CHECK (generation >= 1)
         );
 
+CREATE TRIGGER memory_reviewer_retired_generation_no_delete BEFORE DELETE ON memory_reviewer_retired_generation
+BEGIN SELECT RAISE(ABORT, 'the retired generation stays for the store incarnation'); END;
+
+CREATE TRIGGER memory_reviewer_retired_generation_no_decrease BEFORE UPDATE ON memory_reviewer_retired_generation
+WHEN NEW.generation < OLD.generation
+BEGIN SELECT RAISE(ABORT, 'the retired generation only rises'); END;
+
 -- `job_id` is the task id a MemoryReviewer claim persists; a declared integer key survives a
 -- rebuild, where a hidden rowid may be renumbered. The key counts upward for the life of the
 -- file, so a claim that names a retired job names no later one.

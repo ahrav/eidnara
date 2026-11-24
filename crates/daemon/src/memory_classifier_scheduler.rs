@@ -629,7 +629,7 @@ impl MemoryClassifierScheduler {
                     now_ms,
                 ) {
                     Ok(frozen) => frozen,
-                    // Nothing was persisted, so holding the slot due would repeat the whole selection every idle poll; the cron slot selects from the same cursor once headroom returns, and the metadata quota never returns.
+                    // Nothing was persisted, so holding the slot due would repeat the whole selection every idle poll; the cron slot selects from the same cursor once headroom returns, and the metadata quota returns headroom only as jobs and pages retire.
                     Err(MemoryReviewerJobError::Refused(refusal)) => {
                         return self.complete_selection_slot(
                             store,

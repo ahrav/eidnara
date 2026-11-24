@@ -25,7 +25,7 @@ const SAMPLE_BYTE_FIELDS: [&str; 3] = ["stores", "artifact_bytes", "cassette_byt
 pub struct ReviewerQuota {
     pub receipt_charge_bytes: u64,
     pub job_allowance_bytes: u64,
-    /// Permanent receipt charge each frozen page keeps once terminal.
+    /// Receipt charge each frozen page keeps once terminal.
     pub page_receipt_bytes: u64,
     /// Allowance a page holds while frozen; terminal pages hold none.
     pub page_allowance_bytes: u64,
@@ -34,7 +34,7 @@ pub struct ReviewerQuota {
 }
 
 impl ReviewerQuota {
-    /// Bytes the quota should hold for the jobs and pages counted: a permanent
+    /// Bytes the quota should hold for the jobs and pages counted: a
     /// receipt charge per terminal job or page, plus the receipt charge and
     /// the allowance per job still open or page still frozen. `None` when the
     /// counts do not fit in `u64`.
@@ -251,7 +251,7 @@ pub enum GrowthRefused {
         field: &'static str,
     },
     /// `admitted_total` is not `pending_jobs + terminal_jobs`; every admitted
-    /// job is one or the other for the store incarnation.
+    /// job is one or the other until it retires, ninety days after its queue deadline.
     AdmittedMismatch {
         step: u32,
         expected: u64,

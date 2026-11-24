@@ -948,9 +948,12 @@ pub(crate) fn settle_memory_reviewer_reservation(
             if !crate::clear_memory_reviewer_reservation_tx(conn, session_id, expected)? {
                 return Ok(WriteDisposition::Replay(false));
             }
-            let reserved = load_memory_reviewer_job(conn, project, &expected.causal_identity)?
-                .is_some_and(|job| job.state == MemoryReviewerJobState::Reserved);
-            if reserved {
+            // A reservation whose job the store no longer holds has no row to retire an audit with, so the clear commits as a replay, which records none.
+            let Some(job) = load_memory_reviewer_job(conn, project, &expected.causal_identity)?
+            else {
+                return Ok(WriteDisposition::Replay(true));
+            };
+            if job.state == MemoryReviewerJobState::Reserved {
                 if expected.queue_deadline_ms <= now_ms {
                     expire_reserved_memory_reviewer_job_in_tx(
                         conn,
@@ -1742,7 +1745,7 @@ impl MemoryStore {
             .map_err(MemoryReviewerJobError::Store)
     }
 
-    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its own writes left: the reservation, activation and rebinds of the job, its ledger writes, and the completion's selection. A sweep that leaves no such job also deletes terminal selection pages whose deadline passed a queue lifetime earlier still, so every job a page enqueued is gone before the page and the scan audit of its references. The totals triggers return each row's charge to its project, so the quota bounds the work of one retention window. Returns the jobs retired.
+    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its own writes left: the reservation, activation and rebinds of the job, its ledger writes, and the completion's selection. A sweep that leaves no such job also deletes terminal selection pages whose deadline passed a queue lifetime earlier still, so every job a page enqueued is gone before the page and the scan audit of its references. The totals triggers return each row's charge to its project, so the quota bounds the work of one retention window. Returns the jobs and pages retired. The caller runs the expiry sweep at the same `now_ms` first, as the lifecycle pass does, so every job past its queue deadline is terminal when the pages are judged.
     ///
     /// A receipt begins above the highest generation a retired receipt reached, which the sweep records, so a job enqueued again for a retired job's inputs runs under a generation its Kernel holds never carried.
     pub fn retire_settled_memory_reviewer_jobs(
@@ -1863,10 +1866,9 @@ impl MemoryStore {
                     )?
                     .execute(params![project, slot_id, selection_attempt])?;
                 }
-                Ok(if settled.is_empty() && pages.is_empty() {
-                    WriteDisposition::Replay(0)
-                } else {
-                    WriteDisposition::Applied(settled.len())
+                Ok(match settled.len() + pages.len() {
+                    0 => WriteDisposition::Replay(0),
+                    retired => WriteDisposition::Applied(retired),
                 })
             })
             .map_err(MemoryReviewerJobError::Store)
