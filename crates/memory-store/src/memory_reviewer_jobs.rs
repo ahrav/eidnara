@@ -18,7 +18,7 @@ use context_core::redaction::reject_transaction_secret_text;
 
 use crate::{
     DurableWriteFamily, MemoryStore, MemoryStoreError, PreparedWrite, WriteDisposition,
-    active_scan_owner_key, retire_active_scan_domain_owner,
+    active_scan_owner_key, retire_active_scan_domain_owner, retire_active_scan_domain_owner_set,
 };
 
 pub const MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT: usize = 64;
@@ -1775,6 +1775,9 @@ impl MemoryStore {
                     )?
                     .collect::<rusqlite::Result<_>>()?;
                 let mut retired_generation = 0_i64;
+                // The first vector groups job and page owners under `MemoryReviewerJobs`. The second groups completion selection owners under the lease ledger's owner kind because the task lease write records the selection.
+                let mut retired_owners: BTreeMap<&str, (Vec<String>, Vec<String>)> =
+                    BTreeMap::new();
                 for (job_id, project, causal_identity) in &settled {
                     let generation: Option<i64> = tx
                         .prepare_cached(
@@ -1791,29 +1794,26 @@ impl MemoryStore {
                         "DELETE FROM memory_reviewer_receipts WHERE project = ?1 AND causal_identity = ?2",
                     )?
                     .execute(params![project, causal_identity])?;
-                    let jobs = DurableWriteFamily::MemoryReviewerJobs.owner_kind();
-                    let owners = JOB_OPERATIONS
-                        .iter()
-                        .map(|operation| (jobs, ["memory_reviewer", operation]))
-                        .chain(
-                            crate::memory_reviewer_ledger::LEDGER_OPERATIONS
-                                .iter()
-                                .map(|operation| (jobs, ["memory_reviewer-ledger", operation])),
-                        )
-                        // The completion records its selection inside the task lease's write, so that audit is owned under the lease ledger's kind.
-                        .chain(std::iter::once((
-                            crate::task_lease::LEDGER_FAMILY.owner_kind(),
-                            ["memory_reviewer-ledger", "complete"],
-                        )));
-                    for (owner_kind, [family, operation]) in owners {
-                        retire_active_scan_domain_owner(
-                            tx,
-                            "project",
-                            project,
-                            owner_kind,
-                            &active_scan_owner_key(&[family, operation, causal_identity]),
-                        )?;
-                    }
+                    let (job_owners, lease_owners) =
+                        retired_owners.entry(project.as_str()).or_default();
+                    job_owners.extend(
+                        JOB_OPERATIONS
+                            .iter()
+                            .map(|operation| ["memory_reviewer", operation])
+                            .chain(
+                                crate::memory_reviewer_ledger::LEDGER_OPERATIONS
+                                    .iter()
+                                    .map(|operation| ["memory_reviewer-ledger", operation]),
+                            )
+                            .map(|[family, operation]| {
+                                active_scan_owner_key(&[family, operation, causal_identity])
+                            }),
+                    );
+                    lease_owners.push(active_scan_owner_key(&[
+                        "memory_reviewer-ledger",
+                        "complete",
+                        causal_identity,
+                    ]));
                     tx.prepare_cached("DELETE FROM memory_reviewer_jobs WHERE job_id = ?1")?
                         .execute([job_id])?;
                 }
@@ -1846,25 +1846,36 @@ impl MemoryStore {
                         Vec::new()
                     };
                 for (project, slot_id, selection_attempt) in &pages {
-                    release_frozen_page_scans(tx, project, slot_id, selection_attempt)?;
-                    retire_active_scan_domain_owner(
-                        tx,
-                        "project",
-                        project,
-                        DurableWriteFamily::MemoryReviewerJobs.owner_kind(),
-                        &active_scan_owner_key(&[
-                            "memory_reviewer",
-                            "freeze",
-                            slot_id,
-                            selection_attempt,
-                            PAGE_ROW_OWNER,
-                        ]),
-                    )?;
+                    let (page_owners, _) = retired_owners.entry(project.as_str()).or_default();
+                    page_owners.push(frozen_page_owner_key(slot_id, selection_attempt));
+                    page_owners.push(active_scan_owner_key(&[
+                        "memory_reviewer",
+                        "freeze",
+                        slot_id,
+                        selection_attempt,
+                        PAGE_ROW_OWNER,
+                    ]));
                     tx.prepare_cached(
                         "DELETE FROM memory_reviewer_frozen_selections
                           WHERE project = ?1 AND slot_id = ?2 AND selection_attempt = ?3",
                     )?
                     .execute(params![project, slot_id, selection_attempt])?;
+                }
+                for (project, (owners, lease_owners)) in &retired_owners {
+                    retire_active_scan_domain_owner_set(
+                        tx,
+                        "project",
+                        project,
+                        DurableWriteFamily::MemoryReviewerJobs.owner_kind(),
+                        owners,
+                    )?;
+                    retire_active_scan_domain_owner_set(
+                        tx,
+                        "project",
+                        project,
+                        crate::task_lease::LEDGER_FAMILY.owner_kind(),
+                        lease_owners,
+                    )?;
                 }
                 Ok(match settled.len() + pages.len() {
                     0 => WriteDisposition::Replay(0),

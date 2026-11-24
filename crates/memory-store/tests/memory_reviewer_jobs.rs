@@ -1534,6 +1534,81 @@ fn a_terminal_page_is_retired_after_the_jobs_it_enqueued() {
     );
 }
 
+/// Each project holds its scan audit in a separate scope, even when both jobs review identical inputs.
+#[test]
+fn a_sweep_across_projects_retires_the_scan_audit_of_each_project() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    for project in ["proj-a", "proj-b"] {
+        let job = reserved(
+            store
+                .reserve_memory_reviewer_job(project, &producer("f1"), &inputs("cand-1"), NOW)
+                .unwrap(),
+        );
+        store
+            .activate_memory_reviewer_job(
+                project,
+                &job.causal_identity,
+                &producer("f1"),
+                &input("cand-1"),
+                NOW,
+            )
+            .unwrap();
+        store
+            .finish_memory_reviewer_job(
+                project,
+                &job.causal_identity,
+                MemoryReviewerJobOutcome::Failed,
+                NOW + 1,
+            )
+            .unwrap();
+    }
+    let frozen = store
+        .freeze_selection(
+            "proj-b",
+            "slot-1",
+            "attempt-1",
+            &FrozenSelectionPage {
+                references: vec![inputs("cand-2")],
+                next_cursor: None,
+            },
+            NOW,
+        )
+        .unwrap();
+    store
+        .expire_memory_reviewer_work(frozen.selection_deadline_ms)
+        .unwrap();
+    let count = |sql: &str| -> i64 {
+        store
+            .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .unwrap()
+    };
+    let owners = || count("SELECT COUNT(*) FROM scan_domain_owners");
+    let scopes = || count("SELECT COUNT(*) FROM scan_owner_scopes");
+    assert_eq!(
+        scopes(),
+        2,
+        "each project holds the audit of its own writes"
+    );
+    assert!(owners() > 2, "{} owners", owners());
+
+    let retire_at = (NOW + MEMORY_REVIEWER_QUEUE_LIFETIME_MS).max(frozen.selection_deadline_ms)
+        + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+        + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        3,
+        "both jobs and the page"
+    );
+    assert_eq!(owners(), 0, "no owner of either project remains");
+    assert_eq!(scopes(), 0, "each project's scope went with its last owner");
+    assert_eq!(count("SELECT COUNT(*) FROM field_scans"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM scan_batches"), 0);
+}
+
 /// The transaction-local enqueue writes nothing when it defers: a caller that commits its own transaction around a `Deferred` outcome must find the page still frozen with its references, not a committed `enqueued` row without jobs.
 #[test]
 fn a_deferred_enqueue_leaves_the_page_frozen_even_when_its_transaction_commits() {
