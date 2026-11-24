@@ -17,14 +17,14 @@ payload the hook returns.
 
 All references are at the tree this record was last revised with.
 
-Admission. `GenerationParams` carries `max_output_tokens: u64` and
-`temperature: Option<f64>` (`model_execution/protocol.rs:43-45`). The wire form
-carries a generation `revision` defaulting to 1 (`:107-108`); `parse_send` rejects a
-zero or over-bound token count (`:265`), a revision outside `1 | 2` (`:268-269`), and
-a revision 1 request with no temperature (`:271-272`), and bounds any present
-temperature (`:275-280`). A revision 2 request may omit temperature to keep the
+Admission. `SendRequest` carries `max_output_tokens: u64` and
+`temperature: Option<f64>` (`model_execution/protocol.rs:43-45`). The wire form's
+generation object carries those two fields and refuses any other (`:104-110`);
+`parse_send` rejects a zero or over-bound token count (`:259-261`) and bounds any
+present temperature (`:263-269`). A request may omit temperature to keep the
 model's native decoding policy, so the hook can receive a bound with no
 temperature.
+
 
 Delivery. `run_pi` writes `PI_MODEL_EXECUTION_EXTENSION_BYTES` to a 0600 file in the
 per-run 0700 directory through `PrivateDir::write_private_async` (`pi.rs:430-433`;
