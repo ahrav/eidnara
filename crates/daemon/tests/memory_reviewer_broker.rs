@@ -280,6 +280,11 @@ impl Fixture {
 
     /// A live, admitted decision at `object` inside `scope`.
     fn decision_in(&self, object: &str, scope: &str) {
+        self.decision_on(object, scope, &format!("src/{object}"));
+    }
+
+    /// A live, admitted decision at `object` inside `scope` on the source lineage `source_id`.
+    fn decision_on(&self, object: &str, scope: &str, source_id: &str) {
         self.store
             .commit(intent(&format!("decision-{object}")), |envelope| {
                 envelope.insert_decision(DecisionSpec {
@@ -296,7 +301,7 @@ impl Fixture {
                         rationale: format!("rationale {object}"),
                     },
                     source_kind: "repo".to_string(),
-                    source_id: format!("src/{object}"),
+                    source_id: source_id.to_string(),
                     source_revision: 1,
                     sensitivity: Sensitivity::Normal,
                 })?;
@@ -2169,6 +2174,42 @@ fn canonical_and_promoted_descriptors_resolve_to_their_originating_decision_and_
         fixture.canonical_state(&["decision-a", &claim, &promoted]),
         (tip, before)
     );
+}
+
+/// The failure recorder alone writes the rows of a failure lineage and reads a command's run from the rationale it wrote, so a live decision on `tool_failure` or `tool_failure:<digest>` is no proposal target. The same decision on a lineage that only begins with those letters is one.
+#[test]
+fn a_decision_on_a_failure_lineage_is_no_proposal_target() {
+    let fixture = Fixture::open();
+    for (object, source_id, reserved) in [
+        (
+            "decision-failure",
+            "tool_failure:0f3a5c7e9b1d2f4a6c8e0b2d4f6a8c0e",
+            true,
+        ),
+        ("decision-bare", "tool_failure", true),
+        ("decision-near", "tool_failures", false),
+    ] {
+        fixture.decision_on(object, SCOPE, source_id);
+        let (claim, _) = derived(
+            &fixture,
+            &format!("claim-{object}"),
+            OccurrenceClass::CanonicalClaims,
+            object,
+        );
+        let subject = fixture.resolve(&claim).unwrap();
+        let target = proposal_target(&fixture.store, &subject);
+        match reserved {
+            true => assert_eq!(
+                target.unwrap_err().code,
+                RefusalCode::Unsupported,
+                "{source_id}"
+            ),
+            false => assert!(
+                matches!(target, Ok(kernel::ProposalTarget::Memory(_))),
+                "{source_id}: {target:?}"
+            ),
+        }
+    }
 }
 
 #[test]
