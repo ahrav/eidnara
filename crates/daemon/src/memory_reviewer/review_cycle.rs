@@ -1409,7 +1409,7 @@ pub fn describe(selected: &Selected) -> BTreeMap<&'static str, usize> {
         .collect()
 }
 
-/// The new jobs one selection may enqueue: what the project's pending capacity, the runs of one pass, and the review holds left ([`holds_left`]) each still admit beside the `pending` jobs already queued.
+/// The new jobs one selection may enqueue: what the project's pending capacity, the runs of one pass, and the review holds left ([`holds_left`]) each still admit beside the `pending` memory reviews already queued.
 pub fn room(pending: usize, per_pass: usize, holds_left: usize) -> usize {
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT
         .min(per_pass)
