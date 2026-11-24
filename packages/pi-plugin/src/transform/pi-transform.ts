@@ -267,7 +267,9 @@ export function createPiTransform(options: PiTransformOptions) {
         declined.add(inputs.sessionId);
         const alignment = new PiAlignment(inputs.messages, branch, inputs.reader);
         const slotRows = new Map<number, PiRow>();
-        const allowance = new ReferenceableAllowance();
+        // An attempt compares its rows within its own allowance: the client calls `preflight`
+        // once per attempt, before the attempt's first window read.
+        let allowance = new ReferenceableAllowance();
         const rows = (start: number, end: number, fresh: boolean): PiRow[] | undefined => {
             const window: PiRow[] = [];
             for (let index = end - 1; index >= start; index -= 1) {
@@ -292,7 +294,10 @@ export function createPiTransform(options: PiTransformOptions) {
                 idAt: (index) => alignment.idAt(index),
                 holds: (id) => alignment.holds(id),
             },
-            preflight: async () => inputs.projectRoot,
+            preflight: async () => {
+                allowance = new ReferenceableAllowance();
+                return inputs.projectRoot;
+            },
             readWindow: (start, end) => rows(start, end, true),
             ...(inputs.eidnaraFolds
                 ? {

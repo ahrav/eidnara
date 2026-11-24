@@ -6211,6 +6211,62 @@ async fn a_failed_command_of_a_pi_request_is_recorded_and_a_deleted_session_writ
     );
 }
 
+/// The recorder's task limit and its delete fence follow the session id, as
+/// the transform lane does: one session id routed under two project roots
+/// has one task at a time, and a `session.delete` on a route of either root
+/// retires the handed-off task of the other. A later pass of that root
+/// judges the result, and its fact stands in that root's project.
+#[tokio::test]
+async fn a_session_id_under_two_project_roots_shares_one_task_and_one_delete_fence() {
+    let (handler, _store, dir, project) = delivery_handler(failure_config()).await;
+    let other = dir.path().join("other-project");
+    std::fs::create_dir_all(&other).unwrap();
+    bind(&handler, OTHER_PROJECT, &other, "s-other", failure_config());
+    let window = || command_window("s1", &[failed_run("call-1", "cargo test -p api", 1_000)]);
+    let here = failure_binding(&project, "pi", "s1");
+    let there = failure_binding(&other, "pi", "s1");
+    let first = handler
+        .failure_checkpoint(&here, &window())
+        .expect("the first root's pass hands off");
+    assert!(
+        handler.failure_checkpoint(&there, &window()).is_none(),
+        "the other root's pass hands off nothing while the session id's task runs"
+    );
+    assert_eq!(first.run().await, 1);
+    // The call's name carries its project, so the other root's pass still
+    // holds an unjudged result.
+    let handed_off = handler
+        .failure_checkpoint(&there, &window())
+        .expect("the other root's pass hands off once the task has ended");
+    let request = json!({ "method": "session.delete", "session_id": "s1" });
+    let deleted = handler
+        .core
+        .handle_session_delete_value(test_route(FIRST), &request)
+        .await;
+    assert!(
+        matches!(deleted, PreparedOutcome::Response(_)),
+        "{deleted:?}"
+    );
+    assert_eq!(
+        handed_off.run().await,
+        0,
+        "a delete on the first root's route retires the other root's task"
+    );
+    let recorded = |rows: Vec<(String, String)>| {
+        rows.iter()
+            .any(|(record, _)| record.contains("\nCommand: cargo test [arguments left out]\n"))
+    };
+    assert!(!recorded(
+        explicit_search(&handler, (OTHER_PROJECT, "s-other"), &other).await
+    ));
+    // The other root's next pass judges the result and writes its fact in
+    // that root's project.
+    assert_eq!(record_window(&handler, &other, "s1", &window()).await, 1);
+    assert!(recorded(
+        explicit_search(&handler, (OTHER_PROJECT, "s-other"), &other).await
+    ));
+}
+
 /// A session writes 64 failure records in a project, resolved copies
 /// included. The count is the number of the session's commits in the
 /// Kernel's log: a resolution counts for the session that writes it, a

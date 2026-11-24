@@ -289,8 +289,8 @@ struct SessionCalls {
     order: VecDeque<u64>,
 }
 
-/// Tool calls already judged, by project and session. The memo spares a
-/// pass the reading of results an earlier pass judged. The Kernel's commit
+/// Tool calls already judged, by session id, each named with its project.
+/// A pass skips the results an earlier pass judged. The Kernel's commit
 /// log holds the receipt of each commit, so a call that wrote a row writes
 /// nothing when it is judged again after a restart or after the memo gave
 /// it up. A call that wrote no row left no receipt and is judged again as

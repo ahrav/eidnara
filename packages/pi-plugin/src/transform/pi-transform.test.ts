@@ -840,8 +840,8 @@ describe("Pi native entry identity", () => {
         const stringify = spyOn(JSON, "stringify");
         const descriptors = spyOn(Object, "getOwnPropertyDescriptor");
         try {
-            // One allowance serves the pass: the row that spends it and the rows after it read
-            // as changed, and no text of them is built.
+            // One allowance serves an attempt: the row that spends it and the rows after it
+            // read as changed, and no text of them is built.
             const allowance = new ReferenceableAllowance(1 << 16);
             expect(typed(rowOf(shared(), shared(), allowance))).toBe(false);
             expect(typed(rowOf(structuredClone(small), small, allowance))).toBe(false);
@@ -1002,6 +1002,39 @@ describe("Pi native entry identity", () => {
                     ["e3", undefined],
                 ],
             ]);
+        });
+
+        it("compares the second window read of a pass within its own 128 MiB", async () => {
+            // The walk charges a string two bytes for each UTF-16 unit. The result's entry
+            // holds 66 MiB of text that an earlier handler pruned, and the user message holds
+            // 4 MiB, so one read of the window spends 74 MiB of comparison charge.
+            const held = persisted();
+            (held[0] as Json).content = "u".repeat(2 * 1024 * 1024);
+            (held[2] as Json).content = Array.from({ length: 33 }, () => ({
+                type: "text",
+                text: "x".repeat(1024 * 1024),
+            }));
+            const context = structuredClone(held.slice(0, 2));
+            context.push({ ...result(), content: [{ type: "text", text: "pruned" }] });
+            const transport = fakeTransport({
+                "transform.boundary": [() => ({ anchors: [] }), () => ({ anchors: [] })],
+                transform: [() => ({ status: "boundary_unknown" }), rawReply],
+            });
+            const inputs = passOver(branchOver(held), context);
+            const outcome = await transformOver(transport.client, inputs.branch).run(inputs);
+            expect(outcome.outcome?.kind).toBe("applied");
+            const sent = transport.calls.filter((call) => call.method === "transform");
+            // Each request names the unchanged rows by their entries and the pruned row by none.
+            const rows = [
+                ["e1", "message"],
+                ["e2", "message"],
+                ["e3", undefined],
+            ];
+            expect(
+                sent.map((call) =>
+                    (call.body.native_messages as PiRow[]).map(({ id, type }) => [id, type]),
+                ),
+            ).toEqual([rows, rows]);
         });
 
         it("declines when a custom message row is edited in place", async () => {
