@@ -819,6 +819,33 @@ fn private_key_body_lines_are_redacted_under_a_header_without_a_footer() {
         "<REDACTED:private_key>",
     );
     assert_exact(&format!("{header}\n{fifteen}\n{fifteen}\n"));
+    // A serializer that escapes `/` (PHP's `json_encode`) writes the Base64 character as
+    // `\/`; the two bytes are one character of the body line.
+    let escaped = format!("{}\\/{}", &line[..40], &line[40..]);
+    let short_escaped = format!("{}\\/{}", &line[..5], &line[5..11]);
+    for (input, body) in [
+        (
+            format!("{{\"output\":\"{header}\\n{escaped}\\n{line}\\n{short}\"}}"),
+            format!("{escaped}\\n{line}\\n{short}"),
+        ),
+        (
+            format!("{header}\\n{line}\\n{escaped}\\n{short_escaped}\\n"),
+            format!("{line}\\n{escaped}\\n{short_escaped}"),
+        ),
+    ] {
+        assert_redacts(&input, &body, "<REDACTED:private_key>");
+    }
+    let ends_escaped = |characters: usize| format!("{}\\/", &line[..characters - 1]);
+    assert_redacts(
+        &format!("{header}\\n{}\\n{fifteen}\\n", ends_escaped(16)),
+        &format!("{}\\n{fifteen}", ends_escaped(16)),
+        "<REDACTED:private_key>",
+    );
+    assert_exact(&format!(
+        "{header}\\n{}\\n{}\\n",
+        ends_escaped(15),
+        ends_escaped(15)
+    ));
     assert_exact(&format!("{header}\\N{line}\\N{line}"));
     let lines = |count: usize| {
         format!(

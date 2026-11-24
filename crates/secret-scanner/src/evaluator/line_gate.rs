@@ -13,6 +13,14 @@ use crate::ScanProfile;
 
 static EMBEDDED: LazyLock<RuleSet> = LazyLock::new(|| RuleSet::from_embedded().unwrap());
 
+/// The embedded rules with the line gate off: `evaluate` takes its `captures_iter` branch for
+/// every rule, which makes this set the reference for the gated branch.
+static WHOLE_INPUT: LazyLock<RuleSet> = LazyLock::new(|| {
+    RuleSet::from_embedded()
+        .unwrap()
+        .searched_over_the_whole_input()
+});
+
 const LINE_GATED_RULES: [&str; 4] = [
     "magic-value-digits",
     "magic-value-digits-quoted",
@@ -256,6 +264,30 @@ fn assert_gated_search_replays_captures_iter(input: &str) {
     }
 }
 
+/// Compares whole reports: findings, `candidates_evaluated`, `work_bytes`, and `limits_hit`.
+fn assert_gated_scan_reports_the_whole_input_scan(input: &str, limits: ScanLimits) {
+    for profile in [ScanProfile::Conservative, ScanProfile::Comprehensive] {
+        assert_eq!(
+            evaluate(&EMBEDDED, profile, limits, [0; 32], input),
+            evaluate(&WHOLE_INPUT, profile, limits, [0; 32], input),
+            "{profile:?} under {limits:?} on {input:?}"
+        );
+    }
+}
+
+fn generated_text(parts: &[(bool, usize)]) -> String {
+    parts
+        .iter()
+        .map(|&(key, index)| {
+            if key {
+                KEY_PARTS[index % KEY_PARTS.len()]
+            } else {
+                TEXT_PARTS[index]
+            }
+        })
+        .collect()
+}
+
 const KEY_PARTS: [&str; 12] = [
     "pass", "word", "PASS", "WORD", "sec", "ret", "SEC", "RET", "tok", "en", "api_", "key",
 ];
@@ -272,17 +304,82 @@ proptest::proptest! {
     fn the_line_gated_search_yields_the_captures_of_the_whole_input(
         parts in proptest::collection::vec((proptest::bool::ANY, 0..TEXT_PARTS.len()), 0..24),
     ) {
-        let input: String = parts
-            .iter()
-            .map(|&(key, index)| {
-                if key {
-                    KEY_PARTS[index % KEY_PARTS.len()]
-                } else {
-                    TEXT_PARTS[index]
-                }
-            })
-            .collect();
-        assert_gated_search_replays_captures_iter(&input);
+        assert_gated_search_replays_captures_iter(&generated_text(&parts));
+    }
+
+    #[test]
+    fn a_scan_through_the_line_gate_reports_what_the_whole_input_scan_reports(
+        parts in proptest::collection::vec((proptest::bool::ANY, 0..TEXT_PARTS.len()), 0..24),
+        max_candidates in 0usize..8,
+    ) {
+        let input = generated_text(&parts);
+        assert_gated_scan_reports_the_whole_input_scan(&input, ScanLimits::default());
+        assert_gated_scan_reports_the_whole_input_scan(
+            &input,
+            ScanLimits {
+                max_candidates,
+                ..ScanLimits::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn a_scan_through_the_line_gate_reports_what_the_whole_input_scan_reports_at_each_limit() {
+    assert!(
+        WHOLE_INPUT
+            .active(ScanProfile::Comprehensive)
+            .all(|rule| rule.line_literals.is_none())
+    );
+    let scan = |profile, input: &str| {
+        evaluate(&EMBEDDED, profile, ScanLimits::default(), [0; 32], input).unwrap()
+    };
+    let pass = ["pass", "word"].concat();
+    let secret = ["sec", "ret"].concat();
+    let folded = ["pa", "\u{17f}\u{17f}", "word"].concat();
+    let kelvin = ["api_", "\u{212a}", "ey"].concat();
+    // The option form declines a plain word, so each lead is a candidate without a finding.
+    let declined = format!("deploy --{pass} hunter --{secret} plain");
+    let report = scan(ScanProfile::Conservative, &declined);
+    assert_eq!(report.findings, []);
+    assert!(report.candidates_evaluated >= 2, "{report:?}");
+    let unterminated = format!("--{pass} \"{}", "x".repeat(MAX_MATCH_BYTES + 8));
+    assert_eq!(
+        scan(ScanProfile::Conservative, &unterminated).limits_hit,
+        Some(LimitExhausted::Match)
+    );
+    for input in [
+        declined,
+        unterminated,
+        format!("deploy --{pass} Zx9kq7 --token Qw8rt2Lm"),
+        format!("{pass}: Zx9kq7\n{secret}: {}\napi_key: Qw8rt2Lm5\n", 1234),
+        format!("\"{pass}\": \"{}\", {secret}={}", 1234, 5678),
+        format!("{folded}: {}\n--{kelvin} Zx9kq7", 1234),
+    ] {
+        let complete = scan(ScanProfile::Comprehensive, &input);
+        for max_candidates in 0..=complete.candidates_evaluated + 1 {
+            assert_gated_scan_reports_the_whole_input_scan(
+                &input,
+                ScanLimits {
+                    max_candidates,
+                    ..ScanLimits::default()
+                },
+            );
+        }
+        let step = if complete.work_bytes <= 8192 {
+            1
+        } else {
+            complete.work_bytes / 48
+        };
+        for max_work_bytes in (0..=complete.work_bytes + 1).step_by(step) {
+            assert_gated_scan_reports_the_whole_input_scan(
+                &input,
+                ScanLimits {
+                    max_work_bytes,
+                    ..ScanLimits::default()
+                },
+            );
+        }
     }
 }
 

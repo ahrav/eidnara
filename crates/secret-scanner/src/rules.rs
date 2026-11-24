@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "f3de9d7eea117be96f47b48719db3c953c0323f6d402a42af1b5acbb7128367c";
+    "71a59536e49b358c4498f492c728a0c07444afb57ecbfd8783c96543ad67d0f5";
 
 const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -709,6 +709,16 @@ fn line_literals(name: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+#[cfg(test)]
+impl RuleSet {
+    pub(crate) fn searched_over_the_whole_input(mut self) -> Self {
+        for rule in &mut self.rules {
+            rule.line_literals = None;
+        }
+        self
+    }
+}
+
 fn build_case_insensitive_matcher(patterns: &[String]) -> Result<AhoCorasick, ConstructionError> {
     AhoCorasickBuilder::new()
         // The evaluator probes these matchers with `find_overlapping_iter`, which panics for every match kind except `Standard`.
@@ -1148,11 +1158,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "ee05a13fd4d57c17c0ad42ea908a5f47c6aaf1085e9111d6163b3158b592dac3",
+                "e20154cbae87bcf8623fa6fc893627c724dbadd15b46a1636132ac180f539ce7",
             ),
             (
                 ScanProfile::Comprehensive,
-                "e60e5cd7d8386ca153a347b903c88ef1863f76272de1d1f6e6949650cd99f01c",
+                "8c7b6a4f52972e0859a35dbab9d3eed6effbf688230649bfde1f53721f220bd5",
             ),
         ] {
             let digest = rules

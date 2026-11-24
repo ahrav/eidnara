@@ -394,6 +394,8 @@ rules:
 #     of the line: an output limit can cut the last line and append its own marker;
 #   - one last line of 1 to 15 Base64 characters when it is a whole line: a line break, the
 #     end of the text, or a quote that closes a serialized string follows it.
+# In a body line `\/` is one Base64 character: a JSON serializer that escapes `/` writes
+# it as those two bytes.
 # A line break is LF or CR LF, each written raw or serialized (`\n`, `\r`, `\u000a`,
 # `\u000d`). At most 256 spaces or tabs may stand before and after a line break and after
 # the last line. When no body follows the `Name: value` lines, the lines under the header

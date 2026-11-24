@@ -2110,7 +2110,7 @@ const MAX_KEY_HEADER_BYTES: usize = 232;
 const MIN_KEY_LINE_BYTES: usize = 16;
 
 impl WordReader<'_> {
-    fn run(&mut self, limit: usize, accepts: fn(char) -> bool) -> Result<usize, Abort> {
+    fn run(&mut self, limit: usize, accepts: impl Fn(char) -> bool) -> Result<usize, Abort> {
         let start = self.at;
         while self.at - start < limit
             && let Some(character) = self.peek().filter(|next| accepts(*next))
@@ -2143,6 +2143,24 @@ impl WordReader<'_> {
 
     fn rewind(&mut self, at: usize) {
         self.at = at;
+    }
+
+    /// Counts the Base64 characters of a run of at most `limit` bytes. `\/` is one
+    /// character: a JSON serializer that escapes `/` writes it as those two bytes.
+    fn base64_run(&mut self, limit: usize) -> Result<usize, Abort> {
+        let start = self.at;
+        let mut escapes = 0;
+        loop {
+            self.run(limit - (self.at - start), is_base64)?;
+            let left = limit - (self.at - start);
+            if left < 2 || !self.input.as_bytes()[self.at..].starts_with(b"\\/") {
+                break;
+            }
+            self.advance('\\')?;
+            self.advance('/')?;
+            escapes += 1;
+        }
+        Ok(self.at - start - escapes)
     }
 }
 
@@ -2219,10 +2237,10 @@ fn read_key_lines(reader: &mut WordReader<'_>) -> Result<Option<Word>, Abort> {
     let start = reader.at;
     let mut end = start;
     loop {
-        let line = reader.at;
-        let length = reader.run(MAX_MATCH_BYTES + 1, is_base64)?;
+        let length = reader.base64_run(MAX_MATCH_BYTES + 1)?;
+        let line_end = reader.at;
         if length >= MIN_KEY_LINE_BYTES {
-            end = reader.at;
+            end = line_end;
             if end - start > MAX_MATCH_BYTES {
                 return Err(Abort::Match);
             }
@@ -2237,7 +2255,7 @@ fn read_key_lines(reader: &mut WordReader<'_>) -> Result<Option<Word>, Abort> {
                 _ => reader.line_break()?,
             };
             if whole_line {
-                end = line + length;
+                end = line_end;
             }
         }
         break;
