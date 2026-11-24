@@ -2308,7 +2308,7 @@ fn is_replaceable(object: &kernel::ObjectRow) -> bool {
 }
 
 /// The attribution native capture prefixes to a user message's quotation.
-const USER_STATED: &str = "User stated";
+pub(crate) const USER_STATED: &str = "User stated";
 /// The attribution native capture prefixes to an assistant message's
 /// quotation.
 const ASSISTANT_REPORTED: &str = "Assistant reported";

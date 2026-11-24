@@ -10,39 +10,59 @@ re-verified at this branch tip.
 ## Evidence trail
 
 References are verified at the #1157 branch tip, the commit that carries this
-revision.
+revision, except the last four tests named under Existing check and the
+`canonical_memory.rs` line of every reference: later changes added those
+tests, the #1157 gate run covers none of them, and they and those lines
+were read at the tree that holds
+`rows_of_one_id_enter_the_revision_in_category_order`.
 
 - `CanonicalMemorySnapshot::new` seeds the hasher with
   `eidnara-project-memory-revision-v1` and hashes category plus rendered line
-  per rendered row: the positive-category rows in object-id order, then the
-  `CURRENT_WORK` rows in the supplied order, which is the order the block
-  renders them in (`crates/daemon/src/canonical_memory.rs:54-61`).
+  per rendered row, in the digest's own order: the `NAMED_FILES` rows in the
+  supplied order, each line up to its last-change clause
+  (`named_files::revised_part`), the positive-category rows in object-id
+  order across their categories, rows of one id in category order, then the
+  `CURRENT_WORK` rows in the supplied order (`crates/daemon/src/canonical_memory.rs:57-86`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:826`)).
-- The first four tests named under Existing check are unchanged since
-  `a0e3f2993`; the spec cited their `fn` lines, and the production code was not
-  cited. The fifth covers the order of the `CURRENT_WORK` rows.
+  (`crates/daemon/src/canonical_memory.rs:906`)).
+- The spec cited the `fn` lines of the first four tests named under Existing
+  check, and the production code was not cited. The fifth covers the order
+  of the `CURRENT_WORK` rows, the sixth the `NAMED_FILES` rows and how
+  the two sections interleave, the seventh the last-change clause, and the
+  eighth two rows of one id.
 
-- Guarantee under test: The composition revision is a digest over exactly the
-  rendered rows after the token-budget trim: the positive-category rows sorted
-  by object id, then the `CURRENT_WORK` rows in the order the block renders
-  them.
+- Guarantee under test: The composition revision is a digest over the
+  rendered rows after the token-budget trim, in the digest's own order: the
+  `NAMED_FILES` rows in the supplied order, each line up to its last-change
+  clause, the positive-category rows sorted by object id across their
+  categories, rows of one id in category order, then the `CURRENT_WORK` rows
+  in the supplied order. The last-change clause of a `NAMED_FILES` line reads
+  the work tree when the block is composed and is no input of the digest.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1503`);
+  (`crates/daemon/src/canonical_memory.rs:1589`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1737`);
+  (`crates/daemon/src/canonical_memory.rs:1885`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1754`);
+  (`crates/daemon/src/canonical_memory.rs:1902`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1776`);
+  (`crates/daemon/src/canonical_memory.rs:1924`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1703`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:1851`);
+  `the_revision_reads_the_named_files_in_the_supplied_order`
+  (`crates/daemon/src/canonical_memory.rs:1790`);
+  `the_revision_leaves_out_a_named_files_last_change`
+  (`crates/daemon/src/canonical_memory.rs:1999`);
+  `rows_of_one_id_enter_the_revision_in_category_order`
+  (`crates/daemon/src/canonical_memory.rs:2046`). Status: unaudited.
 
 ## Failure scenario
 
 A renderer change that drops a row without changing the digest inputs would
-leave the revision equal while the bytes differ.
+leave the revision equal while the bytes differ. The last-change clause of a
+`NAMED_FILES` line is such a difference by design: two blocks that differ in
+it alone share a revision, and a session keeps the block its last
+composition rendered.
 
 ## Timing windows and dependencies
 
@@ -50,11 +70,13 @@ None.
 
 ## What a test must construct
 
-The five unit tests already construct each input class.
+The eight unit tests already construct each input class.
 
 Required faults and enabling state: Snapshots that differ only in rows the
-renderer drops, bytes past the render cap, rows past the memory budget, or
-the order of the `CURRENT_WORK` rows.
+renderer drops, bytes past the render cap, rows past the memory budget, the
+order of the `CURRENT_WORK` rows, the presence and order of the
+`NAMED_FILES` rows, the last-change clause of a `NAMED_FILES` line, or the
+input order of two rows of one id in two categories.
 
 ## Investigation log
 

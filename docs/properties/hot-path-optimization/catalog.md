@@ -171,7 +171,14 @@ under the policy digest.
 covers an artifact ingested with `object_kind` `decision`, whose class lives
 on `evidence_meta`.
 Guarantee: Selection optimization preserves the canonical memory result for
-the same valid store state, requested snapshot, project, and budget.
+the same valid store state, requested snapshot, project, and budget. The
+pass's read also selects the `named-files` domain: its rows enter the
+selected rows, the served ids, and the revision as the `NAMED_FILES` element,
+so the comparison with the fixed baseline, which holds no such element and no
+closing sentence, runs on a store that holds no record of that domain and
+compares the selected rows under one frame charge; the delivered block's
+closing sentence and its charge are pinned by the renderer's and the packer's
+tests.
 Check: `always` - With every registered outbox consumer inside the serving
 thresholds, where the fixed baseline's lag gate and the current reader agree,
 compare the ordered selected rows, rendered memory bytes, revision, truncation
@@ -194,9 +201,11 @@ Open questions:
   consumer lag no longer withholds the memory read, so the fixed baseline,
   which withholds on consumer lag, is compared only with every registered
   consumer inside the serving thresholds.
-- Resolved (#443, owner decision): a corrupt row outside the memory domain no
-  longer withholds the memory read, because the pushed-down query never reads
-  it; reads that serve that row still decode it and fail on it.
+- Resolved (#443, owner decision): a corrupt row outside the memory and
+  `named-files` domains no longer withholds the memory read, because the
+  pushed-down queries never read it; reads that serve that row still decode
+  it and fail on it. A failed or corrupt read of either selected domain
+  withholds the composition.
 - Unresolved, needs a committed reproducible check: the #443 review-time
   differentials (per-row versus batched approval judgment over the kernel and
   daemon suites' served reads; every selection shape, surface, scope filter,
@@ -219,6 +228,32 @@ eligible memory decisions or independently set canonical truncation.
 Check: `always` - With relevant rows, scope/admission facts, and freshness held
 equal, vary valid other-domain, non-decision, hidden, and out-of-project rows;
 selected IDs, order, content, revision, and truncation must remain equal.
+Rows of the `named-files` domain are selected by the pass and are no noise:
+they enter the selected rows, the served ids, and the revision, and their
+charge of up to an eighth of the budget can displace lasting facts. The
+pass's work on them runs in this order. It looks for a regular file at the
+paths of the first 32 recorded files. It samples up to eight of those that
+exist: each one's status and, for a file of at most 256 KiB, its bytes and
+one byte more and its status again, a second time when the two statuses or
+the byte count disagree, of which it hashes at most 256 KiB. When a sample
+holds a blob and the history reader's queue admits the pass's job, the
+pass waits up to half a second for that one thread, which, for a job it
+takes up before the pass stops waiting, reads the repository's HEAD and
+work tree and walks up to 256 parents of each file whose answer it does
+not keep for that HEAD; a full queue costs no wait and no read. When at
+least one sample gives a line and the read serves a statement of the user,
+the pass reads the commit times of those statements in one statement. The
+budget then trims the lines: it charges a line up to its last-change
+clause and then one fixed clause, and admits the longest leading run that
+fits the element's share. The sampling, the wait, and the time query
+therefore run before the trim. The last-change clause of a `NAMED_FILES`
+line is outside the revision. The time that ends a statement is part of
+the statement's line, of its charge, and of the revision. A paired-store
+comparison that holds named-file rows therefore holds equal the commit
+log's times of the served statements, and either holds equal the listed
+files' bytes and modification times, the repository's HEAD and history,
+and the history reader's answer within the wait, or compares each
+`NAMED_FILES` line up to its last-change clause.
 Compare snapshot metadata to each store's own pinned tip, not across tips.
 Fault/timing angle: An early SQL limit or changed predicate admits noise into
 the bounded set or removes candidates the baseline keeps.
@@ -776,15 +811,15 @@ them without creating implementation tickets.
 [r1]: #prepared-field-output-and-audit-policy-agree
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
-[pass-read]: ../../../crates/daemon/src/lib.rs#L8759
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L195-L374
+[pass-read]: ../../../crates/daemon/src/lib.rs#L8786
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L508
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
 [read-callback]: ../../../crates/storage/src/lib.rs#L346
 [write-callback]: ../../../crates/storage/src/lib.rs#L439
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2380
-[hard-compose]: ../../../crates/daemon/src/transform.rs#L4081-L4112
+[hard-compose]: ../../../crates/daemon/src/transform.rs#L4088-L4119
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
 [core-prep]: ../../../crates/memory-store/src/lib.rs#L3745-L3777
 [transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3779-L3811
@@ -792,11 +827,11 @@ them without creating implementation tickets.
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L383
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3818-L4078
-[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L178-L215
+[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L233-L270
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180
 [soft-core]: ../../../crates/cache-stability/src/lib.rs#L221-L287
-[soft-inputs]: ../../../crates/daemon/src/transform.rs#L4458-L4510
+[soft-inputs]: ../../../crates/daemon/src/transform.rs#L4465-L4517
 [render-json]: ../../../crates/daemon/testdata/render-golden.json
 [tight-json]: ../../../crates/daemon/testdata/render-tight-golden.json
 [shape-json]: ../../../crates/daemon/testdata/decay-store-shape.json

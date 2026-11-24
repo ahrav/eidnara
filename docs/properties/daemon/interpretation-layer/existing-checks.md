@@ -23,6 +23,7 @@ or whose check U4 deleted says so.
 | `tv-tests:232` `edge_names_classify_as_unknown` | empty, `mcp_foo`, a 10 KiB name, a NUL, a non-ASCII name | unaudited |
 | `tv-tests:248` `classify_is_total_and_deterministic` (proptest) | arbitrary strings | unaudited |
 | `tv-tests:257` `tabled_names_classify_under_any_ascii_case_and_one_mcp_prefix` (proptest) | case flips and one prefix over every tabled name | unaudited |
+| `tv-tests:279` `a_pi_operand_is_the_read_path_or_the_bash_command` | Pi `read` yields the string under `path` and Pi `bash` the string under `command`; `Read`, `mcp_read`, `ls`, `edit`, another key, and a non-string value yield no operand | unaudited |
 | `sel.rs:2828` `identical_calls_produce_no_dedup_decision_for_any_tool_name` | identical `read`, `mcp_read`, `mcp_foo` calls produce no decision; an `edit` positive control reaches supersession | unaudited |
 | `scripts/forbid-tool-literals.test.ts` (run by `bun test ./scripts` in `bun run check:repo`) | the gate's exit 0, 1, and 2 contract, its path filter, its test-region skip, `--staged` mode, and a run from a subdirectory | unaudited |
 | `scripts/forbid-tool-literals.sh` (CI step `.github/workflows/ci.yml:302-303`) | no distinctive literal outside the module | unaudited |
@@ -43,7 +44,7 @@ or whose check U4 deleted says so.
 | --- | --- | --- |
 | `history_summarizer_chunk.rs:3520` `repeated_call_ids_render_each_call_with_its_own_arguments` | `TC: read(one.rs)` from `filePath` | unaudited |
 | `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument on separate inputs, with newlines collapsed | unaudited |
-| `crates/daemon/src/lib.rs:20052` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:20338-20344`, `:26936`) | unaudited |
+| `crates/daemon/src/lib.rs:20091` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:20338-20344`, `:26936`) | unaudited |
 | `crates/daemon/testdata/history_summarizer-chunk-golden.json` | `TC:` lines from short arguments | unaudited |
 
 ## Wire and injection
@@ -53,7 +54,7 @@ or whose check U4 deleted says so.
 | `crates/daemon/testdata/wire-golden.json` | the flatten step, including `path` inputs | unaudited |
 | `wire.rs:1260` (inside a reduction test) | a reduced tool result keeps its output variant; no path | unaudited |
 | `injection.rs:553` `constants_match_ts_golden`, `:1047`, `:1052`, and `crates/daemon/testdata/injection-golden.json` | the synthetic `todowrite` round trip under `TODO_TOOL` | unaudited |
-| `crates/daemon/src/transform.rs:29651` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | the echoed synthetic pair beside a native `todowrite` call produces no duplicate tool-use id | unaudited |
+| `crates/daemon/src/transform.rs:29659` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | the echoed synthetic pair beside a native `todowrite` call produces no duplicate tool-use id | unaudited |
 
 ## Capture adapters and outcome records
 
@@ -114,7 +115,7 @@ or whose check U4 deleted says so.
 
 - No test asserts that keep-one and the read-back act on the native
   `todowrite` call alone when the echoed synthetic pair is present; selection
-  never sees the pair (`transform.rs:3469-3473`).
+  never sees the pair (`transform.rs:3476-3480`).
 - No test asserts a reduced `ToolCall` input's `path` against the original
   input's `path_arg`.
 - No harness-produced fixture holds a Pi `details.truncation.truncated` value.

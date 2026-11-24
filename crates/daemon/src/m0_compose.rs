@@ -16,8 +16,9 @@ use crate::decay_render::{
     PRESSURE_WINDOW, TokenCount, counting, fold_plan, m0_block, render_owned_rows,
 };
 use crate::memory_render::{
-    CURRENT_WORK_SECTION, M0Inputs, delivered_memory_frame, is_positive_memory_category,
-    push_category_open, render_delivered_memory_block, render_m0_counted, render_memory_line,
+    CURRENT_WORK_SECTION, M0Inputs, NAMED_FILES_SECTION, delivered_memory_frame,
+    is_positive_memory_category, push_category_open, render_delivered_memory_block,
+    render_m0_counted, render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
 
@@ -121,35 +122,89 @@ pub(crate) fn trim_memories_to_budget(
 
 pub(crate) const CURRENT_WORK_BUDGET_SHARE: f64 = 0.25;
 
-/// Trims `lasting` to `budget_tokens` with [`trim_memories_to_budget`],
-/// then admits `current_work` rows in the supplied order until one exceeds
-/// the section's budget: the smaller of [`CURRENT_WORK_BUDGET_SHARE`] of
+pub(crate) const NAMED_FILES_BUDGET_SHARE: f64 = 0.125;
+
+/// The text a section row is charged for: its rendered line and line break.
+/// A `NAMED_FILES` line is charged up to its last-change clause and then for
+/// [`crate::named_files::CHARGED_CLAUSE`], the clause of the most tokens, so
+/// a file's last change moves neither the rows a budget admits nor, with
+/// them, the block's revision.
+fn charged_line(memory: &CanonicalMemory) -> String {
+    let line = render_memory_line(memory);
+    if memory.category == NAMED_FILES_SECTION {
+        let stable = crate::named_files::revised_part(&line);
+        format!("{stable}{}\n", crate::named_files::CHARGED_CLAUSE)
+    } else {
+        line + "\n"
+    }
+}
+
+/// The rows of `rows`, in the supplied order, that fit `room` tokens with
+/// the opening and closing tags of `section`, and the tokens they cost.
+/// The prefix ends at the first row that exceeds the room.
+fn section_prefix(
+    rows: &[CanonicalMemory],
+    section: &str,
+    room: u64,
+    estimate_tokens: impl Fn(&str) -> usize + Copy,
+) -> (Vec<CanonicalMemory>, u64) {
+    let mut tags = String::new();
+    push_category_open(&mut tags, section);
+    tags.push_str(&format!("\n</{section}>\n"));
+    let Some(mut left) = room.checked_sub(estimate_tokens(&tags) as u64) else {
+        return (Vec::new(), 0);
+    };
+    let mut kept = Vec::new();
+    for memory in rows {
+        let cost = estimate_tokens(&charged_line(memory)) as u64;
+        let Some(rest) = left.checked_sub(cost) else {
+            break;
+        };
+        left = rest;
+        kept.push(memory.clone());
+    }
+    if kept.is_empty() {
+        return (kept, 0);
+    }
+    (kept, room - left)
+}
+
+/// Admits `named_files` rows in the supplied order within
+/// [`NAMED_FILES_BUDGET_SHARE`] of `budget_tokens`, trims `lasting` to the
+/// rest with [`trim_memories_to_budget`], then admits `current_work` rows in
+/// the supplied order within the smaller of [`CURRENT_WORK_BUDGET_SHARE`] of
 /// `budget_tokens` and the tokens the lasting rows left.
 pub(crate) fn trim_block_to_budget(
+    named_files: &[CanonicalMemory],
     lasting: &[CanonicalMemory],
     current_work: &[CanonicalMemory],
     budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Vec<CanonicalMemory> {
-    let (mut kept, unspent) = trim_memories_to_budget(lasting, budget_tokens, estimate_tokens);
-    let share = (budget_tokens.max(1.0) * CURRENT_WORK_BUDGET_SHARE).floor() as u64;
-    let mut section = String::new();
-    push_category_open(&mut section, CURRENT_WORK_SECTION);
-    section.push_str(&format!("\n</{CURRENT_WORK_SECTION}>\n"));
-    let Some(mut room) = unspent
-        .min(share)
-        .checked_sub(estimate_tokens(&section) as u64)
-    else {
-        return kept;
+    let budget = budget_tokens.max(1.0);
+    let wrapper = estimate_tokens(&delivered_memory_frame()) as f64;
+    let files_room = ((budget * NAMED_FILES_BUDGET_SHARE).floor()).min((budget - wrapper).floor());
+    let (mut kept, files_cost) = if files_room >= 1.0 {
+        section_prefix(
+            named_files,
+            NAMED_FILES_SECTION,
+            files_room as u64,
+            estimate_tokens,
+        )
+    } else {
+        (Vec::new(), 0)
     };
-    for memory in current_work {
-        let cost = estimate_tokens(&(render_memory_line(memory) + "\n")) as u64;
-        let Some(left) = room.checked_sub(cost) else {
-            break;
-        };
-        room = left;
-        kept.push(memory.clone());
-    }
+    let (lasting, unspent) =
+        trim_memories_to_budget(lasting, budget_tokens - files_cost as f64, estimate_tokens);
+    kept.extend(lasting);
+    let share = (budget * CURRENT_WORK_BUDGET_SHARE).floor() as u64;
+    let (work, _) = section_prefix(
+        current_work,
+        CURRENT_WORK_SECTION,
+        unspent.min(share),
+        estimate_tokens,
+    );
+    kept.extend(work);
     kept
 }
 
@@ -403,7 +458,7 @@ mod trim_memories_tests {
             .map(|id| work(id, &format!("request number {id}")))
             .collect();
         for budget in [2_000.0, 4_000.0, 8_000.0] {
-            let kept = trim_block_to_budget(&lasting, &requests, budget, bytes);
+            let kept = trim_block_to_budget(&[], &lasting, &requests, budget, bytes);
             assert_eq!(kept[..2], lasting, "budget {budget}");
             let section = &kept[2..];
             assert!(
@@ -444,19 +499,157 @@ mod trim_memories_tests {
         let element = section_tokens(&requests[..4], bytes);
         let exact = (element * 4) as f64;
         assert_eq!(
-            trim_block_to_budget(&[], &requests, exact, bytes),
+            trim_block_to_budget(&[], &[], &requests, exact, bytes),
             requests[..4]
         );
         assert_eq!(
-            trim_block_to_budget(&[], &requests, exact - 4.0, bytes),
+            trim_block_to_budget(&[], &[], &requests, exact - 4.0, bytes),
             requests[..3]
         );
         // A lasting category's wrapper is charged as it renders too: the
         // block of one row fits a budget of its bytes, and no smaller one.
         let row = [memory("ARCHITECTURE", "alpha")];
         let block = bytes(&render_delivered_memory_block(&row)) as f64;
-        assert_eq!(trim_block_to_budget(&row, &[], block, bytes), row);
-        assert!(trim_block_to_budget(&row, &[], block - 1.0, bytes).is_empty());
+        assert_eq!(trim_block_to_budget(&[], &row, &[], block, bytes), row);
+        assert!(trim_block_to_budget(&[], &row, &[], block - 1.0, bytes).is_empty());
+    }
+
+    /// The `NAMED_FILES` element holds the supplied rows, in order, that fit
+    /// an eighth of the budget with its tags; the lasting rows are selected
+    /// against exactly what the element left, and the block fits the
+    /// budget. A budget whose eighth is below the element's tags, or holds
+    /// the tags and no line, holds no element, and neither does a budget
+    /// whose room after the block's frame is below the first line.
+    #[test]
+    fn the_named_files_element_takes_an_eighth_and_the_lasting_rows_the_rest() {
+        let bytes = |text: &str| text.len();
+        let files: Vec<CanonicalMemory> = (0..8)
+            .map(|id| CanonicalMemory {
+                object_id: format!("nfu-{id}"),
+                category: NAMED_FILES_SECTION.to_owned(),
+                // Each line ends with the clause the packer charges, so a
+                // line's charge is the bytes it renders.
+                content: format!(
+                    "docs/guide-{id}.md (the agent used it in 1 earlier session{}",
+                    crate::named_files::CHARGED_CLAUSE
+                ),
+            })
+            .collect();
+        let lasting: Vec<CanonicalMemory> = (0..200)
+            .map(|id| {
+                memory(
+                    "ARCHITECTURE",
+                    &format!("decision {id:03} {}", "x".repeat(40)),
+                )
+            })
+            .collect();
+        let element_tokens = |rows: &[CanonicalMemory]| {
+            let block = render_delivered_memory_block(rows);
+            let start = block.find("<NAMED_FILES").expect("the element opens");
+            let close = "</NAMED_FILES>\n";
+            bytes(&block[start..block.find(close).expect("the element closes") + close.len()])
+        };
+        let budget = 9_600.0;
+        let kept = trim_block_to_budget(&files, &lasting, &[], budget, bytes);
+        let named = kept
+            .iter()
+            .filter(|row| row.category == NAMED_FILES_SECTION)
+            .count();
+        assert!(
+            (1..files.len()).contains(&named),
+            "the eighth holds some of the files: {named}"
+        );
+        assert_eq!(kept[..named], files[..named], "a run from the first row");
+        assert!(
+            element_tokens(&kept) as f64 <= 1_200.0,
+            "an eighth of 9,600"
+        );
+        let mut longer = files[..=named].to_vec();
+        longer.extend_from_slice(&kept[named..]);
+        assert!(
+            element_tokens(&longer) as f64 > 1_200.0,
+            "the next file exceeds the eighth"
+        );
+        assert!(bytes(&render_delivered_memory_block(&kept)) as f64 <= budget);
+        let alone = trim_block_to_budget(&[], &lasting, &[], budget, bytes);
+        assert!(
+            alone.len() < lasting.len(),
+            "the lasting rows exceed the budget"
+        );
+        assert!(
+            kept.len() - named < alone.len(),
+            "the element's tokens are charged to the lasting rows"
+        );
+        assert_eq!(kept[named..], alone[..kept.len() - named]);
+        // The lasting rows take all the element left: one more exceeds the
+        // budget, so the element is charged once.
+        let mut fuller = kept.clone();
+        fuller.push(lasting[kept.len() - named].clone());
+        assert!(bytes(&render_delivered_memory_block(&fuller)) as f64 > budget);
+
+        // An eighth of 2,400 is 300 bytes, which the element's tags exceed.
+        let kept = trim_block_to_budget(&files, &lasting, &[], 2_400.0, bytes);
+        assert!(kept.iter().all(|row| row.category != NAMED_FILES_SECTION));
+        assert_eq!(
+            kept,
+            trim_block_to_budget(&[], &lasting, &[], 2_400.0, bytes)
+        );
+
+        // An eighth that holds the tags and ten bytes more holds no line.
+        let mut tags = String::new();
+        push_category_open(&mut tags, NAMED_FILES_SECTION);
+        tags.push_str("\n</NAMED_FILES>\n");
+        let tight = ((bytes(&tags) + 10) * 8) as f64;
+        let kept = trim_block_to_budget(&files, &lasting, &[], tight, bytes);
+        assert!(kept.iter().all(|row| row.category != NAMED_FILES_SECTION));
+        assert_eq!(kept, trim_block_to_budget(&[], &lasting, &[], tight, bytes));
+
+        // An estimator that prices the element's tags and the charged
+        // clause's time at nothing: a line of 24 bytes fits the eighth and
+        // is kept only when the room after the block's frame holds it too.
+        let clause = crate::named_files::CHARGED_CLAUSE;
+        let tags_free = |text: &str| {
+            if text.starts_with("<NAMED_FILES") {
+                0
+            } else {
+                text.replace(clause, ")").len()
+            }
+        };
+        let short = [CanonicalMemory {
+            object_id: "nfu-0".to_owned(),
+            category: NAMED_FILES_SECTION.to_owned(),
+            content: format!("docs/guide.md (use day{clause}"),
+        }];
+        assert_eq!(tags_free(&(render_memory_line(&short[0]) + "\n")), 24);
+        let frame = bytes(&delivered_memory_frame()) as f64;
+        assert!((frame + 20.0) / 8.0 >= 24.0);
+        assert!(trim_block_to_budget(&short, &[], &[], frame + 20.0, tags_free).is_empty());
+        assert_eq!(
+            trim_block_to_budget(&short, &[], &[], frame + 24.0, tags_free),
+            short
+        );
+
+        // A line is charged for the packer's clause whatever its own
+        // clause holds: the same budgets admit the same file with a
+        // shorter clause and with a longer one.
+        for own in [
+            "; last changed 2026-03-01T09:30Z)",
+            "; last changed at a time the read history does not show)",
+        ] {
+            let other = [CanonicalMemory {
+                content: format!("docs/guide.md (use day{own}"),
+                ..short[0].clone()
+            }];
+            assert!(
+                trim_block_to_budget(&other, &[], &[], frame + 20.0, tags_free).is_empty(),
+                "{own}"
+            );
+            assert_eq!(
+                trim_block_to_budget(&other, &[], &[], frame + 24.0, tags_free),
+                other,
+                "{own}"
+            );
+        }
     }
 
     #[test]
@@ -467,10 +660,10 @@ mod trim_memories_tests {
             work(1, &"long ".repeat(200)),
             work(2, "short again"),
         ];
-        let kept = trim_block_to_budget(&[], &requests, 2_000.0, bytes);
+        let kept = trim_block_to_budget(&[], &[], &requests, 2_000.0, bytes);
         assert_eq!(kept, requests[..1]);
         // The same rows fit a budget that holds the long one.
-        let kept = trim_block_to_budget(&[], &requests, 8_000.0, bytes);
+        let kept = trim_block_to_budget(&[], &[], &requests, 8_000.0, bytes);
         assert_eq!(kept, requests);
     }
 
@@ -494,7 +687,7 @@ mod trim_memories_tests {
             alone.len() < lasting.len(),
             "the lasting rows exceed the budget"
         );
-        let kept = trim_block_to_budget(&lasting, &requests, budget, bytes);
+        let kept = trim_block_to_budget(&[], &lasting, &requests, budget, bytes);
         assert_eq!(
             kept[..alone.len()],
             alone,
@@ -502,7 +695,7 @@ mod trim_memories_tests {
         );
         let section = &kept[alone.len()..];
         assert!(
-            section.len() < trim_block_to_budget(&[], &requests, budget, bytes).len(),
+            section.len() < trim_block_to_budget(&[], &[], &requests, budget, bytes).len(),
             "the section holds fewer rows than its quarter admits: {}",
             section.len()
         );
@@ -523,7 +716,7 @@ mod trim_memories_tests {
             budget as u64
         );
         assert!(unspent > 0 && (unspent as f64) < budget / 4.0, "{unspent}");
-        let kept = trim_block_to_budget(&pressed, &requests, budget, bytes);
+        let kept = trim_block_to_budget(&[], &pressed, &requests, budget, bytes);
         assert_eq!(&kept[..some.len()], some);
         let section = &kept[some.len()..];
         assert!(
@@ -537,11 +730,11 @@ mod trim_memories_tests {
         longer.push(requests[section.len()].clone());
         assert!(section_tokens(&longer, bytes) as u64 > unspent);
         // With a few lasting rows the section is bound by its quarter.
-        let few = trim_block_to_budget(&lasting[..2], &requests, budget, bytes);
+        let few = trim_block_to_budget(&[], &lasting[..2], &requests, budget, bytes);
         assert_eq!(few[..2], lasting[..2]);
         assert_eq!(
             few[2..],
-            trim_block_to_budget(&[], &requests, budget, bytes),
+            trim_block_to_budget(&[], &[], &requests, budget, bytes),
         );
     }
 
@@ -549,9 +742,9 @@ mod trim_memories_tests {
     fn a_budget_below_the_section_wrapper_renders_no_section() {
         let bytes = |text: &str| text.len();
         let requests = [work(0, "short")];
-        assert!(trim_block_to_budget(&[], &requests, 300.0, bytes).is_empty());
-        assert!(trim_block_to_budget(&[], &requests, f64::NAN, bytes).is_empty());
-        assert!(trim_block_to_budget(&[], &requests, -5.0, bytes).is_empty());
+        assert!(trim_block_to_budget(&[], &[], &requests, 300.0, bytes).is_empty());
+        assert!(trim_block_to_budget(&[], &[], &requests, f64::NAN, bytes).is_empty());
+        assert!(trim_block_to_budget(&[], &[], &requests, -5.0, bytes).is_empty());
     }
 
     /// A statement of the largest size capture stores, written as text with
@@ -573,6 +766,7 @@ mod trim_memories_tests {
         };
         let section = |budget: f64| {
             trim_block_to_budget(
+                &[],
                 &[],
                 std::slice::from_ref(&largest),
                 budget,
@@ -1679,16 +1873,39 @@ mod charged_text_tests {
             row("mem_4", CURRENT_WORK_SECTION, "update docs/a.md"),
             row("mem_5", CURRENT_WORK_SECTION, "rename the upload helper"),
         ];
+        // Each file's line ends with the clause the packer charges, so the
+        // charged text of a line is the line the block renders.
+        let clause = crate::named_files::CHARGED_CLAUSE;
+        let files = [
+            row(
+                "nfu_1",
+                NAMED_FILES_SECTION,
+                &format!("docs/guide.md (used most{clause}"),
+            ),
+            row(
+                "nfu_2",
+                NAMED_FILES_SECTION,
+                &format!("tools/check.sh (used less{clause}"),
+            ),
+        ];
         let charged = RefCell::new(Vec::<String>::new());
         let record = |text: &str| {
             charged.borrow_mut().push(text.to_owned());
             text.len()
         };
 
-        let kept = trim_block_to_budget(&lasting, &work, 1e6, record);
-        assert_eq!(kept.len(), lasting.len() + work.len());
+        let kept = trim_block_to_budget(&files, &lasting, &work, 1e6, record);
+        assert_eq!(kept.len(), files.len() + lasting.len() + work.len());
         let block = render_delivered_memory_block(&kept);
-        let production = charged.take();
+        let mut production = charged.take();
+        // The frame is priced twice: when the packer computes the tokens the
+        // `NAMED_FILES` element may take, and as the block's own charge.
+        let frame = delivered_memory_frame();
+        let priced = production
+            .iter()
+            .position(|text| *text == frame)
+            .expect("the frame is priced for the element's room");
+        production.remove(priced);
         assert_eq!(
             lines_of(production.iter().map(String::as_str)),
             lines_of([block.as_str()]),
@@ -1710,21 +1927,31 @@ mod charged_text_tests {
                 assert!(rendered.contains(&line), "{line:?}: {block}");
             }
         }
-        let section: Vec<&String> = production
-            .iter()
-            .filter(|text| text.starts_with("<CURRENT_WORK"))
-            .collect();
-        assert_eq!(section.len(), 1, "{production:?}");
-        let tags: Vec<&str> = section[0].split_inclusive('\n').collect();
-        assert_eq!(tags.len(), 2, "{tags:?}");
-        assert!(
-            tags[0].starts_with("<CURRENT_WORK note=\"Work the user left open")
-                && tags[0].ends_with("\">\n"),
-            "{tags:?}"
-        );
-        assert_eq!(tags[1], "</CURRENT_WORK>\n");
-        for line in tags {
-            assert!(rendered.contains(&line), "{line:?}: {block}");
+        for (opening, closing) in [
+            (
+                "<CURRENT_WORK note=\"Work the user left open",
+                "</CURRENT_WORK>\n",
+            ),
+            (
+                "<NAMED_FILES note=\"Files of this project",
+                "</NAMED_FILES>\n",
+            ),
+        ] {
+            let section: Vec<&String> = production
+                .iter()
+                .filter(|text| text.starts_with(&opening[..opening.find(' ').unwrap()]))
+                .collect();
+            assert_eq!(section.len(), 1, "{production:?}");
+            let tags: Vec<&str> = section[0].split_inclusive('\n').collect();
+            assert_eq!(tags.len(), 2, "{tags:?}");
+            assert!(
+                tags[0].starts_with(opening) && tags[0].ends_with("\">\n"),
+                "{tags:?}"
+            );
+            assert_eq!(tags[1], closing);
+            for line in tags {
+                assert!(rendered.contains(&line), "{line:?}: {block}");
+            }
         }
 
         let selected = reference(&lasting, 1e6, record);

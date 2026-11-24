@@ -3,9 +3,9 @@ use serde_json::{Value, json};
 
 use crate::harness_sources::Harness;
 use crate::tool_vocabulary::{
-    DisplayArg, NOTE_ACTIONS, TABLED_NAMES, Tier, ToolClass, classify, diff_keys, display_arg,
-    exit_code, is_injected_todo_tool, is_zero_value_note_call, path_arg, selection_tier, tier,
-    truncated_flag,
+    DisplayArg, NOTE_ACTIONS, PiOperand, TABLED_NAMES, Tier, ToolClass, classify, diff_keys,
+    display_arg, exit_code, is_injected_todo_tool, is_zero_value_note_call, path_arg, pi_operand,
+    selection_tier, tier, truncated_flag,
 };
 
 const TRACE: &str = include_str!("../testdata/opencode-tool-outcome-trace.json");
@@ -270,5 +270,37 @@ proptest! {
         prop_assert_eq!(classify(&name), classify(tabled));
         prop_assert_eq!(tier(&name), tier(tabled));
         prop_assert_ne!(classify(&name), ToolClass::Unknown);
+    }
+}
+
+/// Pi's `read` uses the string under `path`, and Pi's `bash` the string under `command`. A
+/// tool of another name, another key, and a value of another type name no operand.
+#[test]
+fn a_pi_operand_is_the_read_path_or_the_bash_command() {
+    assert_eq!(
+        pi_operand(
+            "read",
+            &json!({"path": "docs/a.md", "filePath": "docs/b.md"})
+        ),
+        Some(PiOperand::Read("docs/a.md"))
+    );
+    assert_eq!(
+        pi_operand(
+            "bash",
+            &json!({"command": "sh tools/check.sh", "timeout": 30})
+        ),
+        Some(PiOperand::Command("sh tools/check.sh"))
+    );
+    for (name, input) in [
+        ("read", json!({"filePath": "docs/a.md"})),
+        ("read", json!({"path": ["docs/a.md"]})),
+        ("bash", json!({"command": ["sh", "tools/check.sh"]})),
+        ("bash", json!({"path": "tools/check.sh"})),
+        ("Read", json!({"path": "docs/a.md"})),
+        ("mcp_read", json!({"path": "docs/a.md"})),
+        ("ls", json!({"path": "docs"})),
+        ("edit", json!({"path": "docs/a.md"})),
+    ] {
+        assert_eq!(pi_operand(name, &input), None, "{name} {input}");
     }
 }

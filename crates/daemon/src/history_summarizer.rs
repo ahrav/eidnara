@@ -2857,9 +2857,13 @@ mod tests {
             .and_then(|value| value.trim_end_matches(';').replace('_', "").parse().ok())
             .expect("module-transport.ts declares TRANSFORM_SEND_TIMEOUT_MS");
         let margin_ms = EMERGENCY_REPLY_MARGIN.as_millis() as u64;
+        // The pass's first unit can also wait for the named-file history
+        // reader, outside the emergency budget.
+        let reader_ms = crate::named_files::HISTORY_WAIT.as_millis() as u64;
+        assert_eq!(reader_ms, 500);
         assert!(
-            EMERGENCY_WAIT_BUDGET.as_millis() as u64 + margin_ms <= deadline_ms,
-            "a {}ms emergency wait leaves under {margin_ms}ms of a {deadline_ms}ms transform deadline",
+            EMERGENCY_WAIT_BUDGET.as_millis() as u64 + reader_ms + margin_ms <= deadline_ms,
+            "a {}ms emergency wait and a {reader_ms}ms reader wait leave under {margin_ms}ms of a {deadline_ms}ms transform deadline",
             EMERGENCY_WAIT_BUDGET.as_millis()
         );
     }
