@@ -595,29 +595,27 @@ fn marked_statements(response: &ReadResponse) -> Vec<Marked> {
         .collect()
 }
 
-/// The line a pass shows for `mark`, whose stored text is `summary`.
-/// `observation` is the text of the contesting memory while the Kernel
-/// serves it, and the statement then takes [`contested_line`]'s text. A
-/// statement that shows no contest and replaced an observation takes
-/// [`replaced_line`]'s text. `None` keeps the stored text. `recorded` gives
-/// the time a commit was recorded.
+/// `observation` holds the contesting memory's text when available.
+/// `times` maps commit sequence numbers to their recorded timestamps in
+/// milliseconds.
 fn marked_line(
     summary: &str,
     mark: &Marked,
     observation: Option<&str>,
-    mut recorded: impl FnMut(i64) -> Result<Option<i64>, kernel::KernelError>,
-) -> Result<Option<String>, kernel::KernelError> {
+    times: &std::collections::HashMap<i64, i64>,
+) -> Option<String> {
     let shown = mark.contest.as_ref().zip(observation);
-    let Some((stated_seq, other_seq)) = dated_commits(mark, shown.is_some()) else {
-        return Ok(None);
-    };
-    let (stated_ms, other_ms) = (recorded(stated_seq)?, recorded(other_seq)?);
-    Ok(Some(match shown {
+    let (stated_seq, other_seq) = dated_commits(mark, shown.is_some())?;
+    let (stated_ms, other_ms) = (
+        times.get(&stated_seq).copied(),
+        times.get(&other_seq).copied(),
+    );
+    Some(match shown {
         Some((contest, text)) => {
             contested_line(summary, stated_ms, other_ms, &contest.memory, text)
         }
         None => replaced_line(summary, stated_ms, other_ms),
-    }))
+    })
 }
 
 /// Rewrites the statements of `response` that carry a record, each to its
@@ -696,12 +694,7 @@ fn show_contests(
         let Some(decision) = response.decisions.get_mut(&mark.statement) else {
             continue;
         };
-        let line = marked_line(
-            &decision.payload.summary,
-            &mark,
-            observation(&mark),
-            |seq| Ok(times.get(&seq).copied()),
-        )?;
+        let line = marked_line(&decision.payload.summary, &mark, observation(&mark), &times);
         if let Some(line) = line {
             decision.payload.summary = line;
         }
@@ -1221,8 +1214,8 @@ mod tests {
     /// observation, whichever commit wrote the row the pass serves. While
     /// its contesting observation is served the line is the contested line
     /// alone; once that observation is served no longer the replacement
-    /// line returns. A statement with no record keeps its stored text, and
-    /// the line's builder returns a failed commit-time read to its caller.
+    /// line returns. `marked_line` returns `None` when the statement has
+    /// neither a replacement record nor a served contesting observation.
     #[test]
     fn a_marked_statement_is_dated_from_its_first_commit_and_the_replaced_one() {
         let capture_row = |object_id: &str| {
@@ -1273,66 +1266,65 @@ mod tests {
         );
         // Commits 2, 4, and 9 were recorded on three different days.
         let day = 86_400_000;
-        let recorded = |seq: i64| Ok(Some(seq * day));
+        let times_without = |missing: Option<i64>| {
+            [2, 4, 9]
+                .into_iter()
+                .filter(|seq| Some(*seq) != missing)
+                .map(|seq| (seq, seq * day))
+                .collect::<std::collections::HashMap<i64, i64>>()
+        };
+        let times = times_without(None);
         let stored = "User stated: The limit is 500.";
         let dated = "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded 1970-01-03 that the user had not stated)";
         for mark in &marked {
             assert_eq!(
-                marked_line(stored, mark, None, recorded)
-                    .unwrap()
-                    .as_deref(),
+                marked_line(stored, mark, None, &times).as_deref(),
                 Some(dated),
                 "{}",
                 mark.statement
             );
         }
+        let report = Some("Assistant reported: 300.");
         assert_eq!(
-            marked_line(
-                stored,
-                &marked[1],
-                Some("Assistant reported: 300."),
-                recorded
-            )
-            .unwrap()
-            .as_deref(),
+            marked_line(stored, &marked[1], report, &times).as_deref(),
             Some(
                 "User stated: The limit is 500. (stated 1970-01-05; contested 1970-01-10 by mem_b: \"Assistant reported: 300.\")"
             )
         );
-        let unknown = |seq: i64| Ok((seq != 2).then_some(seq * day));
-        assert_eq!(
-            marked_line(stored, &marked[0], None, unknown)
-                .unwrap()
-                .as_deref(),
-            Some(
-                "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded unknown date that the user had not stated)"
-            )
-        );
-        // Each line reads two commit times, and a failure of either read is
-        // returned: the statement's first commit and the replaced commit for
-        // the replacement line, the statement's first commit and the row's
-        // own for the contested line.
-        for (mark, observation, reads) in [
-            (&marked[0], None, [4, 2]),
-            (&marked[1], Some("Assistant reported: 300."), [4, 9]),
+        // A missing commit timestamp changes only its corresponding date to
+        // `unknown date`.
+        for (mark, observation, missing, line) in [
+            (
+                &marked[0],
+                None,
+                4,
+                "User stated: The limit is 500. (stated unknown date; it replaces a value recorded 1970-01-03 that the user had not stated)",
+            ),
+            (
+                &marked[0],
+                None,
+                2,
+                "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded unknown date that the user had not stated)",
+            ),
+            (
+                &marked[1],
+                report,
+                4,
+                "User stated: The limit is 500. (stated unknown date; contested 1970-01-10 by mem_b: \"Assistant reported: 300.\")",
+            ),
+            (
+                &marked[1],
+                report,
+                9,
+                "User stated: The limit is 500. (stated 1970-01-05; contested unknown date by mem_b: \"Assistant reported: 300.\")",
+            ),
         ] {
-            for failing in reads {
-                let one_fails = |seq: i64| {
-                    if seq == failing {
-                        Err(kernel::KernelError::CorruptCanonicalRow)
-                    } else {
-                        Ok(Some(seq * day))
-                    }
-                };
-                assert!(
-                    matches!(
-                        marked_line(stored, mark, observation, one_fails),
-                        Err(kernel::KernelError::CorruptCanonicalRow)
-                    ),
-                    "{}: commit {failing}",
-                    mark.statement
-                );
-            }
+            assert_eq!(
+                marked_line(stored, mark, observation, &times_without(Some(missing))).as_deref(),
+                Some(line),
+                "{}: commit {missing}",
+                mark.statement
+            );
         }
         let unmarked = Marked {
             statement: "contested-alone".to_string(),
@@ -1341,10 +1333,7 @@ mod tests {
             contest: marked[1].contest.clone(),
             replaced_seq: None,
         };
-        assert_eq!(
-            marked_line(stored, &unmarked, None, recorded).unwrap(),
-            None
-        );
+        assert_eq!(marked_line(stored, &unmarked, None, &times), None);
     }
 
     /// A pass dates each line from the store's commit log: the day of a
@@ -1440,6 +1429,45 @@ mod tests {
             })
         });
         assert_eq!(returned, Ok(true));
+    }
+
+    /// If the commit-time read fails, `show_contests` returns
+    /// `KernelError::Io` and preserves the summary in `read.decisions`. A
+    /// retry rewrites that summary when the read succeeds.
+    #[test]
+    fn a_pass_fails_when_its_commit_time_read_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = kernel::KernelStore::open(dir.path()).unwrap();
+        let tip = store.tip().unwrap();
+        let mut row = visible_row("replaced", "decision", SurfaceVisibility::Visible);
+        row.object.source_id = "memory_capture".to_string();
+        let mut decision = decision("replaced", "PROJECT_RULES", "User stated: S.");
+        decision.payload.rationale = serde_json::json!({
+            "stated_seq": tip + 1,
+            "replaces_observation": {"recorded_seq": tip + 2},
+        })
+        .to_string();
+        let mut read = response(vec![row], vec![decision]);
+        let project = project("/work/app");
+        // `commits_recorded_at` selects from `commit_log` by name.
+        let log = rusqlite::Connection::open(dir.path().join("kernel.sqlite")).unwrap();
+        log.execute_batch("ALTER TABLE commit_log RENAME TO commit_log_unavailable")
+            .unwrap();
+        assert!(matches!(
+            show_contests(&store, &project, &mut read),
+            Err(kernel::KernelError::Io)
+        ));
+        assert_eq!(
+            read.decisions["replaced"].payload.summary,
+            "User stated: S."
+        );
+        log.execute_batch("ALTER TABLE commit_log_unavailable RENAME TO commit_log")
+            .unwrap();
+        show_contests(&store, &project, &mut read).unwrap();
+        assert_eq!(
+            read.decisions["replaced"].payload.summary,
+            replaced_line("User stated: S.", None, None)
+        );
     }
 
     /// A plain id is shown as written. Any other id is caller-supplied text
