@@ -1640,7 +1640,34 @@ fact's unchanged row. A stored plan whose fact names more than four contests
 is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
 sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
-by the fact already named writes nothing. The `<project-memory>` block renders
+by the fact already named writes nothing. A fact that capture writes as the
+user's statement, its stored text being the label and the quotation alone,
+holds `replaces_observation` in its rationale when it names at least one
+fact under `replaces` or `also_replaces` and every fact the plan's facts of
+its quotation name there is an observation: a fact the Kernel serves as
+unapproved that is no quotation capture stored under the `User stated: `
+label, which an assistant's report and a memory the host memory tool wrote
+are. Two facts share a quotation when their quotations are equal once edge
+whitespace and one closing `.` or `!` are dropped. The named facts of a
+quotation are judged together before the plan writes any fact, so one
+statement stored as two facts is judged as one. The
+record is an object with `recorded_seq`, the commit sequence that recorded
+the earliest of those observations. A statement that names no fact holds no
+record. A statement whose quotation names a fact the Kernel serves as
+approved, one a labeled correction keeps live and contests included, or a
+labeled quotation of the user, holds none, and a note retired because a
+replaced statement restated it is not counted. Each fact that later rewrites
+the statement, for a contest, a settlement, or its end, keeps the record. The
+`<project-memory>` block renders a statement whose rationale holds the record
+as
+`<statement> (stated <date>; it replaces a value recorded <date> that the user had not stated)`
+on every pass that shows no contest of the statement, a pass whose Kernel
+serves the contesting fact no longer among them,
+the dates being the UTC days on which the statement's first commit and the
+commit `recorded_seq` names were recorded, `unknown date` when the commit log
+holds none; a record of another shape marks nothing. The stored summary holds
+the user's words alone, and explicit search shows the rationale with the
+record as it shows every rationale field. The `<project-memory>` block renders
 a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
 the dates being the UTC days on which the statement's first commit and the
@@ -1661,9 +1688,11 @@ the store state of the statements it renders, and shows the contest only
 while that read serves the fact: live, not hidden, and of normal sensitivity.
 A labeled fact, such as an assistant's report, is served there; a fact a
 disposition hides, a retired fact, and a fact of another project contest
-nothing a reader is shown. The block shows the stored statement alone in
-those cases, and a pass whose contest read fails is withheld as any failed
-read of the pass is. Every session whose block holds the statement is shown
+nothing a reader is shown. In those cases the block shows the replacement
+line (above) for a statement whose rationale holds a `replaces_observation`
+record and the stored statement alone for any other, and names neither the
+contesting fact nor its text. A pass whose contest read or commit-time read
+fails is withheld as any failed read of the pass is. Every session whose block holds the statement is shown
 the contest, the one whose message recorded it included: the excerpt is the
 one text from a session's own messages that its block carries, because that
 session's observation of the newer value can leave its conversation at a
