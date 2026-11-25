@@ -2460,7 +2460,7 @@ fn user_stated(states_whole: bool, prose: &Prose<'_>, memory: &CapturedMemory) -
 }
 
 /// The text after `label` and `: ` of a summary that opens with them.
-fn after_label<'a>(summary: &'a str, label: &str) -> Option<&'a str> {
+pub(crate) fn after_label<'a>(summary: &'a str, label: &str) -> Option<&'a str> {
     summary.strip_prefix(label)?.strip_prefix(": ")
 }
 

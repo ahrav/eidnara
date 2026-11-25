@@ -28,12 +28,13 @@ pub enum Writer {
 }
 
 impl Writer {
-    /// Who a memory's statement says said it: memory capture opens a statement with its writer.
+    /// Who a memory's statement says said it: memory capture opens a statement with its writer's label and `: `.
     pub fn of_statement(statement: &str) -> Self {
         let [user, assistant] = crate::memory_capture::STATEMENT_WRITERS;
-        if statement.starts_with(user) {
+        let opens_with = |label| crate::memory_capture::after_label(statement, label).is_some();
+        if opens_with(user) {
             Self::User
-        } else if statement.starts_with(assistant) {
+        } else if opens_with(assistant) {
             Self::Assistant
         } else {
             Self::Unrecorded
@@ -644,6 +645,14 @@ pub(super) mod tests {
             Writer::of_statement("Deploy from main."),
             Writer::Unrecorded
         );
+        // The attribution is the label and its `: `, as capture writes it; prose that opens with the label's words names no writer.
+        for prose in [
+            "User stated requirements are stored in config.",
+            "Assistant reported builds live under dist.",
+            "User stated",
+        ] {
+            assert_eq!(Writer::of_statement(prose), Writer::Unrecorded, "{prose}");
+        }
     }
 
     #[test]

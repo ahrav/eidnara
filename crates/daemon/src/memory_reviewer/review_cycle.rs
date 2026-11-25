@@ -35,6 +35,7 @@ use crate::attestation_verifier::attest::Identity;
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::claim_sources::{ClaimMaterializer, ClaimProgress, MaterializationEnd};
 use crate::config::ReviewApply;
+use crate::contradiction_candidates::scorer::matcher_digest;
 
 /// The context store the switch's authority rows are recorded under.
 pub const SWITCH_AUTHORITY_STORE: &str = "eidnara-memory-reviewer";
@@ -664,6 +665,9 @@ pub fn select_and_enqueue(
     let tip = kernel
         .tip_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
+    let incarnation = kernel
+        .database_incarnation_id_within_budget(&budget)
+        .map_err(CycleError::Kernel)?;
     let walk = memory.walk();
     let (descriptors, next) = subject_descriptors(
         kernel,
@@ -749,7 +753,14 @@ pub fn select_and_enqueue(
             .next()
             .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.publish_tip > stated && row.evidence_id.len() <= MAX_IDENTITY_BYTES)
+            // A row is evidence while it is one the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before this selection's tip. The source lookup below judges its evidence's liveness.
+            .filter(|row| {
+                row.publish_tip > stated
+                    && row.publish_tip <= tip
+                    && row.kernel_incarnation_id == incarnation
+                    && row.matcher_digest == matcher_digest()
+                    && row.evidence_id.len() <= MAX_IDENTITY_BYTES
+            })
             .map(|row| LaterEvidence {
                 evidence_id: row.evidence_id,
                 trigger: Trigger::LaterMessage,

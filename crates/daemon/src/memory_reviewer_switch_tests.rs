@@ -1635,6 +1635,29 @@ async fn evidence_that_ages_out_starts_no_second_review() {
     assert_eq!(rig.status.activation_state(), ActivationState::Open);
 }
 
+/// A candidate row starts a review while it is a row the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before the selection's tip. A row of an earlier matcher or of another Kernel incarnation waits for the sweep and starts no review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_candidate_row_of_another_matcher_or_incarnation_starts_no_review() {
+    for (column, earlier) in [
+        ("matcher_digest", "0".repeat(64)),
+        ("kernel_incarnation_id", "0".repeat(32)),
+    ] {
+        let rig = Rig::open(ReviewApply::Contest).await;
+        rig.state_rules(&[THURSDAY]).await;
+        rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+            .await;
+        rig.store
+            .execute_tag_sql_for_test(&format!(
+                "UPDATE contradiction_candidates SET {column} = '{earlier}'"
+            ))
+            .unwrap();
+        assert_eq!(rig.store.candidate_sweep_page(0, 1_000).unwrap().len(), 1);
+        rig.decides(&[KEEP]);
+        assert_eq!(rig.drain().await, 0, "{column}");
+        assert_eq!(rig.attempts().len(), 0, "{column}");
+    }
+}
+
 /// A statement a review marked contested was reviewed on everything recorded up to that mark. Two later statements about its two rules bring it to one review, the mark names one of them, and the other starts no further review: the statement's line stays as that review left it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_contested_statement_is_not_reviewed_again_on_the_evidence_of_its_review() {
