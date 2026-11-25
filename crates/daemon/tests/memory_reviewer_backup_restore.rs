@@ -229,14 +229,15 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
         assert_eq!(kernel.read_artifact(&evidence).unwrap(), EVIDENCE);
     }
     copy_store_family(&backup.join("store"), &restored.context());
-    {
+    let reference = {
         let (kernel, store) = restored.open_pair();
         assert_eq!(kernel_incarnation(&kernel), kernel_id);
         assert_eq!(store.memory_reviewer_store_incarnation().unwrap(), store_id);
         let read = read_selected_proposal(&kernel, &store, PROJECT, &identity, now + 2).unwrap();
         assert!(read.review_expires_at > now);
         assert!(evaluate(&owner_record, &live(&kernel, &store)).is_ok());
-    }
+        read.reference
+    };
 
     // The restored receipt binds the original Kernel incarnation, so reads and acceptance with the replacement Kernel fail with IncarnationMismatch.
     let replaced_kernel = root.path().join("replaced-kernel");
@@ -261,6 +262,7 @@ fn a_consistent_pair_restores_and_every_mismatched_restore_is_refused() {
                 (&kernel_incarnation(&kernel), &store_id),
                 &identity,
                 "caller-1",
+                &reference,
                 &kernel::ProposalTarget::StagedCandidate {
                     candidate_id: "cand-1".to_string(),
                 },

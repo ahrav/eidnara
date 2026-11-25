@@ -656,6 +656,97 @@ fn rebinding_hands_a_reserved_row_to_another_firing_of_the_same_producer() {
     );
 }
 
+/// Each successful rebind updates the job's firing and replaces its rebind scan audit. A refused rebind preserves the audit. The retirement sweep deletes the audit with the job.
+#[test]
+fn a_rebind_retires_the_audit_of_the_rebind_it_supersedes() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let job = reserved(
+        store
+            .reserve_memory_reviewer_job("proj", &producer("f0"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    );
+    let audit = || -> (i64, i64, i64, i64) {
+        let count = |sql: &str| -> i64 {
+            store
+                .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+                .unwrap()
+        };
+        (
+            count("SELECT COUNT(*) FROM scan_batches"),
+            count("SELECT COUNT(*) FROM field_scans"),
+            count("SELECT COUNT(*) FROM scan_owner_copies"),
+            count("SELECT COUNT(*) FROM scan_domain_owners"),
+        )
+    };
+    let rebind = |firing: i64| {
+        store.rebind_reserved_memory_reviewer_job(
+            "proj",
+            &job.causal_identity,
+            &producer(&format!("f{firing}")),
+            NOW + firing,
+        )
+    };
+    let reserved_audit = audit();
+    rebind(1).unwrap();
+    let one_rebind = audit();
+    assert_eq!(
+        (
+            one_rebind.0 - reserved_audit.0,
+            one_rebind.1 - reserved_audit.1
+        ),
+        (1, 3),
+        "a rebind records one batch and the project, producer, and firing scans"
+    );
+    for firing in 2..=50 {
+        rebind(firing).unwrap();
+    }
+    assert_eq!(audit(), one_rebind, "fifty rebinds hold the audit of one");
+    let mut foreign = producer("f51");
+    foreign.producer = "other-producer".to_string();
+    assert_eq!(
+        refusal(
+            store
+                .rebind_reserved_memory_reviewer_job(
+                    "proj",
+                    &job.causal_identity,
+                    &foreign,
+                    NOW + 51
+                )
+                .unwrap_err()
+        ),
+        MemoryReviewerJobRefusal::ProducerMismatch
+    );
+    assert_eq!(
+        audit(),
+        one_rebind,
+        "a refused rebind leaves the standing audit"
+    );
+    assert_eq!(
+        store
+            .lookup_memory_reviewer_job("proj", &job.causal_identity)
+            .unwrap()
+            .unwrap()
+            .producer,
+        producer("f50")
+    );
+
+    let retire_at = job.queue_deadline_ms + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    store.expire_memory_reviewer_work(retire_at).unwrap();
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        audit(),
+        (0, 0, 0, 0),
+        "the sweep takes the rebound job's audit"
+    );
+}
+
 #[test]
 fn activation_composed_with_a_failing_producer_transaction_commits_nothing() {
     let dir = tempfile::tempdir().unwrap();

@@ -1596,14 +1596,22 @@ impl MemoryStore {
                 Ok(())
             },
             |conn| {
-                rebind_reserved_memory_reviewer_job_in_tx(
+                let job = rebind_reserved_memory_reviewer_job_in_tx(
                     conn,
                     project,
                     causal_identity,
                     producer,
                     now_ms,
-                )
-                .map(WriteDisposition::Applied)
+                )?;
+                // The row stores one firing. Retiring the rebind owner here leaves the audit this write records as the job's only rebind receipt.
+                retire_active_scan_domain_owner(
+                    conn,
+                    "project",
+                    project,
+                    DurableWriteFamily::MemoryReviewerJobs.owner_kind(),
+                    &active_scan_owner_key(&["memory_reviewer", "rebind", causal_identity]),
+                )?;
+                Ok(WriteDisposition::Applied(job))
             },
         )
     }
@@ -1751,7 +1759,7 @@ impl MemoryStore {
             .map_err(MemoryReviewerJobError::Store)
     }
 
-    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its own writes left: the reservation, activation and rebinds of the job, its ledger writes, and the completion's selection. A sweep that leaves no such job also deletes terminal selection pages whose deadline passed a queue lifetime earlier still, so every job a page enqueued is gone before the page and the scan audit of its references, its cursor, and its standalone completion. The totals triggers return each row's charge to its project, so the quota bounds the work of one retention window. Returns the jobs and pages retired. The caller runs the expiry sweep at the same `now_ms` first, as the lifecycle pass does, so every job past its queue deadline is terminal when the pages are judged.
+    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its own writes left: the reservation, activation and latest rebind of the job, its ledger writes, and the completion's selection. A sweep that leaves no such job also deletes terminal selection pages whose deadline passed a queue lifetime earlier still, so every job a page enqueued is gone before the page and the scan audit of its references, its cursor, and its standalone completion. The totals triggers return each row's charge to its project, so the quota bounds the work of one retention window. Returns the jobs and pages retired. The caller runs the expiry sweep at the same `now_ms` first, as the lifecycle pass does, so every job past its queue deadline is terminal when the pages are judged.
     ///
     /// A receipt begins above the highest generation a retired receipt reached, which the sweep records, so a job enqueued again for a retired job's inputs runs under a generation its Kernel holds never carried.
     pub fn retire_settled_memory_reviewer_jobs(

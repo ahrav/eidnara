@@ -141,6 +141,82 @@ pub fn try_begin_job(
     })
 }
 
+/// Enqueues the causal inputs of `retired` once more after the retirement sweep deleted that job: reserved and activated under another firing of the same producer and ordinal, claimed by `worker-a`, and its receipt begun. The subject the retired job staged in the Kernel serves the later job.
+pub fn begin_job_again(
+    store: &MemoryStore,
+    kernel_incarnation: &str,
+    generation: u64,
+    retired: &MemoryReviewerJob,
+    now: i64,
+) -> BegunJob {
+    let ordinal = retired.producer.ordinal;
+    let producer = ProducerBinding {
+        producer: retired.producer.producer.clone(),
+        firing_id: format!("{}#{ordinal}", "6".repeat(32)),
+        ordinal,
+    };
+    let inputs = CausalInputs {
+        target: retired.target.clone(),
+        question_template: "extracted_facts".to_string(),
+        signals: Vec::new(),
+        required_evidence: Vec::new(),
+        policy_versions: review_policy_versions(),
+    };
+    let job = match store.reserve_memory_reviewer_job(PROJECT, &producer, &inputs, now) {
+        Ok(ReserveOutcome::Reserved(job)) => job,
+        other => panic!("the retired job's inputs reserve a new job: {other:?}"),
+    };
+    assert_eq!(job.causal_identity, retired.causal_identity);
+    store
+        .activate_memory_reviewer_job(
+            PROJECT,
+            &job.causal_identity,
+            &producer,
+            &MemoryReviewerJobInput {
+                subject: job.target.clone(),
+                starting_references: Vec::new(),
+                question_template: "extracted_facts".to_string(),
+            },
+            now,
+        )
+        .unwrap();
+    let LeaseAcquireOutcome::Claim { claim, .. } = store
+        .acquire_memory_reviewer_task(
+            PROJECT,
+            &format!("acq-again-{ordinal}"),
+            "worker-a",
+            i64::try_from(ordinal).unwrap(),
+            i64::try_from(generation).unwrap(),
+            &job.causal_identity,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the later job is claimed")
+    };
+    let MemoryReviewerBeginOutcome::Begun(receipt) = store
+        .begin_memory_reviewer_receipt(
+            PROJECT,
+            &job.causal_identity,
+            kernel_incarnation,
+            &claim.claim_id,
+            now,
+        )
+        .unwrap()
+    else {
+        panic!("the later job's receipt begins")
+    };
+    let job = store
+        .lookup_memory_reviewer_job(PROJECT, &job.causal_identity)
+        .unwrap()
+        .unwrap();
+    BegunJob {
+        job,
+        claim_id: claim.claim_id,
+        receipt,
+    }
+}
+
 /// One History Summarizer job at firing `firing` as the handoff leaves it, before any worker claims it: reserved, its subject staged in the Kernel under `digest`'s binding, and activated Ready with reference-only input. A reservation refusal writes nothing.
 pub fn try_ready_job(
     kernel: &KernelStore,
