@@ -6,7 +6,7 @@ Specification [#1130](https://github.com/ahrav/eidnara/issues/1130), existing-be
 
 ## Evidence trail
 
-`publish` (`crates/daemon/src/memory_capture.rs:2055`) reads the frozen plan and its dispatch count through `frozen_memory_capture` (`crates/memory-store/src/memory_capture.rs:455`), a read that returns the stored `prepared_json` of a job that holds one; `prepare_memory_capture` (`crates/memory-store/src/memory_capture.rs:415`) freezes the plan at extraction and returns the stored plan once frozen. `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:4355`) builds the intent with producer `memory_capture`, the project's operation key for the job id (`:4416`), and the SHA-256 of the frozen plan (`:4419`). The envelope replays a receipt with an equal digest and returns `Conflict` for a different one (`crates/kernel/tests/kernel_envelope.rs:160`).
+`publish` (`crates/daemon/src/memory_capture.rs:2062`) reads the frozen plan and its dispatch count through `frozen_memory_capture` (`crates/memory-store/src/memory_capture.rs:455`), a read that returns the stored `prepared_json` of a job that holds one; `prepare_memory_capture` (`crates/memory-store/src/memory_capture.rs:415`) freezes the plan at extraction and returns the stored plan once frozen. `publish_captured_memories` (`crates/daemon/src/memory_capture.rs:4362`) builds the intent with producer `memory_capture`, the project's operation key for the job id (`:4423`), and the SHA-256 of the frozen plan (`:4426`). The envelope replays a receipt with an equal digest and returns `Conflict` for a different one (`crates/kernel/tests/kernel_envelope.rs:160`).
 
 ## Failure scenario
 
@@ -24,7 +24,7 @@ A publish, then a second publish of the same job; a frozen plan edited under the
 
 ### Q: Do the cited checks exist at the branch tip under the cited names?
 
-- Sources examined: `crates/daemon/src/memory_capture.rs:12594`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24958`, read at the branch that adds this part (base `3a3b916b7`).
+- Sources examined: `crates/daemon/src/memory_capture.rs:12601`; `crates/kernel/tests/kernel_envelope.rs:160`; `crates/daemon/src/lib.rs:24974`, read at the branch that adds this part (base `3a3b916b7`).
 - Findings: Each cited line is the first line of the named test or function.
 - Missing evidence: none.
 - Conclusion: resolved with answer.

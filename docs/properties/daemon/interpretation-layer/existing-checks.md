@@ -44,7 +44,7 @@ or whose check U4 deleted says so.
 | --- | --- | --- |
 | `history_summarizer_chunk.rs:3520` `repeated_call_ids_render_each_call_with_its_own_arguments` | `TC: read(one.rs)` from `filePath` | unaudited |
 | `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument on separate inputs, with newlines collapsed | unaudited |
-| `crates/daemon/src/lib.rs:20091` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:20338-20344`, `:26936`) | unaudited |
+| `crates/daemon/src/lib.rs:20107` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:20338-20344`, `:26936`) | unaudited |
 | `crates/daemon/testdata/history_summarizer-chunk-golden.json` | `TC:` lines from short arguments | unaudited |
 
 ## Wire and injection

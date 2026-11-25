@@ -16,7 +16,10 @@ import {
 /** One window row: the message's persisted entry id, or a reserved id, and the message. */
 export interface PiRow {
     readonly id: string;
-    /** The session entry's `type`, present when the entry the row was built from could be read. */
+    /**
+     * The session entry's `type`, present when the entry the row was built from could be read
+     * and, for a message entry, holds the row's message.
+     */
     readonly type?: string;
     /** The session entry's `parentId`, present beside `type`. */
     readonly parentId?: string | null;

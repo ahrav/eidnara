@@ -220,6 +220,12 @@ pub fn render_memory_line(memory: &CanonicalMemory) -> String {
 /// Category names are escaped for XML attributes, while `wrapper` is interpolated as written, so callers must pass a valid element name.
 /// Memory content is escaped by [`render_memory_line`].
 pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> String {
+    render_block(memories, wrapper, None)
+}
+
+/// `render_block` uses the [`render_memory_block`] format and places a
+/// supplied `note`, as written, on its own line before the closing tag.
+fn render_block(memories: &[CanonicalMemory], wrapper: &str, note: Option<&str>) -> String {
     let mut ordered = memories
         .iter()
         .filter_map(|memory| Some((memory_category_rank(&memory.category)?, memory)))
@@ -239,7 +245,8 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
         })
         .sum::<usize>()
         + 2 * wrapper.len()
-        + 5;
+        + 5
+        + note.map_or(0, |note| note.len() + 1);
     let mut block = String::with_capacity(len_hint);
     block.push('<');
     block.push_str(wrapper);
@@ -264,6 +271,10 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
         push_escaped_xml_attr(&mut block, category);
         block.push('>');
     }
+    if let Some(note) = note {
+        block.push('\n');
+        block.push_str(note);
+    }
     block.push_str("\n</");
     block.push_str(wrapper);
     block.push('>');
@@ -282,26 +293,19 @@ const DELIVERED_CLOSE: &str = "</project-memory>";
 /// and its closing tag. The budget charges these bytes for a block that
 /// holds a row, and [`render_delivered_memory_block`] writes the rows'
 /// elements after the opening line.
-pub(crate) fn delivered_memory_frame() -> String {
-    delivered_block("")
-}
-
-/// A delivered block whose rows render as `elements`, each element ending
-/// with a line break.
-fn delivered_block(elements: &str) -> String {
-    format!("{DELIVERED_OPEN}{elements}{PROJECT_MEMORY_NOTE}\n{DELIVERED_CLOSE}")
+pub(crate) fn delivered_memory_frame() -> &'static str {
+    static FRAME: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!("{DELIVERED_OPEN}{PROJECT_MEMORY_NOTE}\n{DELIVERED_CLOSE}")
+    });
+    &FRAME
 }
 
 /// The `<project-memory>` block of a session's m0: the rows' elements as
-/// [`render_memory_block`] writes them, then [`PROJECT_MEMORY_NOTE`]. No
-/// rows render no block.
+/// [`render_memory_block`] writes them, then [`PROJECT_MEMORY_NOTE`] on the
+/// line before the closing tag. The block is an empty string when it renders
+/// no row.
 pub fn render_delivered_memory_block(memories: &[CanonicalMemory]) -> String {
-    let block = render_memory_block(memories, "project-memory");
-    block
-        .strip_prefix(DELIVERED_OPEN)
-        .and_then(|rest| rest.strip_suffix(DELIVERED_CLOSE))
-        .map(delivered_block)
-        .unwrap_or_default()
+    render_block(memories, "project-memory", Some(PROJECT_MEMORY_NOTE))
 }
 
 /// The caller token-trims user memories; an empty set renders as an empty string.
@@ -588,9 +592,19 @@ mod tests {
                     content: contents[next() % contents.len()].clone(),
                 })
                 .collect();
+            let reference = replace_chain::block(&memories, "project-memory");
             assert_eq!(
                 render_memory_block(&memories, "project-memory"),
-                replace_chain::block(&memories, "project-memory"),
+                reference,
+                "round {round}"
+            );
+            let delivered = reference
+                .strip_suffix("\n</project-memory>")
+                .map(|rows| format!("{rows}\n{PROJECT_MEMORY_NOTE}\n</project-memory>"))
+                .unwrap_or_default();
+            assert_eq!(
+                render_delivered_memory_block(&memories),
+                delivered,
                 "round {round}"
             );
             for memory in &memories {
@@ -851,6 +865,11 @@ mod tests {
         );
         assert!(!render_memory_block(&rows, "project-memory").contains(note));
         assert_eq!(render_delivered_memory_block(&[]), "");
+        assert_eq!(
+            render_delivered_memory_block(&[row("mem_7", "WARNING", "a warning")]),
+            "",
+            "rows of dropped categories render no block"
+        );
         assert!(
             !PROJECT_MEMORY_NOTE.contains(['<', '>', '&', '\n']),
             "the note renders as written on one line"

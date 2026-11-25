@@ -2831,6 +2831,9 @@ pub struct HandlerCore {
     capture_commit_gate: Arc<Mutex<()>>,
     capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
     named_files: Arc<named_files::NamedFiles>,
+    /// The tool calls each session's failure recorder has judged, and the
+    /// sessions whose recorder task runs.
+    failure_memo: Arc<Mutex<memory_capture::FailureMemo>>,
     source_capture: Arc<source_capture::SourceCapture>,
     contradiction_candidates: Arc<contradiction_candidates::Candidates>,
     session_resolver: Arc<dyn SessionResolver>,
@@ -3866,6 +3869,7 @@ impl Handler {
             contradiction_candidates: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             named_files: Arc::default(),
+            failure_memo: Arc::new(Mutex::new(memory_capture::FailureMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
@@ -4418,6 +4422,7 @@ impl Handler {
             contradiction_candidates: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
             named_files: Arc::default(),
+            failure_memo: Arc::new(Mutex::new(memory_capture::FailureMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
@@ -7086,10 +7091,16 @@ impl HandlerCore {
                 // checkpointing; both hold `capture_commit_gate` on a blocking
                 // thread. Purging the memo here retires any checkpoint admitted
                 // before this delete but not yet run.
-                let _capture_gate = core
+                let capture_gate = core
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
+                // A failure recorder task reads its memo entry under the same gate. The fence holds the gate, retires the session's entry before the delete changes either store, and on every way out of this block retires it again and then releases the gate, so a task handed off before the delete or while it holds the gate has nothing to write, also when the delete ends partway.
+                let _capture_gate = memory_capture::DeleteFence::raise(
+                    capture_gate,
+                    &core.failure_memo,
+                    &session_id,
+                );
                 // Captured sources retire and the session's use-outcome records are marked deleted before the memory rows go, so no deleted session keeps a live descriptor or reads as live.
                 core.delete_kernel_step(&binding, &session_id)?;
                 #[cfg(test)]
@@ -9262,6 +9273,11 @@ impl HandlerCore {
             parsed.messages.len(),
             entry.meter.reserve(),
         ) {
+            self.spawn_tracked_task(checkpoint.run());
+        }
+        // A command result the window holds is recorded when it reports a
+        // failure, off the reply's path as the capture checkpoint is.
+        if let Some(checkpoint) = self.failure_checkpoint(&binding, &parsed) {
             self.spawn_tracked_task(checkpoint.run());
         }
         // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.

@@ -6,10 +6,12 @@
 //! the model found every fact. Exact quotations prove provenance, not entailment.
 
 pub(crate) mod cite;
+mod failures;
 mod head;
 mod native;
 #[cfg(test)]
 pub(crate) use cite::CITATION_EVENT_KIND;
+pub(crate) use failures::{DeleteFence, FailureMemo, is_failure_lineage};
 #[cfg(test)]
 pub(crate) use head::fixtures as head_fixtures;
 pub(crate) use head::{FrozenHead, observe_head, observe_head_in};
@@ -60,8 +62,12 @@ pub const MAX_CAPTURE_MEMORY_BYTES: usize = 2048;
 const CAPTURE_FRAGMENT_BYTES: usize = 16 * 1024;
 const MAX_CAPTURE_WORKERS: usize = 16;
 /// Per worker: 4.5 read byte caps for [`select_existing_memories`] and 4 MiB for buffers and plans.
-pub(crate) const RETAINED_BYTES_BOUND: u64 = MAX_CAPTURE_WORKERS as u64
-    * (kernel_routes::read::MAX_READ_ROW_BYTES as u64 * 9 / 2 + 4 * 1024 * 1024);
+const WORKER_RETAINED_BYTES: u64 =
+    kernel_routes::read::MAX_READ_ROW_BYTES as u64 * 9 / 2 + 4 * 1024 * 1024;
+/// The workers' reservations, and the failure recorder's memo and
+/// checkpoints at their own bound.
+pub(crate) const RETAINED_BYTES_BOUND: u64 =
+    MAX_CAPTURE_WORKERS as u64 * WORKER_RETAINED_BYTES + failures::RETAINED_BYTES_BOUND;
 
 /// Text roles admitted to extraction. Tool output and reasoning are not memory
 /// instructions and must not be relabeled as user messages by an adapter.
@@ -1581,6 +1587,7 @@ impl PendingFragment {
 
 /// The user-only consent gate shared by checkpointing and draining. Both sides
 /// must agree, or sources accumulate with no drainer, or drain without consent.
+/// The failure recorder reads it beside the source capture consent.
 pub(crate) fn capture_enabled(binding: &SessionBinding) -> bool {
     binding.config.memory_enabled
         && binding.config.auto_promote
@@ -12960,7 +12967,7 @@ mod tests {
         let window = cap;
         let walk = 2 * cap + 2 * work_cap + cap;
         let other = 4 * 1024 * 1024;
-        let reserved = RETAINED_BYTES_BOUND / MAX_CAPTURE_WORKERS as u64;
+        let reserved = WORKER_RETAINED_BYTES;
         assert!(
             reserved >= window + walk + other,
             "a worker reserves {reserved} bytes and holds {window} of the window, {walk} of the walk, and {other} besides"

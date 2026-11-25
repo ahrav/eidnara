@@ -18,7 +18,7 @@ that adds this part.
 | F7 | Operation-key reuse with different bytes | constructible: Kernel envelope tests; for capture, a committed source whose queue row was pruned and whose message is planned again: a plan with the receipt's bytes replays it and completes the source, and planning that keeps conflicting ends at the dispatch cap |
 | F8 | Kernel writer held past 5 s | constructible: hold the writer from a test thread |
 | F9 | Model output invents or omits a source id or quotes foreign text | constructible: memory-capture unit tests |
-| F10 | Session delete interleaved with checkpoint or publish | constructible: gate-holding daemon tests |
+| F10 | Session delete interleaved with checkpoint, publish, or a failed-command task, also a delete that stops between its two stores | constructible: gate-holding daemon tests; the partial delete through the `source_capture.stop_after_retirement` test hook; a unit test of the fence pins a memo entry directly while the fence stands and observes the fence's two retirements; a production handoff from an idle session during the delete, and that task's gate wait, are not yet constructed |
 | F11 | Blocking hop failure | constructible: daemon route tests |
 | F12 | Source-capture slot busy, budget spent, cancelled, Kernel starting | constructible: source-capture test module |
 | F13 | Secret-bearing text | constructible: known secret fixtures |

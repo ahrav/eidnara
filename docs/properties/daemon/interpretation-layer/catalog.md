@@ -73,7 +73,7 @@ evidence, not proof.
   `transform.rs:11902`. Class-driven supersession (edit markers, the
   `todowrite` keep-one, zero-value drops) also needs `smart_drops`, which
   defaults false (`config.rs:168`) and reaches selection unchanged
-  (`crates/daemon/src/lib.rs:9794`, `transform.rs:4171-4172`), plus an
+  (`crates/daemon/src/lib.rs:9810`, `transform.rs:4171-4172`), plus an
   emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`,
   `:980`). Capture runs only when `source_capture_enabled` is
   set (`config.rs:154` defaults it false; `sc.rs:291-302` gates on it). The
@@ -81,7 +81,7 @@ evidence, not proof.
   non-empty model chain: `model_chain` defaults empty (`config.rs:149`),
   `eidnara_folds` requires it (`config.rs:190-194`),
   `prepare_history_summarizer_with` returns before the trigger estimate when
-  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10186`), and the firing
+  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10202`), and the firing
   assembler returns `NoModels` (`history_summarizer_chunk.rs:890-894`).
 - `test-only`: the subject is a CI step or an authoring-time artifact, not a
   daemon code path: the literal gate (`scripts/forbid-tool-literals.sh`, run
@@ -296,7 +296,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1287-1291` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:437`, `:456`) at `history_summarizer_chunk.rs:1295` and `boundary.rs:1867`.
 Status: active
-Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20091` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20338-20344`, the input at `lib.rs:26936`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
+Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20107` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20338-20344`, the input at `lib.rs:26936`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
 Check: `always` - `history_summarizer_chunk.rs:1326-1338`. `always` because the function is pure.
 Fault/timing angle: none.
