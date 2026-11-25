@@ -335,6 +335,11 @@ fn stated(quote: &str) -> String {
     format!("User stated: {quote}")
 }
 
+/// A message time `after_ms` past the daemon's clock, for a message written after a memory the store has just recorded.
+fn later_than_now(after_ms: i64) -> u64 {
+    u64::try_from(crate::now_ms() + after_ms).expect("a time after the epoch")
+}
+
 fn new_worker(
     handler: &Handler,
     state: &Arc<ProducerState>,
@@ -636,7 +641,8 @@ async fn a_memory_older_than_its_retained_messages_is_reviewed_on_new_evidence()
         .expire_harness_captures(forty_days_on)
         .unwrap();
     assert!(expired.retired >= 1, "{expired:?}");
-    rig.user_says_later("later-2", 1_700_000_100_000, TUESDAY)
+    // With its source retired, the memory was stated when its commit was recorded, and the new message is written after that.
+    rig.user_says_later("later-2", later_than_now(60_000), TUESDAY)
         .await;
     rig.flagged(&[RETAIN]);
     assert_eq!(rig.drain().await, 1);
@@ -709,12 +715,13 @@ async fn a_change_outside_the_action_rule_is_dropped() {
     }
 }
 
-/// A user's statement takes evidence only from the user: a later message of the assistant about the same subject starts no review of it and sends no request. A fact the assistant reported takes evidence from anyone, so the same kind of message brings it to review, and the state names both writers. In `apply` mode a `revise` of that fact whose new text opens as the user's words is dropped: the reviewer's text never reads as the user's.
+/// A statement of the user and a fact the assistant reported take evidence from the user: a later message of the assistant about the same subject starts no review of either and sends no request, and the user's later message brings the reported fact to review with the state naming both writers. In `apply` mode a `revise` of that fact whose new text opens as the user's words is dropped: the reviewer's text never reads as the user's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn whose_message_it_is_decides_whether_it_is_evidence() {
     const REPORTED: &str = "The integration suite needs a local Redis on port 6380.";
-    const CORRECTED: &str =
+    const RESTATED: &str =
         "Correction: the integration suite needs a local Redis on port 6390, not 6380.";
+    const CORRECTED: &str = "The integration suite needs a local Redis on port 6390 now, not 6380.";
     let rig = Rig::open(ReviewApply::Apply).await;
     rig.state_rules(&[THURSDAY]).await;
     rig.says_later(
@@ -732,7 +739,16 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
     assert!(rig.attempts().is_empty());
 
     rig.report_facts(&[REPORTED]).await;
-    rig.says_later("assistant", "later-2", 1_700_000_100_000, CORRECTED)
+    rig.says_later("assistant", "later-2", 1_700_000_100_000, RESTATED)
+        .await;
+    assert_eq!(
+        rig.drain().await,
+        0,
+        "the assistant's later message reopens no fact it reported"
+    );
+    assert!(rig.attempts().is_empty());
+
+    rig.user_says_later("later-2u", 1_700_000_120_000, CORRECTED)
         .await;
     let reported = format!("Assistant reported: {REPORTED}");
     let as_the_user = r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"User stated: The integration suite needs a local Redis on port 6390.","support":[],"contradictions":[{"alias":"ref-3"}],"limitations":[],"uncertainty":"low"}}"#;
@@ -744,8 +760,10 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
     assert_eq!(state["memory"]["text"], reported);
     assert_eq!(state["memory"]["said_by"], "assistant");
     assert_eq!(state["source"][0]["writer"], "assistant");
-    assert_eq!(state["later"][0]["writer"], "assistant");
-    assert_eq!(state["later"][0]["text"], CORRECTED);
+    let later = state["later"].as_array().unwrap();
+    assert_eq!(later.len(), 1, "the user's message alone is evidence");
+    assert_eq!(later[0]["writer"], "user");
+    assert_eq!(later[0]["text"], CORRECTED);
     let memories = rig.search().await;
     assert!(
         memories.iter().any(|(text, _)| *text == reported),
@@ -758,8 +776,7 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
     assert_eq!(rig.active_review_holds(), 0);
 
     // A `revise` that opens with the fact's own attribution and carries the user's label on a later line is dropped too.
-    rig.says_later(
-        "assistant",
+    rig.user_says_later(
         "later-2b",
         1_700_000_150_000,
         "Again: the integration suite needs a local Redis on port 6390, not 6380.",
@@ -779,8 +796,7 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
     );
 
     // A `revise` that keeps the fact's own attribution is accepted: its text replaces the reported fact.
-    rig.says_later(
-        "assistant",
+    rig.user_says_later(
         "later-3",
         1_700_000_200_000,
         "To confirm: the integration suite needs its local Redis on port 6390.",
@@ -799,6 +815,86 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
         memories.iter().all(|(text, _)| *text != reported),
         "{memories:?}"
     );
+}
+
+/// In `contest` a `revise` of a fact the assistant reported writes nothing: the proposal says part of the fact still holds, so the row keeps its text and its place on search and the review hold ends. A `retire` of the same fact on the user's later message disputes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
+    const REPORTED: &str =
+        "The retry helper at src/net/retry.rs line 41 waits two seconds between attempts.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.report_facts(&[REPORTED]).await;
+    let reported = format!("Assistant reported: {REPORTED}");
+    let row = |rows: Vec<(String, String)>| rows.into_iter().find(|(text, _)| *text == reported);
+    let before = row(rig.search().await).expect("the reported fact is served on search");
+    rig.user_says_later(
+        "later-1",
+        1_700_000_000_000,
+        "The retry helper moved: src/net/retry.rs line 50 waits two seconds between attempts.",
+    )
+    .await;
+    let revise = r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"Assistant reported: The retry helper at src/net/retry.rs line 50 waits two seconds between attempts.","support":[],"contradictions":[{"alias":"ref-3"}],"limitations":[],"uncertainty":"low"}}"#;
+    rig.flagged(&[revise]);
+    assert_eq!(rig.drain().await, 1);
+    assert_eq!(
+        row(rig.search().await),
+        Some(before.clone()),
+        "a revise leaves the row as it is"
+    );
+    assert_eq!(
+        rig.active_review_holds(),
+        0,
+        "the proposal's hold ended, where a dispute keeps its hold"
+    );
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "The retry helper at src/net/retry.rs is gone; nothing waits between attempts now.",
+    )
+    .await;
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    assert_eq!(rig.active_review_holds(), 1, "a dispute holds its memory");
+}
+
+/// A selection reviews the memories a session receives automatically before the ones served on search alone, whatever the order of their evidence. Here the note's evidence is the newer, and the delivered statement's review runs first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {
+    const NOTE: &str = "Changelog entries are kept in reverse chronological order.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    commit_decision(
+        &rig,
+        "mem_note_changelog",
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        "repo",
+        NOTE,
+    );
+    assert_eq!(rig.drain().await, 0);
+    rig.user_says_later(
+        "later-1",
+        later_than_now(60_000),
+        "The release branches are still cut from main every Thursday.",
+    )
+    .await;
+    rig.user_says_later(
+        "later-2",
+        later_than_now(120_000),
+        "Keep the changelog entries in chronological order, oldest entries first.",
+    )
+    .await;
+    rig.decides(&[KEEP, KEEP]);
+    assert_eq!(rig.worker.pass(&CancellationToken::new()).await, 2);
+    let reviewed: Vec<String> = rig
+        .attempts()
+        .iter()
+        .map(|attempt| {
+            let state: Value =
+                serde_json::from_str(&attempt.prompt).expect("the state is JSON text");
+            state["memory"]["text"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(reviewed, [stated(THURSDAY), NOTE.to_string()]);
 }
 
 /// A memory review reads stored memory and conversation text. A step that asks for a file of the project's working tree is refused as unavailable, the model is told so, and no file text reaches a request.
@@ -1690,35 +1786,76 @@ async fn a_decision_that_is_not_a_stored_memory_is_left_unreviewed() {
     );
 }
 
-/// Selection uses publication order; the run counts later references by message time. A message written before the memory's source but published after the memory qualifies for review and contributes zero later references.
+/// A reference is evidence of change only when it was written after the memory was stated. A message written before the memory's source, whose descriptor is published after the memory, starts no review and sends no request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_message_written_before_the_source_is_kept_without_a_request() {
-    use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
+async fn a_message_written_before_the_source_starts_no_review() {
     let rig = Rig::open(ReviewApply::Apply).await;
     rig.state_rules(&[THURSDAY]).await;
     rig.user_says_later("earlier-1", STATED_AT_MS - 60_000, TUESDAY)
         .await;
     rig.flagged(&[RETIRE_CITING_LATER]);
-    assert_eq!(rig.drain().await, 1);
+    assert_eq!(rig.drain().await, 0);
     assert!(rig.attempts().is_empty(), "no request was made");
     let root = rig.project.to_string_lossy().to_string();
     let outcomes = list_review_outcomes(&rig.store, &root, None, 16)
         .unwrap()
         .outcomes;
-    assert_eq!(outcomes.len(), 1);
-    assert_eq!(
-        outcomes[0].terminal,
-        MemoryReviewerReceiptTerminal::Abstained
-    );
-    assert_eq!(
-        outcomes[0].abstained_reason,
-        Some(AbstainReason::ExpectationChanged)
-    );
-    assert!(!outcomes[0].selected);
+    assert!(outcomes.is_empty(), "no review job was started");
     assert_eq!(rig.active_review_holds(), 0);
     assert!(rig.block().await.contains(&stated(THURSDAY)));
-    assert_eq!(rig.drain().await, 0);
+}
+
+/// A note the agent writes through the memory tool cites no source, and source capture publishes the user's message of that turn after the note is stored. The message the note was written from, and the statement capture stores for it, are the note's origin: they start no review of the note, so a note of a rule in force is left as it is. A message the user writes after the note is evidence, and the review is shown that message alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_note_is_reviewed_only_on_a_message_written_after_it() {
+    const NOTE: &str =
+        "User stated: indent Python files with tabs. This replaces the earlier four spaces.";
+    const ORIGIN: &str = "Indent Python files with tabs from now on, not four spaces.";
+    const LATER: &str = "Indent Python files with two spaces from now on, not tabs.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    // The user's message of the turn is written first; the agent stores its note a few seconds later.
+    let origin_at = later_than_now(-6_000);
+    commit_decision(
+        &rig,
+        "mem_note_indentation",
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        "repo",
+        NOTE,
+    );
+    rig.user_states_later("origin-1", origin_at, ORIGIN).await;
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(
+        rig.drain().await,
+        0,
+        "the message a note was written from is no evidence against it"
+    );
     assert!(rig.attempts().is_empty());
+    let note_row = |rows: Vec<(String, String)>| rows.into_iter().find(|(text, _)| text == NOTE);
+    let before = note_row(rig.search().await).expect("the note is served on search");
+
+    rig.state.await_results.lock().unwrap().clear();
+    rig.user_says_later("later-1", later_than_now(60_000), LATER)
+        .await;
+    // The note and the statement capture stored for the origin message are both reviewed on the later message.
+    rig.decides(&[KEEP, KEEP]);
+    assert_eq!(rig.drain().await, 2);
+    let states: Vec<Value> = rig
+        .attempts()
+        .iter()
+        .map(|attempt| serde_json::from_str(&attempt.prompt).expect("the state is JSON text"))
+        .collect();
+    let of_note = states
+        .iter()
+        .find(|state| state["memory"]["text"] == NOTE)
+        .expect("the note was reviewed");
+    let later: Vec<&str> = of_note["later"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reference| reference["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(later, [LATER], "the origin message is no later reference");
+    assert_eq!(note_row(rig.search().await), Some(before));
 }
 
 /// A job is named by the newest later source it was shown. When an older source ages out of the store's candidate rows, the memory's evidence is a part of what it was reviewed on, and neither the worker nor one started afterwards reviews it again.

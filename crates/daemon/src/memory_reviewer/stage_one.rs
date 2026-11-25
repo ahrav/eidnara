@@ -88,10 +88,17 @@ pub struct ReviewState {
     pub later: Vec<StateReference>,
 }
 
+/// Whether a later reference `writer` wrote is evidence of change for a memory `said_by` wrote. A statement of the user and a fact the assistant reported take evidence from the user. Work in progress and a note that carries no writer's label take it from any writer.
+///
+/// The user's later word outranks both a statement and a report. The assistant's later messages and tool results restate and extend its earlier reports turn after turn, so they would bring every report back to review at each turn; a report is delivered on explicit search alone, where a review's dispute leaves it. Work in progress ends when anyone reports it finished, and a note is the agent's own record, which its later messages and tool results may correct.
+pub fn takes_evidence(said_by: Writer, work_in_progress: bool, writer: Writer) -> bool {
+    work_in_progress || said_by == Writer::Unrecorded || writer == Writer::User
+}
+
 impl ReviewState {
-    /// Whether a later reference `writer` wrote is evidence a decider can flag the review on and a change proposal can cite. A user's statement takes evidence from the user alone, except that work in progress takes it from any writer. A memory attributed to another writer takes it from any writer.
+    /// Whether a later reference `writer` wrote is evidence a decider can flag the review on and a change proposal can cite: [`takes_evidence`] for this memory.
     pub fn takes(&self, writer: Writer) -> bool {
-        self.said_by != Writer::User || self.work_in_progress || writer == Writer::User
+        takes_evidence(self.said_by, self.work_in_progress, writer)
     }
 
     pub fn eligible(&self, reference: &StateReference) -> bool {
@@ -505,6 +512,31 @@ pub(super) mod tests {
         );
     }
 
+    /// Who may change a memory: the user changes a statement and a report; any writer ends work in progress and corrects a note.
+    #[test]
+    fn a_statement_and_a_report_take_evidence_from_the_user() {
+        let writers = [
+            Writer::User,
+            Writer::Assistant,
+            Writer::Tool,
+            Writer::RepositoryFile,
+            Writer::Unrecorded,
+        ];
+        for said_by in [Writer::User, Writer::Assistant] {
+            for writer in writers {
+                assert_eq!(
+                    takes_evidence(said_by, false, writer),
+                    writer == Writer::User,
+                    "{said_by:?} {writer:?}"
+                );
+                assert!(takes_evidence(said_by, true, writer), "work in progress");
+            }
+        }
+        for writer in writers {
+            assert!(takes_evidence(Writer::Unrecorded, false, writer), "a note");
+        }
+    }
+
     #[test]
     fn yes_and_unsure_flag_and_no_keeps() {
         let by_user = user_statement(vec![reference("ref-3", Writer::User, "Deploy from main.")]);
@@ -535,7 +567,31 @@ pub(super) mod tests {
             said_by: Writer::Assistant,
             ..by_assistant.clone()
         };
-        assert_eq!(decided(&reported, &answer("yes", "no")), Stage1::Flagged);
+        assert!(!reported.has_eligible_later());
+        assert_eq!(
+            decided(&reported, &answer("yes", "no")),
+            Stage1::Keep,
+            "an assistant message reopens no fact the assistant reported"
+        );
+        let reported_then_corrected = ReviewState {
+            later: by_user.later.clone(),
+            ..reported.clone()
+        };
+        assert_eq!(
+            decided(&reported_then_corrected, &answer("yes", "no")),
+            Stage1::Flagged,
+            "the user's later message does"
+        );
+        let note = ReviewState {
+            memory: "The limit is 2.".to_string(),
+            said_by: Writer::Unrecorded,
+            ..by_assistant.clone()
+        };
+        assert_eq!(
+            decided(&note, &answer("yes", "no")),
+            Stage1::Flagged,
+            "a note with no writer's label takes evidence from any writer"
+        );
         let work = ReviewState {
             work_in_progress: true,
             ..by_assistant.clone()

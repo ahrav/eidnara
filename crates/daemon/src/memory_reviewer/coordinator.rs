@@ -1458,9 +1458,9 @@ impl Run<'_> {
 enum Relation {
     /// The memory cites it.
     Source,
-    /// A reference the memory does not cite, which the selection linked as later evidence: a message written at or after the newest cited message, and every reference that carries no message time, such as a tool result or a repository document.
+    /// A reference the memory does not cite, which the selection linked as later evidence: a message written after the memory was stated, and every reference that carries no message time, such as a tool result or a repository document.
     Later,
-    /// A message written before the newest cited message.
+    /// A message written when the memory was stated or before: the memory's origin, which is never evidence against it.
     Earlier,
 }
 
@@ -1491,11 +1491,11 @@ impl Unread {
 }
 
 impl Relation {
-    /// Where a reference stands: `cited` by the memory, `written` at its own message time when it has one, beside the time of the newest message the memory cites.
-    fn of(cited: bool, written: Option<i64>, newest_cited: Option<i64>) -> Self {
-        match (cited, written, newest_cited) {
+    /// Where a reference stands: `cited` by the memory, or `written` at its own message time when it has one, beside `stated_at`, the time the memory was stated: the time of the newest message it cites or, for a memory with no cited message at hand, of the commit that first recorded it. The selection orders a message the same way (`review_cycle::written_later`).
+    fn of(cited: bool, written: Option<i64>, stated_at: Option<i64>) -> Self {
+        match (cited, written, stated_at) {
             (true, _, _) => Self::Source,
-            (false, Some(written), Some(source)) if written < source => Self::Earlier,
+            (false, Some(written), Some(stated_at)) if written <= stated_at => Self::Earlier,
             (false, _, _) => Self::Later,
         }
     }
@@ -1532,7 +1532,7 @@ impl ReferenceFact {
         label.push_str(match self.relation {
             Relation::Source => "; the memory cites it as its source",
             Relation::Later => "; written after the memory's source",
-            Relation::Earlier => "; written before the memory's source",
+            Relation::Earlier => "; written with the memory's source or before it",
         });
         label
     }
@@ -1595,12 +1595,33 @@ fn reference_facts(
         .filter(|(_, _, cited)| *cited)
         .filter_map(|(_, written, _)| *written)
         .max();
+    // A memory with no cited message at hand was stated when the commit that first recorded it was written.
+    let stated_at = match newest_cited {
+        Some(newest) => Some(newest),
+        None => {
+            let decision = store
+                .decisions_for_objects_as_of_within_budget(
+                    std::slice::from_ref(originating_decision_id),
+                    tip,
+                    &budget,
+                )?
+                .into_iter()
+                .next();
+            match decision {
+                Some(decision) => {
+                    let stated = crate::memory_capture::stated_commit(&decision);
+                    store.commits_recorded_at(&[stated])?.get(&stated).copied()
+                }
+                None => None,
+            }
+        }
+    };
     Ok(facts
         .into_iter()
         .map(|(writer, written, cited)| ReferenceFact {
             writer,
             written,
-            relation: Relation::of(cited, written, newest_cited),
+            relation: Relation::of(cited, written, stated_at),
         })
         .collect())
 }
@@ -2044,23 +2065,27 @@ mod tests {
         }
     }
 
-    /// A reference the memory cites is its source. A message older than the newest cited message was written before the memory. Every other reference is later evidence: a message at or after the source, a reference with no message time such as a tool result or a repository document, and every reference of a memory whose source the store no longer retains.
+    /// A reference the memory cites is its source. A message written when the memory was stated or before is the memory's origin. Every other reference is later evidence: a message written after the memory was stated, a reference with no message time such as a tool result or a repository document, and a message beside a memory whose time the store cannot give.
     #[test]
-    fn a_reference_is_placed_against_the_memorys_source() {
+    fn a_reference_is_placed_against_the_time_the_memory_was_stated() {
         assert_eq!(Relation::of(true, Some(5), Some(5)), Relation::Source);
         assert_eq!(Relation::of(true, None, None), Relation::Source);
         assert_eq!(Relation::of(false, Some(4), Some(5)), Relation::Earlier);
-        assert_eq!(Relation::of(false, Some(5), Some(5)), Relation::Later);
+        assert_eq!(
+            Relation::of(false, Some(5), Some(5)),
+            Relation::Earlier,
+            "a message of the same moment as the source is the source's own"
+        );
         assert_eq!(Relation::of(false, Some(6), Some(5)), Relation::Later);
         assert_eq!(
             Relation::of(false, None, Some(5)),
             Relation::Later,
-            "a tool result or a repository document beside a retained source"
+            "a tool result or a repository document"
         );
         assert_eq!(
             Relation::of(false, Some(4), None),
             Relation::Later,
-            "the store retains no source"
+            "the store holds no time for the memory"
         );
         assert_eq!(Relation::of(false, None, None), Relation::Later);
     }
