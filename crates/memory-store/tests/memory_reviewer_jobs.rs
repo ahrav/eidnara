@@ -107,6 +107,43 @@ fn incarnation_survives_reopen_and_changes_on_replacement() {
     assert_ne!(replaced.memory_reviewer_store_incarnation().unwrap(), first);
 }
 
+/// The retired generation keeps its row and its value only rises under every statement form. `REPLACE` runs as delete-then-insert past the delete guard, so a second insert is refused, as are a delete and a lowering update.
+#[test]
+fn the_retired_generation_refuses_a_replace_a_second_insert_a_delete_and_a_lowering_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "INSERT INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 5)",
+                [],
+            )
+            .map(drop)
+        })
+        .unwrap();
+    for refused in [
+        "INSERT OR REPLACE INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 1)",
+        "INSERT OR REPLACE INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 9)",
+        "INSERT INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 9)",
+        "DELETE FROM memory_reviewer_retired_generation",
+        "UPDATE memory_reviewer_retired_generation SET generation = 4",
+    ] {
+        let outcome: Result<(), _> =
+            store.with_fenced_conn_for_test(|conn| conn.execute(refused, []).map(drop));
+        assert!(outcome.is_err(), "{refused}");
+        let stored: i64 = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT generation FROM memory_reviewer_retired_generation WHERE id = 0",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(stored, 5, "{refused}");
+    }
+}
+
 #[test]
 fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job() {
     let dir = tempfile::tempdir().unwrap();
@@ -1454,7 +1491,7 @@ fn a_cursor_for_an_overlong_project_is_refused_before_it_is_written() {
     assert_eq!(rows, 0);
 }
 
-/// A terminal page leaves the store after the jobs it enqueued: the retirement sweep deletes the page one queue lifetime after its jobs retire, with the scan audit of its references, and its receipt charge returns. A project's metadata therefore holds the pages and jobs of one retention window.
+/// A terminal page leaves the store after the jobs it enqueued: the retirement sweep deletes the page one queue lifetime after its jobs retire, with the scan audit of its references and cursor, and its receipt charge returns. The continuation row the enqueue advanced stays. A project's metadata therefore holds the pages and jobs of one retention window.
 #[test]
 fn a_terminal_page_is_retired_after_the_jobs_it_enqueued() {
     use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
@@ -1462,7 +1499,7 @@ fn a_terminal_page_is_retired_after_the_jobs_it_enqueued() {
     let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
     let page = FrozenSelectionPage {
         references: vec![inputs("cand-1"), inputs("cand-2")],
-        next_cursor: None,
+        next_cursor: Some("cursor-1".to_string()),
     };
     let frozen = store
         .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
@@ -1530,8 +1567,60 @@ fn a_terminal_page_is_retired_after_the_jobs_it_enqueued() {
     assert_eq!(
         owners(),
         0,
-        "the audit of the page's references went with it"
+        "the audit of the page's references and cursor went with it"
     );
+    assert_eq!(
+        store.selection_cursor("proj", "slot-1").unwrap().as_deref(),
+        Some("cursor-1"),
+        "the continuation row stays"
+    );
+}
+
+/// A page ended through `complete_frozen_selection` owns the scan audit of that completion, so the retirement sweep deletes it with the page for both standalone terminal states.
+#[test]
+fn a_page_completed_standalone_takes_the_audit_of_its_completion_with_it() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    for state in [
+        FrozenSelectionState::FailedSlot,
+        FrozenSelectionState::Expired,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let page = FrozenSelectionPage {
+            references: vec![inputs("cand-1")],
+            next_cursor: None,
+        };
+        let frozen = store
+            .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+            .unwrap();
+        store
+            .complete_frozen_selection("proj", "slot-1", "attempt-1", state, NOW + 1)
+            .unwrap();
+        let page_retires_at = frozen.selection_deadline_ms
+            + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+            + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+        assert_eq!(
+            store
+                .retire_settled_memory_reviewer_jobs(page_retires_at)
+                .unwrap(),
+            1,
+            "{state:?}"
+        );
+        let count = |sql: &str| -> i64 {
+            store
+                .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+                .unwrap()
+        };
+        assert_eq!(
+            (
+                count("SELECT COUNT(*) FROM scan_domain_owners"),
+                count("SELECT COUNT(*) FROM field_scans"),
+                count("SELECT COUNT(*) FROM scan_batches"),
+            ),
+            (0, 0, 0),
+            "{state:?}"
+        );
+    }
 }
 
 /// Each project holds its scan audit in a separate scope, even when both jobs review identical inputs.

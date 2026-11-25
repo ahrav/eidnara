@@ -1125,7 +1125,7 @@ fn complete_loaded_frozen_selection_in_tx(
     )
 }
 
-/// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released. The scan audit of the references is retired with them unless they became jobs (`Enqueued`), whose rows keep the same identities; that audit stays with the page until the retirement sweep deletes the page after its jobs. Callers decide whether the deadline permits it.
+/// The terminal write for one frozen row: `state`, references and cursor dropped, allowance released. The scan audit of the references and cursor is retired with them unless the references became jobs (`Enqueued`), whose rows keep the same identities; that audit stays with the page until the retirement sweep deletes the page after its jobs. The continuation row an enqueue copies the cursor to is admitted by its own insert and update triggers. Callers decide whether the deadline permits it.
 fn retire_frozen_page_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -1156,10 +1156,13 @@ fn retire_frozen_page_in_tx(
 /// The last part of the scan owner that holds a page's slot and attempt identities, which the row keeps until the page is deleted.
 const PAGE_ROW_OWNER: &str = "row";
 
-/// The scan owner of one page's reference and cursor text; retired when the page goes terminal and that text leaves the row.
+/// Page expiry or slot failure retires the scan owner for the page's references and cursor. For an `Enqueued` page, the retirement sweep retires the owner when it deletes the page.
 fn frozen_page_owner_key(slot_id: &str, selection_attempt: &str) -> String {
     active_scan_owner_key(&["memory_reviewer", "freeze", slot_id, selection_attempt])
 }
+
+/// The page's slot and attempt identify the scan owner for standalone completion. The retirement sweep retires that owner with the page.
+const COMPLETE_SELECTION: &str = "complete-selection";
 
 fn release_frozen_page_scans(
     conn: &GuardedConn<'_>,
@@ -1482,7 +1485,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// One fenced write: `prepare` records the identities the write carries so a detected secret refuses it, then `body` runs the transaction-local primitive. `owner` names what owns the scan audit of the write's caller text beside the operation: a job's causal identity for a write about one job, and a page's slot and attempt for a freeze, so the retirement sweep retires that audit with the job or the page.
+    /// One fenced write: `prepare` records the identities the write carries so a detected secret refuses it, then `body` runs the transaction-local primitive. `owner` names what owns the scan audit of the write's caller text beside the operation: a job's causal identity for a write about one job, and a page's slot and attempt for a freeze or a standalone completion, so the retirement sweep retires that audit with the job or the page.
     fn memory_reviewer_transaction<T>(
         &self,
         project: &str,
@@ -1491,7 +1494,10 @@ impl MemoryStore {
         body: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, MemoryReviewerJobError> {
         debug_assert!(
-            owner.is_empty() || operation == "freeze" || JOB_OPERATIONS.contains(&operation)
+            owner.is_empty()
+                || operation == "freeze"
+                || operation == COMPLETE_SELECTION
+                || JOB_OPERATIONS.contains(&operation)
         );
         let mut owner_parts = vec!["memory_reviewer", operation];
         owner_parts.extend(owner);
@@ -1745,7 +1751,7 @@ impl MemoryStore {
             .map_err(MemoryReviewerJobError::Store)
     }
 
-    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its own writes left: the reservation, activation and rebinds of the job, its ledger writes, and the completion's selection. A sweep that leaves no such job also deletes terminal selection pages whose deadline passed a queue lifetime earlier still, so every job a page enqueued is gone before the page and the scan audit of its references. The totals triggers return each row's charge to its project, so the quota bounds the work of one retention window. Returns the jobs and pages retired. The caller runs the expiry sweep at the same `now_ms` first, as the lifecycle pass does, so every job past its queue deadline is terminal when the pages are judged.
+    /// Deletes settled jobs whose queue deadline passed at least [`MEMORY_REVIEWER_SETTLED_RETENTION_MS`] ago, oldest first and at most [`MEMORY_REVIEWER_RETIREMENT_BATCH`] per call, each with its completed receipt, its attempt markers, and the scan audit its own writes left: the reservation, activation and rebinds of the job, its ledger writes, and the completion's selection. A sweep that leaves no such job also deletes terminal selection pages whose deadline passed a queue lifetime earlier still, so every job a page enqueued is gone before the page and the scan audit of its references, its cursor, and its standalone completion. The totals triggers return each row's charge to its project, so the quota bounds the work of one retention window. Returns the jobs and pages retired. The caller runs the expiry sweep at the same `now_ms` first, as the lifecycle pass does, so every job past its queue deadline is terminal when the pages are judged.
     ///
     /// A receipt begins above the highest generation a retired receipt reached, which the sweep records, so a job enqueued again for a retired job's inputs runs under a generation its Kernel holds never carried.
     pub fn retire_settled_memory_reviewer_jobs(
@@ -1818,11 +1824,19 @@ impl MemoryStore {
                         .execute([job_id])?;
                 }
                 if retired_generation > 0 {
-                    tx.prepare_cached(
-                        "INSERT INTO memory_reviewer_retired_generation (id, generation) VALUES (0, ?1)
-                         ON CONFLICT(id) DO UPDATE SET generation = MAX(generation, excluded.generation)",
-                    )?
-                    .execute([retired_generation])?;
+                    // The baseline permits an insert only when the retired-generation row is absent.
+                    let raised = tx
+                        .prepare_cached(
+                            "UPDATE memory_reviewer_retired_generation
+                                SET generation = MAX(generation, ?1) WHERE id = 0",
+                        )?
+                        .execute([retired_generation])?;
+                    if raised == 0 {
+                        tx.prepare_cached(
+                            "INSERT INTO memory_reviewer_retired_generation (id, generation) VALUES (0, ?1)",
+                        )?
+                        .execute([retired_generation])?;
+                    }
                 }
                 // A page enqueues its jobs before its selection deadline, so their queue deadlines end within one queue lifetime of it. A sweep that found fewer jobs than its batch left none of them behind.
                 let pages: Vec<(String, String, String)> =
@@ -1854,6 +1868,12 @@ impl MemoryStore {
                         slot_id,
                         selection_attempt,
                         PAGE_ROW_OWNER,
+                    ]));
+                    page_owners.push(active_scan_owner_key(&[
+                        "memory_reviewer",
+                        COMPLETE_SELECTION,
+                        slot_id,
+                        selection_attempt,
                     ]));
                     tx.prepare_cached(
                         "DELETE FROM memory_reviewer_frozen_selections
@@ -1899,7 +1919,7 @@ impl MemoryStore {
             |write| {
                 write.identity("slot_id", slot_id)?;
                 write.identity("selection_attempt", selection_attempt)?;
-                // The references and cursor leave the row when the page goes terminal; their scans are owned apart so they can be retired with them, while the slot and attempt identities the compact row keeps stay under the page's row owner until the page is deleted.
+                // Terminal pages drop their references and cursor. A separate scan owner lets expiry or slot failure retire those scans immediately; `Enqueued` pages retain them until the sweep deletes the page. The page's row owner retains the slot and attempt scans until page deletion.
                 let first_reference_scan = write.scans.len();
                 if let Some(cursor) = &page.next_cursor {
                     write.identity("next_cursor", cursor)?;
@@ -1953,7 +1973,7 @@ impl MemoryStore {
         }
         self.memory_reviewer_transaction(
             project,
-            ("complete-selection", &[]),
+            (COMPLETE_SELECTION, &[slot_id, selection_attempt]),
             |_| Ok(()),
             |conn| {
                 complete_frozen_selection_in_tx(

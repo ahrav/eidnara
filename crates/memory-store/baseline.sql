@@ -505,6 +505,12 @@ CREATE TRIGGER memory_reviewer_retired_generation_no_decrease BEFORE UPDATE ON m
 WHEN NEW.generation < OLD.generation
 BEGIN SELECT RAISE(ABORT, 'the retired generation only rises'); END;
 
+-- REPLACE runs as delete-then-insert past the delete guard, so the row is
+-- inserted once and every later write is an update.
+CREATE TRIGGER memory_reviewer_retired_generation_no_reinsert BEFORE INSERT ON memory_reviewer_retired_generation
+WHEN EXISTS (SELECT 1 FROM memory_reviewer_retired_generation)
+BEGIN SELECT RAISE(ABORT, 'the retired generation stays for the store incarnation'); END;
+
 -- `job_id` is the task id a MemoryReviewer claim persists; a declared integer key survives a
 -- rebuild, where a hidden rowid may be renumbered. The key counts upward for the life of the
 -- file, so a claim that names a retired job names no later one.
