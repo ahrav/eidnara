@@ -204,8 +204,14 @@ Open questions:
 - Resolved (#443, owner decision): a corrupt row outside the memory and
   `named-files` domains no longer withholds the memory read, because the
   pushed-down queries never read it; reads that serve that row still decode
-  it and fail on it. A failed or corrupt read of either selected domain
-  withholds the composition.
+  it and fail on it. A failed or corrupt read of either selected domain,
+  one the Kernel returns an error for, withholds the composition. A
+  `named-files` decision that the Kernel decodes and that is no record of
+  the recorder (another source kind, source id, or decision kind, or a
+  rationale without `session` and `used_ms`) is left out of the `NAMED_FILES`
+  element, and the composition stays available
+  (`the_element_lists_only_rows_of_the_recorders_source_kind`,
+  `a_row_with_the_recorders_fields_and_another_rationale_is_no_record`).
 - Unresolved, needs a committed reproducible check: the #443 review-time
   differentials (per-row versus batched approval judgment over the kernel and
   daemon suites' served reads; every selection shape, surface, scope filter,
@@ -818,7 +824,7 @@ them without creating implementation tickets.
 [r1]: #prepared-field-output-and-audit-policy-agree
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
-[pass-read]: ../../../crates/daemon/src/lib.rs#L8797
+[pass-read]: ../../../crates/daemon/src/lib.rs#L9739-L9743
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L508
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
@@ -826,7 +832,7 @@ them without creating implementation tickets.
 [read-callback]: ../../../crates/storage/src/lib.rs#L346
 [write-callback]: ../../../crates/storage/src/lib.rs#L439
 [prepared-execute]: ../../../crates/memory-store/src/lib.rs#L2380
-[hard-compose]: ../../../crates/daemon/src/transform.rs#L4088-L4119
+[hard-compose]: ../../../crates/daemon/src/transform.rs#L4530-L4563
 [history-render]: ../../../crates/daemon/src/decay_render.rs#L296-L338
 [core-prep]: ../../../crates/memory-store/src/lib.rs#L3745-L3777
 [transaction-prep]: ../../../crates/memory-store/src/lib.rs#L3779-L3811
@@ -834,11 +840,11 @@ them without creating implementation tickets.
 [tokenizer-dependency]: ../../../crates/daemon/Cargo.toml#L36
 [read-visible]: ../../../crates/daemon/src/kernel_routes/read.rs#L383
 [admission-reference]: ../../../crates/kernel/src/admission.rs#L3818-L4078
-[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L233-L270
+[outer-retry]: ../../../crates/daemon/src/m0_compose.rs#L230-L269
 [tokenizer-reference]: ../../../crates/tokenizer/src/lib.rs#L123-L155
 [cache-reference]: ../../../crates/daemon/src/token_cache.rs#L165-L180
 [soft-core]: ../../../crates/cache-stability/src/lib.rs#L221-L287
-[soft-inputs]: ../../../crates/daemon/src/transform.rs#L4465-L4517
+[soft-inputs]: ../../../crates/daemon/src/transform.rs#L4948-L4991
 [render-json]: ../../../crates/daemon/testdata/render-golden.json
 [tight-json]: ../../../crates/daemon/testdata/render-tight-golden.json
 [shape-json]: ../../../crates/daemon/testdata/decay-store-shape.json

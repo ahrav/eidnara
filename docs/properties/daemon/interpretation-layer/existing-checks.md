@@ -44,7 +44,7 @@ or whose check U4 deleted says so.
 | --- | --- | --- |
 | `history_summarizer_chunk.rs:3520` `repeated_call_ids_render_each_call_with_its_own_arguments` | `TC: read(one.rs)` from `filePath` | unaudited |
 | `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` | the description arm and a `filePath` key argument on separate inputs, with newlines collapsed | unaudited |
-| `crates/daemon/src/lib.rs:20107` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:20338-20344`, `:26936`) | unaudited |
+| `crates/daemon/src/lib.rs:20116` `history_summarizer_boundary_construction_matches_owned_reference` | the bare-name arm: `TC: bash` for an input holding only `command` (`lib.rs:20402-20408`, `:27150`) | unaudited |
 | `crates/daemon/testdata/history_summarizer-chunk-golden.json` | `TC:` lines from short arguments | unaudited |
 
 ## Wire and injection
@@ -54,7 +54,7 @@ or whose check U4 deleted says so.
 | `crates/daemon/testdata/wire-golden.json` | the flatten step, including `path` inputs | unaudited |
 | `wire.rs:1260` (inside a reduction test) | a reduced tool result keeps its output variant; no path | unaudited |
 | `injection.rs:553` `constants_match_ts_golden`, `:1047`, `:1052`, and `crates/daemon/testdata/injection-golden.json` | the synthetic `todowrite` round trip under `TODO_TOOL` | unaudited |
-| `crates/daemon/src/transform.rs:29659` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | the echoed synthetic pair beside a native `todowrite` call produces no duplicate tool-use id | unaudited |
+| `crates/daemon/src/transform.rs:29811` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` | the echoed synthetic pair beside a native `todowrite` call produces no duplicate tool-use id | unaudited |
 
 ## Capture adapters and outcome records
 
@@ -115,7 +115,7 @@ or whose check U4 deleted says so.
 
 - No test asserts that keep-one and the read-back act on the native
   `todowrite` call alone when the echoed synthetic pair is present; selection
-  never sees the pair (`transform.rs:3476-3480`).
+  never sees the pair (`transform.rs:3509-3513`).
 - No test asserts a reduced `ToolCall` input's `path` against the original
   input's `path_arg`.
 - No harness-produced fixture holds a Pi `details.truncation.truncated` value.

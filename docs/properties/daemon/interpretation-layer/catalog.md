@@ -57,23 +57,23 @@ evidence, not proof.
   request projects its window, so wire flattening (`wire.rs:540`) runs on the
   default path, and the m0 composer reads project documents with
   `inject_docs: true` (`crates/daemon/src/config.rs:168`; the additive-only
-  composer reads them at `crates/daemon/src/transform.rs:2827-2828`).
+  composer reads them at `crates/daemon/src/transform.rs:2853-2854`).
   Selection, reduced-call rendering, and to-do injection do not run under the
   default: `model_chain` defaults empty (`config.rs:149`), so `eidnara_folds()`
   is false (`config.rs:190-194`), and `apply_once` hands the request to
-  `apply_additive_only` (`transform.rs:3359-3360`), which projects the window
+  `apply_additive_only` (`transform.rs:3391-3392`), which projects the window
   and composes m0 without selecting or injecting. The one request that passes
   that gate with folds off, a switched-lineage subagent, returns a passthrough
-  (`transform.rs:3373-3379`).
+  (`transform.rs:3406-3412`).
 - `explicit-config-only`: the fold path runs only when `eidnara_folds()`
   holds: an admitted configuration with `compaction_enabled` (default true,
   `config.rs:151`) and a non-empty `model_chain`. On that path selection is
-  called from `transform.rs:4142`, injection from `transform.rs:4076` and
-  `:4460`, and reduced calls render from `transform.rs:5208` through
-  `transform.rs:11902`. Class-driven supersession (edit markers, the
+  called from `transform.rs:4179`, injection from `transform.rs:4113` and
+  `:4497`, and reduced calls render from `transform.rs:5245` through
+  `transform.rs:11941`. Class-driven supersession (edit markers, the
   `todowrite` keep-one, zero-value drops) also needs `smart_drops`, which
   defaults false (`config.rs:168`) and reaches selection unchanged
-  (`crates/daemon/src/lib.rs:9810`, `transform.rs:4171-4172`), plus an
+  (`crates/daemon/src/lib.rs:9836`, `transform.rs:4208-4209`), plus an
   emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`,
   `:980`). Capture runs only when `source_capture_enabled` is
   set (`config.rs:154` defaults it false; `sc.rs:291-302` gates on it). The
@@ -81,7 +81,7 @@ evidence, not proof.
   non-empty model chain: `model_chain` defaults empty (`config.rs:149`),
   `eidnara_folds` requires it (`config.rs:190-194`),
   `prepare_history_summarizer_with` returns before the trigger estimate when
-  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10202`), and the firing
+  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10231`), and the firing
   assembler returns `NoModels` (`history_summarizer_chunk.rs:890-894`).
 - `test-only`: the subject is a CI step or an authoring-time artifact, not a
   daemon code path: the literal gate (`scripts/forbid-tool-literals.sh`, run
@@ -264,7 +264,7 @@ Open questions: None.
 ### il-reduced-tool-call-carries-extracted-path
 
 Type: safety
-Reachability: explicit-config-only - `flatten_block` (`wire.rs:520`) stores `extract_file_path(input)` for every `ToolCall` on every transform (`wire.rs:540`, field `wire.rs:568`), but a reduced call renders only on the fold path: `apply_once` builds the output (`transform.rs:5208`), which renders a reduced call from that field (`transform.rs:11902-11908`) through `reduced_block` (`wire.rs:445`); see Reachability classes. The source labelled this record default-production.
+Reachability: explicit-config-only - `flatten_block` (`wire.rs:520`) stores `extract_file_path(input)` for every `ToolCall` on every transform (`wire.rs:540`, field `wire.rs:568`), but a reduced call renders only on the fold path: `apply_once` builds the output (`transform.rs:5245`), which renders a reduced call from that field (`transform.rs:11941-11947`) through `reduced_block` (`wire.rs:445`); see Reachability classes. The source labelled this record default-production.
 Status: active
 Exercised: not yet - no test asserts a reduced `ToolCall` input's `path` against `extract_file_path` of the original; `wire.rs:1260` reduces a result with no path.
 Guarantee: The `path` key of every reduced `ToolCall` input equals `path_arg` of the original input, so the path key list is byte-visible compaction output.
@@ -279,15 +279,15 @@ Open questions: None.
 ### il-synthetic-todowrite-round-trips-under-one-name
 
 Type: safety
-Reachability: explicit-config-only - injection emits the synthetic call and result (`injection.rs:155-180`) and reads to-do state back (`injection.rs:429-457`) only on the fold path (`transform.rs:4076`, `:4460`; see Reachability classes). The source labelled this record default-production.
+Reachability: explicit-config-only - injection emits the synthetic call and result (`injection.rs:155-180`) and reads to-do state back (`injection.rs:429-457`) only on the fold path (`transform.rs:4113`, `:4497`; see Reachability classes). The source labelled this record default-production.
 Status: active
-Exercised: partial - `tv-tests:17` asserts `classify("todowrite") == TodoWrite` and `is_injected_todo_tool("todowrite")`; `injection.rs:553`, `:1047`, `:1052` assert the synthetic constants and names; `transform.rs:29659` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` replays the echoed synthetic pair beside a native `todowrite` call and asserts no duplicate tool-use id. No test asserts that keep-one and the read-back act on the native call alone when the echoed pair is present.
+Exercised: partial - `tv-tests:17` asserts `classify("todowrite") == TodoWrite` and `is_injected_todo_tool("todowrite")`; `injection.rs:553`, `:1047`, `:1052` assert the synthetic constants and names; `transform.rs:29811` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` replays the echoed synthetic pair beside a native `todowrite` call and asserts no duplicate tool-use id. No test asserts that keep-one and the read-back act on the native call alone when the echoed pair is present.
 Guarantee: Injection emits a synthetic call and result named `TODO_TOOL` (`injection.rs:158`, `:173`), reads to-do state back from calls `is_injected_todo_tool` accepts (`injection.rs:435`), and selection's keep-one rule counts calls `classify` names `TodoWrite` (`sel.rs:660-663`, `:693`); all three resolve `TODO_TOOL` (`tv.rs:26`).
 Check: `always` - `classify(TODO_TOOL) == ToolClass::TodoWrite` and `is_injected_todo_tool(TODO_TOOL)`. `always` because the constant is static and both queries are pure.
 Fault/timing angle: none.
-Required faults and enabling state: a fold-path window holding the echoed synthetic pair and one native `todowrite` call. Selection and the read-back never see the synthetic pair: ingress marks any message carrying a `synthetic_todo_` id synthetic (`transform.rs:2606-2624`), and `live` drops synthetic blocks (`transform.rs:3476-3480`) before `tail_for_selection` is built (`transform.rs:4072-4073`). The pair therefore exercises the id exclusion, and the native call exercises the shared name.
+Required faults and enabling state: a fold-path window holding the echoed synthetic pair and one native `todowrite` call. Selection and the read-back never see the synthetic pair: ingress marks any message carrying a `synthetic_todo_` id synthetic (`transform.rs:2635-2653`), and `live` drops synthetic blocks (`transform.rs:3509-3513`) before `tail_for_selection` is built (`transform.rs:4109-4110`). The pair therefore exercises the id exclusion, and the native call exercises the shared name.
 Confidence: high - [evidence](evidence/il-synthetic-todowrite-round-trips-under-one-name.md). The three uses read at `41d889ea4`; U4 replaced three spellings with one constant.
-Existing check: `tv-tests:17`; `injection.rs:553`, `:1047`, `:1052`; `transform.rs:29659`; `injection-golden.json`; unaudited.
+Existing check: `tv-tests:17`; `injection.rs:553`, `:1047`, `:1052`; `transform.rs:29811`; `injection-golden.json`; unaudited.
 Impact: the synthetic pair is excluded by id, so a divergent name would not make selection drop it. A divergence would emit the injected to-do state under a tool name that differs from the name the harness's own to-do calls carry, which is the name selection's keep-one and the read-back match.
 Open questions: None.
 
@@ -296,7 +296,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1287-1291` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:437`, `:456`) at `history_summarizer_chunk.rs:1295` and `boundary.rs:1867`.
 Status: active
-Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20107` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20338-20344`, the input at `lib.rs:26936`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
+Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20116` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20402-20408`, the input at `lib.rs:27150`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
 Check: `always` - `history_summarizer_chunk.rs:1326-1338`. `always` because the function is pure.
 Fault/timing angle: none.
@@ -357,7 +357,7 @@ Falsifier or legal witness: Falsifier: `classify("")` panics. Legal witness: `cl
 ### il-unknown-tool-never-dropped-deduped-or-edit-marked
 
 Type: safety
-Reachability: explicit-config-only - the tier lookup (`sel.rs:749-755`) runs for every arc on the fold path (`transform.rs:4142`), and `select_supersession` (`sel.rs:630`) runs there only with `smart_drops` set and an emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`, `:980`); see Reachability classes. The source labelled this record default-production.
+Reachability: explicit-config-only - the tier lookup (`sel.rs:749-755`) runs for every arc on the fold path (`transform.rs:4179`), and `select_supersession` (`sel.rs:630`) runs there only with `smart_drops` set and an emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`, `:980`); see Reachability classes. The source labelled this record default-production.
 Status: active
 Exercised: yes - `sel.rs:2828` `identical_calls_produce_no_dedup_decision_for_any_tool_name` runs two identical `mcp_foo` calls carrying `filePath` and `oldString` and asserts no decision, beside an `edit` positive control; `tv-tests:133` `an_unknown_tool_takes_every_default`.
 Guarantee: For an `Unknown` tool, selection never drops it as a zero-value meta tool, never deduplicates it, and never compresses it into an `edit_marker` by a class decision; its selection tier is 3 unless the name carries two `mcp_` prefixes over a tabled name, its display argument comes from the generic key list, and `exit_code` is `None`.
@@ -390,7 +390,7 @@ Falsifier or legal witness: Falsifier: the gate exits 1 on the post-U4 tree beca
 ### il-dedup-removal-leaves-goldens-byte-identical
 
 Type: safety
-Reachability: explicit-config-only - the removed selector ran inside selection, which runs only on the fold path (`transform.rs:4142`; see Reachability classes), and the goldens pin selection, summarizer chunking, and compression output. The source labelled this record default-production.
+Reachability: explicit-config-only - the removed selector ran inside selection, which runs only on the fold path (`transform.rs:4179`; see Reachability classes), and the goldens pin selection, summarizer chunking, and compression output. The source labelled this record default-production.
 Status: active
 Exercised: yes - `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata` is empty, so U4 changed no golden; `crates/daemon/tests/selection_differential.rs:2248` `optimized_matches_frozen_reference_on_identical_calls` and the rest of the differential pass against a reference without dedup.
 Guarantee: Removing `DEDUP_SAFE_TOOLS`, `select_tool_dedup`, `dedup_name`, and the mirrored differential constants changed no byte of `selection-golden.json`, `differential-golden.json`, `history_summarizer-chunk-golden.json`, or `compression-fidelity.json`, because no tool either harness sends was in the dedup list.

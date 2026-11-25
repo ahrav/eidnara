@@ -353,7 +353,7 @@ Required faults and enabling state: A route bound with memory on, then a reload
 that turns it off (and the reverse), then a pass and a wrapup.
 Confidence: medium -
 [evidence](evidence/uo-consent-gate-source-is-the-route-frozen-config.md). bind
-freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13694-13704`);
+freezes `effective_config` into the binding (`crates/daemon/src/lib.rs:13706-13716`);
 wrapup reads the live config (`prepare_wrapup_fire`
 (`crates/daemon/src/lib.rs:6121`)). R14 applied: the config seam is
 `SessionBinding.config` versus `effective_config` at the two call sites.
@@ -368,10 +368,10 @@ Open questions:
 - Lead L5: the pass and the wrapup read consent from different sources. Owner:
   daemon owner (needs human input).
 - Gap G4: the summarizer reattach path reads `memory_enabled` from the live
-  effective config (`crates/daemon/src/lib.rs:5310`, used at
-  `crates/daemon/src/lib.rs:5462`), a third consent source beside the frozen
+  effective config (`crates/daemon/src/lib.rs:5321`, used at
+  `crates/daemon/src/lib.rs:5473`), a third consent source beside the frozen
   binding and the live wrapup config; the fire path states the frozen-config
-  rule in its own comment (`crates/daemon/src/lib.rs:5992`). Recorded, not
+  rule in its own comment (`crates/daemon/src/lib.rs:6003`). Recorded, not
   fixed; whether the reattach should follow the frozen config is an owner
   decision (needs human input).
 
@@ -545,9 +545,9 @@ Required faults and enabling state: A session with captured sources; the
 Confidence: high -
 [evidence](evidence/uo-session-delete-retires-kernel-sources-before-memory-rows-under-the-capture-gate.md).
 handler `handle_session_delete_value` (`crates/daemon/src/lib.rs:7067`); gate
-`crates/daemon/src/lib.rs:2830`; Kernel step `retire_captured_sources`
+`crates/daemon/src/lib.rs:2831`; Kernel step `retire_captured_sources`
 (`crates/daemon/src/lib.rs:7030-7034`); memory delete
-`crates/daemon/src/lib.rs:7107`.
+`crates/daemon/src/lib.rs:7118`.
 Existing check:
 `session_delete_retires_captured_sources_and_a_retry_recovers_a_stop_between_stores`
 (`crates/daemon/src/source_capture_tests.rs:1575`);
@@ -762,7 +762,7 @@ Confidence: high -
 [evidence](evidence/uo-review-reads-authorize-by-bearer-and-project-binding-not-owner.md).
 `kernel_route_scope` (`crates/daemon/src/kernel_routes/mod.rs:422`);
 `bind_review` (`crates/daemon/src/memory_reviewer/wire.rs:203`);
-`crates/daemon/src/lib.rs:279`.
+`crates/daemon/src/lib.rs:280`.
 Existing check:
 `review_operations_are_disabled_without_module_authority_and_list_and_read_receipts_under_it`
 (`crates/daemon/tests/memory_reviewer_wire.rs:15`);
@@ -1322,7 +1322,7 @@ settle step checks the session's live records once per committed pass on a
 memory-enabled route (`use_outcomes_to_touch`
 (`crates/daemon/src/lib.rs:9966`)) and, when one needs the update, makes it on a
 scoped thread beside the response build that the settle joins before the
-response returns (`crates/daemon/src/lib.rs:10267`, `touch_use_outcomes`
+response returns (`crates/daemon/src/lib.rs:10279-10298`, `touch_use_outcomes`
 (`crates/daemon/src/lib.rs:10000`)), within what remains of the pass's Kernel
 wait (`PassWriteBudget::spend`, `crates/daemon/src/use_outcome_writer.rs:395-402`); a pass that handed its
 serve to a tracked job leaves the touch to that job, which checks and updates

@@ -1544,9 +1544,9 @@ the 256 sessions that recorded a path last and until it restarts; a path
 the store already holds for the session then takes one of a pass's eight
 places once more, and its write replays. At most four passes' records
 are written at once, a write that waits for its turn among them. A write
-first takes the gate that capture's publications and `session.delete`
-take. Once it holds the gate, the paths of the pass share one five-second
-deadline for the Kernel's writer and are committed one by one: a path
+that finds the Kernel ready takes the gate that capture's publications and
+`session.delete` take. Once it holds the gate, the paths of the pass share
+one five-second deadline for the Kernel's writer and are committed one by one: a path
 whose commit that deadline ends or the Kernel refuses stays unrecorded,
 the paths committed before it stay recorded, and the paths after it are
 tried under the same deadline. A pass that finds four being written, a

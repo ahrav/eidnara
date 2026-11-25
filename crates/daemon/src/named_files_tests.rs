@@ -1097,6 +1097,77 @@ async fn the_element_lists_only_rows_of_the_recorders_source_kind() {
     assert_eq!(delivered_paths(&handler, &project, "reader"), [NOTES]);
 }
 
+/// Among `named-files` rows with the recorder's source kind, source id, and decision kind,
+/// a record requires `used_ms` in its rationale. A pass's composition stays available and
+/// lists the files of the records alone.
+#[tokio::test]
+async fn a_row_with_the_recorders_fields_and_another_rationale_is_no_record() {
+    let (handler, _dir, project) =
+        project_with(&[(NOTES, BODY), ("docs/plan.md", "Plan.\n")]).await;
+    let store = handler.kernel.kernel_store().unwrap();
+    let binding = session_binding(&project, "reader");
+    let bound = &binding.kernel_project;
+    let id = "nfu_another_rationale";
+    store
+        .commit(kernel_route_fixtures::intent(id), |envelope| {
+            kernel_route_fixtures::ensure_domain(envelope, "named-files")?;
+            let (mut ready, mut domains, mut refusal) = (false, HashSet::new(), None);
+            kernel_routes::commit::ensure_scope(
+                envelope,
+                bound,
+                &mut ready,
+                &mut domains,
+                &mut refusal,
+            )?;
+            let mut spec = kernel_route_fixtures::decision_spec_in_domain(
+                id,
+                &bound.scope_id(),
+                "named-files",
+                "named_file_use",
+                "docs/plan.md",
+            );
+            spec.source_kind = named_files::SOURCE_KIND.to_string();
+            spec.source_id = "named_file_use".to_string();
+            spec.payload.rationale =
+                json!({"source": "named_file_use", "session": "s1"}).to_string();
+            envelope.insert_decision(spec)?;
+            kernel_routes::commit::admit(
+                envelope,
+                id,
+                (
+                    kernel::SourceClass::ModelInference,
+                    kernel::TaintClass::AssistantInference,
+                ),
+            )?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(stored_paths(&handler, &project), ["docs/plan.md"]);
+    let read = canonical_memory::read_project_memory(
+        &handler.kernel,
+        bound,
+        "reader",
+        binding.config.memory_budget_tokens,
+    );
+    assert!(
+        matches!(read, canonical_memory::CanonicalMemoryRead::Available(_)),
+        "the composition is available"
+    );
+    assert!(delivered_lines(&handler, &project, "reader").is_empty());
+    named_files::record(
+        &store,
+        bound,
+        "s2",
+        NOTES,
+        1_000,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+    let lines = delivered_lines(&handler, &project, "reader");
+    assert_eq!(paths_of(&lines), [NOTES]);
+    assert!(lines[0].contains("1 earlier session,"), "{lines:?}");
+}
+
 /// A summarizer firing composes its prompt's block from the project's facts, whether the
 /// pass read a block for its messages or the firing reads its own: the prompt holds the
 /// project's rule and no named file, while the pass's own read lists the file.
