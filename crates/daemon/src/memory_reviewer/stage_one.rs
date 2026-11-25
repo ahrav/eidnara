@@ -28,12 +28,13 @@ pub enum Writer {
 }
 
 impl Writer {
-    /// Who a memory's statement says said it: memory capture opens a statement with its writer.
+    /// Who a memory's statement says said it: memory capture opens a statement with its writer's label and `: `.
     pub fn of_statement(statement: &str) -> Self {
         let [user, assistant] = crate::memory_capture::STATEMENT_WRITERS;
-        if statement.starts_with(user) {
+        let opens_with = |label| crate::memory_capture::after_label(statement, label).is_some();
+        if opens_with(user) {
             Self::User
-        } else if statement.starts_with(assistant) {
+        } else if opens_with(assistant) {
             Self::Assistant
         } else {
             Self::Unrecorded
@@ -286,7 +287,7 @@ struct WireAnswers {
 }
 
 impl ChatAnswers {
-    /// The answers of `text`: one JSON object with the four members, alone or inside one code fence. `None` for any other text, such as an answer cut at the output cap, prose, or a value outside a question's closed set.
+    /// The answers of `text`: one JSON object with the four members, alone or inside one code fence. A member beside the four is passed over, since the four answers read the same with it. `None` for any other text, such as an answer cut at the output cap, prose, a missing member, or a value outside a question's closed set.
     pub fn parse(state: &ReviewState, text: &str) -> Option<Self> {
         let wire: WireAnswers = serde_json::from_str(unfenced(text)).ok()?;
         Some(Self {
@@ -611,6 +612,13 @@ pub(super) mod tests {
             None,
             "an id outside the state names no reference"
         );
+        let with_a_fifth_member = r#"{"strongest":"ref-3","relation":"adds","changes":"no","work_ended":"no","explanation":"The later message adds a rule."}"#;
+        let parsed = ChatAnswers::parse(&state, with_a_fifth_member).expect("the four answers");
+        assert_eq!(
+            (parsed.changes, parsed.relation, parsed.work_ended),
+            (Verdict::No, Relation::Adds, Verdict::No),
+            "a member beside the four leaves the four answers as written"
+        );
         for malformed in [
             "",
             "The later message replaces the rule.",
@@ -688,6 +696,14 @@ pub(super) mod tests {
             Writer::of_statement("Deploy from main."),
             Writer::Unrecorded
         );
+        // The attribution is the label and its `: `, as capture writes it; prose that opens with the label's words names no writer.
+        for prose in [
+            "User stated requirements are stored in config.",
+            "Assistant reported builds live under dist.",
+            "User stated",
+        ] {
+            assert_eq!(Writer::of_statement(prose), Writer::Unrecorded, "{prose}");
+        }
     }
 
     #[test]

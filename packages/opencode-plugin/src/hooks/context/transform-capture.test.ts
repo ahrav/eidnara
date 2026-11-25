@@ -13,6 +13,7 @@ import {
     historyDigestsEqual,
     inspectReferenceableMessages,
     type MessageContentSnapshot,
+    ReferenceableAllowance,
     readOwnDataProperty,
     rootArrayRejection,
     snapshotFieldsEqual,
@@ -2357,5 +2358,103 @@ describe("bounded capture sizing", () => {
         live[0] = shared;
         expect(capturedMessagesUnchanged(live, captured)).toBe(false);
         expect(messageMatchesContentSnapshot(shared, messageContentSnapshot(null))).toBe(false);
+    });
+});
+
+describe("referenceable allowance", () => {
+    const message = () => ({
+        role: "toolResult",
+        content: [{ type: "text", text: "exit 2" }],
+        details: { lines: [1, 2] },
+        isError: true,
+    });
+    const admits = (...values: unknown[]) => new ReferenceableAllowance().admits(...values);
+
+    it("admits plain records and refuses the values the walk refuses, running none of their code", () => {
+        expect(admits(message(), structuredClone(message()))).toBe(true);
+        expect(admits(null, "text", 1, true)).toBe(true);
+        expect(admits(Object.freeze(Object.assign(Object.create(null), message())))).toBe(true);
+        let runs = 0;
+        const run = () => {
+            runs += 1;
+            return "ran";
+        };
+        const refused: [string, () => unknown][] = [
+            [
+                "cycle",
+                () => {
+                    const value: Record<string, unknown> = message();
+                    value.self = value;
+                    return value;
+                },
+            ],
+            [
+                "depth",
+                () => {
+                    const value: Record<string, unknown> = message();
+                    let leaf = value;
+                    for (let level = 0; level < 300; level += 1) {
+                        leaf.next = {};
+                        leaf = leaf.next as Record<string, unknown>;
+                    }
+                    return value;
+                },
+            ],
+            [
+                "hole",
+                () => {
+                    const value = message();
+                    value.content.length = 2;
+                    return value;
+                },
+            ],
+            ["undefined item", () => ({ ...message(), content: [undefined] })],
+            [
+                "accessor",
+                () => Object.defineProperty(message(), "role", { get: run, enumerable: true }),
+            ],
+            ["proxy", () => new Proxy(message(), { get: run, ownKeys: run as never })],
+            ["toJSON", () => ({ ...message(), toJSON: run })],
+            ["class instance", () => Object.assign(new (class Row {})(), message())],
+            ["bigint", () => ({ ...message(), details: 1n })],
+            ["nonfinite number", () => ({ ...message(), details: Number.NaN })],
+        ];
+        for (const [label, build] of refused) {
+            expect([label, admits(build())]).toEqual([label, false]);
+            expect([label, admits(message(), build())]).toEqual([label, false]);
+        }
+        expect(runs).toBe(0);
+    });
+
+    it("draws every walk from one budget, the walk it refuses included", () => {
+        const walks = (budget: number, times: number): boolean[] => {
+            const allowance = new ReferenceableAllowance(budget);
+            return Array.from({ length: times }, () => allowance.admits(message()));
+        };
+        let spend = 1;
+        while (spend < 4096 && !walks(spend, 1)[0]) spend += 1;
+        expect(walks(spend, 1)).toEqual([true]);
+        expect(walks(spend - 1, 1)).toEqual([false]);
+        expect(walks(2 * spend, 3)).toEqual([true, true, false]);
+        // Two values in one call spend what two calls spend.
+        const pair = new ReferenceableAllowance(2 * spend);
+        expect([pair.admits(message(), message()), pair.admits(message())]).toEqual([true, false]);
+
+        // Sixty levels that each hold one child under two keys: 2^60 paths over 60 objects.
+        let shared: unknown = null;
+        for (let level = 0; level < 60; level += 1) shared = { left: shared, right: shared };
+        const descriptors = spyOn(Object, "getOwnPropertyDescriptor");
+        try {
+            const allowance = new ReferenceableAllowance(4096);
+            expect(allowance.admits(shared)).toBe(false);
+            const afterShared = descriptors.mock.calls.length;
+            expect(afterShared).toBeLessThan(1000);
+            // What is left of the budget pays for no further value.
+            expect(allowance.admits(message())).toBe(false);
+            expect(allowance.admits(new Array(2 ** 32 - 1))).toBe(false);
+            expect(descriptors.mock.calls.length - afterShared).toBeLessThan(8);
+        } finally {
+            descriptors.mockRestore();
+        }
     });
 });

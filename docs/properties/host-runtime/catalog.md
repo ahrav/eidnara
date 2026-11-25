@@ -74,7 +74,7 @@ portfolio evaluation under its own directory; every per-record evidence file liv
   composed component (ModelExecution, LocalEmbeddings, the reserved route class), on the host's own `Client`, or
   on the daemon's probe and CLI paths are `test-only` here and say which caller reclassifies
   them. Whether the `run`-default records should also move until the daemon lands is bias B1 in
-  [discovered-at-u3/portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md).
+  [discovered-at-u3/portfolio-evaluation.md](discovered-at-u3/portfolio-evaluation.md). Dated note, 2026-11-25, #1240: at this head the daemon's host binary calls `host_runtime::run` (`crates/daemon/src/bin/eidnara_host/serve.rs:1344`), opens the harness closure store (`crates/daemon/src/bin/eidnara_host/serve.rs:262`, `:872`, `:953`), captures its startup environment (`crates/daemon/src/bin/eidnara_host/serve.rs:1226`), and composes `ModelExecutionComponent` with a credential verifier when its startup envelope carries credentials or an AWS source (`crates/daemon/src/bin/eidnara_host/serve.rs:1043-1045`, `:1250-1259`), so every clause in this catalog, and in this part's evidence, existing-check, fault-map, and portfolio files, that says the daemon is scheduled for U4, that `run` is reached only from examples and a bench, that the closure store, the environment capture, or the credential verifier has no caller outside tests, or that names other `serve.rs` lines for those calls, is invalidated. The labels keep the definition in this bullet until the composed-component and daemon-path records are reclassified together.
 - Discovery at U3 for code the source catalogs did not cover (`model_execution/`, `local_embeddings/`, `harness_closure.rs`, `wire.rs`)
   is in the trailing "Discovered at U3" section; those records carry the status observed at discovery.
 
@@ -9949,8 +9949,8 @@ Open questions: None.
 ## Group E: paths nobody owns
 
 Two records on code that runs at startup and belongs to no test. The first is the
-harness closure store, 1,122 lines whose only two production constructions
-discard their error with `.ok()` in a file outside this crate. The second is the
+harness closure store, 1,122 lines whose production constructions, in a file outside this crate,
+drop the cause: one with `.ok()` and two by mapping every cause to one static reason. The second is the
 pre-publication drain, the path a handler takes when it initialized successfully
 and the host then never published a transport. Grouped because both are startup
 paths whose failure is invisible, and because in both cases lens A's own
@@ -9960,30 +9960,30 @@ footprint.
 ### rt-a-a-closure-store-open-failure-is-classified-not-swallowed
 
 Type: safety
-Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
-this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/model_execution_subprocess.rs:1111`, which opens a store to materialise a fixture
-closure), and `manifest_digest` is reached through the store and directly from
-`tests/harness_closure.rs:410-413`; the daemon that opens the store in production
-(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
-in the wave that lands it.
+Reachability: test-only - the daemon's host binary opens the store outside tests: the launcher's
+`prepare` (`crates/daemon/src/bin/eidnara_host/serve.rs:262`), `clear_selection_at` (`:872`), and
+`harness_backend` (`:953`). In this crate `HarnessClosureStore::open` is called from
+`crates/host-runtime/tests/harness_closure.rs` and `tests/model_execution_subprocess.rs:1111`, which
+opens a store to materialise a fixture closure. The label is retained under this catalog's definition
+of `default-production` (Provenance and scope) until the composed-component and daemon-path
+records are reclassified together.
 Status: active
 Exercised: not yet - `tests/harness_closure.rs` covers `open` succeeding and
 `validate`/`materialize` failing; no test exercises `open` failing on the
 production path
 Guarantee: A failure to open the harness closure store is reported as an `Err`
 whose `HarnessClosureError::detail` names its distinct cause, never as an `Ok`
-that looks like an absent store; when the daemon that opens the store in
-production lands, its startup classification must carry that cause forward
+that looks like an absent store; the daemon's host binary opens the store at startup
+(`crates/daemon/src/bin/eidnara_host/serve.rs:953`), and its startup classification must carry that cause forward
 rather than silently selecting a different execution backend.
 Check: `always` - for every failure `open` (`harness_closure.rs:531`) can take,
 an unnormalized path, an anchor that cannot be opened, a directory that cannot be
 created or opened, and a traversal failure (`open_or_create_store_path`,
 `:1043-1101`), assert the call returns `Err` and that `detail()` is the distinct
 string for that cause, so no two causes share a detail and none returns `Ok`.
-The host-startup half of the guarantee has no in-tree caller to assert against
-(`open` is called only from tests; `crates/daemon` is U4) and is deferred to the
-wave that lands it. `always` because every open failure must be classified; the
+The host-startup half of the guarantee has callers in the daemon's host binary
+(`crates/daemon/src/bin/eidnara_host/serve.rs:262`, `:872`, `:953`) and no check there; it is deferred to the
+reclassification of the daemon-path records. `always` because every open failure must be classified; the
 store's absence is a legitimate state, but an indistinguishable one is not.
 Fault/timing angle: none timing-related. The window is startup. `open` fails on a
 symlinked or non-owner-only ancestor, a wrong mode, a non-directory, or a
@@ -9995,8 +9995,8 @@ Required faults and enabling state: a
 group-writable, or owned by another uid. `tests/instance_security.rs` already
 builds hostile-path fixtures for the sibling walk in `instance.rs`.
 Confidence: medium - [evidence](evidence/rt-a-a-closure-store-open-failure-is-classified-not-swallowed.md).
-The `.ok()` at both sites and the distinct error strings are verified. Medium
-because the two call sites are in
+The `.ok()` at `serve.rs:953`, the one static reason at `serve.rs:262-263` and `:872-873`, and the distinct error strings are verified at this head. Medium
+because the call sites are in
 `crates/daemon/src/bin/eidnara_host/serve.rs`, outside this sub-part's
 footprint, so I read only their immediate context and did not trace what the
 downstream backend selection ultimately reports to an operator.
@@ -10242,13 +10242,13 @@ Open questions: None.
 ### harness-closure-manifest-digest-is-canonical
 
 Type: safety
-Reachability: test-only - `HarnessClosureStore::open` is called only from tests in
-this tree (`crates/host-runtime/tests/harness_closure.rs` and
-`tests/model_execution_subprocess.rs:1111`, which opens a store to materialise a fixture
-closure), and `manifest_digest` is reached through the store and directly from
-`tests/harness_closure.rs:410-413`; the daemon that opens the store in production
-(`crates/daemon`) is scheduled for U4 (`docs/properties/README.md:52`); reclassify
-in the wave that lands it.
+Reachability: test-only - the daemon's host binary opens the store outside tests
+(`crates/daemon/src/bin/eidnara_host/serve.rs:262`, `:872`, `:953`) and computes `manifest_digest` for a
+supplied closure (`crates/daemon/src/bin/eidnara_host/serve.rs:603`); the store computes it when it
+materializes a candidate (`crates/host-runtime/src/harness_closure.rs:665`), and
+`tests/harness_closure.rs:410-413` calls it directly. The label is retained under this catalog's
+definition of `default-production` (Provenance and scope) until the composed-component and
+daemon-path records are reclassified together.
 Status: active
 Exercised: yes - the committed fixture's digest is asserted, an independent canonical-JSON digest reproduced both the predecessor and the current value, a key-reordered copy of the fixture digests the same, and each manifest and node field is changed alone and shown to move the digest, with the validator-fixed fields shown to be refused.
 Guarantee: The manifest digest is SHA-256 over the manifest serialized as key-sorted, two-space-indented JSON, so any manifest with the same fields hashes the same regardless of field order, and the committed `pi-valid.json` fixture digests to `5386c200...f911`.
@@ -10263,7 +10263,7 @@ Open questions: None.
 ### credential-fingerprint-derives-from-the-product-domain
 
 Type: safety
-Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `ModelExecutionComponent::new_with_credentials` (`crates/host-runtime/src/model_execution/mod.rs:142`) installs one; its first caller is `tests/model_execution_protocol.rs:477`. `ModelExecutionComponent::new` (`crates/host-runtime/src/model_execution/mod.rs:129-139`) sets no verifier, so the default construction path skips the check (`crates/host-runtime/src/model_execution/mod.rs:357-369`). Reclassify when a production constructor installs the verifier.
+Reachability: test-only - the fingerprint comparison runs only when a verifier is installed, and only `ModelExecutionComponent::new_with_credentials` (`crates/host-runtime/src/model_execution/mod.rs:142`) installs one. The daemon's host binary calls it when its startup envelope carries credentials or an AWS source (`crates/daemon/src/bin/eidnara_host/serve.rs:1043-1045`, `:1250-1259`), and its first test caller is `tests/model_execution_protocol.rs:477`. `ModelExecutionComponent::new` (`crates/host-runtime/src/model_execution/mod.rs:129-139`) sets no verifier, so a host started with neither skips the check (`crates/host-runtime/src/model_execution/mod.rs:357-369`). The label is retained under this catalog's definition of `default-production` (Provenance and scope) until the ModelExecution records are reclassified together. The vector the code pins for this record's documented row is `c399334c...f651` (`crates/host-runtime/src/model_execution/subprocess.rs:3352-3370`), under the claim domain and canonicalization the #989 note above names; the `ecac831b...7e80` literal in the Guarantee is invalidated with the version-named clauses that note covers.
 Status: active
 Exercised: yes - the committed vector is asserted, an independent HMAC oracle reproduced it, and a campaign over generated keys, every harness-and-provider pair including both Pi aliases, and value shapes including a multibyte value and two non-UTF-8 byte values agrees with an in-test implementation of the documented derivation and yields distinct fingerprints for distinct rows; field-boundary pairs, including an empty name and an empty harness, are encoded apart by the pure encoder.
 Guarantee: The credential fingerprint is `HMAC(derive(connection_key, "eidnara-model-execution-credential-v3"), canonical_row)` where the canonical row is length-prefixed fields under canonicalization `harness-provider-name-length-value/1`; the committed vector for the documented inputs is `ecac831b...7e80`.
@@ -10335,7 +10335,7 @@ Existing check: The checks named above; unaudited.
 Impact: Orphaned model processes holding credentials.
 Open questions:
 
-- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3750`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
+- `supervisor_shutdown_reaps_group` discards the unresolved count `shutdown()` returns (`tests/model_execution_subprocess.rs:3782`), so it cannot refute a late kill; the cancel and delete variants can. Strengthen it or record the shutdown path as `partial`. (needs human input)
 
 ### model_execution-child-environment-carries-only-the-provider-row
 
@@ -10375,15 +10375,17 @@ Open questions: None.
 Type: safety
 Reachability: test-only - every Pi run loads the compiled-in hook as the last `--extension` after `--no-extensions` disables discovery, so the hook is the final `before_provider_request` handler on every provider request. The daemon's host binary constructs `PiBackend::new` when the Pi harness closure snapshot opens and its manifest names an interpreter and an entrypoint (`crates/daemon/src/bin/eidnara_host/serve.rs:984-1009`), so Pi runs reach the hook outside tests at this head. The label is retained until the ModelExecution records are reclassified together; the dated note for #1223 in the evidence record states that decision.
 Status: active
-Exercised: partial - a driver that registers a tampering handler ahead of the hook covers the OpenAI-style, Gemini-style, Bedrock-style, and mixed-spelling payloads plus one unrecognized shape under generation revision 1, and, with the temperature variable removed, an OpenAI-style and a Bedrock-style payload under revision 2; a second driver passes extension contexts whose model is marked `compat.supportsTemperature: false`, marked accepting, unmarked, unreadable, and absent, and refusing contexts whose payloads already carry a `temperature`; a third driver covers cache markers on user messages and on the system prompt in the Bedrock Converse, Anthropic Messages, and OpenAI-completions shapes, and user blocks that carry a marker beside other members; nothing runs the hook inside a real Pi process or covers a non-numeric environment value.
-Guarantee: The provider payload Pi sends carries exactly the output-token bound the `session.send` request admitted and, when the request admitted a temperature (every generation revision 1 request; a revision 2 request that names one), exactly that temperature: every recognized output-token spelling present on the payload, `generationConfig.maxOutputTokens`, and `inferenceConfig.maxTokens` are rewritten to the request's `max_output_tokens`; `temperature` follows it when admitted, is left untouched when a revision 2 request omits it, and is absent from every spelling the hook owns when the request's model carries `compat.supportsTemperature: false` in Pi's registry, so the model's native decoding policy applies; a user message leaves the hook with no provider cache marker, while every marker the provider placed on the system prompt stays, so only the system prompt can carry cache markers in a single-turn run; every unrelated field survives; and a payload with no recognized output-token field or a non-object payload fails the request rather than running uncapped.
-Check: `always` - for every payload the hook returns, each recognized output-token field equals the admitted bound; when `EIDNARA_MODEL_EXECUTION_TEMPERATURE` is set and the extension context's model does not carry `compat.supportsTemperature: false`, `temperature` equals it; when the model carries that flag, no `temperature` remains on the payload, in `generationConfig`, or in `inferenceConfig`; and otherwise no `temperature` field is written or removed; no content block of a user message carries a `cachePoint` or `cache_control` member, and every other member of its blocks is unchanged; every other field the hook does not own, the system prompt's cache marker included, is byte-identical to the input; and a payload with no recognized field throws. The rewrite is an invariant over every provider request, so one `always` covers the conjunction.
-Fault/timing angle: An earlier trusted extension leaves a larger limit in a second spelling, or a provider adds a wire family the hook does not recognize; either lets a provider default exceed the caller's budget. Under revision 2 with no admitted temperature, a temperature an earlier handler set survives by design; the hook owns only the output-token bound there.
-Required faults and enabling state: A payload touched by an earlier handler; a payload carrying two output-token spellings; a payload with no recognized spelling; a revision 2 request that omits temperature; a payload whose user messages and system prompt carry cache markers, as a `cachePoint` block in the Bedrock Converse shape and as a `cache_control` member in the Anthropic Messages and OpenAI-completions shapes; a user content block that carries a marker beside other members.
-Confidence: medium - [evidence](evidence/model_execution-payload-hook-owns-the-generation-controls.md). `pi_model_execution_hook_owns_generation_controls`, `pi_model_execution_hook_omits_temperature_for_registry_refusing_models`, and `pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt` (`crates/host-runtime/tests/model_execution_subprocess.rs`, `harness = false` runner) materialize the hook bytes from `PI_MODEL_EXECUTION_EXTENSION_BYTES` and drive them under Node or Bun.
+Exercised: partial - a driver that registers a tampering handler ahead of the hook covers the OpenAI-style, Gemini-style, Bedrock-style, and mixed-spelling payloads plus one unrecognized shape with a temperature admitted, and, with the temperature variable removed, an OpenAI-style and a Bedrock-style payload for a request that admits none; a second driver passes extension contexts whose model is marked `compat.supportsTemperature: false`, marked accepting, unmarked, unreadable, and absent, and refusing contexts whose payloads already carry a `temperature`; a third driver covers cache markers on user messages and on the system prompt in the Bedrock Converse, Anthropic Messages, and OpenAI-completions shapes, and user blocks that carry a marker beside other members; nothing runs the hook inside a real Pi process or covers a non-numeric environment value; the fail-closed clause is unexercised: the first driver observes the hook's throw on an unrecognized payload and on a non-object `inferenceConfig`, and no check observes a failed run under a runner that catches the throw, as Pi 0.80.2's does.
+Guarantee: The provider payload Pi sends carries exactly the output-token bound the `session.send` request admitted and, when the request admitted a temperature, exactly that temperature: every recognized output-token spelling present on the payload, `generationConfig.maxOutputTokens`, and `inferenceConfig.maxTokens` are rewritten to the request's `max_output_tokens`; `temperature` follows it when admitted, is left untouched when the request omits it, and is absent from every spelling the hook owns when the request's model carries `compat.supportsTemperature: false` in Pi's registry, so the model's native decoding policy applies; a user message leaves the hook with no provider cache marker, while every marker the provider placed on the system prompt stays, so only the system prompt can carry cache markers in a single-turn run; every unrelated field survives; and a payload with no recognized output-token field or a non-object payload fails the request rather than running uncapped.
+Check: `always` - for every payload the hook returns, each recognized output-token field equals the admitted bound; when `EIDNARA_MODEL_EXECUTION_TEMPERATURE` is set and the extension context's model does not carry `compat.supportsTemperature: false`, `temperature` equals it; when the model carries that flag, no `temperature` remains on the payload, in `generationConfig`, or in `inferenceConfig`; and otherwise no `temperature` field is written or removed; no content block of a user message carries a `cachePoint` or `cache_control` member, and every other member of its blocks is unchanged; every other field the hook does not own, the system prompt's cache marker included, is byte-identical to the input; and when the hook refuses a request (a payload with no recognized field, a non-object payload, a non-object `generationConfig` or `inferenceConfig`, a missing output-token variable, or an empty or non-finite generation-control variable), the run fails and Pi sends no provider request. The rewrite is an invariant over every provider request, so one `always` covers the conjunction.
+Fault/timing angle: An earlier trusted extension leaves a larger limit in a second spelling, or a provider adds a wire family the hook does not recognize; either lets a provider default exceed the caller's budget. With no admitted temperature, a temperature an earlier handler set survives by design; the hook owns only the output-token bound there.
+Required faults and enabling state: A payload touched by an earlier handler; a payload carrying two output-token spellings; a payload with no recognized spelling; a request that omits temperature; a payload whose user messages and system prompt carry cache markers, as a `cachePoint` block in the Bedrock Converse shape and as a `cache_control` member in the Anthropic Messages and OpenAI-completions shapes; a user content block that carries a marker beside other members.
+Confidence: medium - [evidence](evidence/model_execution-payload-hook-owns-the-generation-controls.md). `pi_model_execution_hook_owns_generation_controls`, `pi_model_execution_hook_omits_temperature_for_registry_refusing_models`, and `pi_model_execution_hook_keeps_cache_writes_to_the_system_prompt` (`crates/host-runtime/tests/model_execution_subprocess.rs`, `harness = false` runner) materialize the hook bytes from `PI_MODEL_EXECUTION_EXTENSION_BYTES` and drive them under Node or Bun. The fail-closed clause has no supporting evidence inside Pi; see Open questions.
 Existing check: The check named above; unaudited.
 Impact: A provider request runs with a token budget the caller did not admit, or with a temperature other than the one a request admitted, or a single-turn run pays a cache-write premium for an entry only a Pi retry reads.
-Open questions: None.
+Open questions:
+
+- Contract versus code: the Guarantee says a payload with no recognized output-token field or a non-object payload fails the request rather than running uncapped, and the Check requires a failed run with no provider request. The hook throws on those payloads, on a non-object `generationConfig` or `inferenceConfig`, on a missing output-token variable, and on an empty or non-finite generation-control variable (`crates/host-runtime/assets/pi-model_execution-extension.mjs:38-45`, `:141-145`, `:162-166`, `:173-177`). Pi 0.80.2's `emitBeforeProviderRequest` catches a handler's throw, reports it, and returns the payload as it stood (`pi-coding-agent/dist/core/extensions/runner.js:714-744`), so the request goes out without the admitted bound. The hook's plain-system check ends the child with a failing exit status (`crates/host-runtime/assets/pi-model_execution-extension.mjs:124-134`). Unresolved, needs the hook to end the child on these four checks and a check that runs the hook under a runner that catches a throw.
 
 ### local_embeddings-admission-boundaries-are-exact
 

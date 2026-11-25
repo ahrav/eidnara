@@ -532,7 +532,7 @@ enum SelectionStep {
     CapacityDeferred(String),
 }
 
-/// Whether a refusal clears on its own as pending jobs finish or expire. Only those refusals are worth re-offering a frozen page at the idle-poll cadence; the metadata quota is a ceiling for the store incarnation and the selection caps are cleared by slots, not jobs.
+/// Whether a refusal clears on its own as pending jobs finish or expire. Only those refusals are worth re-offering a frozen page at the idle-poll cadence; the metadata quota clears when the retirement sweep deletes jobs and pages a retention window old, and the selection caps are cleared by slots, not jobs.
 fn drains_as_jobs_finish(refusal: MemoryReviewerJobRefusal) -> bool {
     matches!(
         refusal,
@@ -629,7 +629,7 @@ impl MemoryClassifierScheduler {
                     now_ms,
                 ) {
                     Ok(frozen) => frozen,
-                    // Nothing was persisted, so holding the slot due would repeat the whole selection every idle poll; the cron slot selects from the same cursor once headroom returns, and the metadata quota never returns.
+                    // Nothing was persisted, so holding the slot due would repeat the whole selection every idle poll; the cron slot selects from the same cursor once headroom returns, and the metadata quota returns headroom only as jobs and pages retire.
                     Err(MemoryReviewerJobError::Refused(refusal)) => {
                         return self.complete_selection_slot(
                             store,
@@ -2712,7 +2712,7 @@ mod tests {
         let clock = ManualClock::at(T0 + 1_000);
         let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(&host).await.is_empty());
-        // An earlier job's recorded outcome, which no refusal may disturb; its permanent receipt charge stays in the quota.
+        // An earlier job's recorded outcome, which no refusal may disturb; its receipt charge stays in the quota until the job retires.
         let earlier = selection_page(2_000, 1, None).references[0]
             .causal_identity()
             .unwrap();
@@ -2767,7 +2767,7 @@ mod tests {
         *host.selections.lock().unwrap() = vec![Ok(selection_page(0, 2, Some("c")))];
         clock.advance(15 * MINUTE);
         let events = scheduler.tick(&host).await;
-        // The quota is a ceiling for the store incarnation, so the slot completes rather than holding the claim: the page stays frozen, no reference is written, and the cursor does not move.
+        // The quota clears only as jobs and pages retire, a retention window after they settle, so the slot completes rather than holding the claim: the page stays frozen, no reference is written, and the cursor does not move.
         assert!(
             matches!(&events[0], TickEvent::Ran { outcome: TaskRunOutcome::Ran { response }, .. } if response["ok"] == false && response["code"] == "memory_reviewer_selection_refused" && response["refusal"].as_str().unwrap().contains("quota")),
             "{events:?}"
@@ -2829,7 +2829,7 @@ mod tests {
         let clock = ManualClock::at(T0 + 1_000);
         let mut scheduler = MemoryClassifierScheduler::new(clock.shared());
         assert!(scheduler.tick(&host).await.is_empty());
-        // After the filler's receipt and allowance and the page's own permanent receipt, exactly the page's two jobs fit under the quota: the allowance the frozen page holds is released by the same transaction, so it must not count against them.
+        // After the filler's receipt and allowance and the page's own receipt charge, exactly the page's two jobs fit under the quota: the allowance the frozen page holds is released by the same transaction, so it must not count against them.
         let producer = ProducerBinding {
             producer: "filler".to_string(),
             firing_id: "f".to_string(),

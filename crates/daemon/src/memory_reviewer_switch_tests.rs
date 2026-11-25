@@ -377,7 +377,7 @@ impl Rig {
 
     /// The next session's block, or an empty string when the session receives none.
     async fn block(&self) -> String {
-        memory_auto_delivery_tests::delivered_block(&self.handler, THIRD, "s3")
+        memory_auto_delivery_tests::reviewer_rig_block(&self.handler, THIRD, "s3")
             .await
             .unwrap_or_default()
     }
@@ -1179,6 +1179,7 @@ async fn a_store_larger_than_one_selection_is_covered_over_successive_passes() {
     rig.worker.switched.walk_within(Walk {
         page_rows: 1,
         bound: 1,
+        ..Walk::PRODUCTION
     });
     rig.state_rules(&[THURSDAY, LINTER]).await;
     rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
@@ -1195,6 +1196,76 @@ async fn a_store_larger_than_one_selection_is_covered_over_successive_passes() {
         settled += rig.worker.pass(&CancellationToken::new()).await;
     }
     assert_eq!(settled, 2, "both statements were reviewed");
+    assert_eq!(rig.attempts().len(), 2);
+}
+
+/// A cancelled pass runs no claim catch-up: the catch-up reads the cancellation before its first slice and between slices, so a shutdown or a `drain` caller waits for one slice at most. The next pass publishes the claims.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_pass_runs_no_claim_catch_up() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    let claims = || {
+        let kernel = rig.handler.kernel.kernel_store().unwrap();
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + Duration::from_secs(5)),
+            Arc::default(),
+        );
+        let tip = kernel.tip_within_budget(&budget).unwrap();
+        kernel
+            .live_source_descriptors(
+                kernel::source_identity::OccurrenceClass::CanonicalClaims,
+                tip,
+                None,
+                std::num::NonZeroUsize::new(16).unwrap(),
+                &budget,
+            )
+            .unwrap()
+            .rows
+            .len()
+    };
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(rig.worker.pass(&cancelled).await, 0);
+    assert_eq!(claims(), 0, "the cancelled pass published no claim");
+    rig.worker.pass(&CancellationToken::new()).await;
+    assert_ne!(
+        claims(),
+        0,
+        "the next pass published the statement's claims"
+    );
+}
+
+/// A walk whose later-statement association would pass its step allowance ends at the last statement inside it, and the next selection continues after that statement. Here the allowance admits one statement a walk, and both statements are reviewed over successive passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_walk_the_association_allowance_ends_is_continued_by_the_next_pass() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.worker.switched.walk_within(Walk {
+        association_steps: 1,
+        ..Walk::PRODUCTION
+    });
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the formatter instead of the linter before every commit.",
+    )
+    .await;
+    rig.decides(&[KEEP, KEEP]);
+    let mut settled = Vec::new();
+    for _ in 0..8 {
+        settled.push(rig.worker.pass(&CancellationToken::new()).await);
+    }
+    assert_eq!(
+        settled.iter().sum::<usize>(),
+        2,
+        "both statements were reviewed: {settled:?}"
+    );
+    assert!(
+        settled.iter().all(|pass| *pass <= 1),
+        "one statement a walk: {settled:?}"
+    );
     assert_eq!(rig.attempts().len(), 2);
 }
 
@@ -1317,10 +1388,11 @@ async fn a_statement_replaced_in_part_stays_delivered_and_is_marked_contested() 
             ActivationState::Open,
             "{apply:?}"
         );
-        // A row's id and the dates of its contest belong to the rig, so the two modes are compared by the statements they deliver.
+        // A row's id and the dates of its contest belong to the rig, so the two modes are compared by the statements they deliver. A delivered statement's line opens with its memory id, which starts with `mem_`, and the statement follows the first `": "`.
         let mut statements: Vec<String> = block
             .lines()
             .filter_map(|line| line.split_once(": "))
+            .filter(|(id, _)| id.starts_with("mem_"))
             .map(|(_, statement)| {
                 statement
                     .split(" (stated ")
@@ -1364,6 +1436,50 @@ async fn a_revise_with_no_later_memory_leaves_the_statement_as_it_is() {
         );
         assert_eq!(rig.active_review_holds(), 0);
     }
+}
+
+/// The memory capture stored for the later message a `revise` cites is found wherever the store's descriptor order places it: the lookup reads the claim descriptors to their end, one walk after another. Here one walk examines a single descriptor and two statements are each replaced by a later statement of their own, so at most one of the two later memories lies in the first walk, and both statements are marked contested, each by its own later statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_memory_past_the_first_walk_contests_the_statement() {
+    const FORMATTER: &str = "Run the formatter instead of the linter before every commit.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later("later-2", 1_700_000_100_000, FORMATTER)
+        .await;
+    memory_auto_delivery_tests::capture(
+        &rig.handler,
+        SECOND,
+        "s2",
+        &[("later-1", "user", TUESDAY), ("later-2", "user", FORMATTER)],
+        |text, _| vec![memory_auto_delivery_tests::classed(text, "lasting")],
+    )
+    .await;
+    rig.worker.switched.walk_within(Walk {
+        page_rows: 1,
+        bound: 1,
+        ..Walk::PRODUCTION
+    });
+    rig.flagged(&[REVISE_CITING_LATER, REVISE_CITING_LATER]);
+    let mut settled = 0;
+    for _ in 0..64 {
+        settled += rig.worker.pass(&CancellationToken::new()).await;
+    }
+    assert_eq!(settled, 2, "both replaced statements were reviewed");
+    let block = rig.block().await;
+    for (replaced, later) in [(THURSDAY, TUESDAY), (LINTER, FORMATTER)] {
+        let line = block
+            .lines()
+            .find(|line| line.contains(replaced))
+            .unwrap_or_else(|| panic!("the replaced statement left the block: {block}"));
+        assert!(line.contains("; contested "), "{line}");
+        assert!(
+            line.contains(&format!("\"{}\"", stated(later))),
+            "the line quotes its own later statement: {line}"
+        );
+    }
+    assert_eq!(rig.active_review_holds(), 0);
 }
 
 /// A response the provider stopped itself settles the review on that request as the model declining: one request is made and the statement stays.
@@ -1672,6 +1788,58 @@ async fn contest_moves_a_contradicted_statement_from_the_block_to_labeled_search
     );
 }
 
+/// A proposal whose target `contest` disputed stays acceptable: the dispute is recorded as an admission of its own, the statement's last change is the one the proposal names, and the Kernel acceptance `review.accept` runs retires the statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_proposal_whose_target_contest_disputed_is_still_accepted() {
+    let rig = reviewed(ReviewApply::Contest).await;
+    assert_eq!(rig.active_review_holds(), 1);
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+    let identity = outcomes.outcomes[0].causal_identity.clone();
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let budget = kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now() + Duration::from_secs(5)),
+        Arc::default(),
+    );
+    let kernel_incarnation = kernel
+        .database_incarnation_id_within_budget(&budget)
+        .unwrap();
+    let memstore_incarnation = rig.store.memory_reviewer_store_incarnation().unwrap();
+    let selected = crate::memory_reviewer::settlement::read_selected_proposal(
+        &kernel,
+        &rig.store,
+        &root,
+        &identity,
+        crate::now_ms(),
+    )
+    .expect("the disputed proposal reads under its hold");
+    let accepted = crate::memory_reviewer::settlement::accept_selected_proposal(
+        &kernel,
+        rig.store
+            .lookup_memory_reviewer_receipt(&root, &identity)
+            .unwrap(),
+        (&kernel_incarnation, &memstore_incarnation),
+        &identity,
+        "reader-1",
+        &selected.reference,
+        &selected.proposal.target,
+    )
+    .expect("the Kernel accepts the proposal after the dispute");
+    assert!(
+        matches!(
+            accepted.settlement.effect,
+            kernel::SettlementEffect::Retired { .. }
+        ),
+        "{:?}",
+        accepted.settlement.effect
+    );
+    assert_eq!(
+        rig.search().await,
+        [(stated(LINTER), "visible".to_string())],
+        "the retired statement left explicit search"
+    );
+}
+
 /// In `apply` mode the worker accepts the proposal through the Kernel acceptance: the retired statement leaves the block and explicit search, and the retained one stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn apply_retires_a_replaced_statement_from_the_block_and_from_search() {
@@ -1720,6 +1888,49 @@ async fn an_answer_from_another_model_is_withheld_and_closes_review() {
         // The latch holds: a later pass sends nothing.
         assert_eq!(rig.drain().await, 0);
         assert_eq!(rig.attempts().len(), 2);
+    }
+}
+
+/// At either review stage, a host-reported `auth_required` failure counts as an attempt and keeps review closed on the next pass. Previously delivered statements remain visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_credential_the_host_reports_refused_closes_review() {
+    use crate::history_summarizer_producer::{ErrorClass, ErrorClassification};
+    use host_runtime::model_execution::protocol::ErrorScope;
+    let refused = || {
+        Err(HistorySummarizerProducerError::RunFailed {
+            run_id: "run".to_string(),
+            detail: "provider returned 401".to_string(),
+            classification: Some(ErrorClassification {
+                class: ErrorClass::AuthRequired,
+                retry_after_secs: None,
+                scope: ErrorScope::Model,
+            }),
+            class_field_present: true,
+        })
+    };
+    for (requests, stage) in [(1, "stage 1"), (2, "the proposal request")] {
+        let rig = Rig::open(ReviewApply::Apply).await;
+        rig.state_rules(&[THURSDAY, LINTER]).await;
+        rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+            .await;
+        if requests == 2 {
+            rig.decides(&[FLAG]);
+        }
+        rig.state.await_results.lock().unwrap().push_back(refused());
+        assert_eq!(rig.drain().await, 0, "{stage}");
+        assert_eq!(rig.attempts().len(), requests, "{stage}");
+        assert_eq!(
+            rig.status.activation_state(),
+            ActivationState::Closed("unavailable"),
+            "{stage}"
+        );
+        let root = rig.project.to_string_lossy().to_string();
+        let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+        assert!(outcomes.outcomes.is_empty(), "{stage}");
+        let block = rig.block().await;
+        assert!(block.contains(&stated(THURSDAY)), "{block}");
+        assert_eq!(rig.drain().await, 0, "{stage}");
+        assert_eq!(rig.attempts().len(), requests, "{stage}");
     }
 }
 
@@ -1801,6 +2012,112 @@ async fn a_project_without_the_switch_is_left_unreviewed() {
     );
 }
 
+/// Reviewer selection tests use this fixture to model direct Kernel producers.
+fn commit_decision(rig: &Rig, object: &str, domain_id: &str, source_kind: &str, summary: &str) {
+    use sha2::{Digest, Sha256};
+    let key = object;
+    rig.handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .commit(
+            kernel::CommitIntent {
+                producer: "memory_reviewer-switch-test".to_string(),
+                operation_key: key.to_string(),
+                request_digest: format!("{:x}", Sha256::digest(key.as_bytes())),
+                actor: "test".to_string(),
+                cause: "proof".to_string(),
+            },
+            |envelope| {
+                let (_, scope) = kernel_route_fixtures::ensure_route_scope(envelope, &rig.project)?;
+                kernel_route_fixtures::ensure_domain(envelope, domain_id)?;
+                envelope.insert_decision(kernel::DecisionSpec {
+                    source_kind: source_kind.to_string(),
+                    ..kernel_route_fixtures::decision_spec_in_domain(
+                        object, &scope, domain_id, "lasting", summary,
+                    )
+                })?;
+                envelope.record_admission(kernel::AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(object.to_string()),
+                    source_class: Some(kernel::SourceClass::ExplicitUser),
+                    taint_class: Some(kernel::TaintClass::UserExplicit),
+                    event: kernel::AdmissionEvent {
+                        kind: kernel::EventKind::Other,
+                        trigger_object_id: None,
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: "test".to_string(),
+                    },
+                })?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+}
+
+/// Reviewer selection skips both the architecture decision and the verifier attestation even though their summaries share terms with the later user statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_that_is_not_a_stored_memory_is_left_unreviewed() {
+    let rig = Rig::open(ReviewApply::Apply).await;
+    commit_decision(
+        &rig,
+        "decision-architecture",
+        "architecture",
+        "repo",
+        THURSDAY,
+    );
+    let attestation =
+        crate::attestation_verifier::attest::Identity::of("decision-attested", "oid").object_id;
+    commit_decision(
+        &rig,
+        &attestation,
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        crate::attestation_verifier::classify::VERIFIER_SOURCE_KIND,
+        "Release branches are cut from main on the Thursday of every week.",
+    );
+    rig.user_states_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.flagged(&[RETIRE_CITING_LATER, RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 0);
+    assert_eq!(
+        rig.attempts().len(),
+        0,
+        "no request carried either decision"
+    );
+}
+
+/// Selection uses publication order; the run counts later references by message time. A message written before the memory's source but published after the memory qualifies for review and contributes zero later references.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_written_before_the_source_is_kept_without_a_request() {
+    use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
+    let rig = Rig::open(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("earlier-1", STATED_AT_MS - 60_000, TUESDAY)
+        .await;
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    assert!(rig.attempts().is_empty(), "no request was made");
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16)
+        .unwrap()
+        .outcomes;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].terminal,
+        MemoryReviewerReceiptTerminal::Abstained
+    );
+    assert_eq!(
+        outcomes[0].abstained_reason,
+        Some(AbstainReason::ExpectationChanged)
+    );
+    assert!(!outcomes[0].selected);
+    assert_eq!(rig.active_review_holds(), 0);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert_eq!(rig.drain().await, 0);
+    assert!(rig.attempts().is_empty());
+}
+
 /// A job is named by the newest later source it was shown. When an older source ages out of the store's candidate rows, the memory's evidence is a part of what it was reviewed on, and neither the worker nor one started afterwards reviews it again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn evidence_that_ages_out_starts_no_second_review() {
@@ -1839,6 +2156,29 @@ async fn evidence_that_ages_out_starts_no_second_review() {
     );
     assert_eq!(rig.attempts().len(), 1);
     assert_eq!(rig.status.activation_state(), ActivationState::Open);
+}
+
+/// A candidate row starts a review while it is a row the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before the selection's tip. A row of an earlier matcher or of another Kernel incarnation waits for the sweep and starts no review.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_candidate_row_of_another_matcher_or_incarnation_starts_no_review() {
+    for (column, earlier) in [
+        ("matcher_digest", "0".repeat(64)),
+        ("kernel_incarnation_id", "0".repeat(32)),
+    ] {
+        let rig = Rig::open(ReviewApply::Contest).await;
+        rig.state_rules(&[THURSDAY]).await;
+        rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+            .await;
+        rig.store
+            .execute_tag_sql_for_test(&format!(
+                "UPDATE contradiction_candidates SET {column} = '{earlier}'"
+            ))
+            .unwrap();
+        assert_eq!(rig.store.candidate_sweep_page(0, 1_000).unwrap().len(), 1);
+        rig.decides(&[KEEP]);
+        assert_eq!(rig.drain().await, 0, "{column}");
+        assert_eq!(rig.attempts().len(), 0, "{column}");
+    }
 }
 
 /// A statement a review marked contested was reviewed on everything recorded up to that mark. Two later statements about its two rules bring it to one review, the mark names one of them, and the other starts no further review: the statement's line stays as that review left it.

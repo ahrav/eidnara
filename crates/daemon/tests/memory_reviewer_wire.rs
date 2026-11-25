@@ -7,7 +7,7 @@ use kernel::ReviewProposal;
 use serde_json::{Value, json};
 use support::kernel_daemon::{KernelDaemon, envelope};
 use support::memory_reviewer_publish::{
-    PROJECT, abstain, activate_module_authority, begin_job, commit_memory_domain,
+    PROJECT, abstain, activate_module_authority, begin_job, begin_job_again, commit_memory_domain,
     kernel_incarnation, now_ms, proposal, publish, publish_proposal,
 };
 
@@ -404,16 +404,8 @@ fn write_owner_record(home: &std::path::Path, name: &str, value: &Value) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-/// `review.accept` end to end: `disabled` until the owner's acceptance record names the live store pair, whatever the disclosure record says; then the selected create proposal settles through the Kernel into one decision, a second operation key replays the same settlement, the first key reused for another target conflicts, removing the record stops acceptance again, and bodies are strict.
-#[tokio::test]
-async fn review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record() {
-    let daemon = KernelDaemon::start().await;
-    let project = daemon.project().to_path_buf();
-    let store = daemon.memory_store().unwrap();
-    let kernel = daemon.store();
-    let digest = daemon.project_digest();
-    let generation = activate_module_authority(&store, &project);
-    commit_memory_domain(&kernel);
+/// Commits the bound project's scope as the kernel routes materialize it, in their own domain, and returns its id.
+fn commit_project_scope(kernel: &kernel::KernelStore, digest: &str) -> String {
     let scope = format!("project:{digest}");
     kernel
         .commit(
@@ -446,7 +438,7 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
                     terms: vec![kernel::ScopeTermSpec {
                         dimension: kernel::Dimension::Project.as_str().to_string(),
                         operator: "exact".to_string(),
-                        exact_value: Some(digest.clone()),
+                        exact_value: Some(digest.to_string()),
                         ..kernel::ScopeTermSpec::default()
                     }],
                 })?;
@@ -454,6 +446,20 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
             },
         )
         .unwrap();
+    scope
+}
+
+/// `review.accept` end to end: `disabled` until the owner's acceptance record names the live store pair, whatever the disclosure record says; then the selected create proposal settles through the Kernel into one decision, a second operation key replays the same settlement, the first key reused for another target conflicts, removing the record stops acceptance again, and bodies are strict.
+#[tokio::test]
+async fn review_accept_applies_the_selected_proposal_only_under_the_owners_acceptance_record() {
+    let daemon = KernelDaemon::start().await;
+    let project = daemon.project().to_path_buf();
+    let store = daemon.memory_store().unwrap();
+    let kernel = daemon.store();
+    let digest = daemon.project_digest();
+    let generation = activate_module_authority(&store, &project);
+    commit_memory_domain(&kernel);
+    let scope = commit_project_scope(&kernel, &digest);
     let kernel_incarnation = kernel_incarnation(&kernel);
     let now = now_ms();
     let begun = begin_job(
@@ -485,17 +491,50 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         },
     );
     let target = serde_json::to_value(&created.target).unwrap();
-    let accept = |key: &str, target: &Value| {
+    let read = daemon
+        .call(envelope(
+            "review.read",
+            &project,
+            json!({ "causal_identity": begun.job.causal_identity }),
+        ))
+        .await;
+    let reference = read["reference"].clone();
+    assert!(reference.is_object(), "{read}");
+    let accept_naming = |key: &str, reference: &Value, target: &Value| {
         envelope(
             "review.accept",
             &project,
             json!({
                 "causal_identity": begun.job.causal_identity,
                 "operation_key": key,
+                "reference": reference,
                 "target": target,
             }),
         )
     };
+    let accept = |key: &str, target: &Value| accept_naming(key, &reference, target);
+    // A reference that differs from the read's in any one member names another proposal than the receipt selects.
+    let other_references: Vec<Value> = [
+        ("database_incarnation_id", json!("0".repeat(32))),
+        (
+            "candidate_id",
+            json!(
+                kernel::provisional_result_identity(
+                    &begun.job.causal_identity,
+                    begun.receipt.generation + 1
+                )
+                .candidate_id
+            ),
+        ),
+        ("payload_digest", json!("0".repeat(64))),
+    ]
+    .into_iter()
+    .map(|(member, value)| {
+        let mut other = reference.clone();
+        other[member] = value;
+        other
+    })
+    .collect();
     let disabled = json!({ "kind": "terminal", "terminal": "disabled" });
 
     // A disclosure record admits no acceptance; only the acceptance record does.
@@ -525,6 +564,13 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         disabled,
         "a record for another store pair is closed"
     );
+    assert_eq!(
+        daemon
+            .call(accept_naming("caller-1", &other_references[1], &target))
+            .await,
+        disabled,
+        "a closed gate answers before the reference is judged"
+    );
     assert_eq!(kernel.tip().unwrap(), tip, "a closed gate writes nothing");
     write_owner_record(
         daemon.data_home(),
@@ -532,11 +578,44 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         &record(&kernel_incarnation),
     );
 
+    for other in &other_references {
+        assert_eq!(
+            daemon.call(accept_naming("caller-0", other, &target)).await,
+            json!({ "kind": "terminal", "terminal": "not_selected" }),
+            "{other}"
+        );
+    }
+    assert_eq!(
+        kernel.tip().unwrap(),
+        tip,
+        "an acceptance that names another proposal writes nothing"
+    );
+
+    let read = || {
+        daemon.call(envelope(
+            "review.read",
+            &project,
+            json!({ "causal_identity": begun.job.causal_identity }),
+        ))
+    };
+    let active_holds = || kernel.list_active_review_holds(now_ms(), 16).unwrap().len();
+    assert_eq!(read().await["kind"], json!("proposal"));
+    assert_eq!(
+        active_holds(),
+        1,
+        "the refused acceptances left the proposal's review hold"
+    );
     let settled = daemon.call(accept("caller-1", &target)).await;
     assert_eq!(
         (&settled["kind"], &settled["replayed"]),
         (&json!("settled"), &json!(false)),
         "{settled}"
+    );
+    // The settlement is the decision the review hold waited for: the hold ends with the acceptance, its place in the project's allowance returns, and the proposal reads as a review that ended.
+    assert_eq!(active_holds(), 0, "the acceptance ended the review hold");
+    assert_eq!(
+        read().await,
+        json!({ "kind": "terminal", "terminal": "review_expired" })
     );
     let settlement = &settled["settlement"];
     assert_eq!(settlement["action"], json!("create"));
@@ -591,7 +670,7 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
     let unknown = envelope(
         "review.accept",
         &project,
-        json!({ "causal_identity": "b".repeat(64), "operation_key": "k".repeat(128), "target": target }),
+        json!({ "causal_identity": "b".repeat(64), "operation_key": "k".repeat(128), "reference": reference, "target": target }),
     );
     assert_eq!(
         daemon.call(unknown).await,
@@ -604,8 +683,7 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         subject: settlement["proposal_id"].as_str().unwrap().to_string(),
         generation: 1,
     };
-    let hold = kernel.lookup_review_hold(&review, now).unwrap().unwrap();
-    kernel.release_review_hold(&hold.hold_id, &review).unwrap();
+    assert_eq!(kernel.lookup_review_hold(&review, now).unwrap(), None);
     let after_hold = daemon.call(accept("caller-5", &target)).await;
     assert_eq!(
         (&after_hold["replayed"], &after_hold["settlement"]),
@@ -632,15 +710,18 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
 
     // Bodies are strict.
     for body in [
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "target": target, "extra": 1 }),
-        json!({ "causal_identity": "z", "operation_key": "k", "target": target }),
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "", "target": target }),
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "with space", "target": target }),
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k" }),
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k".repeat(129), "target": target }),
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "ké", "target": target }),
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "target": { "kind": "staged_candidate", "candidate_id": "c", "extra": 1 } }),
-        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "target": target, "v": 1 }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "reference": reference, "target": target, "extra": 1 }),
+        json!({ "causal_identity": "z", "operation_key": "k", "reference": reference, "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "", "reference": reference, "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "with space", "reference": reference, "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "reference": reference }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k".repeat(129), "reference": reference, "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "ké", "reference": reference, "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "reference": reference, "target": { "kind": "staged_candidate", "candidate_id": "c", "extra": 1 } }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "reference": reference, "target": target, "v": 1 }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "reference": { "candidate_id": reference["candidate_id"], "payload_digest": reference["payload_digest"] }, "target": target }),
+        json!({ "causal_identity": begun.job.causal_identity, "operation_key": "k", "reference": { "database_incarnation_id": reference["database_incarnation_id"], "candidate_id": reference["candidate_id"], "payload_digest": reference["payload_digest"], "extra": 1 }, "target": target }),
     ] {
         match daemon
             .outcome(envelope("review.accept", &project, body.clone()))
@@ -650,6 +731,140 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
             other => panic!("{body}: {other:?}"),
         }
     }
+}
+
+/// An acceptance names the proposal its caller read. A job retired ninety days after its queue deadline frees its causal identity, and a later job of the same inputs selects another proposal at the same target; an acceptance built from the read of the retired job's proposal answers `not_selected` and writes nothing, and an acceptance built from the read of the later proposal settles it.
+#[tokio::test]
+async fn an_accept_built_from_a_retired_jobs_read_is_not_selected_once_a_later_job_holds_the_identity()
+ {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    let daemon = KernelDaemon::start().await;
+    let project = daemon.project().to_path_buf();
+    let store = daemon.memory_store().unwrap();
+    let kernel = daemon.store();
+    let digest = daemon.project_digest();
+    let generation = activate_module_authority(&store, &project);
+    commit_memory_domain(&kernel);
+    commit_project_scope(&kernel, &digest);
+    let kernel_incarnation = kernel_incarnation(&kernel);
+    write_owner_record(
+        daemon.data_home(),
+        daemon::memory_reviewer::activation::ACCEPTANCE_RECORD,
+        &json!({
+            "schema": 1,
+            "kernel_incarnation": kernel_incarnation,
+            "memstore_incarnation": store.memory_reviewer_store_incarnation().unwrap(),
+            "evidence": "owner review of the actual-evidence record",
+        }),
+    );
+    let now = now_ms();
+    let first = begin_job(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        generation,
+        1,
+        now,
+    );
+    let identity = first.job.causal_identity.clone();
+    let memory_store::memory_reviewer_jobs::ReviewTarget::StagedSubject { candidate_id, .. } =
+        &first.job.target
+    else {
+        panic!("{:?}", first.job.target)
+    };
+    let subject_target = kernel::ProposalTarget::StagedCandidate {
+        candidate_id: candidate_id.clone(),
+    };
+    publish_proposal(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        &first,
+        now,
+        ReviewProposal {
+            target: subject_target.clone(),
+            ..proposal()
+        },
+    );
+    let read = || {
+        envelope(
+            "review.read",
+            &project,
+            json!({ "causal_identity": identity }),
+        )
+    };
+    let read_first = daemon.call(read()).await;
+    assert_eq!(read_first["kind"], json!("proposal"), "{read_first}");
+
+    // The sweep deletes the settled job ninety days after its queue deadline, and its identity names no job.
+    let retire_at = first.job.queue_deadline_ms + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    store.expire_memory_reviewer_work(retire_at).unwrap();
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        daemon.call(read()).await,
+        json!({ "kind": "terminal", "terminal": "not_selected" })
+    );
+
+    // The same inputs enqueue again and the later run selects another proposal at the same target.
+    let second = begin_job_again(&store, &kernel_incarnation, generation, &first.job, now);
+    assert!(second.receipt.generation > first.receipt.generation);
+    publish_proposal(
+        &kernel,
+        &store,
+        &digest,
+        &kernel_incarnation,
+        &second,
+        now,
+        ReviewProposal {
+            target: subject_target,
+            new_text: Some("the workspace builds with cargo".to_string()),
+            ..proposal()
+        },
+    );
+    let read_second = daemon.call(read()).await;
+    assert_eq!(read_second["kind"], json!("proposal"), "{read_second}");
+    assert_eq!(
+        read_second["proposal"]["target"],
+        read_first["proposal"]["target"]
+    );
+    assert_ne!(read_second["reference"], read_first["reference"]);
+
+    let accept = |key: &str, read: &Value| {
+        envelope(
+            "review.accept",
+            &project,
+            json!({
+                "causal_identity": identity,
+                "operation_key": key,
+                "reference": read["reference"],
+                "target": read["proposal"]["target"],
+            }),
+        )
+    };
+    let tip = kernel.tip().unwrap();
+    assert_eq!(
+        daemon.call(accept("late", &read_first)).await,
+        json!({ "kind": "terminal", "terminal": "not_selected" }),
+        "an acceptance of the retired job's proposal applies nothing"
+    );
+    assert_eq!(kernel.tip().unwrap(), tip);
+    let settled = daemon.call(accept("current", &read_second)).await;
+    assert_eq!(
+        (&settled["kind"], &settled["replayed"]),
+        (&json!("settled"), &json!(false)),
+        "{settled}"
+    );
+    assert_eq!(
+        settled["settlement"]["proposal_id"],
+        read_second["reference"]["candidate_id"]
+    );
 }
 
 /// Records one serve of `objects` for `session` under `project_digest`, read at the current tip.

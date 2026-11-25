@@ -140,7 +140,7 @@ pub fn plain_system(system: &str) -> (bool, &str) {
 /// `BackendError::message` of a Pi run whose provider completed the response under a stop outside end, length, and tool use, such as a content filter, and so returned no answer.
 pub const PI_PROVIDER_STOP_MESSAGE: &str = "pi provider ended the response without an answer";
 
-/// Whether a `BackendError::message` says the provider itself ended the response without an answer. The same request meets the same stop again, so a caller with a bounded number of requests settles on the first one. Pi 0.80.2 writes one text for every stop of a completed response outside end, length, and tool use, so this is also true of the few such stops a second request can pass.
+/// Whether a `BackendError::message` says the provider itself ended the response without an answer. The same request meets the same stop again, so a caller with a bounded number of requests settles on the first one. Pi 0.80.2 writes one text for every stop of a completed response outside end, length, tool use, and an Anthropic refusal, so this is also true of the few such stops a second request can pass.
 pub fn is_provider_stop(message: &str) -> bool {
     message
         .strip_prefix(PI_PROVIDER_STOP_MESSAGE)

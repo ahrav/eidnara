@@ -1675,14 +1675,18 @@ async fn a_fold_into_a_less_restrictive_survivor_is_refused() {
     daemon.handler.shutdown().await.unwrap();
 }
 
-/// The route-owned domain that holds project scopes, and the domain whose
-/// rows approve a captured memory as the user's statement, are not writable
-/// by callers.
+/// The route-owned domain that holds project scopes, the domain whose rows
+/// approve a captured memory as the user's statement, and the domain whose
+/// rows say the daemon observed a file's use are not writable by callers.
 #[tokio::test]
 async fn a_caller_cannot_write_into_a_daemon_owned_domain() {
     let daemon = Daemon::start().await;
     seed_domain(&daemon.store());
-    for (key, domain) in [("squat", "project-scopes"), ("approve", "user-statements")] {
+    for (key, domain) in [
+        ("squat", "project-scopes"),
+        ("approve", "user-statements"),
+        ("observe", "named-files"),
+    ] {
         let mut squatting = decision_spec(1);
         squatting["domain_id"] = json!(domain);
         let refused = daemon
@@ -1691,6 +1695,12 @@ async fn a_caller_cannot_write_into_a_daemon_owned_domain() {
                 vec![json!({"op": "insert_decision", "spec": squatting})],
                 vec![],
             )
+            .await;
+        assert_state(&refused, "invalid", Some("invalid_input"));
+        let mut observing = observation_depending(1, "decision-object-1", "implements");
+        observing["spec"]["domain_id"] = json!(domain);
+        let refused = daemon
+            .commit(&format!("{key}-observation"), vec![observing], vec![])
             .await;
         assert_state(&refused, "invalid", Some("invalid_input"));
     }

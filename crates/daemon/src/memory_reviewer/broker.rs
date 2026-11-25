@@ -530,11 +530,6 @@ impl DisclosureLedger {
         &self.union
     }
 
-    /// A capacity refusal leaves the evidence set truncated whether it came before or after a disclosure: the run asked for evidence it will not see.
-    pub fn record_partial_disclosure(&mut self) {
-        self.partial = true;
-    }
-
     /// Records the capacity refusal `code` of a read the run asked for. The inspection ceiling of a run whose conclusion stands on what it read is noted for the proposal's limitations; every other capacity refusal marks the disclosure partial.
     pub fn record_truncation(&mut self, code: RefusalCode) {
         if self.answers_on_inspected && code == RefusalCode::InspectionLimit {

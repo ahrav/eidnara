@@ -91,22 +91,42 @@ function withoutConversationCacheMarkers(messages) {
 	});
 }
 
+// A provider adapter can add system text after the agent start replaced the
+// prompt, as Pi's Anthropic adapter does with an identity block for an OAuth
+// credential. A `system` array, the Anthropic Messages and Bedrock Converse
+// spelling, passes when its one text block equals the caller's text; blocks
+// without text, such as a `cachePoint`, are skipped. A payload that spells the
+// system text another way passes on the replaced prompt alone.
+function carriesWrittenSystem(written, payload) {
+	if (written === undefined) return false;
+	const system = isPlainObject(payload) ? payload.system : undefined;
+	if (!Array.isArray(system)) return true;
+	let found = false;
+	for (const block of system) {
+		if (!isPlainObject(block) || typeof block.text !== "string") continue;
+		if (found || block.text !== written) return false;
+		found = true;
+	}
+	return found;
+}
+
 export default function (pi) {
 	const plainSystem = process.env[PLAIN_SYSTEM_ENV] === "1";
-	let sentAsWritten = false;
+	let written;
 	pi.on("before_agent_start", (event) => {
 		if (!plainSystem) return undefined;
-		const written = event?.systemPromptOptions?.customPrompt;
-		if (typeof written !== "string" || written === "") return undefined;
-		sentAsWritten = true;
-		return { systemPrompt: written };
+		const custom = event?.systemPromptOptions?.customPrompt;
+		if (typeof custom !== "string" || custom === "") return undefined;
+		written = custom;
+		return { systemPrompt: custom };
 	});
 	pi.on("before_provider_request", (event, ctx) => {
-		// A flagged run whose system text was not replaced would send Pi's own lines to
+		// A flagged run whose system text was not replaced, or whose request holds
+		// other system text, would send the harness's own lines to
 		// the model while its caller counts on the text as written. Pi catches a
 		// handler's throw and sends the request anyway, so the run ends here with a
 		// failing exit status, which the adapter reports as a failed run.
-		if (plainSystem && !sentAsWritten) {
+		if (plainSystem && !carriesWrittenSystem(written, event?.payload)) {
 			process.stderr.write(
 				"model_execution payload hook: the system text could not be sent as written\n",
 			);

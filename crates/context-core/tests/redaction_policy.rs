@@ -643,15 +643,43 @@ fn a_match_past_the_scanner_bound_that_straddles_a_window_edge_is_still_refused(
 
 #[test]
 fn a_match_longer_than_the_overlap_that_straddles_a_window_edge_is_not_seen() {
-    // No window contains the full match: the header and footer fall in different windows.
+    // The opening and closing quotes fall in different windows, so each window holds only a part of the match.
+    let mut quoted = String::from("token=\"\n");
+    while quoted.len() < WINDOW_OVERLAP_BYTES + 4 * 1024 {
+        quoted.push_str("plain filler line without any credential words 0123\n");
+    }
+    quoted.push('"');
+    assert_eq!(
+        redactor().redact(&quoted).unwrap_err().kind(),
+        RedactionErrorKind::MatchLimit
+    );
+    let window = secret_scanner::MAX_INPUT_BYTES;
+    let second_window_start = window - WINDOW_OVERLAP_BYTES;
+    let (text, offset) = text_with_line_at(second_window_start - 2 * 1024, &quoted, 3 * window);
+    assert!(offset + 64 < second_window_start && offset + quoted.len() > window);
+    let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
+    assert!(windowed.detections.is_empty());
+    assert_eq!(windowed.text, text);
+}
+
+#[test]
+fn a_private_key_longer_than_the_overlap_that_straddles_a_window_edge_is_refused() {
+    // The header and footer fall in different windows, yet both windowed operations return `MatchLimit`.
     let pem = pem_private_key(WINDOW_OVERLAP_BYTES + 4 * 1024);
     let window = secret_scanner::MAX_INPUT_BYTES;
     let second_window_start = window - WINDOW_OVERLAP_BYTES;
     let (text, offset) = text_with_line_at(second_window_start - 2 * 1024, &pem, 3 * window);
     assert!(offset + 64 < second_window_start && offset + pem.len() > window);
-    let windowed = redact_windowed_durable_text(&text, usize::MAX).unwrap();
-    assert!(windowed.detections.is_empty());
-    assert_eq!(windowed.text, text);
+    assert_eq!(
+        redact_windowed_durable_text(&text, usize::MAX)
+            .unwrap_err()
+            .kind(),
+        RedactionErrorKind::MatchLimit
+    );
+    assert_eq!(
+        detect_windowed_durable_text(&text).unwrap_err().kind(),
+        RedactionErrorKind::MatchLimit
+    );
 }
 
 #[test]

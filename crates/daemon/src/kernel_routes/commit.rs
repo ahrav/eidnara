@@ -680,13 +680,45 @@ const PROJECT_SCOPES_DOMAIN_ID: &str = "project-scopes";
 /// A caller-named domain; the route-owned one is refused as invalid input.
 fn caller_domain(domain_id: &str) -> Result<&str, KernelError> {
     // Capture alone writes the statement domain: a row there approves a
-    // captured memory as the user's statement.
+    // captured memory as the user's statement. The daemon alone writes the
+    // named-files domain: a row there says the daemon observed a file's use.
     if domain_id == PROJECT_SCOPES_DOMAIN_ID
         || domain_id == crate::memory_capture::STATEMENT_DOMAIN_ID
+        || domain_id == crate::named_files::DOMAIN_ID
     {
         return Err(KernelError::InvalidInput);
     }
     Ok(domain_id)
+}
+
+/// The object of the bound project that a caller's operation replaces,
+/// retires, or marks. An object of another project answers as absent, and a
+/// row of the named-files domain, which the daemon alone changes, is refused
+/// as invalid input.
+fn caller_target(
+    envelope: &Envelope<'_>,
+    filter: &mut ScopeFilter,
+    object_id: &str,
+) -> Result<ObjectState, KernelError> {
+    let state = scoped_object_state(envelope, filter, object_id)?;
+    if state.object.domain_id == crate::named_files::DOMAIN_ID {
+        return Err(KernelError::InvalidInput);
+    }
+    Ok(state)
+}
+
+/// A caller-named source lineage for a new row; a lineage of failure records
+/// is refused as invalid input. The daemon's recorder alone starts a row
+/// there, under the capture publication gate, and reads the lineage's newest
+/// decision as the command's record, so a caller's decision or observation
+/// on the lineage would stand in that read. The check runs in the commit's
+/// transaction, after the Kernel has answered a retried commit from its
+/// stored receipt.
+fn caller_lineage(source_id: &str) -> Result<(), KernelError> {
+    if crate::memory_capture::is_failure_lineage(source_id) {
+        return Err(KernelError::InvalidInput);
+    }
+    Ok(())
 }
 
 /// Materializes the project scope, and the route-owned domain it belongs to,
@@ -719,7 +751,10 @@ pub(crate) fn ensure_scope(
     Ok(())
 }
 
-const DOMAIN_SOURCE_KIND: &str = "kernel_route";
+pub(crate) const DOMAIN_SOURCE_KIND: &str = "kernel_route";
+
+/// What precedes a domain's id in the object id of the domain's own row.
+pub(crate) const DOMAIN_OBJECT_PREFIX: &str = "domain:";
 
 /// The shared transaction prevents concurrent commits from inserting the same domain twice.
 pub(crate) fn ensure_domain(
@@ -731,19 +766,25 @@ pub(crate) fn ensure_domain(
         return Ok(());
     }
     if !envelope.domain_exists(domain_id)? {
-        let object_id = format!("domain:{domain_id}");
-        envelope.insert_domain(DomainSpec {
-            domain_id: domain_id.to_string(),
-            object_id: object_id.clone(),
-            name: domain_id.to_string(),
-            source_kind: DOMAIN_SOURCE_KIND.to_string(),
-            source_id: object_id,
-            source_revision: 1,
-            sensitivity: Sensitivity::Normal,
-        })?;
+        let object_id = format!("{DOMAIN_OBJECT_PREFIX}{domain_id}");
+        envelope.insert_domain(domain_spec(domain_id, object_id))?;
     }
     ready.insert(domain_id.to_string());
     Ok(())
+}
+
+/// The row of the domain `domain_id` under `object_id`, which is also the
+/// row's source id.
+pub(crate) fn domain_spec(domain_id: &str, object_id: String) -> DomainSpec {
+    DomainSpec {
+        domain_id: domain_id.to_string(),
+        object_id: object_id.clone(),
+        name: domain_id.to_string(),
+        source_kind: DOMAIN_SOURCE_KIND.to_string(),
+        source_id: object_id,
+        source_revision: 1,
+        sensitivity: Sensitivity::Normal,
+    }
 }
 
 /// The object, when its scope names the bound project by the same algebra
@@ -782,7 +823,7 @@ fn disposition_request(
         reason,
         ..
     } = args;
-    let state = scoped_object_state(envelope, filter, object_id)?;
+    let state = caller_target(envelope, filter, object_id)?;
     if state.object.object_kind != "decision" || state.object.invalidated_commit_seq.is_some() {
         return Err(KernelError::NotFound);
     }
@@ -999,6 +1040,7 @@ fn apply(
     for operation in &plan.operations {
         match operation {
             Operation::InsertDecision { spec } => {
+                caller_lineage(&spec.source_id)?;
                 ensure_domain(
                     envelope,
                     caller_domain(&spec.domain_id)?,
@@ -1032,8 +1074,18 @@ fn apply(
                     &mut domains_ready,
                     refused,
                 )?;
-                let predecessor = scoped_object_state(envelope, filter, replaced_object_id)?;
+                let predecessor = caller_target(envelope, filter, replaced_object_id)?;
                 refuse_rewriting_user_authority(envelope, replaced_object_id)?;
+                // The recorder alone writes the rows of a failure lineage:
+                // it finds a command's record as the newest row there and
+                // orders runs by the rationale it wrote, so a caller's
+                // successor on or off the lineage would stand in that place.
+                // The MemoryReviewer forms no proposal on such a target (see
+                // `memory_reviewer::coordinator::proposal_target`).
+                let recorded = crate::memory_capture::is_failure_lineage;
+                if recorded(&predecessor.object.source_id) || recorded(&spec.source_id) {
+                    return Err(KernelError::AdmissionPolicy);
+                }
                 // An existing replacement must belong to the bound project
                 // whether or not it is live: a foreign retired id answering
                 // `already_exists` where a foreign live one answers
@@ -1045,6 +1097,12 @@ fn apply(
                         Some(state) => {
                             scoped_object_state(envelope, filter, &spec.object_id)?;
                             if state.object.invalidated_commit_seq.is_none() {
+                                // A fold keeps the survivor's stored row, so
+                                // a survivor on a failure lineage is refused
+                                // as a successor there is.
+                                if recorded(&state.object.source_id) {
+                                    return Err(KernelError::AdmissionPolicy);
+                                }
                                 // A fold discards the spec and keeps the
                                 // survivor's stored label, so the floor is
                                 // judged against that label instead.
@@ -1082,7 +1140,7 @@ fn apply(
                 result.touched.push(outcome.object_id);
             }
             Operation::RetireDecision { object_id } => {
-                scoped_object_state(envelope, filter, object_id)?;
+                caller_target(envelope, filter, object_id)?;
                 refuse_rewriting_user_authority(envelope, object_id)?;
                 envelope.retire_decision(object_id)?;
                 result.touched.push(object_id.clone());
@@ -1098,6 +1156,7 @@ fn apply(
                 result.touched.push(args.object_id.to_string());
             }
             Operation::InsertObservation { spec } => {
+                caller_lineage(&spec.source_id)?;
                 ensure_domain(
                     envelope,
                     caller_domain(&spec.domain_id)?,
@@ -1461,8 +1520,8 @@ mod tests {
 #[allow(clippy::items_after_test_module)]
 impl Operation {
     /// The per-operation checks that run before any transaction: the row ids
-    /// must lie outside the verifier's prefixes, and a disposition's reason
-    /// must compose.
+    /// must lie outside the ids the daemon's own writers derive, and a
+    /// disposition's reason must compose.
     fn validate(&mut self, reporter_taint: TaintClass) -> Result<(), InvalidReason> {
         if self.names_verifier_ids() {
             return Err(InvalidReason::InvalidInput);
@@ -1470,16 +1529,12 @@ impl Operation {
         self.compose_reason(reporter_taint)
     }
 
-    /// Whether the operation names a row id under one of the verifier's prefixes
-    /// ([`crate::attestation_verifier::attest::ID_PREFIXES`]). The verifier derives
-    /// those ids from `(model decision, oid)`, so a row a caller placed under them
-    /// would occupy an attestation's ids for good.
+    /// Whether the operation writes a row under an id one of the daemon's own
+    /// writers derives ([`super::is_writer_reserved_id`]): an id under one of
+    /// the verifier's prefixes, or an id of the named-file recorder. A row a
+    /// caller placed under one would occupy the writer's id for good.
     fn names_verifier_ids(&self) -> bool {
-        let reserved = |id: &str| {
-            crate::attestation_verifier::attest::ID_PREFIXES
-                .iter()
-                .any(|prefix| id.starts_with(prefix))
-        };
+        let reserved = super::is_writer_reserved_id;
         match self {
             Self::InsertDecision { spec } | Self::SupersedeDecision { spec, .. } => {
                 reserved(&spec.object_id) || reserved(&spec.decision_id)

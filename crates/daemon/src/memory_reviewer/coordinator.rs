@@ -82,6 +82,24 @@ fn step_instructions(question: QuestionTemplate) -> String {
 /// The limitation a proposal carries when the run's inspection ceiling refused a read the model asked for.
 const INSPECTIONS_EXHAUSTED_LIMITATION: &str = "The inspection budget of this review ended before every requested reference was read; the proposal rests on the references read.";
 
+/// The limitations a proposal carries: the model's, and for a run that reached its inspection ceiling the host's own after them. The host's is recorded always: the model's limitations are kept in order while the proposal's count and text bounds leave room for the host's, and the rest give way to it.
+fn limitations_of(model: Vec<String>, new_text_bytes: usize, exhausted: bool) -> Vec<String> {
+    if !exhausted {
+        return model;
+    }
+    let mut text = new_text_bytes + INSPECTIONS_EXHAUSTED_LIMITATION.len();
+    let mut kept: Vec<String> = model
+        .into_iter()
+        .take(kernel::MAX_REVIEW_LIMITATIONS - 1)
+        .take_while(|limitation| {
+            text += limitation.len();
+            text <= kernel::MAX_REVIEW_TEXT_BYTES
+        })
+        .collect();
+    kept.push(INSPECTIONS_EXHAUSTED_LIMITATION.to_string());
+    kept
+}
+
 /// Active-investigation capacity: one per project and [`MAX_ACTIVE_PER_HOST`] per host. Acquisition never waits; a full slot refuses.
 #[derive(Debug, Default)]
 pub struct InvestigationPermits {
@@ -170,6 +188,8 @@ pub struct JobContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
     Status(u16),
+    /// The daemon maps the host's `auth_required` model execution result to this rejection.
+    AuthRequired,
     /// `reported` is the provider's model id cut to [`MAX_REPORTED_MODEL_CHARS`] characters, or `None` when the response named none; it is never response content.
     ModelMismatch {
         reported: Option<String>,
@@ -184,6 +204,10 @@ impl Rejection {
     /// The rejection a disclosure refusal carries, if any, including the cause behind an attempt whose terminal was not recorded.
     fn of(refusal: &DisclosureRefusal) -> Option<Self> {
         match refusal {
+            DisclosureRefusal::Send {
+                error: SendError::AuthRequired,
+                ..
+            } => Some(Self::AuthRequired),
             DisclosureRefusal::Send { error, .. } => error.refused_credential().map(Self::Status),
             DisclosureRefusal::ModelMismatch {
                 reported, expected, ..
@@ -206,6 +230,7 @@ impl std::fmt::Display for Rejection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Status(status) => write!(formatter, "status {status}"),
+            Self::AuthRequired => formatter.write_str("auth_required"),
             Self::ModelMismatch { reported, expected } => {
                 match reported {
                     Some(model) => {
@@ -902,7 +927,9 @@ impl Run<'_> {
                 return Ok(self.unread_later(code));
             }
             self.decided_by_host(stage, Stage1::Keep);
-            return Ok(Classified::Keep);
+            return Ok(Classified::Ended(RunResult::Refused(
+                RefusalCode::ExpectationChanged,
+            )));
         }
         // A request to an unproven default that failed moved this run's stage 1 to the review model.
         let by_review_model = self.stage_one_by_review_model;
@@ -1890,6 +1917,12 @@ pub fn proposal_target(
     if state.object.invalidated_commit_seq.is_some() {
         return Err(refuse(None, revoked));
     }
+    // The failure recorder alone writes the rows of a failure lineage and
+    // reads a command's run from the rationale it wrote, which a revised
+    // row leaves empty.
+    if crate::memory_capture::is_failure_lineage(&state.object.source_id) {
+        return Err(refuse(None, RefusalCode::Unsupported));
+    }
     let decision_target = matches!(subject, ReferenceExpectation::CanonicalSource { .. });
     if state.object.source_revision != source_revision
         || (decision_target && state.object.object_kind != "decision")
@@ -1962,17 +1995,11 @@ fn bind_proposal(
         return Err(refuse(None, RefusalCode::TooLarge));
     }
     let target = proposal_target(store, subject)?;
-    let mut limitations = outcome.limitations;
-    // A run that reached its inspection ceiling says so beside the model's own limitations, when the proposal has room for it.
-    if broker.ledger.inspections_exhausted()
-        && limitations.len() < kernel::MAX_REVIEW_LIMITATIONS
-        && limitations.iter().map(String::len).sum::<usize>()
-            + outcome.new_text.as_ref().map_or(0, String::len)
-            + INSPECTIONS_EXHAUSTED_LIMITATION.len()
-            <= kernel::MAX_REVIEW_TEXT_BYTES
-    {
-        limitations.push(INSPECTIONS_EXHAUSTED_LIMITATION.to_string());
-    }
+    let limitations = limitations_of(
+        outcome.limitations,
+        outcome.new_text.as_ref().map_or(0, String::len),
+        broker.ledger.inspections_exhausted(),
+    );
     // The manifest is the inspection record this run can attest to: every disclosed alias and the byte ranges rendered under it, in order.
     let mut manifest = Sha256::new();
     for alias in broker.ledger.disclosed() {
@@ -2012,6 +2039,35 @@ mod tests {
     use kernel::{ArtifactIngestRequest, CommitIntent, DomainSpec, ProviderEgress, Sensitivity};
 
     use super::*;
+
+    /// A run that reached its inspection ceiling states it in the proposal whatever the model wrote: the host's limitation comes last, and the model's last limitations give way to it at the proposal's count and text bounds. A run that read everything it asked for carries the model's limitations as written.
+    #[test]
+    fn a_run_past_its_inspection_ceiling_always_states_it() {
+        let host = INSPECTIONS_EXHAUSTED_LIMITATION.to_string();
+        let model = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|index| format!("limitation {index}"))
+                .collect()
+        };
+        assert_eq!(limitations_of(model(2), 0, false), model(2));
+        assert_eq!(
+            limitations_of(model(2), 0, true),
+            [model(2), vec![host.clone()]].concat()
+        );
+        let full = limitations_of(model(kernel::MAX_REVIEW_LIMITATIONS), 0, true);
+        assert_eq!(full.len(), kernel::MAX_REVIEW_LIMITATIONS);
+        assert_eq!(full.last(), Some(&host));
+        assert_eq!(
+            full[..full.len() - 1],
+            model(kernel::MAX_REVIEW_LIMITATIONS - 1)[..]
+        );
+        // One limitation that fills the text bound beside the new text leaves no room: it gives way.
+        let long = "x".repeat(kernel::MAX_REVIEW_TEXT_BYTES - 64);
+        assert_eq!(
+            limitations_of(vec!["short".to_string(), long], 64, true),
+            ["short".to_string(), host]
+        );
+    }
 
     /// A refused read of a later reference ends its review by what the refusal means: a store failure leaves the review for a later pass, a reference past the run's bounds spends the run, a retired reference is gone, and any other refusal is the policy's.
     #[test]

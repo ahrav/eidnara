@@ -29,7 +29,7 @@ use crate::m1_compose::{
     M1RevisionReadTimings, M1RevisionSignal, claim_and_render_notes, compose_m1,
     m1_revision_signal_timed,
 };
-use crate::memory_render::{M0Inputs, M1_PLACEHOLDER, render_m0, render_memory_block};
+use crate::memory_render::{M0Inputs, M1_PLACEHOLDER, render_delivered_memory_block, render_m0};
 use crate::project_docs::read_project_docs_canonical;
 pub use crate::prompt_surface::PromptSurfacePreset;
 use crate::prompt_surface::PromptSurfaceSelection;
@@ -746,6 +746,10 @@ pub struct TransformRequest {
     pub tool_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo_tool_present: Option<bool>,
+    /// The session's working directory as a path beneath the project root, empty for the root.
+    /// `pi` sends it; the named-file records are taken for a session whose value is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     #[serde(default)]
     pub prompt_surface_preset: PromptSurfacePreset,
     /// `prompt_surface_model_key` shares `model_key`'s provider/model key but routes independently of opaque provider model identity.
@@ -909,6 +913,8 @@ struct TransformRequestWire {
     #[serde(default)]
     todo_tool_present: Option<bool>,
     #[serde(default)]
+    working_directory: Option<String>,
+    #[serde(default)]
     prompt_surface_preset: PromptSurfacePreset,
     #[serde(default)]
     prompt_surface_model_key: Option<String>,
@@ -1011,6 +1017,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             terse_text_compression_min_chars: wire.terse_text_compression_min_chars,
             tool_present: wire.tool_present,
             todo_tool_present: wire.todo_tool_present,
+            working_directory: wire.working_directory,
             prompt_surface_preset: wire.prompt_surface_preset,
             prompt_surface_model_key: wire.prompt_surface_model_key,
             prompt_surface_config_identity: wire.prompt_surface_config_identity,
@@ -2860,7 +2867,7 @@ fn compose_additive_m0(
         },
         crate::decay_render::counting(estimate_tokens),
     );
-    let project_memory = render_memory_block(selected_memories, "project-memory");
+    let project_memory = render_delivered_memory_block(selected_memories);
     if !project_memory.is_empty() {
         m0_bytes.push_str("\n\n");
         m0_bytes.push_str(&project_memory);
@@ -13785,6 +13792,7 @@ pub(crate) mod tests {
             terse_text_compression_min_chars: DEFAULT_TERSE_TEXT_COMPRESSION_MIN_CHARS,
             tool_present: false,
             todo_tool_present: Some(true),
+            working_directory: None,
             prompt_surface_preset: PromptSurfacePreset::Full,
             prompt_surface_model_key: None,
             prompt_surface_config_identity: String::new(),

@@ -47,6 +47,8 @@ const STAGE_ONE_RETRY_PAUSE: Duration = Duration::from_secs(2);
 const STAGE_ONE_RETRY_PAUSE: Duration = Duration::from_millis(20);
 /// Derived stage-1 defaults remembered at once; the map starts over past this.
 const MAX_REMEMBERED_DEFAULTS: usize = 64;
+/// This limit bounds the set of roots tracked for once-per-root `Grant::LeftToOwner` logging.
+const MAX_REPORTED_OWNER_ROOTS: usize = 64;
 
 /// Idle interval between passes when no job was run.
 pub const IDLE_INTERVAL: Duration = Duration::from_secs(30);
@@ -276,12 +278,24 @@ pub(crate) fn module_projects(
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
         // The switch is the user's consent to review this root's memories, so the root takes the authority every review row is keyed and fenced by.
-        if review.is_some()
-            && let Err(error) = review_cycle::grant_authority(store, &root)
-        {
-            eprintln!(
-                "daemon: memory_reviewer could not take memories authority for a switched root: {error}"
-            );
+        if review.is_some() {
+            match review_cycle::grant_authority(store, &root) {
+                Ok(review_cycle::Grant::Held) => {}
+                Ok(review_cycle::Grant::LeftToOwner) => {
+                    static REPORTED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+                    let mut reported = REPORTED
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if reported.len() < MAX_REPORTED_OWNER_ROOTS && reported.insert(root.clone()) {
+                        eprintln!(
+                            "daemon: memory_reviewer leaves a switched root to the authority identity its route is bound to; its reviews start when that identity holds MODULE memories authority"
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "daemon: memory_reviewer could not take memories authority for a switched root: {error}"
+                ),
+            }
         }
         if let Ok(MemoriesAuthority::Module(authority)) = memories_authority_for_route(store, &root)
         {
@@ -448,7 +462,11 @@ impl Worker {
     /// One pass over every project the worker runs for: first the projects the owner's activation record admits, then the projects under the review switch. Both read one listing of the projects, so one pass sees one configuration. The record is evaluated on every pass, so the status always reads a current state. Returns how many runs settled. Passes of one worker run one at a time.
     pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         let _serial = self.switched.serial.lock().await;
-        let routes = (self.projects)();
+        let projects = Arc::clone(&self.projects);
+        let Ok(routes) = tokio::task::spawn_blocking(move || projects()).await else {
+            eprintln!("daemon: memory_reviewer project listing ended without a result");
+            return 0;
+        };
         let recorded = self.recorded_pass(&routes, cancel).await;
         recorded + self.switched_pass(routes, cancel).await
     }
@@ -554,6 +572,7 @@ impl Worker {
         let prepared = {
             let worker = Arc::clone(self);
             let kernel = Arc::clone(&kernel);
+            let cancel = cancel.clone();
             tokio::task::spawn_blocking(move || {
                 if !worker
                     .switched
@@ -566,7 +585,9 @@ impl Worker {
                         .claims
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms());
+                    review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms(), &|| {
+                        cancel.is_cancelled()
+                    });
                 }
                 let budget = kernel::applicability::EvalBudget::new(
                     Some(std::time::Instant::now() + Duration::from_secs(5)),
@@ -787,6 +808,12 @@ impl Worker {
                                 let (kernel_incarnation, memstore_incarnation) =
                                     (kernel_incarnation.clone(), memstore_incarnation.clone());
                                 let mode = switch.apply;
+                                let walk = self
+                                    .switched
+                                    .selection
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .walk();
                                 // A change acts on the later references of a review stage 1 flagged. A run with no stage-1 record, as one adopted after a restart, has none.
                                 let later = stage_one
                                     .filter(|record| {
@@ -804,6 +831,7 @@ impl Worker {
                                             project_digest: &root.project_digest,
                                             kernel_incarnation: &kernel_incarnation,
                                             memstore_incarnation: &memstore_incarnation,
+                                            walk,
                                         },
                                         &job.causal_identity,
                                         mode,

@@ -85,7 +85,7 @@ import {
     setTodoSnapshot,
 } from "./tools/todo-view-pi";
 import { PiBranchIndex, type PiBranchReader } from "./transform/pi-branch";
-import { piPassFields } from "./transform/pi-pass-inputs";
+import { piPassFields, projectRelativeDirectory } from "./transform/pi-pass-inputs";
 import { createPiTransform, type PiEviction } from "./transform/pi-transform";
 
 const PREFIX = "[eidnara][pi]";
@@ -609,6 +609,11 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                         messages,
                         completedAtMs,
                         now: Date.now(),
+                        // A session with no project identity records no named file, so its
+                        // passes carry no working directory.
+                        workingDirectory: deps.projectIdentity
+                            ? projectRelativeDirectory(deps.projectDir, ctx.cwd)
+                            : undefined,
                     }),
             });
             if (!result.messages) return undefined;

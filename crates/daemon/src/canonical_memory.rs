@@ -15,7 +15,8 @@ use crate::kernel_routes::read::{MAX_READ_ROW_BYTES, MAX_READ_ROWS, ReadResponse
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding};
 use crate::m0_compose::trim_block_to_budget;
 use crate::memory_render::{
-    CURRENT_WORK_SECTION, is_positive_memory_category, render_memory_line, renders_in_block,
+    CURRENT_WORK_SECTION, SECTIONS_AFTER_FACTS, SECTIONS_BEFORE_FACTS, is_positive_memory_category,
+    keeps_supplied_order, render_memory_line, renders_in_block,
 };
 
 pub(crate) const MEMORY_DOMAIN_ID: &str = "memory";
@@ -29,9 +30,10 @@ pub struct CanonicalMemory {
     pub content: String,
 }
 
-/// Injectable rows visible at one kernel snapshot, the lasting rows newest
-/// first and then the work in progress newest first, with the digest of the
-/// block they render computed once at construction.
+/// The rows one kernel snapshot's block renders: the named files, most used
+/// first, the lasting rows newest first, and then the work in progress
+/// newest first, with the revision of those rows computed once at
+/// construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalMemorySnapshot {
     known_as_of: i64,
@@ -45,20 +47,44 @@ pub struct CanonicalMemorySnapshot {
 impl CanonicalMemorySnapshot {
     /// Builds the snapshot and digests the rows the block renders from.
     ///
-    /// Each rendered row contributes its category and the exact line
-    /// `render_memory_line` emits. Edits past the renderer's content cap and
-    /// changes to `truncated` preserve the rendered bytes and the digest.
+    /// Each rendered row contributes its category and the line
+    /// `render_memory_line` emits, a `NAMED_FILES` line up to its
+    /// last-change clause. Edits past the renderer's content cap, changes
+    /// to `truncated`, and a file's last change preserve the digest.
     pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
         let rendered = rendered_rows(&rows);
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
-        // Swapping two `CURRENT_WORK_SECTION` rows with different rendered
-        // lines changes the digest input.
-        let in_section = |row: &&CanonicalMemory| row.category == CURRENT_WORK_SECTION;
-        let lasting = rendered.iter().copied().filter(|row| !in_section(row));
-        for row in lasting.chain(rows.iter().filter(in_section)) {
+        // The digest's own order: the sections the block renders before the
+        // facts, each in the supplied order, the facts by object id across
+        // their categories, then the sections after the facts, each in the
+        // supplied order. Swapping two rows of a section that keeps the
+        // supplied order changes the digest input when their rendered lines
+        // differ, and how those sections interleave in `rows` changes
+        // nothing.
+        let supplied: &[CanonicalMemory] = &rows;
+        let in_sections = |sections: &'static [&'static str]| {
+            sections.iter().flat_map(move |section| {
+                supplied.iter().filter(move |row| row.category == *section)
+            })
+        };
+        let lasting = rendered
+            .iter()
+            .copied()
+            .filter(|row| !keeps_supplied_order(&row.category));
+        for row in in_sections(SECTIONS_BEFORE_FACTS)
+            .chain(lasting)
+            .chain(in_sections(SECTIONS_AFTER_FACTS))
+        {
             row.category.hash(&mut hasher);
-            render_memory_line(row).hash(&mut hasher);
+            let line = render_memory_line(row);
+            // A `NAMED_FILES` line enters the revision without its
+            // last-change clause, which reads the work tree.
+            if row.category == crate::memory_render::NAMED_FILES_SECTION {
+                crate::named_files::revised_part(&line).hash(&mut hasher);
+            } else {
+                line.hash(&mut hasher);
+            }
         }
         let served_set_digest =
             kernel::served_set_digest(rendered.iter().map(|row| row.object_id.as_str()));
@@ -101,7 +127,8 @@ impl CanonicalMemorySnapshot {
     }
 
     /// Digest over the rendered inputs: two snapshots with equal digests
-    /// render identical block bytes.
+    /// render the same block apart from the last-change clauses of its
+    /// `NAMED_FILES` lines.
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -145,13 +172,17 @@ impl ServedSet {
     }
 }
 
-/// The rows the block renders, in object-id order. The served-set digest derives from them, and the revision reads them with the `CURRENT_WORK` rows in the supplied order.
+/// The rows the block renders, in object-id order, rows of one id in category order. The served-set digest derives from them, and the revision reads them with the `NAMED_FILES` and `CURRENT_WORK` rows in the supplied order.
 fn rendered_rows(rows: &[CanonicalMemory]) -> Vec<&CanonicalMemory> {
     let mut rendered: Vec<&CanonicalMemory> = rows
         .iter()
         .filter(|row| renders_in_block(&row.category))
         .collect();
-    rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+    rendered.sort_by(|left, right| {
+        left.object_id
+            .cmp(&right.object_id)
+            .then_with(|| left.category.cmp(&right.category))
+    });
     rendered
 }
 
@@ -196,7 +227,10 @@ impl CanonicalMemoryRead {
 }
 
 /// Reads the project's injectable memory at the kernel tip, trimmed to
-/// `memory_budget_tokens`.
+/// `memory_budget_tokens`: the facts, and the `NAMED_FILES` lines of
+/// [`crate::named_files::delivered`], read at the same tip, whose files
+/// exist when the read runs. A failed read of either withholds the
+/// composition.
 ///
 /// The visible-row read is bound to the tip captured first, so the rows a served read pins are the canonical rows at that commit.
 ///
@@ -204,14 +238,42 @@ impl CanonicalMemoryRead {
 ///
 /// Capture rows whose rationale names `session_id` are left out: the reading session holds those statements in its own conversation. They are judged before the row and byte caps apply (see [`read_other_sessions`]), so they spend neither cap, and the token budget trims what remains.
 ///
-/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`. Each change of the project's verdict logs one line naming the project's digest.
+/// The rows come from the canonical tables at the pinned tip, and outbox consumers maintain derived state, so the read is served at any consumer lag. The report marks a served read with the lag facts of the kernel health block the coordinator last published, while that block is fresh, and logs a read served while a consumer trails past the serving thresholds. Store-access, tip-read, and visible-row-read failures withhold the composition with the corresponding `KernelOutcome`, and so does a failed read of [`show_contests`], which rewrites the delivered line of a statement that carries a contest or a replacement record: the read of the contesting observations, and the commit-time read of the statements it rewrites. A commit the log holds no time for renders `unknown date` and withholds nothing. Each change of the project's verdict logs one line naming the project's digest.
 pub(crate) fn read_project_memory(
     kernel: &KernelOpenCoordinator,
     project: &ProjectBinding,
     session_id: &str,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
-    let read = read_at_tip(kernel, project, session_id, memory_budget_tokens);
+    report_read(
+        kernel,
+        project,
+        read_at_tip(kernel, project, session_id, memory_budget_tokens, true),
+    )
+}
+
+/// Reads the project's facts at the kernel tip, trimmed to
+/// `memory_budget_tokens`, as [`read_project_memory`] does, without the
+/// `NAMED_FILES` lines. The summarizer reads its block this way when no pass
+/// read serves it, so the facts take the whole budget.
+pub(crate) fn read_project_facts(
+    kernel: &KernelOpenCoordinator,
+    project: &ProjectBinding,
+    session_id: &str,
+    memory_budget_tokens: f64,
+) -> CanonicalMemoryRead {
+    report_read(
+        kernel,
+        project,
+        read_at_tip(kernel, project, session_id, memory_budget_tokens, false),
+    )
+}
+
+fn report_read(
+    kernel: &KernelOpenCoordinator,
+    project: &ProjectBinding,
+    read: CanonicalMemoryRead,
+) -> CanonicalMemoryRead {
     let published = kernel.health_block();
     let fresh = !published.is_stale();
     let facts = published.block.facts.as_ref().filter(|_| fresh);
@@ -227,6 +289,7 @@ fn read_at_tip(
     project: &ProjectBinding,
     session_id: &str,
     memory_budget_tokens: f64,
+    named_files: bool,
 ) -> CanonicalMemoryRead {
     let store = match kernel.kernel_store() {
         Ok(store) => store,
@@ -236,19 +299,35 @@ fn read_at_tip(
         Ok(tip) => tip,
         Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     };
-    match read_other_sessions(
-        &store,
-        project,
-        &[Some(session_id)],
-        tip,
-        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
-    ) {
-        Ok(mut response) => match show_contests(&store, project, &mut response) {
-            Ok(()) => {
-                CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
+    let read = || -> Result<CanonicalMemorySnapshot, kernel::KernelError> {
+        let mut response = read_other_sessions(
+            &store,
+            project,
+            &[Some(session_id)],
+            tip,
+            (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+        )?;
+        let mut files = Vec::new();
+        let mut statements = Vec::new();
+        if named_files {
+            let (lines, cut_short) =
+                crate::named_files::delivered(&store, project, session_id, response.known_as_of)?;
+            // The flag covers both reads the composition selects from.
+            response.truncated |= cut_short;
+            // A read that finds a file to list dates the user's statements,
+            // before the budget trims its lines, so a reader can order a
+            // statement and a file's last change.
+            if !lines.is_empty() {
+                statements = crate::named_files::user_statements(&response);
             }
-            Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
-        },
+            files = lines;
+        }
+        show_contests(&store, project, &mut response)?;
+        crate::named_files::date_statements(&store, &mut response, &statements)?;
+        Ok(injectable_snapshot(response, files, memory_budget_tokens))
+    };
+    match read() {
+        Ok(snapshot) => CanonicalMemoryRead::Available(snapshot),
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
 }
@@ -496,20 +575,45 @@ fn contested_line(
     memory: &str,
     text: &str,
 ) -> String {
-    let day = |at: Option<i64>| {
-        at.and_then(chrono::DateTime::from_timestamp_millis)
-            .map_or_else(
-                || "unknown date".to_owned(),
-                |at| at.format("%Y-%m-%d").to_string(),
-            )
-    };
     format!(
         "{statement} (stated {}; contested {} by {}: {})",
-        day(stated_ms),
-        day(contested_ms),
+        utc_day(stated_ms),
+        utc_day(contested_ms),
         contest_id(memory),
         contest_excerpt(text)
     )
+}
+
+/// The UTC day of `at_ms`, or `unknown date` for a time the commit log
+/// cannot supply.
+fn utc_day(at_ms: Option<i64>) -> String {
+    at_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || "unknown date".to_owned(),
+            |at| at.format("%Y-%m-%d").to_string(),
+        )
+}
+
+/// The line of a statement that replaced an observation: the statement, the
+/// day it was first recorded, and the day the replaced observation was.
+fn replaced_line(statement: &str, stated_ms: Option<i64>, recorded_ms: Option<i64>) -> String {
+    format!(
+        "{statement} (stated {}; it replaces a value recorded {} that the user had not stated)",
+        utc_day(stated_ms),
+        utc_day(recorded_ms)
+    )
+}
+
+/// `mark`'s line shows the days of two commits: the statement's first
+/// commit, then the row's own commit under a shown contest or the replaced
+/// observation's commit. `None` keeps the stored text.
+fn dated_commits(mark: &Marked, contest_shown: bool) -> Option<(i64, i64)> {
+    match (contest_shown, mark.replaced_seq) {
+        (true, _) => Some((mark.stated_seq, mark.row_seq)),
+        (false, Some(replaced_seq)) => Some((mark.stated_seq, replaced_seq)),
+        (false, None) => None,
+    }
 }
 
 /// The contest a pass shows beside capture-written statement `row`: the
@@ -534,38 +638,86 @@ fn shown_contest(
     crate::memory_capture::capture_rationale(decision).contested_by
 }
 
-/// Rewrites each contested statement of `response` to [`contested_line`]'s
-/// text, for the contests whose observation the Kernel serves. The
-/// observations are read by id in one project-scoped read on explicit
-/// search at the response's snapshot, so a contest shows the text of a
-/// memory that is live, belongs to the project, is not hidden, and has
-/// normal sensitivity there; a labeled observation, such as an assistant's
-/// report, is one. A statement whose observation that read does not serve
-/// keeps its stored text. A failed read fails the pass.
-fn show_contests(
-    store: &kernel::KernelStore,
-    project: &ProjectBinding,
-    response: &mut ReadResponse,
-) -> Result<(), kernel::KernelError> {
-    let contests: Vec<(String, i64, crate::memory_capture::Contest)> = response
+/// A capture-written statement a pass serves that carries a contest record
+/// or the record of an observation it replaced.
+struct Marked {
+    statement: String,
+    /// The commit that wrote the row the pass serves.
+    row_seq: i64,
+    /// The commit that first recorded the statement.
+    stated_seq: i64,
+    contest: Option<crate::memory_capture::Contest>,
+    /// The commit that recorded the observation the statement replaced.
+    replaced_seq: Option<i64>,
+}
+
+fn marked_statements(response: &ReadResponse) -> Vec<Marked> {
+    response
         .rows
         .iter()
         .filter(|row| row.visibility == SurfaceVisibility::Visible)
         .filter_map(|row| {
             let decision = response.decisions.get(&row.object.object_id)?;
-            Some((
-                decision.object_id.clone(),
-                row.object.created_commit_seq,
-                shown_contest(row, decision)?,
-            ))
+            if !crate::memory_capture::is_capture_memory(&row.object) {
+                return None;
+            }
+            let contest = shown_contest(row, decision);
+            let replaced_seq = crate::memory_capture::replaced_observation_commit(decision);
+            (contest.is_some() || replaced_seq.is_some()).then(|| Marked {
+                statement: decision.object_id.clone(),
+                row_seq: row.object.created_commit_seq,
+                stated_seq: crate::memory_capture::stated_commit(decision),
+                contest,
+                replaced_seq,
+            })
         })
-        .collect();
-    if contests.is_empty() {
-        return Ok(());
-    }
-    let mut ids: Vec<String> = contests
+        .collect()
+}
+
+/// `observation` holds the contesting memory's text when available.
+/// `times` maps commit sequence numbers to their recorded timestamps in
+/// milliseconds.
+fn marked_line(
+    summary: &str,
+    mark: &Marked,
+    observation: Option<&str>,
+    times: &std::collections::HashMap<i64, i64>,
+) -> Option<String> {
+    let shown = mark.contest.as_ref().zip(observation);
+    let (stated_seq, other_seq) = dated_commits(mark, shown.is_some())?;
+    let (stated_ms, other_ms) = (
+        times.get(&stated_seq).copied(),
+        times.get(&other_seq).copied(),
+    );
+    Some(match shown {
+        Some((contest, text)) => {
+            contested_line(summary, stated_ms, other_ms, &contest.memory, text)
+        }
+        None => replaced_line(summary, stated_ms, other_ms),
+    })
+}
+
+/// Rewrites the statements of `response` that carry a record, each to its
+/// [`marked_line`]: a contested statement whose observation the Kernel
+/// serves, and a statement that replaced an observation and shows no
+/// contest. A pass with no contested statement rewrites the replacements
+/// too.
+///
+/// The observations are read by id in one project-scoped read on explicit
+/// search at the response's snapshot, so a contest shows the text of a
+/// memory that is live, belongs to the project, is not hidden, and has
+/// normal sensitivity there; a labeled observation, such as an assistant's
+/// report, is one. One read gives the commit times of the statements that
+/// are rewritten. A failed read fails the pass.
+fn show_contests(
+    store: &kernel::KernelStore,
+    project: &ProjectBinding,
+    response: &mut ReadResponse,
+) -> Result<(), kernel::KernelError> {
+    let marked = marked_statements(response);
+    let mut ids: Vec<String> = marked
         .iter()
-        .map(|(_, _, contest)| contest.memory.clone())
+        .filter_map(|mark| Some(mark.contest.as_ref()?.memory.clone()))
         .collect();
     ids.sort_unstable();
     ids.dedup();
@@ -607,31 +759,24 @@ fn show_contests(
             }
         }
     }
-    // Each commit's time is read once for the pass, however many contested
-    // statements share it.
-    let mut times = std::collections::HashMap::new();
-    let mut recorded = |commit_seq: i64| -> Result<Option<i64>, kernel::KernelError> {
-        if let Some(time) = times.get(&commit_seq) {
-            return Ok(*time);
-        }
-        let time = store.commit_recorded_at(commit_seq)?;
-        times.insert(commit_seq, time);
-        Ok(time)
+    let observation = |mark: &Marked| {
+        let contest = mark.contest.as_ref()?;
+        observations.get(&contest.memory).map(String::as_str)
     };
-    for (statement, contested_seq, contest) in contests {
-        let (Some(text), Some(decision)) = (
-            observations.get(&contest.memory),
-            response.decisions.get_mut(&statement),
-        ) else {
+    let seqs: Vec<i64> = marked
+        .iter()
+        .filter_map(|mark| dated_commits(mark, observation(mark).is_some()))
+        .flat_map(|(stated_seq, other_seq)| [stated_seq, other_seq])
+        .collect();
+    let times = store.commits_recorded_at(&seqs)?;
+    for mark in marked {
+        let Some(decision) = response.decisions.get_mut(&mark.statement) else {
             continue;
         };
-        decision.payload.summary = contested_line(
-            &decision.payload.summary,
-            recorded(contest.stated_seq)?,
-            recorded(contested_seq)?,
-            &contest.memory,
-            text,
-        );
+        let line = marked_line(&decision.payload.summary, &mark, observation(&mark), &times);
+        if let Some(line) = line {
+            decision.payload.summary = line;
+        }
     }
     Ok(())
 }
@@ -735,12 +880,14 @@ impl ReadReport {
 /// kind is a positive memory category. Labeled rows never reach `auto_inject`;
 /// the guard keeps a label-bearing row out of a block that has no label
 /// renderer. The rows are then trimmed to `memory_budget_tokens` by
-/// [`trim_block_to_budget`]: the lasting rows in serving order, then the
-/// work in progress ordered by the commit that first recorded each
-/// statement, newest first, with ties in object-id order. The snapshot
-/// holds only rows the block renders.
+/// [`trim_block_to_budget`]: `named_files`, the rows the read of the
+/// named-files domain supplied, in their order, then the lasting rows in
+/// serving order, then the work in progress ordered by the commit that
+/// first recorded each statement, newest first, with ties in object-id
+/// order. The snapshot holds only rows the block renders.
 fn injectable_snapshot(
     response: ReadResponse,
+    named_files: Vec<CanonicalMemory>,
     memory_budget_tokens: f64,
 ) -> CanonicalMemorySnapshot {
     let ReadResponse {
@@ -786,6 +933,7 @@ fn injectable_snapshot(
     let current_work: Vec<CanonicalMemory> =
         current_work.into_iter().map(|(_, memory)| memory).collect();
     let rows = trim_block_to_budget(
+        &named_files,
         &lasting,
         &current_work,
         memory_budget_tokens,
@@ -802,6 +950,10 @@ mod tests {
 
     use super::*;
     use crate::kernel_routes::UnavailableReason;
+
+    fn injectable_snapshot(response: ReadResponse, budget: f64) -> CanonicalMemorySnapshot {
+        super::injectable_snapshot(response, Vec::new(), budget)
+    }
 
     fn lagging(lag_positions: i64) -> Observed {
         Observed::ServedWhileDerivedLag {
@@ -1116,6 +1268,291 @@ mod tests {
         assert_eq!(
             contested_line("S.", None, Some(day("2026-04-09")), "mem_b", "x"),
             "S. (stated unknown date; contested 2026-04-09 by mem_b: \"x\")"
+        );
+    }
+
+    /// The replacement line shows the day the statement was first recorded
+    /// before the day the replaced observation was recorded, and names a day
+    /// the commit log cannot supply.
+    #[test]
+    fn a_replacement_line_dates_the_statement_and_then_the_observation() {
+        let day = |date: &str| {
+            chrono::DateTime::parse_from_rfc3339(&format!("{date}T23:59:59Z"))
+                .unwrap()
+                .timestamp_millis()
+        };
+        assert_eq!(
+            replaced_line(
+                "User stated: The limit is 500.",
+                Some(day("2026-04-09")),
+                Some(day("2026-03-01")),
+            ),
+            "User stated: The limit is 500. (stated 2026-04-09; it replaces a value recorded 2026-03-01 that the user had not stated)"
+        );
+        assert_eq!(
+            replaced_line("S.", Some(day("2026-04-09")), None),
+            "S. (stated 2026-04-09; it replaces a value recorded unknown date that the user had not stated)"
+        );
+    }
+
+    /// A served statement that replaced an observation is dated from the
+    /// commit that first recorded it and the commit that recorded the
+    /// observation, whichever commit wrote the row the pass serves. While
+    /// its contesting observation is served the line is the contested line
+    /// alone; once that observation is served no longer the replacement
+    /// line returns. `marked_line` returns `None` when the statement has
+    /// neither a replacement record nor a served contesting observation.
+    #[test]
+    fn a_marked_statement_is_dated_from_its_first_commit_and_the_replaced_one() {
+        let capture_row = |object_id: &str| {
+            let mut row = visible_row(object_id, "decision", SurfaceVisibility::Visible);
+            row.object.source_id = "memory_capture".to_string();
+            row.object.created_commit_seq = 9;
+            row
+        };
+        let with = |object_id: &str, rationale: serde_json::Value| {
+            let mut decision =
+                decision(object_id, "PROJECT_RULES", "User stated: The limit is 500.");
+            decision.payload.rationale = rationale.to_string();
+            decision.created_commit_seq = 9;
+            decision
+        };
+        let replaced = serde_json::json!({"recorded_seq": 2});
+        let contest = serde_json::json!({"memory": "mem_b", "stated_seq": 4});
+        let read = response(
+            vec![
+                capture_row("settled"),
+                capture_row("contested"),
+                capture_row("plain"),
+                visible_row("other-writer", "decision", SurfaceVisibility::Visible),
+            ],
+            vec![
+                with(
+                    "settled",
+                    serde_json::json!({"stated_seq": 4, "replaces_observation": replaced}),
+                ),
+                with(
+                    "contested",
+                    serde_json::json!({"contested_by": contest, "replaces_observation": replaced}),
+                ),
+                with("plain", serde_json::json!({"quote": "The limit is 500."})),
+                with(
+                    "other-writer",
+                    serde_json::json!({"stated_seq": 4, "replaces_observation": replaced}),
+                ),
+            ],
+        );
+        let marked = marked_statements(&read);
+        assert_eq!(
+            marked
+                .iter()
+                .map(|mark| mark.statement.as_str())
+                .collect::<Vec<_>>(),
+            ["settled", "contested"]
+        );
+        // Commits 2, 4, and 9 were recorded on three different days.
+        let day = 86_400_000;
+        let times_without = |missing: Option<i64>| {
+            [2, 4, 9]
+                .into_iter()
+                .filter(|seq| Some(*seq) != missing)
+                .map(|seq| (seq, seq * day))
+                .collect::<std::collections::HashMap<i64, i64>>()
+        };
+        let times = times_without(None);
+        let stored = "User stated: The limit is 500.";
+        let dated = "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded 1970-01-03 that the user had not stated)";
+        for mark in &marked {
+            assert_eq!(
+                marked_line(stored, mark, None, &times).as_deref(),
+                Some(dated),
+                "{}",
+                mark.statement
+            );
+        }
+        let report = Some("Assistant reported: 300.");
+        assert_eq!(
+            marked_line(stored, &marked[1], report, &times).as_deref(),
+            Some(
+                "User stated: The limit is 500. (stated 1970-01-05; contested 1970-01-10 by mem_b: \"Assistant reported: 300.\")"
+            )
+        );
+        // A missing commit timestamp changes only its corresponding date to
+        // `unknown date`.
+        for (mark, observation, missing, line) in [
+            (
+                &marked[0],
+                None,
+                4,
+                "User stated: The limit is 500. (stated unknown date; it replaces a value recorded 1970-01-03 that the user had not stated)",
+            ),
+            (
+                &marked[0],
+                None,
+                2,
+                "User stated: The limit is 500. (stated 1970-01-05; it replaces a value recorded unknown date that the user had not stated)",
+            ),
+            (
+                &marked[1],
+                report,
+                4,
+                "User stated: The limit is 500. (stated unknown date; contested 1970-01-10 by mem_b: \"Assistant reported: 300.\")",
+            ),
+            (
+                &marked[1],
+                report,
+                9,
+                "User stated: The limit is 500. (stated 1970-01-05; contested unknown date by mem_b: \"Assistant reported: 300.\")",
+            ),
+        ] {
+            assert_eq!(
+                marked_line(stored, mark, observation, &times_without(Some(missing))).as_deref(),
+                Some(line),
+                "{}: commit {missing}",
+                mark.statement
+            );
+        }
+        let unmarked = Marked {
+            statement: "contested-alone".to_string(),
+            row_seq: 9,
+            stated_seq: 4,
+            contest: marked[1].contest.clone(),
+            replaced_seq: None,
+        };
+        assert_eq!(marked_line(stored, &unmarked, None, &times), None);
+    }
+
+    /// A pass dates each line from the store's commit log: the day of a
+    /// commit the log holds, and `unknown date` for a sequence past its
+    /// tip. A pass that rewrites no statement returns while every pooled
+    /// reader is held.
+    #[test]
+    fn a_pass_dates_its_lines_from_the_commit_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = kernel::KernelStore::open(dir.path()).unwrap();
+        for name in ["first", "second"] {
+            store
+                .commit(
+                    kernel::CommitIntent {
+                        producer: "canonical-memory-test".to_string(),
+                        operation_key: name.to_string(),
+                        request_digest: "a".repeat(64),
+                        actor: "test".to_string(),
+                        cause: "test".to_string(),
+                    },
+                    |envelope| {
+                        envelope.insert_domain(kernel::DomainSpec {
+                            domain_id: name.to_string(),
+                            object_id: format!("{name}-object"),
+                            name: name.to_string(),
+                            source_kind: "test".to_string(),
+                            source_id: name.to_string(),
+                            source_revision: 1,
+                            sensitivity: Sensitivity::Normal,
+                        })?;
+                        Ok(String::new())
+                    },
+                )
+                .unwrap();
+        }
+        let tip = store.tip().unwrap();
+        let (first, second, past) = (tip - 1, tip, tip + 1);
+        let day = |commit_seq: i64| utc_day(store.commit_recorded_at(commit_seq).unwrap());
+        assert_ne!(day(first), "unknown date");
+        assert_eq!(day(past), "unknown date");
+        let statement = |object_id: &str, rationale: serde_json::Value| {
+            let mut row = visible_row(object_id, "decision", SurfaceVisibility::Visible);
+            row.object.source_id = "memory_capture".to_string();
+            let mut decision = decision(object_id, "PROJECT_RULES", "User stated: S.");
+            decision.payload.rationale = rationale.to_string();
+            (row, decision)
+        };
+        let replaced = |stated_seq: i64, recorded_seq: i64| {
+            serde_json::json!({
+                "stated_seq": stated_seq,
+                "replaces_observation": {"recorded_seq": recorded_seq},
+            })
+        };
+        let (rows, decisions): (Vec<_>, Vec<_>) = [
+            statement("stated-held", replaced(first, past)),
+            statement("recorded-held", replaced(past, second)),
+            statement("plain", serde_json::json!({"quote": "S."})),
+        ]
+        .into_iter()
+        .unzip();
+        let mut read = response(rows, decisions);
+        let project = project("/work/app");
+        show_contests(&store, &project, &mut read).unwrap();
+        let shown = |object_id: &str| read.decisions[object_id].payload.summary.as_str();
+        assert_eq!(
+            shown("stated-held"),
+            replaced_line(
+                "User stated: S.",
+                store.commit_recorded_at(first).unwrap(),
+                None
+            )
+        );
+        assert_eq!(
+            shown("recorded-held"),
+            replaced_line(
+                "User stated: S.",
+                None,
+                store.commit_recorded_at(second).unwrap()
+            )
+        );
+        assert_eq!(shown("plain"), "User stated: S.");
+
+        let (row, decision) = statement("plain", serde_json::json!({"quote": "S."}));
+        let mut unmarked = response(vec![row], vec![decision]);
+        let (done, wait) = std::sync::mpsc::channel();
+        let returned = std::thread::scope(|scope| {
+            store.with_readers_held_for_test(|| {
+                scope.spawn(|| {
+                    done.send(show_contests(&store, &project, &mut unmarked).is_ok())
+                        .unwrap()
+                });
+                wait.recv_timeout(std::time::Duration::from_secs(3))
+            })
+        });
+        assert_eq!(returned, Ok(true));
+    }
+
+    /// If the commit-time read fails, `show_contests` returns
+    /// `KernelError::Io` and preserves the summary in `read.decisions`. A
+    /// retry rewrites that summary when the read succeeds.
+    #[test]
+    fn a_pass_fails_when_its_commit_time_read_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = kernel::KernelStore::open(dir.path()).unwrap();
+        let tip = store.tip().unwrap();
+        let mut row = visible_row("replaced", "decision", SurfaceVisibility::Visible);
+        row.object.source_id = "memory_capture".to_string();
+        let mut decision = decision("replaced", "PROJECT_RULES", "User stated: S.");
+        decision.payload.rationale = serde_json::json!({
+            "stated_seq": tip + 1,
+            "replaces_observation": {"recorded_seq": tip + 2},
+        })
+        .to_string();
+        let mut read = response(vec![row], vec![decision]);
+        let project = project("/work/app");
+        // `commits_recorded_at` selects from `commit_log` by name.
+        let log = rusqlite::Connection::open(dir.path().join("kernel.sqlite")).unwrap();
+        log.execute_batch("ALTER TABLE commit_log RENAME TO commit_log_unavailable")
+            .unwrap();
+        assert!(matches!(
+            show_contests(&store, &project, &mut read),
+            Err(kernel::KernelError::Io)
+        ));
+        assert_eq!(
+            read.decisions["replaced"].payload.summary,
+            "User stated: S."
+        );
+        log.execute_batch("ALTER TABLE commit_log_unavailable RENAME TO commit_log")
+            .unwrap();
+        show_contests(&store, &project, &mut read).unwrap();
+        assert_eq!(
+            read.decisions["replaced"].payload.summary,
+            replaced_line("User stated: S.", None, None)
         );
     }
 
@@ -1457,6 +1894,68 @@ mod tests {
         );
     }
 
+    /// The block renders the rows of `NAMED_FILES_SECTION` in the supplied
+    /// order and serves their ids, so a named file added to a block is a new
+    /// revision and a new served set, and two orders of the same files are
+    /// two revisions with one served set.
+    #[test]
+    fn the_revision_reads_the_named_files_in_the_supplied_order() {
+        let file = |object_id: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: crate::memory_render::NAMED_FILES_SECTION.to_string(),
+            content: content.to_string(),
+        };
+        let rule = CanonicalMemory {
+            object_id: "rule".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content: "Keep the public contract.".to_string(),
+        };
+        let files = [
+            file("nfu_b", "docs/guide.md"),
+            file("nfu_a", "tools/check.sh"),
+        ];
+        let alone = CanonicalMemorySnapshot::new(1, false, vec![rule.clone()]);
+        let most_used_first = CanonicalMemorySnapshot::new(
+            1,
+            false,
+            vec![files[0].clone(), rule.clone(), files[1].clone()],
+        );
+        assert_ne!(alone.revision(), most_used_first.revision());
+        assert_ne!(
+            alone.served_set_digest(),
+            most_used_first.served_set_digest()
+        );
+        assert_eq!(most_used_first.served_ids(), ["nfu_a", "nfu_b", "rule"]);
+        let other_order =
+            CanonicalMemorySnapshot::new(1, false, vec![files[1].clone(), files[0].clone(), rule]);
+        assert_ne!(most_used_first.revision(), other_order.revision());
+        assert_eq!(
+            most_used_first.served_set_digest(),
+            other_order.served_set_digest()
+        );
+
+        // The block renders the named files before the work in progress
+        // however the caller interleaves the two sections, so the bytes, the
+        // revision, and the served set are the same.
+        let work = |object_id: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: CURRENT_WORK_SECTION.to_string(),
+            content: "an open request".to_string(),
+        };
+        let files_first = vec![files[0].clone(), files[1].clone(), work("w1"), work("w2")];
+        let interleaved = vec![work("w1"), files[0].clone(), work("w2"), files[1].clone()];
+        assert_eq!(
+            crate::memory_render::render_delivered_memory_block(&files_first),
+            crate::memory_render::render_delivered_memory_block(&interleaved)
+        );
+        let (left, right) = (
+            CanonicalMemorySnapshot::new(1, false, files_first),
+            CanonicalMemorySnapshot::new(1, false, interleaved),
+        );
+        assert_eq!(left.revision(), right.revision());
+        assert_eq!(left.served_set_digest(), right.served_set_digest());
+    }
+
     /// The block renders the rows of `CURRENT_WORK_SECTION` in the supplied
     /// order, so two orders of the same rows are two revisions with one
     /// served set.
@@ -1539,14 +2038,14 @@ mod tests {
         let long_summary = "x ".repeat(2_000);
         let long = decision("long", "PROJECT_RULES", &long_summary);
         // Serving order is newest first; both rows are candidates, but only the
-        // short one fits a budget of a few dozen tokens.
+        // short one fits the budget with the block's closing sentence.
         let rows = || {
             vec![
                 visible_row("long", "decision", SurfaceVisibility::Visible),
                 visible_row("short", "decision", SurfaceVisibility::Visible),
             ]
         };
-        let budget = 60.0;
+        let budget = 120.0;
         let trimmed = injectable_snapshot(response(rows(), vec![long, short.clone()]), budget);
         assert_eq!(
             trimmed
@@ -1602,5 +2101,80 @@ mod tests {
         ));
         assert!(empty.rows().is_empty());
         assert_ne!(withheld.composition(), empty.composition());
+    }
+
+    /// The revision reads a `NAMED_FILES` line up to its last-change clause:
+    /// two blocks whose lines differ in that clause alone have one revision,
+    /// and a line that differs before the clause is another revision. A
+    /// fact's line enters whole, the same words included.
+    #[test]
+    fn the_revision_leaves_out_a_named_files_last_change() {
+        let block = |file: &str, fact: &str| {
+            CanonicalMemorySnapshot::new(
+                1,
+                false,
+                vec![
+                    CanonicalMemory {
+                        object_id: "nfu_a".to_string(),
+                        category: crate::memory_render::NAMED_FILES_SECTION.to_string(),
+                        content: file.to_string(),
+                    },
+                    CanonicalMemory {
+                        object_id: "rule".to_string(),
+                        category: "PROJECT_RULES".to_string(),
+                        content: fact.to_string(),
+                    },
+                ],
+            )
+        };
+        let used = "docs/guide.md (the agent used it in 1 earlier session, last on 2026-01-02";
+        let fact = "The guide moved; last changed 2026-03-01.";
+        let committed = block(&format!("{used}; last changed 2026-03-01T09:30Z)"), fact);
+        let edited = block(
+            &format!("{used}; last changed 2026-04-02T10:00Z on disk)"),
+            fact,
+        );
+        assert_ne!(committed.rows(), edited.rows());
+        assert_eq!(committed.revision(), edited.revision());
+        assert_eq!(committed.served_set_digest(), edited.served_set_digest());
+        let used_twice = used.replace("1 earlier session", "2 earlier sessions");
+        let again = block(
+            &format!("{used_twice}; last changed 2026-03-01T09:30Z)"),
+            fact,
+        );
+        assert_ne!(committed.revision(), again.revision());
+        let other_fact = block(
+            &format!("{used}; last changed 2026-03-01T09:30Z)"),
+            "The guide moved; last changed 2026-04-02.",
+        );
+        assert_ne!(committed.revision(), other_fact.revision());
+    }
+
+    /// Two rows of one id in two categories enter the revision in category
+    /// order, whichever the caller supplies first: the block renders the
+    /// same bytes for both orders, and the revision and the served set are
+    /// the same.
+    #[test]
+    fn rows_of_one_id_enter_the_revision_in_category_order() {
+        let row = |category: &str, content: &str| CanonicalMemory {
+            object_id: "mem_shared".to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let naming = row("NAMING", "Types are nouns.");
+        let rule = row("PROJECT_RULES", "Keep the public contract.");
+        let one = vec![naming.clone(), rule.clone()];
+        let other = vec![rule, naming];
+        assert_eq!(
+            crate::memory_render::render_delivered_memory_block(&one),
+            crate::memory_render::render_delivered_memory_block(&other)
+        );
+        let (one, other) = (
+            CanonicalMemorySnapshot::new(1, false, one),
+            CanonicalMemorySnapshot::new(1, false, other),
+        );
+        assert_eq!(one.revision(), other.revision());
+        assert_eq!(one.served_ids(), other.served_ids());
+        assert_eq!(one.served_set_digest(), other.served_set_digest());
     }
 }

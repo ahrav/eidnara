@@ -129,6 +129,9 @@ pub enum SendError {
     /// The provider returned a non-success status.
     #[error("status {0}")]
     Status(u16),
+    /// The host's model execution classed the failed run `auth_required`.
+    #[error("auth_required")]
+    AuthRequired,
     #[error("compressed")]
     Compressed,
     #[error("content_type")]

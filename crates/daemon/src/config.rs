@@ -181,11 +181,11 @@ pub struct DaemonConfig {
     /// User-only switch for the automatic `<project-memory>` and user-profile
     /// blocks.
     pub memory_auto_inject: bool,
-    /// User-only consent for unattended extraction from completed conversation text.
+    /// Only the user can grant consent. Consent covers unattended extraction from completed conversation text and a Pi session's named-file records. It also covers a primary Pi session's failed-command records when `memory_enabled`, `auto_promote`, and `source_capture_enabled` are all true.
     pub memory_auto_capture: bool,
     /// User-only consent to retain the exact bytes of message text and tool results as
-    /// kernel source descriptors. Capture also requires `memory_enabled` and a session
-    /// that is not a subagent's.
+    /// kernel source descriptors. Capture also requires `memory_enabled` and a session that is not a subagent's.
+    /// With `auto_promote` and `memory_auto_capture` it is also the consent to record a failed command of a Pi session from its tool result, as a project memory fact that session deletion leaves in place and that has no retention deadline.
     pub source_capture_enabled: bool,
     /// User-only consent to score each settled source publication against the project's live
     /// memory decisions and keep the overlaps as derived candidate rows, and to sweep those rows.
@@ -199,7 +199,7 @@ pub struct DaemonConfig {
     pub auto_search: AutoSearchConfig,
     /// TerseTextCompression compression uses deterministic age-tier controls.
     pub terse_text_compression: TerseTextCompressionConfig,
-    /// `auto_promote` mirrors the TS auto-promote switch; false drops facts.
+    /// `auto_promote` mirrors the TS auto-promote switch; false drops facts and a Pi session's named-file records.
     pub auto_promote: bool,
     /// The privacy gate controls whether history_summarizer user observations may be collected for later review and promotion.
     pub user_memory_collection_enabled: bool,
@@ -4333,6 +4333,35 @@ mod fold_authority_parity {
         ));
         assert_eq!(broken_user.model_chain, vec!["model-a"]);
         assert!(!broken_user.memory_enabled);
+    }
+}
+
+#[cfg(test)]
+mod memory_reviewer_model_parity {
+    use super::*;
+
+    const FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/config/__fixtures__/memory-reviewer-model-parity.json"
+    );
+
+    #[test]
+    fn every_fixture_row_gets_its_verdict() {
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("the parity fixture parses");
+        let rows = fixture["rows"].as_array().expect("rows");
+        assert!(!rows.is_empty());
+        for row in rows {
+            let value = row["value"].as_str().expect("a value");
+            let verdict = match model_reference(value) {
+                Ok(Some(_)) => "named",
+                Ok(None) => "unset",
+                Err(()) => "refused",
+            };
+            assert_eq!(
+                verdict,
+                row["verdict"].as_str().expect("a verdict"),
+                "{value:?}"
+            );
+        }
     }
 }
 

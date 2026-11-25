@@ -23,6 +23,15 @@ const LANGUAGE_CODE_MESSAGE = 'language must be a 2-letter ISO 639-1 code (e.g. 
 // accept whitespace-only values the loader rejects.
 const NON_BLANK_PATTERN = /\S/;
 
+// `model_reference` in `crates/daemon/src/config.rs` reads the same user-tier keys.
+// `__fixtures__/memory-reviewer-model-parity.json` contains the parity cases.
+const MEMORY_REVIEWER_MODEL_PATTERN =
+    /^(?![\s\S]*\{(?:env|file):)\s*(?:[^\s/][^/]*\/[\s\S]*\S)?\s*$/;
+const MemoryReviewerModelSchema = z.string().regex(MEMORY_REVIEWER_MODEL_PATTERN, {
+    message:
+        "Use a literal provider/model reference; {env:} and {file:} references are not supported.",
+});
+
 /** The schema generator matches `LanguageCodeSchema` by identity and publishes the codes `isValidLanguageCode` accepts as a `pattern`. */
 export const LanguageCodeSchema = z
     .string()
@@ -285,7 +294,11 @@ export interface EidnaraConfig {
     /**
      * User-only consent to retain the exact bytes of message text and tool results as Kernel
      * source descriptors. The daemon reads this key itself; capture also requires
-     * `memory.enabled`, and subagent sessions never capture. Defaults to off.
+     * `memory.enabled`, and subagent sessions never capture. With `memory.auto_promote` and
+     * `memory.auto_capture` it is also the consent under which the daemon writes failed-command
+     * facts from Pi tool results, which later sessions find through `eidnara_search`. Such a
+     * fact is a project memory fact: session deletion leaves it in place and it has no
+     * retention deadline. Defaults to off.
      */
     source_capture?: { enabled: boolean };
     /**
@@ -597,11 +610,13 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(false)
                     .describe(
-                        "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. Project values are ignored with a warning.",
+                        "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. With memory.auto_promote and memory.auto_capture it also lets the daemon write failed-command facts from Pi tool results, which later sessions find through eidnara_search; such a fact is a project memory fact, which session deletion leaves in place and which has no retention deadline. Project values are ignored with a warning.",
                     ),
             })
             .default({ enabled: false })
-            .describe("User-only exact source capture of message text and tool results."),
+            .describe(
+                "User-only exact source capture of message text and tool results, and the consent for failed-command facts.",
+            ),
         contradiction_candidates: z
             .strictObject({
                 enabled: z
@@ -632,18 +647,12 @@ export const EidnaraConfigSchema = z
                     .describe(
                         "User-only: review the project's memories with the configured models. The daemon selects a memory when later messages may have changed it, asks a small model whether they did, and for a memory that model flags asks the review model for a cited proposal to retain, revise, or retire it, all through the host's model execution (default: false). Also turns on source_capture and contradiction_candidates, whose rows a review reads. Project values are ignored with a warning.",
                     ),
-                model: z
-                    .string()
-                    .optional()
-                    .describe(
-                        "User-only: the provider/model every proposal request names, as a literal; {env:} and {file:} references are not supported. Absent, reviews use the history summarizer's model.",
-                    ),
-                stage1_model: z
-                    .string()
-                    .optional()
-                    .describe(
-                        "User-only: the provider/model of the small chat model that decides stage 1 of each review, whether later messages may have changed the memory, as a literal; {env:} and {file:} references are not supported. A small, fast model of the provider you already use is the intended value, for example the current Claude Haiku. Absent, a Claude review model whose id names its tier after claude- gives the Haiku of the same provider and version (amazon-bedrock/global.anthropic.claude-opus-5-5 gives amazon-bedrock/global.anthropic.claude-haiku-5-5), and any other review model answers stage 1 itself. If the derived model fails its first request, stage 1 uses the review model until the daemon restarts.",
-                    ),
+                model: MemoryReviewerModelSchema.optional().describe(
+                    "User-only: the provider/model every proposal request names, as a literal; {env:} and {file:} references are not supported. Absent, reviews use the history summarizer's model.",
+                ),
+                stage1_model: MemoryReviewerModelSchema.optional().describe(
+                    "User-only: the provider/model of the small chat model that decides stage 1 of each review, whether later messages may have changed the memory, as a literal; {env:} and {file:} references are not supported. A small, fast model of the provider you already use is the intended value, for example the current Claude Haiku. Absent, a Claude review model whose id names its tier after claude- gives the Haiku of the same provider and version (amazon-bedrock/global.anthropic.claude-opus-5-5 gives amazon-bedrock/global.anthropic.claude-haiku-5-5), and any other review model answers stage 1 itself. If the derived model fails its first request, stage 1 uses the review model until the daemon restarts.",
+                ),
                 apply: z
                     .enum(["propose", "contest", "apply"])
                     .default("contest")
@@ -783,13 +792,13 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(true)
                     .describe(
-                        "Automatically promote eligible session facts into memory (default: true)",
+                        "Automatically promote eligible session facts into memory (default: true). Capture, and with it the named-file records of a Pi session, needs this switch on.",
                     ),
                 auto_capture: z
                     .boolean()
                     .default(true)
                     .describe(
-                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. Set false to disable unattended capture.",
+                        "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. In a Pi session, while memory.enabled and memory.auto_promote also hold, the same switch lets the daemon record, with no model call, the paths of project files that a message of the user named and the agent then read or named in a command it ran; a <project-memory> block composed for a later session lists the paths whose files exist at that moment, while memory.auto_inject.enabled holds. With memory.enabled, memory.auto_promote, and source_capture.enabled it also gates the failed-command facts the daemon writes from Pi tool results with no model call; such a fact is a project memory fact, which session deletion leaves in place and which has no retention deadline. Set false to disable unattended capture.",
                     ),
                 retrieval_count_promotion_threshold: z
                     .number()

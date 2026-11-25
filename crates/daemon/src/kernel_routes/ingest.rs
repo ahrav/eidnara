@@ -622,12 +622,26 @@ impl HandlerCore {
         if parsed.total_bytes > UPLOAD_ALLOWANCE_BYTES {
             return state_only(KernelOutcome::invalid(InvalidReason::PayloadTooLarge));
         }
+        // The failure recorder alone writes the rows of a failure lineage: it reads a command's record as the newest decision there.
+        if crate::memory_capture::is_failure_lineage(&parsed.request.source_id) {
+            return state_only(KernelOutcome::invalid(InvalidReason::InvalidInput));
+        }
         let Some(intent) = parsed.intent.into_intent(&scope.project, RECEIPT_FAMILY) else {
             return crate::invalid_params_error(format!(
                 "{BEGIN} intent.operation_key must not be blank"
             ));
         };
         let artifact = parsed.request;
+        // The daemon's own writers alone write their ids and source kinds,
+        // and the named-file recorder its domain; an artifact under one
+        // would occupy a writer's id or pass as its row.
+        if super::is_writer_reserved_id(&artifact.object_id)
+            || artifact.domain_id == crate::named_files::DOMAIN_ID
+            || artifact.source_kind == crate::named_files::SOURCE_KIND
+            || artifact.source_kind == crate::attestation_verifier::classify::VERIFIER_SOURCE_KIND
+        {
+            return state_only(KernelOutcome::invalid(InvalidReason::InvalidInput));
+        }
         let upload = Upload {
             upload_id: parsed.upload_id.clone(),
             generation: 0,

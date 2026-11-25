@@ -280,6 +280,30 @@ describe("Pi context handler in compaction-off mode", () => {
         }
     });
 
+    it("sends the working directory only for a session with a project identity", async () => {
+        const firstPass = async (): Promise<Json> => {
+            const { call, transforms } = daemon(keepWindow);
+            try {
+                harness = await createTestAgentSession({
+                    cwd: root,
+                    extensionFactories: [eidnaraPiExtension],
+                });
+                await harness.session.prompt("question");
+                return transforms[0] ?? {};
+            } finally {
+                call.mockRestore();
+                await disposeHarness();
+            }
+        };
+        // A folding configuration submits its passes for a home-directory session too.
+        writeUserConfig(CHAIN);
+        expect((await firstPass()).working_directory).toBe("");
+        __setProjectIdentityTestHooks({ homeDirectory: () => root });
+        const home = await firstPass();
+        expect(home.serializer_profile).toBe("pi");
+        expect("working_directory" in home).toBe(false);
+    });
+
     it("carries the same pass fields for sessions the daemon binds differently", async () => {
         const firstPass = async (cwd: string): Promise<Json> => {
             const { call, transforms } = daemon(keepWindow);

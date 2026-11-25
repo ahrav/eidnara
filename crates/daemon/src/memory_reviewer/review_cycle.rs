@@ -16,7 +16,8 @@ use kernel::{
     ProviderEgress, SourceClass, Surface, TaintClass,
 };
 use memory_store::memory_reviewer_jobs::{
-    CausalInputs, MAX_IDENTITY_BYTES, MAX_MEMORY_REVIEWER_STARTING_REFERENCES,
+    CausalInputs, MAX_IDENTITY_BYTES, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST,
+    MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MAX_MEMORY_REVIEWER_STARTING_REFERENCES,
     MAX_PENDING_MEMORY_REVIEWER_JOBS_PER_PROJECT, MemoryReviewerJobError, MemoryReviewerJobInput,
     MemoryReviewerJobRefusal, ProducerBinding, ReserveOutcome, ReviewTarget,
 };
@@ -30,8 +31,11 @@ use super::settlement::{
     release_settled_review_hold,
 };
 use super::stage_one::Writer;
+use crate::attestation_verifier::attest::Identity;
+use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::claim_sources::{ClaimMaterializer, ClaimProgress, MaterializationEnd};
 use crate::config::ReviewApply;
+use crate::contradiction_candidates::scorer::matcher_digest;
 
 /// The context store the switch's authority rows are recorded under.
 pub const SWITCH_AUTHORITY_STORE: &str = "eidnara-memory-reviewer";
@@ -39,8 +43,10 @@ pub const SWITCH_AUTHORITY_STORE: &str = "eidnara-memory-reviewer";
 pub const SELECTION_PRODUCER: &str = "memory-reviewer-switch";
 /// The operation key the worker accepts its own proposals under in `apply` mode.
 pub const APPLY_OPERATION_KEY: &str = "memory-reviewer-switch";
-/// Claim descriptors one selection examines, of every project and representation in the store, so a selection's work is bounded whatever the inventory's size. A larger store is covered over successive passes.
+/// Claim descriptors one walk examines, of every project and representation in the store, so the work of one walk's reads is bounded whatever the inventory's size. A selection runs one walk a pass and covers a larger store over successive passes. The lookup of the memory a contest names runs walk after walk to the inventory's end within one cycle budget.
 pub const MAX_WALKED_DESCRIPTORS: usize = 4096;
+/// Postings steps the later-statement association of one selection takes at most. A walk of 2,896 statements that all share two subject terms costs this much; a walk whose statements share more ends sooner and the next pass continues it.
+pub const MAX_ASSOCIATION_STEPS: usize = 1 << 24;
 /// Later overlapping sources a job carries as starting references, newest first. The newest names the job.
 pub const MAX_LATER_SOURCES: usize = 4;
 /// Cited message blocks a job carries as starting references.
@@ -49,6 +55,8 @@ const _: () =
     assert!(MAX_LATER_SOURCES + MAX_CITED_SOURCES <= MAX_MEMORY_REVIEWER_STARTING_REFERENCES);
 /// Candidate rows read per decision.
 const CANDIDATE_ROWS_PER_DECISION: usize = 16;
+/// Decisions per `first_candidates_for_decisions` call.
+const CANDIDATE_READ_BATCH: usize = 64;
 /// The representation of a decision whose descriptor a job reviews.
 const SUBJECT_REPRESENTATION: &str = "decision_summary";
 /// The longest one selection or one claim catch-up runs.
@@ -56,14 +64,40 @@ const CYCLE_BUDGET: Duration = Duration::from_secs(30);
 /// Claim slices one catch-up runs before it leaves the rest to the next pass.
 const MAX_CLAIM_SLICES: usize = 256;
 
-/// Gives `route_root` MODULE memories authority when no authority is bound to it, with the root itself as the authority project, so every key derived from the authority project keeps the value an unmanaged root has. A root that holds an authority, active or draining, is left as it is. A grant that stopped after its acknowledgement left its row MODULE and unbound; the next call binds it.
-pub fn grant_authority(store: &MemoryStore, route_root: &str) -> Result<(), MemoryStoreError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grant {
+    /// The route root resolves to active or draining memories authority.
+    Held,
+    /// The route root keeps its binding to another identity when the memories lookup returns `None`.
+    LeftToOwner,
+}
+
+/// Gives `route_root` MODULE memories authority when no authority is bound to it, with the root itself as the authority project, so every key derived from the authority project keeps the value an unmanaged root has. A root that holds an authority, active or draining, is left as it is. The binding write reads the route again in its own transaction, so a binding another identity committed during the grant stands and the grant returns `LeftToOwner`. A grant that stopped after its acknowledgement, or that left the route to such an identity, left its row MODULE and unbound; a later call binds it while no other identity with a preparing, active, or draining authority holds the route.
+pub fn grant_authority(store: &MemoryStore, route_root: &str) -> Result<Grant, MemoryStoreError> {
+    grant_authority_inner(store, route_root, None)
+}
+
+/// [`grant_authority`] with `before_bind` run between the grant's authority steps and its binding write, so a test can commit an owner's binding inside that window.
+fn grant_authority_inner(
+    store: &MemoryStore,
+    route_root: &str,
+    before_bind: Option<&dyn Fn()>,
+) -> Result<Grant, MemoryStoreError> {
     const DOMAIN: &str = "memories";
     if store
         .authority_project_state_for_route(route_root, DOMAIN)?
         .is_some()
     {
-        return Ok(());
+        return Ok(Grant::Held);
+    }
+    // The notes domain resolves through the same binding row, so rebinding the route would detach the owner's notes authority from it.
+    let bound_to_owner = store
+        .bound_authority_identity_for_route(route_root)?
+        .is_some_and(|(context_store, project)| {
+            context_store != SWITCH_AUTHORITY_STORE || project != route_root
+        });
+    if bound_to_owner {
+        return Ok(Grant::LeftToOwner);
     }
     let granted = store
         .authority_status(SWITCH_AUTHORITY_STORE, route_root, DOMAIN)?
@@ -87,13 +121,34 @@ pub fn grant_authority(store: &MemoryStore, route_root: &str) -> Result<(), Memo
             begun.generation,
         )?;
     }
-    store.bind_authority_route(SWITCH_AUTHORITY_STORE, route_root, route_root)
+    if let Some(before_bind) = before_bind {
+        before_bind();
+    }
+    Ok(
+        if store.bind_authority_route_unless_owned(
+            SWITCH_AUTHORITY_STORE,
+            route_root,
+            route_root,
+        )? {
+            Grant::Held
+        } else {
+            Grant::LeftToOwner
+        },
+    )
 }
 
-/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, or a slice is blocked, so every live memory decision has its descriptors before a selection reads them. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one.
-pub fn publish_claims(kernel: &KernelStore, progress: &mut ClaimProgress, now: i64) {
+/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, a slice is blocked, or `cancelled` answers true, so every live memory decision has its descriptors before a selection reads them. `cancelled` is read before each slice, so a cancelled pass waits for one slice at most. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one.
+pub fn publish_claims(
+    kernel: &KernelStore,
+    progress: &mut ClaimProgress,
+    now: i64,
+    cancelled: &dyn Fn() -> bool,
+) {
     let budget = EvalBudget::new(Some(Instant::now() + CYCLE_BUDGET), Arc::default());
     for _ in 0..MAX_CLAIM_SLICES {
+        if cancelled() {
+            return;
+        }
         let report = ClaimMaterializer::new(kernel, ProviderEgress::LocalOnly).run_slice(
             progress,
             crate::search_lifecycle_owner::CLAIM_SLICE_BOUNDS,
@@ -197,6 +252,8 @@ pub struct SelectionMemory {
     held: BTreeSet<String>,
     /// The projects whose store was found larger than one selection examines, so that is logged once.
     large: BTreeSet<String>,
+    /// Each entry identifies a project whose reservation the store's metadata quota refused during an earlier selection.
+    quota: BTreeSet<String>,
     /// The bounds of one selection's walk; `None` is [`Walk::PRODUCTION`].
     walk: Option<Walk>,
 }
@@ -208,12 +265,15 @@ pub struct Walk {
     pub page_rows: usize,
     /// Descriptors one selection examines before it leaves the rest to the next pass.
     pub bound: usize,
+    /// Postings steps the later-statement association of one selection may take, [`MAX_ASSOCIATION_STEPS`] in production; the selection ends its walk at the last statement inside them.
+    pub association_steps: usize,
 }
 
 impl Walk {
-    const PRODUCTION: Self = Self {
+    pub(crate) const PRODUCTION: Self = Self {
         page_rows: 256,
         bound: MAX_WALKED_DESCRIPTORS,
+        association_steps: MAX_ASSOCIATION_STEPS,
     };
 }
 
@@ -237,6 +297,11 @@ impl SelectionMemory {
     #[cfg(test)]
     pub fn walk_within(&mut self, walk: Walk) {
         self.walk = Some(walk);
+    }
+
+    /// The bounds of one walk of the claim descriptors.
+    pub fn walk(&self) -> Walk {
+        self.walk.unwrap_or(Walk::PRODUCTION)
     }
 
     /// The writer and publishing commit of the live source `evidence_id`, read once and remembered. `None` for a source no live descriptor cites: one not yet published, which the next pass looks up again, and one found retired, which is looked up again after [`RETIRED_RECHECK`]. A read the store fails is an error and is remembered as nothing.
@@ -538,15 +603,42 @@ fn stem(term: &str) -> &str {
     cut(stem, "e").unwrap_or(stem)
 }
 
+/// The subject terms of each decision's statement, in the decisions' order.
+fn statement_terms(decisions: &[&DecisionRow]) -> Vec<BTreeSet<String>> {
+    decisions
+        .iter()
+        .map(|decision| subject_terms(&decision.payload.summary))
+        .collect()
+}
+
+/// How many of the statements, from the first, one selection associates within `steps` postings steps. [`reopened_by_later_statements`] walks, for every statement and each of its terms, the statements that hold the term, so a walk costs the sum over terms of the squared count of its holders, and one more statement adds `2n + 1` for each of its terms that `n` earlier ones hold. Admission ends before the first statement that would pass `steps`, and admits one statement always, so every walk moves its cursor.
+fn admitted_within(terms: &[BTreeSet<String>], steps: usize) -> usize {
+    let mut holders: HashMap<&str, usize> = HashMap::new();
+    let mut cost = 0_usize;
+    for (index, statement) in terms.iter().enumerate() {
+        let added: usize = statement
+            .iter()
+            .map(|term| 2 * holders.get(term.as_str()).copied().unwrap_or(0) + 1)
+            .sum();
+        if index > 0 && cost.saturating_add(added) > steps {
+            return index;
+        }
+        cost = cost.saturating_add(added);
+        for term in statement {
+            *holders.entry(term.as_str()).or_default() += 1;
+        }
+    }
+    terms.len()
+}
+
 /// For each decision, the later decisions that share enough subject terms with it: [`MIN_SHARED_SUBJECT_TERMS`] within one category and [`MIN_SHARED_SUBJECT_TERMS_ACROSS_CATEGORIES`] across two. Each later decision names at most [`REOPENED_PER_STATEMENT`] earlier ones. A statement is ordered by the commit that first recorded it, which a contest's rewrite of its row leaves unchanged. This is the second way a memory comes back to review beside the ledger's candidate rows: a later statement about the same subject reaches the earlier one even when it shares too few words for a candidate row.
-fn reopened_by_later_statements(decisions: &[&DecisionRow]) -> Vec<Vec<usize>> {
+fn reopened_by_later_statements(
+    decisions: &[&DecisionRow],
+    terms: &[BTreeSet<String>],
+) -> Vec<Vec<usize>> {
     let stated: Vec<i64> = decisions
         .iter()
         .map(|decision| crate::memory_capture::stated_commit(decision))
-        .collect();
-    let terms: Vec<BTreeSet<String>> = decisions
-        .iter()
-        .map(|decision| subject_terms(&decision.payload.summary))
         .collect();
     let mut postings: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, terms) in terms.iter().enumerate() {
@@ -613,7 +705,10 @@ pub fn select_and_enqueue(
     let tip = kernel
         .tip_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
-    let walk = memory.walk.unwrap_or(Walk::PRODUCTION);
+    let incarnation = kernel
+        .database_incarnation_id_within_budget(&budget)
+        .map_err(CycleError::Kernel)?;
+    let walk = memory.walk();
     let (descriptors, next) = subject_descriptors(
         kernel,
         scope.project,
@@ -622,12 +717,6 @@ pub fn select_and_enqueue(
         memory.resume.get(scope.project_digest).map(String::as_str),
         walk,
     )?;
-    if next.is_some() && memory.large.insert(scope.project_digest.to_string()) {
-        eprintln!(
-            "daemon: memory_reviewer selection examines {} claim descriptors a pass and the store holds more; each pass continues where the last one ended",
-            walk.bound
-        );
-    }
     let ids: Vec<String> = descriptors
         .iter()
         .filter_map(|row| decision_of(row).map(str::to_string))
@@ -671,24 +760,60 @@ pub fn select_and_enqueue(
             reviewable(decision).then_some((descriptor, decision))
         })
         .collect();
-    let rows: Vec<&DecisionRow> = subjects.iter().map(|(_, decision)| *decision).collect();
-    let reopened = reopened_by_later_statements(&rows);
+    let mut subjects = subjects;
+    let mut next = next;
+    let mut rows: Vec<&DecisionRow> = subjects.iter().map(|(_, decision)| *decision).collect();
+    let mut terms = statement_terms(&rows);
+    // A walk whose later-statement association would pass its step allowance ends at the last statement inside it, and the cursor resumes after that statement's descriptor, so the next pass starts with the statement that did not fit.
+    let admitted = admitted_within(&terms, walk.association_steps);
+    if admitted < subjects.len() {
+        subjects.truncate(admitted);
+        rows.truncate(admitted);
+        terms.truncate(admitted);
+        next = subjects
+            .last()
+            .map(|(descriptor, _)| descriptor.object_id.clone());
+    }
+    if next.is_some() && memory.large.insert(scope.project_digest.to_string()) {
+        eprintln!(
+            "daemon: memory_reviewer selection examines at most {} claim descriptors a pass, fewer where its statements share many terms, and the store holds more; each pass continues where the last one ended",
+            walk.bound
+        );
+    }
+    let reopened = reopened_by_later_statements(&rows, &terms);
     let mut candidates = Vec::new();
+    let mut candidate_rows = Vec::new().into_iter();
     for (index, (descriptor, decision)) in subjects.iter().enumerate() {
         selected.examined += 1;
+        if index % CANDIDATE_READ_BATCH == 0 {
+            let batch: Vec<&str> = rows[index..]
+                .iter()
+                .take(CANDIDATE_READ_BATCH)
+                .map(|row| row.object_id.as_str())
+                .collect();
+            candidate_rows = ledger
+                .first_candidates_for_decisions(
+                    scope.project_digest,
+                    &batch,
+                    CANDIDATE_ROWS_PER_DECISION,
+                )
+                .map_err(|error| CycleError::Ledger(error.to_string()))?
+                .into_iter();
+        }
         let cited = cited_by(decision);
         let stated = crate::memory_capture::stated_commit(decision);
-        let mut evidence: Vec<LaterEvidence> = ledger
-            .candidates_for_decision(
-                scope.project_digest,
-                &decision.object_id,
-                None,
-                CANDIDATE_ROWS_PER_DECISION,
-            )
-            .map_err(|error| CycleError::Ledger(error.to_string()))?
-            .items
+        let mut evidence: Vec<LaterEvidence> = candidate_rows
+            .next()
+            .unwrap_or_default()
             .into_iter()
-            .filter(|row| row.publish_tip > stated && row.evidence_id.len() <= MAX_IDENTITY_BYTES)
+            // A row is evidence while it is one the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before this selection's tip. The source lookup below judges its evidence's liveness.
+            .filter(|row| {
+                row.publish_tip > stated
+                    && row.publish_tip <= tip
+                    && row.kernel_incarnation_id == incarnation
+                    && row.matcher_digest == matcher_digest()
+                    && row.evidence_id.len() <= MAX_IDENTITY_BYTES
+            })
             .map(|row| LaterEvidence {
                 evidence_id: row.evidence_id,
                 trigger: Trigger::LaterMessage,
@@ -842,20 +967,29 @@ pub fn select_and_enqueue(
             firing_id: format!("selection@{now}"),
             ordinal: u64::try_from(selected.total()).unwrap_or(u64::MAX),
         };
-        let reserved =
-            match ledger.reserve_memory_reviewer_job(scope.ledger_project, &producer, &inputs, now)
-            {
-                Ok(ReserveOutcome::Reserved(job)) => job,
-                Ok(ReserveOutcome::Existing(_)) => continue,
-                // Capacity and quota refusals hold for every later candidate of this selection.
-                Err(MemoryReviewerJobError::Refused(
-                    MemoryReviewerJobRefusal::ProjectCapacity
-                    | MemoryReviewerJobRefusal::HostCapacity
-                    | MemoryReviewerJobRefusal::MetadataQuota,
-                )) => break,
-                Err(MemoryReviewerJobError::Refused(_)) => continue,
-                Err(error) => return Err(CycleError::Ledger(error.to_string())),
-            };
+        let reserved = match ledger.reserve_memory_reviewer_job(
+            scope.ledger_project,
+            &producer,
+            &inputs,
+            now,
+        ) {
+            Ok(ReserveOutcome::Reserved(job)) => job,
+            Ok(ReserveOutcome::Existing(_)) => continue,
+            // Capacity and quota refusals hold for every later candidate of this selection.
+            Err(MemoryReviewerJobError::Refused(
+                MemoryReviewerJobRefusal::ProjectCapacity | MemoryReviewerJobRefusal::HostCapacity,
+            )) => break,
+            Err(MemoryReviewerJobError::Refused(MemoryReviewerJobRefusal::MetadataQuota)) => {
+                if memory.quota.insert(scope.project_digest.to_string()) {
+                    eprintln!(
+                        "daemon: memory_reviewer selection queues no new review for a project: the store's review metadata quota refused the reservation ({MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT} bytes a project, {MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST} a host)"
+                    );
+                }
+                break;
+            }
+            Err(MemoryReviewerJobError::Refused(_)) => continue,
+            Err(error) => return Err(CycleError::Ledger(error.to_string())),
+        };
         let input = MemoryReviewerJobInput {
             subject: inputs.target.clone(),
             starting_references: starting,
@@ -904,7 +1038,14 @@ fn decision_of(descriptor: &LiveDescriptor) -> Option<&str> {
     )
 }
 
-/// The live `decision_summary` descriptors of the project's decisions that the configured model may read, from one walk of the store's claim descriptors that starts after `after` and examines at most `walk.bound` of them, of every project and representation. Returns the descriptors with the cursor the next walk resumes after, or `None` when this walk reached the end.
+fn names_stored_memory(descriptor: &LiveDescriptor) -> bool {
+    descriptor.detail.representation == SUBJECT_REPRESENTATION
+        && descriptor.domain_id == MEMORY_DOMAIN_ID
+        && decision_of(descriptor)
+            .is_some_and(|decision| Identity::of_attestation(decision).is_none())
+}
+
+/// The walk starts after `after` and examines at most `walk.bound` claim descriptors across all projects and representations. It returns the live `decision_summary` descriptors for this project's memory-domain decisions that the configured model may read. The cursor marks where the next walk resumes; `None` means the walk reached the end.
 fn subject_descriptors(
     kernel: &KernelStore,
     project: &ProjectScope,
@@ -928,11 +1069,7 @@ fn subject_descriptors(
             )
             .map_err(CycleError::Kernel)?;
         examined += page.rows.len();
-        rows.extend(
-            page.rows
-                .into_iter()
-                .filter(|row| row.detail.representation == SUBJECT_REPRESENTATION),
-        );
+        rows.extend(page.rows.into_iter().filter(names_stored_memory));
         after = page.next;
         if after.is_none() || examined >= walk.bound {
             break;
@@ -1087,6 +1224,8 @@ pub struct ApplyScope<'a> {
     pub project_digest: &'a str,
     pub kernel_incarnation: &'a str,
     pub memstore_incarnation: &'a str,
+    /// The bounds of one walk of the claim descriptors, as the selection's: [`SelectionMemory::walk`].
+    pub walk: Walk,
 }
 
 /// The contradictions of a change proposal that pass the action rule: the model states `low` uncertainty, and the contradiction cites one of `later`, the later references that count as evidence in a review stage 1 flagged. `later` is `None` for a review stage 1 did not flag. The memory's own source, another memory and a project file the run read are none of them, so a proposal that cites only those changes nothing.
@@ -1125,6 +1264,8 @@ fn decision_row(kernel: &KernelStore, object_id: &str) -> Result<Option<Decision
 }
 
 /// The live memory of the project that capture stored for a later message a review cites: one recorded after `statement` that cites one of `evidence`. Among several, the one sharing most subject terms with the statement, then the newest. `None` when capture stored none.
+///
+/// The lookup reads the claim descriptors to their end at one tip, one walk of `scope.walk` after another from the cursor the last one returned, and keeps the best memory found so far and that cursor between walks. Each Kernel read covers the descriptors of one walk and takes the cycle budget before it acquires a reader, so a read past the deadline ends the lookup with an error, which its caller reports as a refused write.
 fn later_memory_citing(
     kernel: &KernelStore,
     scope: &ApplyScope<'_>,
@@ -1136,47 +1277,57 @@ fn later_memory_citing(
     let tip = kernel
         .tip_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
-    let (descriptors, _) =
-        subject_descriptors(kernel, &project, tip, &budget, None, Walk::PRODUCTION)?;
-    let ids: Vec<&str> = descriptors
-        .iter()
-        .filter_map(decision_of)
-        .filter(|id| *id != statement.object_id)
-        .collect();
-    let linked = kernel
-        .linked_decisions_evidence_within_budget(
-            &ids,
-            tip,
-            super::selection::MAX_LINKED_EVIDENCE,
-            &budget,
-        )
-        .map_err(CycleError::Kernel)?;
-    let citing: Vec<String> = ids
-        .iter()
-        .zip(&linked)
-        .filter(|(_, rows)| {
-            rows.iter()
-                .any(|row| row.live && evidence.contains(&row.evidence_id.as_str()))
-        })
-        .map(|(id, _)| (*id).to_string())
-        .collect();
     let stated = crate::memory_capture::stated_commit(statement);
     let terms = subject_terms(&statement.payload.summary);
-    Ok(kernel
-        .decisions_for_objects_as_of_within_budget(&citing, tip, &budget)
-        .map_err(CycleError::Kernel)?
-        .into_iter()
-        .filter(|row| row.created_commit_seq > stated)
-        .max_by_key(|row| {
-            (
-                subject_terms(&row.payload.summary)
-                    .intersection(&terms)
-                    .count(),
-                row.created_commit_seq,
-                std::cmp::Reverse(row.object_id.clone()),
+    let mut best: Option<(usize, i64, std::cmp::Reverse<String>)> = None;
+    let mut after: Option<String> = None;
+    loop {
+        let (descriptors, next) =
+            subject_descriptors(kernel, &project, tip, &budget, after.as_deref(), scope.walk)?;
+        let ids: Vec<&str> = descriptors
+            .iter()
+            .filter_map(decision_of)
+            .filter(|id| *id != statement.object_id)
+            .collect();
+        let linked = kernel
+            .linked_decisions_evidence_within_budget(
+                &ids,
+                tip,
+                super::selection::MAX_LINKED_EVIDENCE,
+                &budget,
             )
-        })
-        .map(|row| row.object_id))
+            .map_err(CycleError::Kernel)?;
+        let citing: Vec<String> = ids
+            .iter()
+            .zip(&linked)
+            .filter(|(_, rows)| {
+                rows.iter()
+                    .any(|row| row.live && evidence.contains(&row.evidence_id.as_str()))
+            })
+            .map(|(id, _)| (*id).to_string())
+            .collect();
+        best = kernel
+            .decisions_for_objects_as_of_within_budget(&citing, tip, &budget)
+            .map_err(CycleError::Kernel)?
+            .into_iter()
+            .filter(|row| row.created_commit_seq > stated)
+            .map(|row| {
+                (
+                    subject_terms(&row.payload.summary)
+                        .intersection(&terms)
+                        .count(),
+                    row.created_commit_seq,
+                    std::cmp::Reverse(row.object_id),
+                )
+            })
+            .chain(best)
+            .max();
+        match next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    Ok(best.map(|(_, _, std::cmp::Reverse(object_id))| object_id))
 }
 
 /// Treats the proposal the job's completed receipt selects as `mode` says. A `retain` or `no_change` proposal asks for no write, so every mode accepts it at once: the acceptance leaves the memory as it is and ends the proposal's review hold, which keeps the project's hold allowance for proposals that wait on a decision.
@@ -1213,6 +1364,7 @@ pub fn apply_proposal(
             (scope.kernel_incarnation, scope.memstore_incarnation),
             causal_identity,
             APPLY_OPERATION_KEY,
+            &selected.reference,
             &proposal.target,
         ) {
             Ok(outcome) => {
@@ -1459,6 +1611,143 @@ mod tests {
         }
     }
 
+    /// Moves `identity` to `MODULE` authority for `domain` under the context store `context`.
+    fn activate(store: &MemoryStore, identity: &str, domain: &str) {
+        let preparing = store
+            .authority_begin_prepare("context", identity, domain)
+            .unwrap();
+        let checksum = store
+            .authority_seed_checksum("context", identity, domain)
+            .unwrap();
+        store
+            .authority_verify_prepare(
+                "context",
+                identity,
+                domain,
+                preparing.generation,
+                &checksum,
+                &checksum,
+            )
+            .unwrap();
+        store
+            .authority_ack_prepare("context", identity, domain, preparing.generation)
+            .unwrap();
+    }
+
+    /// A memories grant preserves the root's notes binding. The bound identity controls memories authority: the grant returns `LeftToOwner` until that identity holds `MODULE` authority for memories, then returns `Held`. An unbound root receives `MODULE` authority for memories under its own path.
+    #[test]
+    fn a_root_bound_to_another_identity_keeps_its_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let store =
+            MemoryStore::open(&crate::dev_descriptor_at(data_home.to_str().unwrap())).unwrap();
+        let state = |root: &str, domain: &str| {
+            store
+                .authority_project_state_for_route(root, domain)
+                .unwrap()
+        };
+        let module = |project: &str| Some((project.to_string(), "MODULE".to_string()));
+
+        let owned = "/work/owned";
+        activate(&store, "git:identity", "notes");
+        store
+            .bind_authority_route("context", "git:identity", owned)
+            .unwrap();
+        assert_eq!(state(owned, "notes"), module("git:identity"));
+        assert_eq!(grant_authority(&store, owned).unwrap(), Grant::LeftToOwner);
+        assert_eq!(
+            state(owned, "notes"),
+            module("git:identity"),
+            "the notes authority resolves through the route as before"
+        );
+        assert_eq!(state(owned, "memories"), None);
+
+        activate(&store, "git:identity", "memories");
+        assert_eq!(grant_authority(&store, owned).unwrap(), Grant::Held);
+        assert_eq!(state(owned, "memories"), module("git:identity"));
+
+        let unmanaged = "/work/unmanaged";
+        assert_eq!(grant_authority(&store, unmanaged).unwrap(), Grant::Held);
+        assert_eq!(state(unmanaged, "memories"), module(unmanaged));
+        assert_eq!(grant_authority(&store, unmanaged).unwrap(), Grant::Held);
+    }
+
+    /// An owner's binding committed after the grant read the route and before the grant's own binding write stands: the write leaves the route to the owner's identity, the grant returns `LeftToOwner`, and the owner's notes authority resolves through the route as before.
+    #[test]
+    fn an_owner_binding_committed_during_the_grant_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let store =
+            MemoryStore::open(&crate::dev_descriptor_at(data_home.to_str().unwrap())).unwrap();
+        let raced = "/work/raced";
+        let owner_binds = || {
+            activate(&store, "git:identity", "notes");
+            store
+                .bind_authority_route("context", "git:identity", raced)
+                .unwrap();
+        };
+        assert_eq!(
+            grant_authority_inner(&store, raced, Some(&owner_binds)).unwrap(),
+            Grant::LeftToOwner
+        );
+        assert_eq!(
+            store.bound_authority_identity_for_route(raced).unwrap(),
+            Some(("context".to_string(), "git:identity".to_string()))
+        );
+        assert_eq!(
+            store
+                .authority_project_state_for_route(raced, "notes")
+                .unwrap(),
+            Some(("git:identity".to_string(), "MODULE".to_string()))
+        );
+        assert_eq!(
+            store
+                .authority_project_state_for_route(raced, "memories")
+                .unwrap(),
+            None
+        );
+        assert_eq!(grant_authority(&store, raced).unwrap(), Grant::LeftToOwner);
+    }
+
+    /// The grant's binding write replaces a binding to an identity that holds no authority, and replays a binding that already names the switch's identity.
+    #[test]
+    fn the_grant_binds_over_a_binding_with_no_authority_and_replays_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let store =
+            MemoryStore::open(&crate::dev_descriptor_at(data_home.to_str().unwrap())).unwrap();
+        let switch_identity =
+            |root: &str| Some((SWITCH_AUTHORITY_STORE.to_string(), root.to_string()));
+
+        let ended = "/work/ended";
+        store
+            .bind_authority_route("context", "git:identity", ended)
+            .unwrap();
+        assert_eq!(grant_authority(&store, ended).unwrap(), Grant::Held);
+        assert_eq!(
+            store.bound_authority_identity_for_route(ended).unwrap(),
+            switch_identity(ended)
+        );
+
+        let twice = "/work/twice";
+        let switch_binds = || {
+            store
+                .bind_authority_route(SWITCH_AUTHORITY_STORE, twice, twice)
+                .unwrap();
+        };
+        assert_eq!(
+            grant_authority_inner(&store, twice, Some(&switch_binds)).unwrap(),
+            Grant::Held
+        );
+        assert_eq!(
+            store.bound_authority_identity_for_route(twice).unwrap(),
+            switch_identity(twice)
+        );
+    }
+
     /// A proposal that waits for a reader, a disputed target, and a refused write each hold their memory; every other outcome frees it.
     #[test]
     fn the_outcomes_that_hold_a_memory() {
@@ -1491,6 +1780,28 @@ mod tests {
         assert_eq!(memory.pending["project"].waiting["mem_2"], "job-c");
         memory.note_pending("project", "mem_1", "job-d", false);
         assert_eq!(memory.pending["project"].waiting["mem_1"], "job-d");
+    }
+
+    /// The association of a walk costs, for each term, the square of the number of statements that hold it. A selection admits the statements, from the first, whose association fits the allowance, and always one.
+    #[test]
+    fn a_walk_is_admitted_while_its_association_fits_the_allowance() {
+        let terms = |words: &[&str]| -> BTreeSet<String> {
+            words.iter().map(|word| (*word).to_string()).collect()
+        };
+        // Statements that share two terms: one costs 2 steps, two cost 8, three 18, four 32.
+        let shared = vec![terms(&["release", "branch"]); 4];
+        for (steps, admitted) in [(32, 4), (31, 3), (18, 3), (17, 2), (8, 2), (7, 1), (0, 1)] {
+            assert_eq!(admitted_within(&shared, steps), admitted, "{steps}");
+        }
+        // Statements with no term in common cost their own terms: 2 steps each.
+        let apart = [
+            terms(&["release", "branch"]),
+            terms(&["linter", "commit"]),
+            terms(&["suffix", "test"]),
+        ];
+        assert_eq!(admitted_within(&apart, 4), 2);
+        assert_eq!(admitted_within(&apart, 6), 3);
+        assert_eq!(admitted_within(&[], 0), 0);
     }
 
     /// The subject terms of a statement leave out who said it and the words every rule uses, and cut each term to its stem, so two statements about one subject share terms whatever their wording around it.
@@ -1541,7 +1852,7 @@ mod tests {
             ),
         ];
         let refs: Vec<&DecisionRow> = rows.iter().collect();
-        let reopened = reopened_by_later_statements(&refs);
+        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
         assert_eq!(
             reopened[0],
             [3],
@@ -1574,7 +1885,7 @@ mod tests {
             10,
         ));
         let refs: Vec<&DecisionRow> = many.iter().collect();
-        let reopened = reopened_by_later_statements(&refs);
+        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
         let by_latest = reopened.iter().filter(|later| later.contains(&6)).count();
         assert_eq!(by_latest, REOPENED_PER_STATEMENT);
         assert!(
@@ -1608,7 +1919,7 @@ mod tests {
             ),
         ];
         let refs: Vec<&DecisionRow> = rows.iter().collect();
-        let reopened = reopened_by_later_statements(&refs);
+        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
         assert_eq!(
             reopened[0],
             [2],

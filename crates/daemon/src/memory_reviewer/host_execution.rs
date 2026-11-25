@@ -17,7 +17,7 @@ use super::model_response::StopReason;
 use crate::HistorySummarizerProducerFactory;
 use crate::history_summarizer::HistorySummarizerProducerDriver;
 use crate::history_summarizer_producer::{
-    HistorySummarizerProducerError, HistorySummarizerSendOutcome,
+    ErrorClass, HistorySummarizerProducerError, HistorySummarizerSendOutcome,
 };
 
 /// The credential an attempt marker names for a request the host carries: the host's own credential source, held by the host and its harness child.
@@ -249,8 +249,12 @@ impl HostExecution {
             });
         }
         let output = output.map_err(|error| {
+            let refused_credential = error
+                .classification()
+                .is_some_and(|classification| classification.class == ErrorClass::AuthRequired);
             sent(match error {
                 HistorySummarizerProducerError::TimedOut => SendError::Deadline,
+                _ if refused_credential => SendError::AuthRequired,
                 _ => SendError::Transport,
             })
         })?;

@@ -228,3 +228,29 @@ pub(crate) const TABLED_NAMES: &[&[&str]] = &[
     T2_TOOLS,
     &[EXIT_CODE_TOOL, TODO_TOOL],
 ];
+
+/// Pi's built-in tool that reads a file, and the key of the path it opens.
+const PI_READ_TOOL: &str = "read";
+const PI_PATH_KEY: &str = "path";
+/// The key of the command line Pi's [`EXIT_CODE_TOOL`] runs.
+const COMMAND_KEY: &str = "command";
+
+/// What a call of one of Pi's built-in tools uses, for the named-file
+/// records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PiOperand<'v> {
+    /// The path argument of Pi's `read`.
+    Read(&'v str),
+    /// The command line of Pi's `bash`.
+    Command(&'v str),
+}
+
+/// The operand of a call of Pi's `read` or `bash`, by the tool's exact name
+/// and its own argument key. Every other tool has none.
+pub(crate) fn pi_operand<'v>(name: &str, input: &'v Value) -> Option<PiOperand<'v>> {
+    match name {
+        PI_READ_TOOL => first_string(input, &[PI_PATH_KEY]).map(PiOperand::Read),
+        EXIT_CODE_TOOL => first_string(input, &[COMMAND_KEY]).map(PiOperand::Command),
+        _ => None,
+    }
+}
