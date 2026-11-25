@@ -616,7 +616,7 @@ const MEMORY_REVIEWER_ACTIVATION_STATES: [&str; 12] = [
     "store",
 ];
 /// Every MemoryReviewer counter the wire contract names (`docs/host-wire-protocol.md`, `metrics.memory_reviewer`); an unknown field is dropped.
-const MEMORY_REVIEWER_COUNTERS: [&str; 36] = [
+const MEMORY_REVIEWER_COUNTERS: [&str; 37] = [
     "swept_jobs",
     "swept_selections",
     "jobs_reserved",
@@ -646,6 +646,7 @@ const MEMORY_REVIEWER_COUNTERS: [&str; 36] = [
     "metadata_bytes",
     "metadata_quota_bytes",
     "metadata_headroom_bytes",
+    "projects_at_metadata_quota",
     "nonadmissions",
     "sessions_with_reservation",
     "latest_nonadmission_memory_reviewer_unavailable",

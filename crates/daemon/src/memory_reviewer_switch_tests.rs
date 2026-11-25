@@ -2536,3 +2536,50 @@ async fn the_claim_consumer_advances_between_the_reviews_of_one_pass() {
         "the consumer read the first review's commits before the second ran"
     );
 }
+
+/// A project at the store's review metadata quota queues no review: the selection ends at the refused reservation, no request is sent, and the status facts count the project, which is how an operator sees the stop. Once the project has room again the same evidence is reviewed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_project_at_the_review_quota_queues_no_review_and_the_status_counts_it() {
+    use memory_store::memory_reviewer_jobs::{
+        MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES,
+    };
+    let rig = reviewed(ReviewApply::Contest).await;
+    let at_quota = || {
+        rig.store
+            .memory_reviewer_status_facts()
+            .unwrap()
+            .projects_at_metadata_quota
+    };
+    assert_eq!(at_quota(), 0);
+    // The charge of the project's one settled job stands in for the jobs of a retention window.
+    let charge = |bytes: u64| {
+        rig.store
+            .with_fenced_conn_for_test(|conn| {
+                conn.execute(
+                    "UPDATE memory_reviewer_jobs SET receipt_charge_bytes = ?1",
+                    [i64::try_from(bytes).unwrap()],
+                )
+            })
+            .unwrap();
+    };
+    charge(MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT);
+    assert_eq!(at_quota(), 1);
+    let sent = rig.attempts().len();
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the linter and the formatter before every commit.",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.drain().await, 0, "the store refused the reservation");
+    assert_eq!(rig.attempts().len(), sent, "no request was sent");
+
+    charge(MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES);
+    assert_eq!(at_quota(), 0);
+    assert_eq!(
+        rig.drain().await,
+        1,
+        "the evidence is reviewed once room returns"
+    );
+}

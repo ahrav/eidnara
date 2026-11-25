@@ -309,6 +309,19 @@ fn metadata_quota_exhaustion_refuses_new_work_and_deletes_nothing() {
             .reserve_memory_reviewer_job("proj", &producer("f1"), &inputs("cand-1"), NOW)
             .unwrap(),
     );
+    // A second project with one job holds its own total, far below the quota.
+    reserved(
+        store
+            .reserve_memory_reviewer_job("other", &producer("f1"), &inputs("cand-other"), NOW)
+            .unwrap(),
+    );
+    let at_quota = || {
+        store
+            .memory_reviewer_status_facts()
+            .unwrap()
+            .projects_at_metadata_quota
+    };
+    assert_eq!(at_quota(), 0, "both projects have room for a job");
     // A receipt charge near the project quota stands in for a long history of admitted work.
     let near_quota = i64::try_from(
         MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT
@@ -355,6 +368,11 @@ fn metadata_quota_exhaustion_refuses_new_work_and_deletes_nothing() {
         MemoryReviewerJobRefusal::MetadataQuota
     );
     assert_eq!(store.memory_reviewer_headroom("proj").unwrap(), headroom);
+    assert_eq!(
+        at_quota(),
+        1,
+        "the status counts the project the store refuses a job for"
+    );
     let rows: (i64, i64) = store
         .with_conn_for_test(|conn| {
             conn.query_row(
@@ -364,7 +382,7 @@ fn metadata_quota_exhaustion_refuses_new_work_and_deletes_nothing() {
             )
         })
         .unwrap();
-    assert_eq!(rows, (1, 0));
+    assert_eq!(rows, (2, 0));
     // Finishing the existing job releases only its allowance; the receipt stays and the quota stays exhausted.
     store
         .finish_memory_reviewer_job(
@@ -381,6 +399,7 @@ fn metadata_quota_exhaustion_refuses_new_work_and_deletes_nothing() {
             .project_metadata_remaining,
         MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES + MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES
     );
+    assert_eq!(at_quota(), 0, "the released allowance is room for one job");
     // Exactly the released allowance admits one more job; the receipt it leaves behind exhausts the quota for good.
     reserved(
         store
@@ -402,6 +421,7 @@ fn metadata_quota_exhaustion_refuses_new_work_and_deletes_nothing() {
         ),
         MemoryReviewerJobRefusal::MetadataQuota
     );
+    assert_eq!(at_quota(), 1);
 }
 
 #[test]
