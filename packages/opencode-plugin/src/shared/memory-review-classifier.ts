@@ -43,12 +43,18 @@ export interface ReviewClassifierPump {
 
 const LEASE_PATTERN = /^[a-f0-9]{32}$/;
 /**
- * The pause between two `next` calls that found no work. A session's daemon calls travel in
+ * The longest pause between two `next` calls that found no work. A session's daemon calls travel in
  * order, so each `next` call is one short round trip; a review waits 20 seconds for its answer
  * and the daemon counts a harness present for 120 seconds after a call it answers `work` or
  * `ready`.
  */
 const POLL_INTERVAL_MS = 2_000;
+/**
+ * A short pause after answered work shortens the wait of a request that becomes ready just after
+ * an answer. The first pause schedules this fraction of the poll interval. The next six pauses
+ * each double the cumulative scheduled pause time, which then equals one poll interval.
+ */
+const FIRST_REPOLL_FRACTION = 1 / 64;
 const CALL_TIMEOUT_MS = 10_000;
 /** The largest request text the harness parses. */
 const MAX_REQUEST_BYTES = 128 * 1024;
@@ -107,7 +113,8 @@ export function reviewClassifierWork(response: unknown): ReviewClassifierWork | 
 
 /**
  * Answers the daemon's stage-1 classifier work for each project a session is open on. One loop
- * per project root asks `memory.review.classify.next` for work every few seconds, runs the
+ * per project root asks `memory.review.classify.next` for work every few seconds, and at short,
+ * doubling pauses for one poll interval after it answers work, runs the
  * classifier through `execute`, and returns the answers or one failure code with
  * `memory.review.classify.submit`. The daemon reads each `next` call it answers `work` or
  * `ready` as the sign that this project's harness has a classifier, so a harness that cannot call one starts no loop and the
@@ -209,6 +216,8 @@ export function createReviewClassifierPump(
 
     async function run(loop: Loop): Promise<void> {
         let failures = 0;
+        // `sinceWork` tracks the cumulative scheduled pauses after an answer; at `pollIntervalMs` the loop pauses the whole interval between calls.
+        let sinceWork = pollIntervalMs;
         try {
             while (!closing.signal.aborted && !loop.stopped) {
                 const scope = loop.scope;
@@ -242,7 +251,13 @@ export function createReviewClassifierPump(
                 failures = 0;
                 const state = record(response)?.state;
                 if (state === "ready") {
-                    await pause(pollIntervalMs);
+                    // After the first pause, six doublings bring `sinceWork` to `pollIntervalMs`, which selects the full interval for the next pause.
+                    const wait =
+                        sinceWork < pollIntervalMs
+                            ? Math.max(sinceWork, pollIntervalMs * FIRST_REPOLL_FRACTION)
+                            : pollIntervalMs;
+                    await pause(wait);
+                    sinceWork = Math.min(sinceWork + wait, pollIntervalMs);
                     continue;
                 }
                 if (state !== "work") {
@@ -253,6 +268,7 @@ export function createReviewClassifierPump(
                 // Work outside the contract, and work that arrives for a session released during the call, stays unanswered; its review's wait ends the attempt.
                 if (!work || loop.stopped) continue;
                 const stuck = await answer(loop, work);
+                sinceWork = 0;
                 // A call that ignored its abort signal is still running in the harness. The loop waits for it, so a project has one such call at a time.
                 if (stuck) await Promise.race([stuck.call.catch(() => undefined), closed]);
             }

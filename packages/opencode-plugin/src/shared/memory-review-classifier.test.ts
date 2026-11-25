@@ -349,6 +349,70 @@ describe("createReviewClassifierPump", () => {
         expect(fake.calls.length).toBeLessThanOrEqual(4);
     });
 
+    it("pulls a request that becomes ready shortly after an answer well inside the poll interval", async () => {
+        let readyAt: number | undefined;
+        let waited: number | undefined;
+        let handed = 0;
+        const client = {
+            call: async (args: { method: string }) => {
+                const now = performance.now();
+                if (args.method === "memory.review.classify.submit") {
+                    if (handed === 1) readyAt = now + 50;
+                    return { state: "processed" };
+                }
+                if (handed === 0) {
+                    handed = 1;
+                    return work();
+                }
+                if (handed === 1 && readyAt !== undefined && now >= readyAt) {
+                    handed = 2;
+                    waited = now - readyAt;
+                    return work();
+                }
+                return handed === 2 ? { state: "disabled" } : { state: "ready" };
+            },
+        };
+        const pump = createReviewClassifierPump(client, async () => ({}));
+        pump.start(SCOPE);
+        await pump.idle();
+        // Post-answer repolling picks up the ready request within a quarter of the default two-second poll interval.
+        expect(waited ?? Number.POSITIVE_INFINITY).toBeLessThan(500);
+    });
+
+    it("asks again at doubling pauses after answered work and then at the poll interval", async () => {
+        const interval = 320;
+        let submittedAt: number | undefined;
+        const asked: number[] = [];
+        const client = {
+            call: async (args: { method: string }) => {
+                const now = performance.now();
+                if (args.method === "memory.review.classify.submit") {
+                    submittedAt = now;
+                    return { state: "processed" };
+                }
+                if (submittedAt === undefined) return work();
+                asked.push(now - submittedAt);
+                return { state: "ready" };
+            },
+        };
+        const pump = createReviewClassifierPump(client, async () => ({}), {
+            pollIntervalMs: interval,
+        });
+        pump.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 1_400));
+        await pump.close();
+        // The pump targets offsets of 0, 5, 10, 20, 40, 80, 160 and 320 ms after submission, then schedules 320 ms pauses.
+        expect(asked.length).toBeGreaterThanOrEqual(10);
+        expect(asked.length).toBeLessThanOrEqual(11);
+        expect(asked[7] ?? 0).toBeGreaterThanOrEqual(interval - 5);
+        expect(asked[7] ?? 0).toBeLessThan(interval * 2);
+        for (let index = 8; index < asked.length; index += 1) {
+            const gap = (asked[index] ?? 0) - (asked[index - 1] ?? 0);
+            expect(gap).toBeGreaterThanOrEqual(interval - 5);
+            expect(gap).toBeLessThan(interval * 2);
+        }
+    });
+
     it("closes at once while a next call is in flight or a pause is running", async () => {
         // The transport rejects a call whose signal aborts.
         const client = {
