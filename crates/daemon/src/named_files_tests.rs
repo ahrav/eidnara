@@ -1914,6 +1914,64 @@ async fn a_store_that_holds_a_row_under_the_domains_id_still_records() {
     assert!(stored_records(&full, &project).is_empty());
 }
 
+/// The parent closes the read end of the child's stderr pipe, so reporting the commit
+/// failure panics after `write` releases `capture_commit_gate`. The gate stays unpoisoned.
+#[tokio::test]
+async fn a_failed_write_reports_after_it_releases_the_gate() {
+    const CHILD: &str = "EIDNARA_NAMED_FILE_REPORT_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // libtest's exact test name starts at the first module after the crate name in `module_path!()`.
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, rest)| rest);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!(
+                "{module}::{}",
+                stringify!(a_failed_write_reports_after_it_releases_the_gate)
+            ))
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stderr.take());
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(
+            stdout.contains("1 passed"),
+            "the child must run exactly this test:\n{stdout}"
+        );
+        return;
+    }
+    let (full, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    let taken = (0..8).map(|index| format!("nfd_{index}"));
+    for older in std::iter::once("domain:named-files".to_owned()).chain(taken) {
+        store_statement(&full, &project, (&older, "s0", "An older row."), false);
+    }
+    let binding = session_binding(&project, "s1");
+    let said = format!("Read {NOTES} first.");
+    let mut messages = vec![ck("s1-u1", 1, &said)];
+    messages.extend(read("a1", 2, NOTES));
+    let observed = full
+        .observe_named_files(&binding, &window("s1", &messages))
+        .expect("the window shows a use");
+    let record = full
+        .named_files
+        .keep(
+            &binding.kernel_project,
+            &binding.session,
+            &observed,
+            now_ms(),
+        )
+        .expect("the file exists");
+    let written = std::thread::scope(|scope| scope.spawn(|| write(&full, record)).join());
+    assert!(written.is_err(), "the report panics on the closed stream");
+    assert!(full.capture_commit_gate.lock().is_ok());
+}
+
 /// Over the routes: a Pi result whose row states no outcome shows no use. A result without
 /// `isError`, with the string `"false"`, with `true`, and with `false` beside a `content` that
 /// is no array each record nothing, and the result with the boolean `false` and a content

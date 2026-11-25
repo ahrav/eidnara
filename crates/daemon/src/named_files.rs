@@ -551,35 +551,39 @@ impl NamedFileRecord {
             eprintln!("daemon: named file records dropped: the Kernel is unavailable");
             return 0;
         };
-        let _gate = gate.lock().expect("capture publication mutex");
-        if files.memo().deletes != self.deletes {
-            return 0;
-        }
         let owner = NamedFiles::owner(&self.project, &self.session);
-        let deadline = Instant::now() + COMMIT_WAIT;
         let (mut written, mut failed) = (0, 0);
-        for path in &self.paths {
-            {
-                let memo = files.memo();
-                if memo.recorded(&owner, path) || memo.room(&owner) == 0 {
-                    continue;
+        {
+            let _gate = gate.lock().expect("capture publication mutex");
+            if files.memo().deletes != self.deletes {
+                return 0;
+            }
+            let deadline = Instant::now() + COMMIT_WAIT;
+            for path in &self.paths {
+                {
+                    let memo = files.memo();
+                    if memo.recorded(&owner, path) || memo.room(&owner) == 0 {
+                        continue;
+                    }
+                }
+                let stored = record(
+                    &store,
+                    &self.project,
+                    &self.session,
+                    path,
+                    self.used_ms,
+                    deadline,
+                );
+                if stored.is_ok() {
+                    files.memo().record(&owner, path);
+                    written += 1;
+                } else {
+                    failed += 1;
                 }
             }
-            let stored = record(
-                &store,
-                &self.project,
-                &self.session,
-                path,
-                self.used_ms,
-                deadline,
-            );
-            if stored.is_ok() {
-                files.memo().record(&owner, path);
-                written += 1;
-            } else {
-                failed += 1;
-            }
         }
+        // The job releases `gate` before reporting failures, so other jobs can
+        // acquire `gate` even if the write to standard error blocks.
         if failed > 0 {
             eprintln!("daemon: named file records: {failed} writes failed");
         }
