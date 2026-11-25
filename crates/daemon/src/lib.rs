@@ -80,6 +80,7 @@ pub mod memory_reviewer;
 pub mod memory_tool;
 pub mod message_cleanup;
 pub mod metered_decode;
+mod named_files;
 pub mod packing;
 mod parallel_map;
 pub mod process_memory;
@@ -2618,6 +2619,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// Each search projection connection holds `search_projection::CACHE_KIB` of page cache.
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
+/// The named-file memo holds each session's recorded path digests, and each write slot holds one pass's paths (`named_files::RETAINED_BYTES_BOUND`).
 /// Each in-flight use-outcome serve write holds the served set it records after the pass's response released its charges; `use_outcome_writer::RETAINED_SERVED_SET_BYTES_BOUND` covers every write slot at the id bytes a block the Memory Store commit admits can hold.
 /// The transform-serving combined budget is the CK previous-output store plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
 /// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
@@ -2642,6 +2644,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
     + kernel_routes::ingest::PAGE_DECODE_BYTES_MAX
     + kernel_routes::eligibility::CACHE_BUDGET_BYTES
+    + named_files::RETAINED_BYTES_BOUND
     + memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES
     + memory_capture::RETAINED_BYTES_BOUND
     + source_capture::RETAINED_BYTES_BOUND
@@ -2847,6 +2850,10 @@ pub struct HandlerCore {
     native_capture: Arc<Mutex<memory_capture::NativeCaptureState>>,
     capture_commit_gate: Arc<Mutex<()>>,
     capture_memo: Arc<Mutex<memory_capture::CaptureCheckpointMemo>>,
+    named_files: Arc<named_files::NamedFiles>,
+    /// The tool calls each session's failure recorder has judged, and the
+    /// sessions whose recorder task runs.
+    failure_memo: Arc<Mutex<memory_capture::FailureMemo>>,
     source_capture: Arc<source_capture::SourceCapture>,
     contradiction_candidates: Arc<contradiction_candidates::Candidates>,
     session_resolver: Arc<dyn SessionResolver>,
@@ -3536,6 +3543,8 @@ struct PassEnv {
     project_path: String,
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
+    /// The project files the submitted window showed in use, recorded once the pass's transform has succeeded.
+    named_files: Option<named_files::Observed>,
     /// `use_outcome_settled` records this pass's serve-write handoff to a Ready Kernel, regardless of outcome. If the Kernel is
     /// not Ready, `use_outcome_settled` remains clear so a rerun can retry.
     use_outcome_settled: std::sync::atomic::AtomicBool,
@@ -3891,6 +3900,8 @@ impl Handler {
             use_outcome_lifecycle: Arc::default(),
             contradiction_candidates: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
+            named_files: Arc::default(),
+            failure_memo: Arc::new(Mutex::new(memory_capture::FailureMemo::default())),
             session_resolver: Arc::new(MissingSessionResolver),
             config: Mutex::new(ConfigCache::default()),
             #[cfg(test)]
@@ -4468,6 +4479,8 @@ impl Handler {
             use_outcome_lifecycle: Arc::default(),
             contradiction_candidates: Arc::default(),
             capture_memo: Arc::new(Mutex::new(memory_capture::CaptureCheckpointMemo::default())),
+            named_files: Arc::default(),
+            failure_memo: Arc::new(Mutex::new(memory_capture::FailureMemo::default())),
             session_resolver,
             config: Mutex::new(ConfigCache::default()),
             fixed_config: Some(config),
@@ -5672,6 +5685,24 @@ impl HandlerCore {
         })
     }
 
+    /// The project's facts for a summarizer prompt that no pass read serves: the read of
+    /// [`Self::project_memory_read`] without the `NAMED_FILES` lines, which the prompt leaves out.
+    fn project_facts_read(
+        &self,
+        binding: &SessionBinding,
+        cfg: &DaemonConfig,
+        session_id: &str,
+    ) -> Option<canonical_memory::CanonicalMemoryRead> {
+        cfg.memory_enabled.then(|| {
+            canonical_memory::read_project_facts(
+                &self.kernel,
+                &binding.kernel_project,
+                session_id,
+                cfg.memory_budget_tokens,
+            )
+        })
+    }
+
     fn prepare_history_summarizer_fire(
         &self,
         store: Arc<MemoryStore>,
@@ -6030,7 +6061,7 @@ impl HandlerCore {
                 // `project_memory` was read under `binding.config`; the gate must come from the same config or a reload between bind and fire pairs `memory_enabled: true` with no read.
                 memory_enabled: binding.config.memory_enabled,
                 project_memory: project_memory.cloned().or_else(|| {
-                    self.project_memory_read(binding, &binding.config, &parsed.session_id)
+                    self.project_facts_read(binding, &binding.config, &parsed.session_id)
                 }),
                 auto_promote: cfg.auto_promote,
                 user_memory_collection_enabled: cfg.user_memory_collection_enabled,
@@ -6222,7 +6253,7 @@ impl HandlerCore {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),
-                project_memory: self.project_memory_read(binding, &cfg, &parsed.session_id),
+                project_memory: self.project_facts_read(binding, &cfg, &parsed.session_id),
                 model_chain: cfg.model_chain.clone(),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     cfg.history_summarizer_context_limit_tokens,
@@ -7123,10 +7154,18 @@ impl HandlerCore {
                 // checkpointing; both hold `capture_commit_gate` on a blocking
                 // thread. Purging the memo here retires any checkpoint admitted
                 // before this delete but not yet run.
-                let _capture_gate = core
+                let capture_gate = core
                     .capture_commit_gate
                     .lock()
                     .expect("capture publication mutex");
+                // A failure recorder task reads its memo entry under the same gate. The fence holds the gate, retires the session's entry before the delete changes either store, and on every way out of this block retires it again and then releases the gate, so a task handed off before the delete or while it holds the gate has nothing to write, also when the delete ends partway.
+                let _capture_gate = memory_capture::DeleteFence::raise(
+                    capture_gate,
+                    &core.failure_memo,
+                    &session_id,
+                );
+                // Named-file records check the deletion count under the gate. Advancing it before either store changes fences earlier observations even if deletion fails.
+                core.named_files.delete_session(&session_id);
                 // Captured sources retire and the session's use-outcome records are marked deleted before the memory rows go, so no deleted session keeps a live descriptor or reads as live.
                 core.delete_kernel_step(&binding, &session_id)?;
                 #[cfg(test)]
@@ -7150,6 +7189,8 @@ impl HandlerCore {
                     .lock()
                     .expect("capture memo mutex")
                     .remove_session(&session_id);
+                // The second advance fences a pass observed while this delete held the gate.
+                core.named_files.delete_session(&session_id);
                 // A source capture handed off before this delete rechecks its ticket under the same gate and publishes nothing.
                 core.source_capture.invalidate_sessions();
                 deleted
@@ -9300,6 +9341,11 @@ impl HandlerCore {
         ) {
             self.spawn_tracked_task(checkpoint.run());
         }
+        // A command result the window holds is recorded when it reports a
+        // failure, off the reply's path as the capture checkpoint is.
+        if let Some(checkpoint) = self.failure_checkpoint(&binding, &parsed) {
+            self.spawn_tracked_task(checkpoint.run());
+        }
         // The pass's own charges cover these references until its response is built; source capture charges them separately from then on.
         let consents = source_capture::consents(
             &binding.config,
@@ -9481,6 +9527,9 @@ impl HandlerCore {
             Ok(pass) => pass,
             Err(outcome) => return UnitOutcome::Terminal(outcome),
         };
+        if let Some(observed) = &env.named_files {
+            self.keep_named_files(&env.binding, observed, env.pass_now);
+        }
         if pass.result.fold_authority.settles_first_pass
             && let Some(bind_seq) = env.fold_authority.bind_seq
         {
@@ -9721,8 +9770,14 @@ impl HandlerCore {
             derived,
             entry,
         } = intake;
-        // Resolve first (spec D2): every consumer of the pass reads the cut window and the
-        // ordinals the daemon derived for it.
+        // Resolve first (spec D2): every consumer of the resolved window reads the cut window and
+        // the ordinals the daemon derived for it. Before it, the named-file observation reads the
+        // submitted window, which shows the turn in progress and which resolution cuts. Its
+        // record is started once the pass's transform has succeeded.
+        let named_files = self.observe_named_files(&binding, &parsed);
+        // The observation holds what the directory was read for, so the request, and every
+        // snapshot and lease made of it, carries the directory no further.
+        parsed.working_directory = None;
         if let Err(error) = transform::resolve_window(&store, &mut parsed) {
             return Err(window_refusal(&parsed, error));
         }
@@ -9762,6 +9817,7 @@ impl HandlerCore {
             project_path,
             note_project_path,
             project_memory,
+            named_files,
             use_outcome_settled: std::sync::atomic::AtomicBool::new(false),
             kernel_writes: Default::default(),
             touch_delegated: std::sync::atomic::AtomicBool::new(false),
@@ -19365,6 +19421,8 @@ mod tests {
     mod memory_auto_delivery_tests;
     #[path = "memory_reviewer_switch_tests.rs"]
     mod memory_reviewer_switch_tests;
+    #[path = "named_files_tests.rs"]
+    mod named_files_tests;
     #[path = "pi_native_serving_tests.rs"]
     mod pi_native_serving_tests;
     #[path = "transform/recorded_goldens.rs"]

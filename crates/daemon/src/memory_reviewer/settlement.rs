@@ -1145,13 +1145,14 @@ fn accepted_template(
     })
 }
 
-/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. The caller intent's identity is the run's project digest, the job's causal identity, and the digest of `operation_key`; reusing the key for a different target causes a conflict.
+/// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, a receipt that selects another proposal than `read`, the reference the caller's `review.read` returned, yields `NotSelected` before the Kernel is entered, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. The caller intent's identity is the run's project digest, the job's causal identity, and the digest of `operation_key`; reusing the key for a different target causes a conflict.
 pub fn accept_selected_proposal(
     store: &KernelStore,
     receipt: Option<MemoryReviewerReceipt>,
     expected: (&str, &str),
     causal_identity: &str,
     operation_key: &str,
+    read: &ReviewStagedReference,
     target: &kernel::ProposalTarget,
 ) -> Result<kernel::AcceptanceOutcome, AcceptRefusal> {
     let (live_kernel, live_memstore) = expected;
@@ -1165,6 +1166,9 @@ pub fn accept_selected_proposal(
         .map_err(AcceptRefusal::Receipt)?;
     if run.kernel_incarnation != live_kernel {
         return Err(AcceptRefusal::Receipt(ReadRefusal::IncarnationMismatch));
+    }
+    if *read != reference {
+        return Err(AcceptRefusal::Receipt(ReadRefusal::NotSelected));
     }
     let scope_id = format!("project:{}", run.project_digest);
     let question = accepted_template(store.read_selected_review_input(&reference, selected_at))?;

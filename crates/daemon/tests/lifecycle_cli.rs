@@ -859,8 +859,20 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     assert_eq!(effects(&value), (true, true));
 
     // `search status` reaches the running daemon over a `cli` route and prints one JSON answer: the lifecycle record, or `unavailable` while the daemon has no search lifecycle owner.
-    let out = run(&data, &["search", "status"]);
-    let answer = out.json();
+    // The successor can answer `search status` with reason `store_starting` while its Kernel store opens.
+    let store_deadline = std::time::Instant::now() + BUDGET;
+    let (out, answer) = loop {
+        let out = run(&data, &["search", "status"]);
+        let answer = out.json();
+        if answer["state"]["reason"] != "store_starting" {
+            break (out, answer);
+        }
+        assert!(
+            std::time::Instant::now() < store_deadline,
+            "the successor's Kernel store did not open; last answer: {answer}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     match answer["kind"].as_str() {
         Some("status") => assert_eq!(out.code, 0, "{answer}"),
         Some("terminal") => {

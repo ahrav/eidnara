@@ -25,7 +25,7 @@ pub const UPSTREAM_CORPUS_SHA256: &str =
     "5249f06114ae7f48b7f049c1735da373bfbda50e96a95db45488778e45bbfc50";
 /// Expected SHA-256 digest of the embedded conservative overlay document.
 pub const CONSERVATIVE_OVERLAY_SHA256: &str =
-    "973181a0af049fb4c0ae06160cd022b1beae3660b87ac9fa4d498864912b3487";
+    "71a59536e49b358c4498f492c728a0c07444afb57ecbfd8783c96543ad67d0f5";
 
 const UPSTREAM_BYTES: &[u8] = include_bytes!("../default_rules.yaml");
 const OVERLAY_BYTES: &[u8] = include_bytes!("../conservative_overlay.yaml");
@@ -124,6 +124,38 @@ pub(crate) struct RuleDeclaration {
     /// class treats the same code point as content makes the value run past it.
     #[serde(default)]
     pub unicode: bool,
+    /// Names the reading the evaluator applies to the value of a rule for a credential form
+    /// whose syntax is weaker than `key=value`: the text the gates read and the stand-in
+    /// shapes that are left as written.
+    ///
+    /// A rule without the field is evaluated by its other fields alone. The field is left
+    /// out of the encoded declaration when it is absent, so such a rule encodes to the same
+    /// bytes whether or not this field exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_form: Option<CredentialForm>,
+}
+
+/// The value reading of a credential-form rule. `conservative_overlay.yaml` states the
+/// grammar of each form; `evaluator::CredentialForm::admitted_text` implements the gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CredentialForm {
+    /// The word after a secret-named option: `--password WORD`.
+    OptionValue,
+    /// The word that ends a `name: WORD` line.
+    FieldValue,
+    /// The word assigned to a name that ends in `password`: `PGPASSWORD=WORD`.
+    PasswordAssignment,
+    /// A word of digits under a key that names a password or a secret.
+    Digits,
+    /// The password of URL userinfo.
+    UrlPassword,
+    /// The word a named client reads as its password option: `-pWORD`, `-p WORD`.
+    ClientPassword,
+    ClientPasswordOption,
+    DigitsQuoted,
+    BasicAuthorization,
+    PrivateKeyBody,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -209,6 +241,9 @@ pub(crate) struct Rule {
     /// Which source-code value shapes the evaluator rejects for this rule.
     pub code_reference_gate: Option<CodeReferenceGate>,
     pub encoded_declaration: Vec<u8>,
+    /// When set, every match of `regex` fits on one line and contains one of these literals
+    /// under ASCII case folding.
+    pub line_literals: Option<&'static [&'static str]>,
 }
 
 /// Keyed rules whose unquoted value can be source code naming a secret, as in
@@ -645,6 +680,7 @@ pub(crate) fn compile_rule(
     };
     let encoded_declaration =
         serde_json::to_vec(&declaration).map_err(|_| ConstructionError::InvalidRulePolicy)?;
+    let line_literals = line_literals(&declaration.name);
     Ok(Rule {
         source,
         declaration,
@@ -657,7 +693,30 @@ pub(crate) fn compile_rule(
         confidence_bonus,
         code_reference_gate,
         encoded_declaration,
+        line_literals,
     })
+}
+
+/// Unicode case folding maps `\u{17f}` to `s` and `\u{212a}` to `k`; each list includes the
+/// variants its key words can match.
+fn line_literals(name: &str) -> Option<&'static [&'static str]> {
+    const KEY_WORDS: &[&str] = &["password", "secret", "token", "key", "\u{17f}", "\u{212a}"];
+    const MEMORIZED_WORDS: &[&str] = &["password", "secret", "\u{17f}"];
+    match name {
+        "magic-value-option" | "magic-value-field" => Some(KEY_WORDS),
+        "magic-value-digits" | "magic-value-digits-quoted" => Some(MEMORIZED_WORDS),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+impl RuleSet {
+    pub(crate) fn searched_over_the_whole_input(mut self) -> Self {
+        for rule in &mut self.rules {
+            rule.line_literals = None;
+        }
+        self
+    }
 }
 
 fn build_case_insensitive_matcher(patterns: &[String]) -> Result<AhoCorasick, ConstructionError> {
@@ -770,11 +829,74 @@ fn encode_rule(hash: &mut Sha256, rule: &Rule) {
 }
 
 #[cfg(test)]
+mod monotonicity;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// Pattern count above which `AhoCorasickKind::Auto` stops building a DFA and falls back to a contiguous NFA.
     const AUTO_DFA_PATTERN_LIMIT: usize = 100;
+
+    #[test]
+    fn preselection_selects_each_credential_form_rule_on_its_form() {
+        let rules = RuleSet::from_embedded().unwrap();
+        let word = ["Zx9", "kq7"].concat();
+        let basic = ["dXNlcjpaeDlr", "cTc="].concat();
+        for (input, name) in [
+            (format!("deploy --PASSWORD {word}"), "magic-value-option"),
+            (format!("Password: {word}"), "magic-value-field"),
+            (format!("PASSWORD: {word}\\nuser: bob"), "magic-value-field"),
+            (
+                format!("PGPASSWORD={word}"),
+                "magic-value-password-assignment",
+            ),
+            (
+                format!("pgpassword={word}"),
+                "magic-value-password-assignment",
+            ),
+            (format!("Password={}", 12_345_678), "magic-value-digits"),
+            (
+                format!("AUTHORIZATION: basic {basic}"),
+                "magic-value-basic-authorization",
+            ),
+            (
+                format!("x://alice:{word}@host.internal/"),
+                "magic-value-url-userinfo",
+            ),
+            (
+                format!("mysql -uroot -p{word} app"),
+                "magic-value-client-attached",
+            ),
+            (
+                format!("sshpass -p {word} ssh host"),
+                "magic-value-client-option",
+            ),
+            (
+                format!("docker login -u bob -p {word} registry"),
+                "magic-value-client-option",
+            ),
+            (
+                format!(
+                    "-----begin private key-----\n{}\n",
+                    ["QUJDREVGR0hJSktM", "TU5PUFFSU1RVVldYWVo"].concat()
+                ),
+                "magic-value-private-key-body",
+            ),
+        ] {
+            let rule = rules
+                .active(ScanProfile::Conservative)
+                .find(|rule| rule.declaration.name == name)
+                .unwrap_or_else(|| panic!("no overlay rule named {name}"));
+            assert!(rule.regex.is_match(input.as_bytes()), "{name} on {input:?}");
+            assert!(
+                rules
+                    .preselect(ScanProfile::Conservative, input.as_bytes())
+                    .any(|selected| selected.declaration.name == name),
+                "{name} matches {input:?} but was not preselected"
+            );
+        }
+    }
 
     /// A matching rule must be preselected because unselected rules are not
     /// evaluated.
@@ -1036,11 +1158,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "69235bd55d45ad0e6e80caf378cce8a3ee27087a13190c26776864264503bf22",
+                "e20154cbae87bcf8623fa6fc893627c724dbadd15b46a1636132ac180f539ce7",
             ),
             (
                 ScanProfile::Comprehensive,
-                "c19adcf9d5dc7aa972f008fdb12a0cf8ceeb520b1ed4a73b5211d0c0a629dadb",
+                "8c7b6a4f52972e0859a35dbab9d3eed6effbf688230649bfde1f53721f220bd5",
             ),
         ] {
             let digest = rules

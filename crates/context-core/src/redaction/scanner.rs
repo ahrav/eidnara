@@ -22,6 +22,18 @@ fn provider_label(rule_id: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
+fn form_label(rule_id: &str) -> Option<(&'static str, &'static str)> {
+    Some(match rule_id {
+        "magic-value-basic-authorization" => ("basic", "<REDACTED:basic>"),
+        "magic-value-url-userinfo" => ("url_password", "<REDACTED:url_password>"),
+        "magic-value-password-assignment"
+        | "magic-value-client-attached"
+        | "magic-value-client-option" => ("password", "<REDACTED:password>"),
+        "magic-value-private-key-body" => ("private_key", "<REDACTED:private_key>"),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 const KEYED_RULE_IDS: &[&str] = &[
     "magic-keyed-assignment",
@@ -31,11 +43,17 @@ const KEYED_RULE_IDS: &[&str] = &[
     "magic-keyed-single-quoted",
     "magic-keyed-double-single",
     "magic-keyed-single-double",
+    "magic-value-option",
+    "magic-value-field",
+    "magic-value-digits",
+    "magic-value-digits-quoted",
 ];
 
 #[cfg(test)]
 fn is_known_rule(rule_id: &str) -> bool {
-    provider_label(rule_id).is_some() || KEYED_RULE_IDS.contains(&rule_id)
+    provider_label(rule_id).is_some()
+        || form_label(rule_id).is_some()
+        || KEYED_RULE_IDS.contains(&rule_id)
 }
 
 /// Precedence among findings that cover overlapping bytes; the lowest value wins.
@@ -177,6 +195,15 @@ fn describe(
             start,
             end,
             specificity: PROVIDER_PRECEDENCE,
+            secret_type: secret_type.to_owned(),
+            replacement: replacement.to_owned(),
+        });
+    }
+    if let Some((secret_type, replacement)) = form_label(rule_id) {
+        return Ok(Replacement {
+            start,
+            end,
+            specificity: GENERIC_PRECEDENCE,
             secret_type: secret_type.to_owned(),
             replacement: replacement.to_owned(),
         });
@@ -385,7 +412,7 @@ mod tests {
         }
         assert_eq!(
             names.len(),
-            17,
+            27,
             "overlay rule count changed; update the classifier table"
         );
     }
@@ -410,6 +437,14 @@ mod tests {
         );
         // The key-derived fallback label takes the same column.
         assert_persistable_label("secret");
+        let forms: Vec<_> = overlay_rule_names()
+            .into_iter()
+            .filter_map(form_label)
+            .collect();
+        assert_eq!(forms.len(), 6);
+        for (secret_type, _) in forms {
+            assert_persistable_label(secret_type);
+        }
     }
 
     fn assert_persistable_label(label: &str) {

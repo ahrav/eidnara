@@ -1176,3 +1176,6 @@ mod qualifier_chain_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod credential_form_tests;

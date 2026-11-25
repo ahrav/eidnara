@@ -632,12 +632,12 @@
       "default": {
         "enabled": false
       },
-      "description": "User-only exact source capture of message text and tool results.",
+      "description": "User-only exact source capture of message text and tool results, and the consent for failed-command facts.",
       "type": "object",
       "properties": {
         "enabled": {
           "default": false,
-          "description": "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. Project values are ignored with a warning.",
+          "description": "User-only: retain the exact bytes of user message text, tool outputs, tool errors, and the configured repository documents a pass reads for its prompt block, as Kernel source descriptors for later authorized reading (default: false). Requires memory.enabled; subagent sessions never capture. With memory.auto_promote and memory.auto_capture it also lets the daemon write failed-command facts from Pi tool results, which later sessions find through eidnara_search; such a fact is a project memory fact, which session deletion leaves in place and which has no retention deadline. Project values are ignored with a warning.",
           "type": "boolean"
         }
       },
@@ -870,12 +870,12 @@
         },
         "auto_promote": {
           "default": true,
-          "description": "Automatically promote eligible session facts into memory (default: true)",
+          "description": "Automatically promote eligible session facts into memory (default: true). Capture, and with it the named-file records of a Pi session, needs this switch on.",
           "type": "boolean"
         },
         "auto_capture": {
           "default": true,
-          "description": "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. Set false to disable unattended capture.",
+          "description": "User-only: extract durable project facts from completed turns, compaction checkpoints, and session end using a zero-tool model call (default: true). Uses the configured history_summarizer model chain, or the current chat model when no chain is configured. Source text is redacted before durable queueing; a whole-sentence quotation of a user message is admitted as the user's statement and reaches the <project-memory> block while memory.auto_inject.enabled holds; every other captured fact stays labeled model inference for explicit search. In a Pi session, while memory.enabled and memory.auto_promote also hold, the same switch lets the daemon record, with no model call, the paths of project files that a message of the user named and the agent then read or named in a command it ran; a <project-memory> block composed for a later session lists the paths whose files exist at that moment, while memory.auto_inject.enabled holds. With memory.enabled, memory.auto_promote, and source_capture.enabled it also gates the failed-command facts the daemon writes from Pi tool results with no model call; such a fact is a project memory fact, which session deletion leaves in place and which has no retention deadline. Set false to disable unattended capture.",
           "type": "boolean"
         },
         "retrieval_count_promotion_threshold": {

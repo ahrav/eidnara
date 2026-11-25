@@ -767,7 +767,7 @@ pub struct MemoryReviewerStatusFacts {
     pub attempts_open: u64,
     pub receipts_in_progress: u64,
     pub receipts_complete: u64,
-    /// Permanent receipt charges every admitted job keeps; these never shrink for the incarnation.
+    /// Receipt charges of the jobs and frozen selection pages the store holds; a charge returns when the retirement sweep deletes its row.
     pub receipt_charge_bytes: u64,
     /// Temporary allowances still held by non-terminal jobs and frozen selection pages; released when the work is terminal.
     pub allowance_bytes: u64,
@@ -907,7 +907,7 @@ impl MemoryStore {
                     "SELECT state, COUNT(*), COALESCE(SUM(receipt_charge_bytes), 0)
                      FROM memory_reviewer_frozen_selections GROUP BY state",
                     |state, row| {
-                        // A page's receipt charge is permanent whatever its state; only its allowance is released at a terminal.
+                        // A page keeps its receipt charge in every state until the retirement sweep deletes it; only its allowance is released at a terminal.
                         facts.receipt_charge_bytes = facts
                             .receipt_charge_bytes
                             .saturating_add(unsigned(row.get(2)?));
@@ -945,7 +945,7 @@ impl MemoryStore {
                     },
                 )?;
                 facts.metadata_bytes = memory_reviewer_jobs::metadata_bytes(conn, None)?;
-                // Everything charged that is not a permanent receipt is a temporary allowance: job allowances plus the frozen pages' charges.
+                // Everything charged that is not a receipt charge is a temporary allowance: job allowances plus the frozen pages' charges.
                 facts.allowance_bytes = facts
                     .metadata_bytes
                     .saturating_sub(facts.receipt_charge_bytes);
@@ -3708,7 +3708,15 @@ fn json_id_array<'a>(ids: impl IntoIterator<Item = &'a str>) -> rusqlite::Result
 enum RetiredOwners<'a> {
     Scope,
     Kind(&'a str),
-    Owner { kind: &'a str, key: &'a str },
+    Owner {
+        kind: &'a str,
+        key: &'a str,
+    },
+    /// Every owner of `kind` whose key is in `keys`. One scan query and one owner delete cover the whole set.
+    Owners {
+        kind: &'a str,
+        keys: &'a [String],
+    },
 }
 
 fn retire_active_scan_domain_owners(
@@ -3727,6 +3735,17 @@ fn retire_active_scan_domain_owners(
         .optional()?;
     let Some(owner_scope_id) = owner_scope_id else {
         return Ok(());
+    };
+    // The selection and the delete of a set of owners bind the same JSON array of private keys.
+    let private_owner_keys = match selection {
+        RetiredOwners::Owners { kind, keys } => {
+            let private_keys: Vec<String> = keys
+                .iter()
+                .map(|key| active_scan_private_key(kind, key))
+                .collect();
+            Some(json_id_array(private_keys.iter().map(String::as_str))?)
+        }
+        RetiredOwners::Scope | RetiredOwners::Kind(_) | RetiredOwners::Owner { .. } => None,
     };
 
     macro_rules! retired_scans_sql {
@@ -3761,6 +3780,13 @@ fn retire_active_scan_domain_owners(
                 scan_row,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?,
+        RetiredOwners::Owners { kind, .. } => tx
+            .prepare_cached(retired_scans_sql!(
+                " AND owners.owner_kind = ?2
+                  AND owners.owner_key IN (SELECT value FROM json_each(?3))"
+            ))?
+            .query_map(params![owner_scope_id, kind, private_owner_keys], scan_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
     };
 
     match selection {
@@ -3782,6 +3808,13 @@ fn retire_active_scan_domain_owners(
                 kind,
                 active_scan_private_key(kind, key)
             ])?,
+        RetiredOwners::Owners { kind, .. } => tx
+            .prepare_cached(
+                "DELETE FROM scan_domain_owners
+                  WHERE owner_scope_id = ?1 AND owner_kind = ?2
+                    AND owner_key IN (SELECT value FROM json_each(?3))",
+            )?
+            .execute(params![owner_scope_id, kind, private_owner_keys])?,
     };
     prune_retired_active_scan_audit(tx, &retired_scans, &owner_scope_id)
 }
@@ -3800,6 +3833,28 @@ fn retire_active_scan_domain_owner(
         RetiredOwners::Owner {
             kind: owner_kind,
             key: owner_key,
+        },
+    )
+}
+
+/// Retires every owner of `owner_kind` named in `owner_keys` under one scope, with one scan query and one owner delete for the whole set.
+fn retire_active_scan_domain_owner_set(
+    tx: &GuardedConn<'_>,
+    scope_kind: &str,
+    scope_key: &str,
+    owner_kind: &str,
+    owner_keys: &[String],
+) -> rusqlite::Result<()> {
+    if owner_keys.is_empty() {
+        return Ok(());
+    }
+    retire_active_scan_domain_owners(
+        tx,
+        scope_kind,
+        scope_key,
+        RetiredOwners::Owners {
+            kind: owner_kind,
+            keys: owner_keys,
         },
     )
 }
@@ -29116,9 +29171,9 @@ mod tests {
         }
     }
 
-    /// A frozen page's receipt charge is permanent and its allowance temporary; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
+    /// A frozen page's receipt charge outlasts its allowance; the sampler must attribute each to the right counter, including once the page is terminal and only the receipt charge remains.
     #[test]
-    fn frozen_page_receipt_charges_are_permanent_not_allowances_in_the_sample() {
+    fn frozen_page_receipt_charges_are_receipts_not_allowances_in_the_sample() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let receipt = memory_reviewer_jobs::FROZEN_PAGE_RECEIPT_CHARGE_BYTES;

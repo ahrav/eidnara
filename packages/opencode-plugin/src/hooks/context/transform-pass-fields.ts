@@ -82,6 +82,9 @@ export function transformPassFields(args: TransformPassInputs): Record<string, u
         ...(typeof args.passInputs.todo_tool_present === "boolean"
             ? { todo_tool_present: args.passInputs.todo_tool_present }
             : {}),
+        ...(typeof args.passInputs.working_directory === "string"
+            ? { working_directory: args.passInputs.working_directory }
+            : {}),
         prompt_surface_preset: args.passInputs.prompt_surface_preset ?? "full",
         prompt_surface_model_key: args.passInputs.prompt_surface_model_key,
         prompt_surface_config_identity: args.passInputs.prompt_surface_config_identity,

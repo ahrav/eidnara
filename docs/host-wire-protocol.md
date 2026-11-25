@@ -650,17 +650,17 @@ payload, a reason string, or a project.
 | `selections_frozen`, `selections_enqueued`, `selections_expired`, `selections_failed_slot` | unsigned integer | Memory Classifier selection pages by state |
 | `attempts_attempted`, `attempts_acknowledged`, `attempts_failed`, `attempts_cancelled`, `attempts_unknown`, `attempts_not_dispatched`, `attempts_open` | unsigned integer | model attempts consumed, by terminal kind; `acknowledged` is a complete provider response, `open` has no terminal yet |
 | `receipts_in_progress`, `receipts_complete` | unsigned integer | execution receipts by state |
-| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | permanent receipt charges, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
+| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | receipt charges of jobs and frozen selection pages the store still holds, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
 | `nonadmissions`, `sessions_with_reservation` | unsigned integer | producer-owned History Summarizer nonadmissions summed over sessions, and sessions whose producer state records a MemoryReviewer reservation |
 | `latest_nonadmission_memory_reviewer_unavailable`, `latest_nonadmission_capacity_full`, `latest_nonadmission_evidence_unavailable`, `latest_nonadmission_fact_set_rejected`, `latest_nonadmission_subject_refused` | unsigned integer | sessions whose latest nonadmission carries each closed code |
 
 The same integer rules as `kernel` apply: every counter MUST be no greater
 than 2^53; a larger, negative, non-integer, or `null` counter is dropped to
 absent, never reported as `null`; unknown fields are dropped; fields are
-additive. Permanent receipt charges never shrink within a store incarnation,
-so `metadata_headroom_bytes` reaching zero means new review work is refused
-until a new incarnation; it is a safety ceiling, not a measured service
-lifetime.
+additive. A job keeps its receipt charge until the retirement sweep deletes
+it, ninety days after its queue deadline, and a terminal selection page until the sweep deletes it after its jobs, so `metadata_headroom_bytes`
+reaching zero means new review work is refused until older jobs and pages retire; the
+quota bounds the review work of one ninety-day window. The job, selection, attempt, and receipt counters count the rows the store still holds.
 
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of
@@ -859,7 +859,7 @@ A **context** is `{"context_revision": string, "representation": string, "spans"
 
 `review.read` carries `causal_identity` (hex64; any other spelling is `invalid_params`) and answers the proposal its completed receipt selects. The receipt's selection records the Kernel project digest the proposal was staged under, and the read binds to that recorded digest, so every root bound to the project reads the same proposal whichever root bound most recently and across a daemon restart: `{"kind":"proposal","causal_identity","reference":{"database_incarnation_id","candidate_id","payload_digest"},"proposal": <staged proposal>,"review_expires_at": i64}`. The proposal is the Kernel's staged `ReviewProposal` as serialized: `action`, `target`, optional `new_text`, `support`, `contradictions`, `limitations`, `uncertainty`, `manifest`, `policy_dependencies`. `review_expires_at` is the live review hold's expiry and the only source of the review deadline. Otherwise the answer is `{"kind":"terminal","terminal": t}` with `t` one of `not_selected` (no job, no receipt, a receipt in progress, or a terminal that selected nothing, including every abstention), `incarnation_mismatch` (the receipt binds another Kernel or Memory Store incarnation than the live pair), `selection_mismatch`, `kernel_refused`, `review_expired` (the review hold ended; selection never refreshes a deadline), `dependency_refused` (a disclosed input no longer passes the Kernel for a local reader), or `store_unavailable`. A staged row the Kernel classifies `Secret` is `dependency_refused`; its proposal is never returned.
 
-`review.accept` carries `causal_identity` (hex64), `operation_key` (1 to 128 visible ASCII bytes, 0x21 to 0x7E: the caller's idempotency key, scoped to the job), and `target`, the selected proposal's `target` exactly as `review.read` returned it; any other spelling of a field is `invalid_params`. It applies the proposal the job's completed receipt selects through one Kernel envelope that checks the exact target, every disclosed input under the live review hold, and every policy-union member, or replays the settlement an earlier acceptance of the proposal recorded under any operation key. The replay is answered before the review hold or the queue deadline is consulted. After a settlement, new or replayed, the daemon ends the proposal's review hold, and a `review.read` of that proposal then answers `review_expired`; a release the store fails leaves the hold to its expiry. It answers `{"kind":"settled","replayed": bool,"settlement": <settlement>}`, the settlement as the Kernel records it: `version`, `proposal_id`, `payload_digest`, `receipt_generation`, `kernel_incarnation`, `memstore_incarnation`, `project_digest`, `action`, `target`, `commit_seq`, and `effect`, one of `{"kind":"unchanged"}`, `{"kind":"retired","object_id","object_kind","invalidated_commit_seq","granted_authority_before","demoted","deferred"}`, `{"kind":"created","object_id","admission"}`, or `{"kind":"revised","object_id","predecessor_object_id","predecessor_source_revision","source_revision","predecessor_disposition","admission"}`, where `admission` is `{"disposition","effective_maturity","visibility","source_class","taint_class","sensitivity_class"}`. A create is scoped to the bound project's scope, which a kernel route materializes on its first commit. Acceptance has its own gate. After the body is validated and the route's state is answered as for `review.read`, and until the deployment owner's acceptance record names the live Kernel and Memory Store incarnations, it answers `{"kind":"terminal","terminal":"disabled"}`; the disclosure activation gate neither opens nor closes it, and the connection key is the caller's authority on any route, observational or not. Otherwise the answer is `{"kind":"terminal","terminal": t}` with `t` one of `not_selected`, `incarnation_mismatch`, `selection_mismatch` (each as for `review.read`), `unavailable` (no selected proposal of this run is readable, or a create finds no scope of the bound project), `review_expired` (the review hold ended, or the queue deadline was not after the selection), `changed` (the target, an owner, or a disclosed input moved, or the request names another target than the proposal's), `conflict` (the job's operation key was used for another target), `invalid`, or `store_unavailable`. A refused acceptance writes nothing.
+`review.accept` carries `causal_identity` (hex64), `operation_key` (1 to 128 visible ASCII bytes, 0x21 to 0x7E: the caller's idempotency key, scoped to the job's causal identity), `reference`, the object `review.read` returned under that name with its `database_incarnation_id`, `candidate_id`, and `payload_digest` unchanged, and `target`, the selected proposal's `target` exactly as `review.read` returned it; any other spelling of a field, a missing field included, is `invalid_params`. It applies the proposal the job's completed receipt selects, when `reference` names that proposal, through one Kernel envelope that checks the exact target, every disclosed input under the live review hold, and every policy-union member, or replays the settlement an earlier acceptance of the proposal recorded under any operation key. The replay is answered before the review hold or the queue deadline is consulted. After a settlement, new or replayed, the daemon ends the proposal's review hold, and a `review.read` of that proposal then answers `review_expired`; a release the store fails leaves the hold to its expiry. A job the retirement sweep deleted, ninety days after its queue deadline, has no receipt, so a replay that names it answers `not_selected`. A request whose `reference` names another proposal than the job's completed receipt selects answers `not_selected` as well and writes nothing: once a later job of the same inputs holds the causal identity, an acceptance built from a read of the retired job's proposal carries that proposal's `reference`, and the caller reads again. It answers `{"kind":"settled","replayed": bool,"settlement": <settlement>}`, the settlement as the Kernel records it: `version`, `proposal_id`, `payload_digest`, `receipt_generation`, `kernel_incarnation`, `memstore_incarnation`, `project_digest`, `action`, `target`, `commit_seq`, and `effect`, one of `{"kind":"unchanged"}`, `{"kind":"retired","object_id","object_kind","invalidated_commit_seq","granted_authority_before","demoted","deferred"}`, `{"kind":"created","object_id","admission"}`, or `{"kind":"revised","object_id","predecessor_object_id","predecessor_source_revision","source_revision","predecessor_disposition","admission"}`, where `admission` is `{"disposition","effective_maturity","visibility","source_class","taint_class","sensitivity_class"}`. A create is scoped to the bound project's scope, which a kernel route materializes on its first commit. Acceptance has its own gate. After the body is validated and the route's state is answered as for `review.read`, and until the deployment owner's acceptance record names the live Kernel and Memory Store incarnations, it answers `{"kind":"terminal","terminal":"disabled"}`; the disclosure activation gate neither opens nor closes it, and the connection key is the caller's authority on any route, observational or not. Otherwise the answer is `{"kind":"terminal","terminal": t}` with `t` one of `not_selected` (as for `review.read`, or the request names another proposal than the receipt selects), `incarnation_mismatch`, `selection_mismatch` (each as for `review.read`), `unavailable` (no selected proposal of this run is readable, or a create finds no scope of the bound project), `review_expired` (the review hold ended, or the queue deadline was not after the selection), `changed` (the target, an owner, or a disclosed input moved, or the request names another target than the proposal's), `conflict` (the job's operation key was used for another target), `invalid`, or `store_unavailable`. A refused acceptance writes nothing.
 
 `review.use_outcome` carries `object_id` (a decision object id of 1 to 512 bytes; any other spelling of the field, or an id outside that length, is `invalid_params`) and answers the use-outcome counts of that decision within the bound project: `{"kind":"counts","object_id": string,"served_sessions": u64,"disputed_after_serve": u64}`. `served_sessions` is the number of unretired use-outcome serving records of the bound project whose decision rows name the object, one per (harness, session, served set), and `disputed_after_serve` the number of those records after whose `served_commit_seq` a committed `mark_disputed` or `contradict` admission on the object's lineage followed; both are derived at one Kernel snapshot, so `disputed_after_serve <= served_sessions`, and a decision the project never served answers `0` for both. The answer names counts only, never a session. The method reads the Kernel alone and binds through the kernel-route scope, so the route's state is answered before the body is validated: a route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel answers its `unavailable` state (reason `store_starting`, `store_unavailable`, or `store_unsupported`). A failed read answers the kernel state its failure maps to, such as `unavailable`/`store_busy`; the read, including its wait for a Kernel reader, runs under a 5 s bound, and a read that exceeds the bound answers `unavailable`/`store_busy`. No state answer carries a count. An uninstalled Memory Store, a root without MODULE memories authority, and a closed activation gate do not change the answer, so no `disabled` terminal applies. The connection key is the caller's authority on any route, observational or not, and the read authorizes nothing else. A daemon that predates the method answers the `unrecognized_request_shape` error. A client decodes each count as an exact integer no greater than 2^53 and treats any other answer, any count outside that range, a body it cannot decode, and the `unrecognized_request_shape` error as unavailable; any other error fails the request. No answer and no error yields a zero count.
 
@@ -1206,7 +1206,13 @@ prompt block and, under `source_capture.enabled`, retains it; an empty list
 reads no documents. A project-tier
 list is ignored with a warning, and each plugin strips it from the project
 tier. `memory.auto_capture` and
-`memory.auto_promote` gate only model-extracted facts from redacted text.
+`memory.auto_promote` gate two kinds of fact: model-extracted facts from
+redacted text, and the failed-command facts this section specifies below.
+A failed-command fact holds a command's name and lines of its tool output,
+so it also needs `source_capture.enabled`, the consent under which the
+daemon retains tool output: with that key at its default no such fact is
+written. For a Pi session the two keys also gate the named-file use records
+(below).
 A captured fact is the user's statement when its source message has the user
 role and reaches capture under its own message id (a source id of the form
 `<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
@@ -1451,13 +1457,252 @@ source that names a replacement meets a conflict and is planned again. The
 `<project-memory>` block of a session's m0 holds the live, project-scoped,
 positive-category facts visible on `auto_inject`, selected newest first until
 `memory.injection_budget_tokens` is spent and rendered grouped by category,
-and leaves out facts captured from that session's own messages. Those facts
+and leaves out facts captured from that session's own messages. A block's
+last line, before its closing tag, is one fixed sentence: it says that the lines above it are a partial record of the
+project's sessions, that they hold what was said or recorded there, and that
+conventions kept in the repository's files stay in those files. The sentence
+is charged to the budget with the block's tags. The summarizer's prompt
+carries a block of the facts its read selected (below) and no such line. A
+session replays the m0 an earlier build composed until its next
+recomposition, and a block that recomposition composes ends with the
+sentence. A
+session's own facts
 are judged before the bounds of the newest 8,192 facts and 8 MiB apply, so
 they take no place from another session's facts. The read loads at most
 eight pages of that size, the payloads of up to 64 MiB of a session's own
 newer facts and of work in progress past its bounds (below); past that it stops, keeps the facts it had selected, and
 leaves the older facts out of the block. A fact whose stored payload alone
-passes 8 MiB is left unloaded and ends the read the same way. Live work in
+passes 8 MiB is left unloaded and ends the read the same way. The block's
+first element, `<NAMED_FILES note="...">`, lists project files that a
+message of the user named and the agent then used. Each transform pass of a
+primary Pi session whose configuration permits memory capture, and whose
+request carries the empty `working_directory` (the session works in the
+project root), is observed before its window is resolved. The observation
+reads the last message of the user and the rows after it. A message of the
+user is a row that Pi gives the user role: a prompt the user types, a
+template the user invokes, or a prompt an extension sends in the user's
+name; the daemon's own synthetic and summary rows, which another harness's
+window can hold under the user role, are none. The rows
+before that message show nothing, since a fork copies its parent's rows
+into a session of another id. A message whose text parts hold more than
+64 KiB together names no file. A text part names files when it is text
+someone typed, by the test the summarizer's lift evidence applies to a user
+message: a part that opens with a marker the transform reads as injected
+by a plugin, such as `[SYSTEM DIRECTIVE:` or a whole `<system-reminder>`
+element, and the text the Pi codec gives a bash execution, name nothing
+and count toward the 64 KiB. A prompt an extension
+sends with no such marker reads as the user's. Each typed text part is read up to its first `<`
+that an ASCII letter or a `/` follows, where a tag opens: a block another
+writer adds to a message, such as an attached file or a hint, opens with a
+tag, so the text after it, the sender's included, names no file. From that
+text the daemon
+takes the runs of ASCII letters, digits, and `._-/+@` that hold a `.` or a
+`/` once the periods that end them are dropped, and reads the first 32
+distinct ones, each as one path: the run as written, or, for a run that
+opens with Pi's file-reference mark `@`, the run without that one
+character, as Pi's `read` opens it, so `@docs/a.md` names `docs/a.md` and
+`@@scope/pkg.json` names `@scope/pkg.json`. A path is held relative to
+the project root: a relative path is taken without its leading `./` marks,
+an absolute path that opens with the root as the daemon spells it and one
+`/`, which a root that ends with `/` supplies itself, as the root `/` does,
+is taken relative to it, and the result names a file when it is at most 256 bytes of
+those characters and passes the confined-path rules (at most 16 components,
+none of them empty, `.`, `..`, or `.git` or `.eidnara` in any letter case).
+The daemon normalizes nothing, and a `read` argument that holds another
+character names no file, so a root spelled with another character admits
+relative paths alone.
+A call after the message uses a named file when it is a call of Pi's `read`
+whose `path` argument, read without one leading `@` as Pi opens it, names
+the file, or a call of Pi's `bash` whose `command` names the file in one of
+its first 256 such runs, read as written with their periods, and when the
+call's id is the id of no other call
+after the message and of exactly one
+result, which follows the call, is text, JSON, or content that carries
+no error, and whose Pi row states the outcome: its `isError` is the boolean
+`false` and its `content` is an array. A result whose row holds no
+`isError`, or one of another type, shows no use. The Pi codec decodes such
+a row as a result that carries no error, as text or as content by what its
+`content` holds, so the window holds it as it holds any result. An id here is the one the row
+itself holds, item suffix included: a call part's string `id`, else its
+string `callId`, and a result row's string `toolCallId`. A call or a result
+whose row holds no such string shows no use; the window holds it under an
+id the codec makes, subject to the tool pairing rule of Section 7.10. The `bash` match is one of spelling: a
+path the command line names in a comment, or after a `cd`, matches as the
+same path elsewhere in the line does. A file the
+turn also edits is used the same way. When the pass's transform has
+succeeded, the first eight observed paths that the daemon does not hold as
+recorded for the session, that are regular files beneath
+the project root, reached through no symbolic link or mount point, and that
+the Kernel's durable-text redaction leaves as written, are offered to a
+tracked background write that the reply does not wait for, which takes
+them except in the cases named below; a pass whose
+transform the daemon refuses offers nothing. Each path is recorded once for the
+session: one labeled decision of kind `named_file_use` in the Kernel domain
+`named-files`, scoped to the project, with source kind
+`named_file_recorder`, whose summary is the path and whose rationale holds
+`source` (`named_file_use`), `session`, and `used_ms`, the time of the pass.
+Its id derives from the project, the session, and the path, so a second
+write replays the first and leaves its time. A session records 64 distinct
+paths at most while the daemon holds its recorded paths, which it does for
+the 256 sessions that recorded a path last and until it restarts; a path
+the store already holds for the session then takes one of a pass's eight
+places once more, and its write replays. At most four passes' records
+are written at once, a write that waits for its turn among them. A write
+that finds the Kernel ready takes the gate that capture's publications and
+`session.delete` take. Once it holds the gate, the paths of the pass share
+one five-second deadline for the Kernel's writer and are committed one by one: a path
+whose commit that deadline ends or the Kernel refuses stays unrecorded,
+the paths committed before it stay recorded, and the paths after it are
+tried under the same deadline. A pass that finds four being written, a
+pass observed before a `session.delete` that its write follows, also when
+the delete ends partway, a session
+id the redaction would rewrite, a project root that cannot be opened, a
+Kernel that is unavailable, and a daemon that is shutting down record
+nothing; a
+later pass that shows the same use is observed and written under the same
+rules. The records hold no text of a file. The domain's own row takes the
+id `domain:named-files`. In a store where another row holds that id, which
+a caller could write before the id was reserved, it takes the first of
+`nfd_0` to `nfd_7` that the registry holds no row for, live or invalidated;
+the older rows stay as they are, the records name the domain by
+`named-files` whichever id its row has, and a store that holds a row under
+every one of the nine ids refuses each named-file write. The daemon alone writes and
+changes the domain: a `kernel.commit` operation that names `named-files`,
+that writes a row under the id prefixes `nfu_`, `dnf_`, or `nfd_`, the id
+`domain:named-files`, or an id under the attestation verifier's prefixes
+(`verattest:`, `verattestdec:`, `verwitness:`, `verwitnessobj:`), or that
+replaces, retires, or marks one of the
+domain's rows, is refused as `invalid_input`, and so is a
+`kernel.artifact.ingest.begin` whose artifact's object id is one of those
+ids, or whose artifact names the
+domain, the source kind `named_file_recorder`, or the verifier's source
+kind `verifier`; a path leaves the element a pass composes when its file
+does, and a pass that serves the m0 of an earlier pass serves that pass's
+element. The search projection publishes none of the records, so
+`eidnara_search` ranks none, and a `kernel.read` page returns them with
+`domain_id` `named-files`. A pass reads the newest records
+under the read's row and byte bounds, counts the ones the recorder wrote,
+leaves out the reading session's own,
+groups them by path, orders the paths by the number of sessions that used
+each, then by the last use, then by path, looks for the files of the first
+32, and lists up to eight that are regular files beneath the project root at
+that moment, so a path enters a block only while its file exists; a read
+its bounds cut short marks the composition truncated. A line is
+`<path> (the agent used it in <n> earlier session(s), last on <date>; last changed <time>)`,
+the date being the UTC day of `used_ms`; it carries no id, and the record's
+id is no handle of `eidnara_memory`. The clause after `; last changed` says
+when the file last changed, as the composing pass reads it. The pass reads
+the file through one descriptor: its status and, when it holds at most
+256 KiB, its bytes, with one byte more that shows a file that grew, and
+its status again; a larger file is read no further than its first status.
+A reading whose two statuses differ in inode, link count, size, or
+modification or change time, or whose bytes are not as many as the status
+states, is taken once more; a write that leaves all of those as they were
+goes unseen. A file
+whose bytes no reading holds whole, one that does not open for reading or
+whose reading failed that comparison twice, keeps its line with the modification time of
+one status taken then, and a path that then names no regular file has no
+line. These reads of the listed files have no deadline, as the pass's
+reads of the project's documents have none. When the project root is the work tree of the SHA-1 Git repository
+that opens there, HEAD names a commit, and the tree of that commit
+holds a regular or executable blob at the path that the file's bytes hash
+to, the clause is the committer time of the commit that gave the file
+those bytes, as a UTC minute (`2026-03-01T09:30Z`): the walk goes from HEAD
+to the first parent that holds the same blob, as `git log` simplifies the
+history of one file, and ends at the commit none of whose parents holds
+it. A walk reads at most 256 parents. A walk that would read a 257th, and
+one that meets a tree of HEAD's commit, a parent commit, or a parent's
+tree that it cannot read whole, as a shallow clone has, gives no time, and
+the clause reads `at a time the read history does not show`; a commit
+whose committer line states no time that parses is one the walk cannot
+read. Any other file reads `<time> on disk`, the modification
+time its reading took: a file HEAD holds no blob for, a file edited since
+its commit, a larger file, a file whose bytes no reading held whole, a
+file whose checkout filters change its bytes,
+and a file of a project whose root is the work tree of no repository that
+opens there (a directory beneath a repository's root, and the root of a
+repository whose configuration names another work tree, among them) or
+whose HEAD names no commit the read takes. The commit time is chosen over the modification time because a
+clone or a checkout writes the file anew and leaves the commit time as it
+is; both times are shown as their sources hold them, a time ahead of the
+daemon's clock included, and a time outside the years 0000 to 9999 reads
+`at an unknown time`. No pass reads the repository. One thread of the
+daemon reads it for every pass: HEAD as capture's head observation reads
+it, and each commit and tree through the attestation verifier's object
+reader, which takes an object only when its bytes hash to its id. The
+thread reads the repository's own files (HEAD, references, configuration,
+and object and pack files) as those two readers read them for capture and
+for verification, with the bounds and the file mappings they have there:
+a file of the repository that is truncated while it is mapped raises
+`SIGBUS` in the daemon, as it does during capture's read. What this reader
+bounds is the parents of a walk, the time it works for a pass, and the
+answers it keeps. A pass waits at most half a second
+for its answer, in its first unit and holding that unit, and then shows
+the files' modification times. The thread takes up no job whose pass has
+stopped waiting. It works on a job until half a second after its pass
+stops waiting, so a walk that needs longer than the wait settles for the
+next pass: it checks that time before it opens the repository and before
+each object it reads, and gives each file's walk an equal share of the
+time left, so a walk that time ends dates nothing and leaves the files
+after it their own time. Four jobs wait in a queue beside the one
+the thread works on, and a pass that finds the queue full asks nothing. A
+repository that blocks or spins a read, such as one whose `HEAD` is a
+pipe, therefore costs the passes of the daemon that half second each
+until the queue is full, and holds the one thread until the daemon stops.
+For every job the thread
+reads HEAD and checks that the repository's work tree is the directory the
+pass opened. It
+keeps the answers that a HEAD settles, which are a commit time, a path
+HEAD holds other bytes or nothing for, and a walk the parent bound ended,
+for the path and the blob, for the 64 project roots it answered at a HEAD
+commit last and 64 paths of each, while the root is the same directory at
+the same HEAD commit; an answer an unreadable object gave is read again. A
+job at an unchanged HEAD therefore costs the thread those two reads, and a
+walk for each path and blob it keeps no answer for, and a HEAD that moved
+is read anew. The
+block's revision reads a line up to `; last changed`, and the budget
+charges every line up to there and then for one fixed clause, the form of
+the most tokens, so an edit or a commit of a listed file changes neither
+the rows a budget admits nor the revision, and folds no m0; the line a
+session holds is the one its last composition read. When the read lists a
+file, each fact that capture stored as the user's statement ends with
+` [<time>]`, the UTC minute of the commit that first recorded the
+statement, read from the commit log in one statement for the pass.
+Capture records a statement after the user made it, so
+the statement was made at that minute or before it, and a statement the
+user repeats later keeps the time of its first record; a time outside the
+years 0000 to 9999 reads `[at an unknown time]`. A
+statement shown with its contest already carries the day it was first
+recorded, as `stated <day>`, and takes no second mark, a statement whose
+commit the log holds no time for is shown as stored, the facts carry the
+mark also when the budget then admits no line of the element, and
+`eidnara_search` shows no such mark. A summarizer
+that fires on a pass whose read serves it holds the facts as that read
+rendered them, the times and the contest marks included; a summarizer read
+that no pass read serves lists no file and so carries no such time. The
+daemon's clock dates a record and a committer's clock dates a commit, so
+two machines whose clocks disagree can order a record and a commit made
+within that disagreement the other way. The element is charged first, to an
+eighth of `memory.injection_budget_tokens`: it holds the longest leading run
+of the lines that fits that share with its tags, the other facts are then
+selected against the rest of the budget, and the element is absent when no
+line fits. Its `note` says that a message of the user named the files, that
+the agent read them or named them in a command it ran, that the paths are relative
+to the project root, that each file existed when the block was composed,
+that memory holds none of their content, that a line ends with when the
+file last changed, which is its last commit's time or, marked on disk, its
+modification time, which a checkout also sets, that a `User stated` line
+that ends with a time in square brackets was recorded then, at or after
+the user made it, and what the times order: a statement made after a
+file's last change is newer than the file, and a file committed after a
+statement was recorded is newer than the statement in the lines changed
+since then. A pass that re-renders m0
+composes the element anew; a pass that serves the m0 of an earlier pass
+serves that pass's list. The block the summarizer's prompt carries holds no
+`NAMED_FILES` element: a summarizer that fires on a pass whose read serves it
+holds the facts that read selected beside the element, and a summarizer
+read that no pass read serves, the wrapup's among them, selects the facts
+against the whole budget. Live work in
 progress renders after the categories in one element,
 `<CURRENT_WORK note="...">`, whose `note` states that its lines are work the
 user left open in earlier sessions that no later statement of the user ended,
@@ -1472,7 +1717,8 @@ against bounds of its own, a quarter of the read's row and byte bounds, each
 rounded down and the row bound at least one,
 taken in the read's order, which is by the commit that wrote each fact's
 current row, so the other facts keep the whole of the read's row and byte
-bounds, and they are selected against the whole token budget first. The
+bounds, and they are selected first, against the token budget the
+`NAMED_FILES` element left. The
 read ends for a session when one of the other facts is refused at those
 bounds, so the element holds work in progress the read judged before that
 fact, and the
@@ -1635,7 +1881,34 @@ fact's unchanged row. A stored plan whose fact names more than four contests
 is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
 sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
-by the fact already named writes nothing. The `<project-memory>` block renders
+by the fact already named writes nothing. A fact that capture writes as the
+user's statement, its stored text being the label and the quotation alone,
+holds `replaces_observation` in its rationale when it names at least one
+fact under `replaces` or `also_replaces` and every fact the plan's facts of
+its quotation name there is an observation: a fact the Kernel serves as
+unapproved that is no quotation capture stored under the `User stated: `
+label, which an assistant's report and a memory the host memory tool wrote
+are. Two facts share a quotation when their quotations are equal once edge
+whitespace and one closing `.` or `!` are dropped. The named facts of a
+quotation are judged together before the plan writes any fact, so one
+statement stored as two facts is judged as one. The
+record is an object with `recorded_seq`, the commit sequence that recorded
+the earliest of those observations. A statement that names no fact holds no
+record. A statement whose quotation names a fact the Kernel serves as
+approved, one a labeled correction keeps live and contests included, or a
+labeled quotation of the user, holds none, and a note retired because a
+replaced statement restated it is not counted. Each fact that later rewrites
+the statement, for a contest, a settlement, or its end, keeps the record. The
+`<project-memory>` block renders a statement whose rationale holds the record
+as
+`<statement> (stated <date>; it replaces a value recorded <date> that the user had not stated)`
+on every pass that shows no contest of the statement, a pass whose Kernel
+serves the contesting fact no longer among them,
+the dates being the UTC days on which the statement's first commit and the
+commit `recorded_seq` names were recorded, `unknown date` when the commit log
+holds none; a record of another shape marks nothing. The stored summary holds
+the user's words alone, and explicit search shows the rationale with the
+record as it shows every rationale field. The `<project-memory>` block renders
 a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
 the dates being the UTC days on which the statement's first commit and the
@@ -1656,9 +1929,11 @@ the store state of the statements it renders, and shows the contest only
 while that read serves the fact: live, not hidden, and of normal sensitivity.
 A labeled fact, such as an assistant's report, is served there; a fact a
 disposition hides, a retired fact, and a fact of another project contest
-nothing a reader is shown. The block shows the stored statement alone in
-those cases, and a pass whose contest read fails is withheld as any failed
-read of the pass is. Every session whose block holds the statement is shown
+nothing a reader is shown. In those cases the block shows the replacement
+line (above) for a statement whose rationale holds a `replaces_observation`
+record and the stored statement alone for any other, and names neither the
+contesting fact nor its text. A pass whose contest read or commit-time read
+fails is withheld as any failed read of the pass is. Every session whose block holds the statement is shown
 the contest, the one whose message recorded it included: the excerpt is the
 one text from a session's own messages that its block carries, because that
 session's observation of the newer value can leave its conversation at a
@@ -1707,7 +1982,8 @@ and defaults to true; the daemon ignores a project-tier value with a warning,
 and each plugin strips it from the project tier. False composes m0 with
 neither the `<project-memory>` nor the user-profile block and m1 with no
 `<new-user-profile>` delta, and turning it off rebuilds m0, while explicit
-search, capture, and the history summarizer's memory read are unchanged. Session deletion
+search and capture are unchanged and the history summarizer reads the
+project's facts itself, without the `NAMED_FILES` element. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes
@@ -1718,13 +1994,468 @@ claimed. Pi's status line shows pending or unconfirmed capture; OpenCode warns
 only when a checkpoint or drain fails. Notification failure never discards the
 answer.
 
+A later session is asked what went wrong the last time a command failed, and
+the error a command printed stands in its tool result, which capture's
+sources leave out. Each `transform` request of a primary session carries the
+window's tool calls and results, so the daemon reads failed commands there,
+with no model call. A failed-command fact is a durable copy of part of a tool
+result, so it is written under the consent that already retains tool
+results: `source_capture.enabled`, which is user-only and defaults to false.
+A session writes these facts when `source_capture.enabled`,
+`memory.enabled`, `memory.auto_promote`, and `memory.auto_capture` all
+permit, the session is primary, and the request's serializer profile and its
+binding's harness are both `pi`. With the default configuration no
+failed-command fact is written. The consents are read when a pass hands its
+results off, from the settings saved when the pass's route was bound: a
+route keeps its saved settings until it is bound again, so a changed setting
+governs the passes of routes bound after the change. A failed-command fact is a committed memory fact of its
+project: `session.delete` leaves it live and it has no retention deadline,
+while the tool span that source capture retains is retired with its session
+and at the end of its retention.
+
+A fact names one execution: the session entry that holds the tool result,
+with the id of the call the result answers. Facts are written for a harness
+whose result rows carry an entry id of their own, as a Pi window's rows do. A
+call's id is Pi's native tool call id, the id of the call as Pi gives it,
+which the window's block keeps beside its own id when that is the native id's
+first part; it pairs a result with its call and stands in the fact's
+rationale. A provider can give the calls of two turns one id, and each result
+is then its own execution under its own entry. The daemon reads the ids from
+the request's native rows, which stand one for each message of the window in
+order: a call counts when the `toolCall` part at its place among the
+`toolCall` parts of its message's row carries the call's id itself, as its
+`id` when that is a string and else as its `callId`, and a result counts when
+its row carries the id itself as its `toolCallId`, each a string with a
+character other than whitespace. The Pi codec gives a call part without an id
+a synthesized id and a result row without a `toolCallId` the id `tool`, which
+name no execution, so such a call is answered by no result and such a result
+changes no fact and settles no call. A call and a result also count only in a
+row whose `type` is `message`, which the Pi plugin sets when the row's message
+is the message its session entry holds (section 7.10): Pi hands each `context`
+handler the array the handlers before it returned, and a message that one of
+them changed, in its mark, its text, or a call's arguments, reaches the
+transform under its entry's id and carries no `type`, so it writes, resolves,
+and settles nothing. A window names no execution, and its pass hands off
+nothing, when the request carries no native rows, when the rows and the
+messages differ in number, when a message's id is another than its row's
+`id`, when two messages share an id, and when a message's id is longer than
+128 bytes; the transform refuses the last two with `invalid_params`. A route
+binds a session id of at most 256 bytes, so a request whose session id is
+longer answers `session_mismatch` before the pass reaches its checkpoints and
+hands off nothing; the recorder also names no execution under a longer session
+id. A request that is refused before the pass reaches its checkpoints (such
+as an absent boundary or one whose sequence is no safe integer, a window or a
+profile the intake refuses, a missing `base_revision`, a codec decline, a
+route or store precondition, a load refusal such as `session_busy`,
+admission, or a page stream in progress, or a blank tool description) hands
+off nothing. A request that passes them is read as it was submitted whatever
+the transform then answers, as the capture checkpoint reads it, also when the
+transform refuses the window while resolving it, such as another identity
+field past its bound or a boundary the store does not hold.
+
+The handler reads the window as the request carries it, before the pass
+resolves it, as the capture checkpoint does. A pass considers the last 1,024
+command results of the window and hands the earliest 256 of them that the
+session's earlier passes have left unjudged to a detached task, so the results
+of one command are judged in window order, which is the order the harness
+wrote them. The pass measures each result where it stands in the window and
+copies it once it fits: its command line and, for a result the harness marks,
+its text, each within 64 KiB, its entry id, within the 128 bytes of the
+window rule above, and its tool call id and tool name, each within 1,024
+bytes, 8 MiB together; the first result that lacks room and
+the results after it wait for a later pass. A result that is no text of one
+unit or is an empty text (below), one that passes one of those byte limits,
+one whose message carries no creation time that a UTC date renders, and one
+whose creation time is more than one hour ahead of the daemon's clock at the
+pass is handed off by name alone and settled unread. Every other result is
+copied and read by the task, which judges it or settles it (below). A session
+has one such task at a time and the daemon eight: a pass that finds its
+session's task running, or eight tasks running, hands off nothing, and so does
+a pass while the Kernel is not ready. A result that a pass leaves unjudged is
+judged by a later pass of the session that admits a task while the result and
+its call still stand among the last 1,024 command results of that pass's
+window; a result that 1,024 newer command results push out of that range
+before such a pass reaches it is not judged. A session
+remembers the last 1,024 calls it judged. A session that moves among branches
+whose windows together hold more command results than that judges the
+earliest results of a window again when it returns to it (a call with a
+receipt is settled by the commit log and writes no second fact), and a result
+behind 256 such results waits until passes over the same branch reach it. A result is paired with the call it answers in its tool turn: a
+command call of the assistant message before it, with no message of another
+role between them. A tool turn begins at an assistant message and ends at the
+next assistant message, which begins another turn, or at the next message
+that is neither the assistant's nor a tool's, so a result that arrives after
+its call's turn has ended is paired with no call and shares no id with that
+turn, and two turns that use one call id are two executions. A result under an id that two tool calls or two tool
+results of its turn carry is left out, since the id names neither alone, and
+takes no place among the 1,024 results a pass considers.
+A daemon that shuts down ends a task before its next result, ends
+the task's wait for the capture publication gate and for the Kernel, and
+starts no task that was handed off and not yet running.
+
+A tool call carries a command line when its input holds, under `command`, a
+string with a character other than whitespace; when `command` holds none,
+`cmd` is read the same way. An array of strings is the arguments of one
+program and no command line: a call that carries one alone carries no command
+line, and its result is no command result. The result's text is the text of a
+`text` or `error_text` result, and the one text block of a `content` or
+`error_content` result, beside which blocks of other kinds may stand; a text
+that is a JSON value is read as text. These results change no fact, and their
+calls are settled: a `json`, `error_json`, or `execution_denied` result; a
+`content` or `error_content` result with no text block, such as an image
+alone, or with several text blocks, since the redactor judges each block as a
+unit of its own; a result whose text is empty, which is what a Pi result
+without readable content decodes to (Pi's shell tool writes `(no output)` for
+a command that printed nothing); a result whose text, or whose command line,
+is longer than 64 KiB, the largest tool span source capture retains; a result
+whose tool call id or tool name is empty or longer than 1,024 bytes (an entry
+id is a message id, so an empty one is refused by the Pi codec and one longer
+than 128 bytes names no execution for its whole window, above); a result whose message carries no creation time, or one outside the years a UTC date renders, or one more than one hour ahead of the daemon's clock at the pass, the lead past which source capture retains no span of a native record;
+a result whose tool name, tool call id, or session id the redactor would
+change, or holds a control character, U+2028, or U+2029, each judged whole;
+and a command line on which the redactor's scan does not finish. These rules
+apply to a marked and to an unmarked result alike, so an unmarked result is
+read for its shape and no further: one of these results resolves no fact.
+
+The harness's error mark alone decides. A command result is a failure when
+the harness marks it as an error (`error_text` or `error_content`), which is
+how the window carries the `isError` of a Pi tool result: Pi sets it on the
+result of a command that exits with a nonzero status. A result without the
+mark reports no failure, whatever its text holds: a status line, a status the
+command line echoes, a failure line, a test runner's or a build's summary, and
+a shell's report of a missing program state no failure. A Pi result row that
+carries no boolean error mark is read as unmarked. The daemon follows the mark
+and reads the text that Pi emits for the result. In Pi 0.80, the release this
+daemon's Pi plugin is built against, the built-in shell tool marks a command
+whose process ends with a numeric nonzero status, one it aborted, and one it
+timed out; a process that ends with no exit code, as one ended by a signal
+outside Pi does, leaves its result unmarked. An extension's `tool_result`
+handler runs after the tool and can change the mark and the text; the daemon
+reads the result as it stands after those handlers. An unmarked
+result writes no fact and, as an unmarked result of its command line, resolves
+a live, unresolved fact that it follows.
+
+A fact states what the harness reports of the result and claims no more of
+the command. Pi's built-in shell tool ends the result of a command that exited
+with a nonzero status with the line `Command exited with code <n>`. The daemon reads
+the last non-empty line of a marked result's whole text, trimmed: when the whole line is
+those words and one to ten ASCII digits, a nonzero number is the fact's exit
+code, which is the code that line states. A marked result that ends in any
+other line, or in a code of 0, is a failure with no exit code. Pi marks other
+results too: a command it aborted or timed out, a call an extension blocked,
+and a call whose arguments or tool it refused. Each is a marked result of its
+command line and is recorded as one, with the lines the harness wrote; the
+fact states that the harness marked the result, and its lines say why. The
+report of a call whose arguments Pi refused is the exception: its text is
+withheld (below). The
+reading of the exit code is by the line's text: a marked result of any tool,
+and a blocked call's reason, that ends in such a line is read the same way, so
+the fact says that the result's last line states the code and leaves open
+whether a process ran.
+
+The harness reports one status for the whole command line, which for a
+pipeline or a list is the status the shell returns for it, by default the last
+command's. A failure of an earlier command that the returned status leaves out
+(behind `|`, `||`, `;`, or a line break, inside a script given to another
+shell, or in the background) leaves the result unmarked and writes no fact. A
+later unmarked result of the same command line resolves a live, unresolved
+fact that it follows, by the rules of order below.
+
+A fact holds text of the output under source capture's rule for a tool span:
+text in which the durable-text redactor finds nothing is kept as it is, and
+text with a finding is withheld whole. Each place where the output repeats
+the text of a finding of the redactor in the command line counts as a finding
+of the output, so a credential the redactor reads by its key in the command
+line withholds an output that prints the value alone. With no finding the fact keeps the
+output's chosen lines: the first five lines that state an error, in output
+order, and then those of the last two lines that are none of them, each
+trimmed, each at most 160 bytes with `…` ending a cut line, a text that
+several lines share once, at its first line. Each line of a marked result is
+read as a line of an output block: it states an error when it is a failure
+line by that reading, when it completes one (the line right after a failure
+line that ends with `:`, or one that begins with `-->` or `at `, and that is
+no code fence line), when one of its runs of alphabetic and numeric
+characters, as Unicode classes them (which counts a few combining marks and
+numerals such as fractions), is `error`,
+`errors`, `failed`, `failure`, `fatal`, `panic`, `panicked`, `exception`, or
+`traceback` in any letter case or ends in `Error` or `Exception` after such
+a character (so `error_count` holds the run `error`), or when it holds
+`command not found`. These readings choose lines of a result the
+harness marked and decide no failure. A line is judged as trimmed: an empty
+line, a line with a control character other than a tab, and a line with U+2028
+or U+2029 are left out. Pi answers a call whose arguments its schema refuses
+with a report that begins `Validation failed for tool "`, then the tool's
+name, and that lists the call's arguments after the lines that state what it
+refused. The daemon recognizes the report by its heading and chooses nothing
+from it: a marked result whose text begins with those words and that quote is
+recorded as a marked result with its text withheld, while its exit code is
+read from its last non-empty line and the redactor judges its whole text as
+for any marked result. The fact keeps no line of it, names no
+path and no error, and says that the output begins with the heading of the
+harness's report of a refused call and where the text stands, so the call's
+arguments and the words of Pi's diagnostic, which can hold a key the model
+chose, stay in the tool result. The rule tests the first bytes of the text
+alone. It therefore also holds for a command's own output that begins with
+that heading, whose lines are withheld the same way and whose fact states the
+same reason, and a marked result in which other text stands ahead of the
+heading is read as any other marked result. The lines of every other marked
+result are chosen from its whole
+text; a program's own output can repeat an
+argument, and such a line is kept under the redactor's rule like any other.
+The exit code is read from the whole text in every case. The redactor judges
+the whole text of every marked result the task reads, the arguments of a
+refused call included, and its finding, or a scan that did not finish, is
+the reason such a fact states. With a finding
+the fact keeps no line of the output and says that the text is withheld and
+that it stands in the result of its tool call in its session while that
+session's history holds it; Pi keeps the end of a long output there and the
+rest in a file of its own. A fact also names the first path and the first
+error that its chosen error lines hold; a closing line names neither. A path
+is a whitespace word, without the quotes, brackets, and closing punctuation
+around it, of ASCII letters, digits, and `_`, `.`, `/`, `-` with a file
+extension of one to five letters and digits, at least one a letter, and with a
+directory, a position (`:` or `(`, a digit, and then digits, `:`, `,`, and
+`)`), or a test's name (`::`, then letters, digits, `_`, and `:`); an error is
+a word, read as a run of letters, combining marks, and numeric characters of
+any script, `_`, and `.` without the dots at its ends, that is a type name of
+letters, marks, decimal digits, `_`, and `.` ending in `Error` or `Exception`
+after a first letter, or a code of one to four ASCII capitals and two to six
+ASCII digits (`E0308`, `TS2307`); each is at most 96 bytes. A word is named
+whole or left out: a name with a combining mark is one name, and a word with
+a numeric character that is no decimal digit, such as a fraction, names no
+error. Both are read by shape and are what the line names, with no claim that
+they caused the failure: a host with a port has the shape of a file with a
+line, and the name of a digest such as `SHA256` the shape of a code. With a
+finding the path and the error come from error lines that hold no finding.
+When the redactor's scan does not finish, no text of the output reaches the
+fact. The exit code counts when the redactor finds nothing in its line; a
+marked result stays a failure without that code. The lines are read as the
+result holds them: the note Pi's shell tool writes after an output it cut is a
+line of the result, and a line Pi cut at its start is read as the text that
+remains.
+
+A fact names its command line by a digest and shows the program and its first
+plain operand; its `Command:` line and its rationale's `command` field hold no other argument (the path and the error come from output lines and can repeat one). The command line passes
+the redactor first. The command's digest is the first 32 hexadecimal digits of
+a SHA-256 over the project's digest and the whole redacted line as it is
+written, each behind its length, and then, for each finding of the redactor in
+order, the count of the command line's bytes between the finding before it and
+that finding. The counts hold no byte and no length of a finding, so a
+credential of another length under the same mark keeps the digest, and a
+command line that spells the redactor's mark itself is another command than
+one in which the redactor wrote that mark. Two spellings of one operation, such as a run with and
+without a leading `cd`, with other spacing, or with a line break for a `;`,
+are two commands with a fact each, and a run of one spelling changes the fact
+of that spelling alone. Two command lines that differ only inside the spans
+the redactor finds are one command when the redactor writes the same marks for
+them, so the redacted lines and the gaps are equal; a credential the redactor
+reads as another kind gets another mark and names another command. That holds
+for every finding: where the redactor takes a word that is no credential for
+one, such as the word after an empty assignment under a secret's name, the
+command lines that differ in that word are one command too. The working directory the harness ran the line in is
+no part of the command: runs of one command line from two directories of one
+project share one fact, and a spelled `cd` is part of the line. A daemon build
+whose redactor reads a command line into another text names that command's
+later facts by another `source_id` and leaves the facts of the earlier one as
+they stand; a command line whose redacted text and findings are unchanged
+keeps its `source_id` across builds. The words a fact shows are a reading aid
+and no part of the command's identity. The redacted line is read as the words
+that whitespace parts, with quotes and operators as characters of their words.
+A plain word is ASCII letters, digits, and `_`, `.`, `/`, `+`, `-`, at most 64
+bytes. The words shown follow each leading `cd <directory> &&` step whose
+directory is a plain word that begins with no `-` and that a word follows, and
+then the leading `NAME=value` words that a word follows, where the name is
+ASCII letters, digits, and `_`, begins with no digit, and the value is empty
+or a plain word, so a word with an operator written against it, such as
+`A=1&&make`, stays the command's first word. The fact shows the first of the
+remaining words when it is a plain word, the word after it when that is a
+plain word that begins with no `-`, and ` [arguments left out]` when more
+words follow; a command line whose first such word is no plain word is shown
+as `[left out]`. The redactor is the fact's only judge of text: the words
+shown and the chosen lines of an output hold whatever the redactor's rules
+pass, as a tool span that source capture retains does.
+
+Each marked result writes one fact of the `memory` domain: `decision_kind`
+`TOOL_FAILURE`, `source_id` `tool_failure:<digest>` with the command's digest,
+`source_kind` that of capture's facts, admitted as labeled inference, so it is
+served on `explicit_search` with visibility `labeled`, the fused search route
+and the snapshot scan of `eidnara_search` return it, and it reaches no
+automatic surface: `TOOL_FAILURE` is no category the `<project-memory>` block
+renders, and capture offers no such fact to the extractor as an existing
+memory. The facts count among the memory rows that capture's reference read
+and the contradiction candidate pass load. The search tool renders the first
+1,024 bytes of a fact's `summary`, a line break, and its `rationale` together,
+so the `summary` is at most 900 bytes and states the outcome first. Its first
+line is `Tool failure recorded from the result of <tool> at <time>:
+<outcome>.` with the tool's name in at most 32 bytes, whitespace runs as
+single spaces, and the result's creation time in UTC to the millisecond, so a
+reader of a cut search result orders the failures of a project, and a resolved
+fact's first line ends with ` Resolved: a later run of this command reported
+no failure.` `<outcome>` is `the harness marked the result as an error and its
+last line states exit code <n>` for a nonzero code that line states, or `the
+harness marked the result as an error` for a marked result without one. The
+second line is `Command: ` and the command as shown. A line `Path named:
+<path>` and a line `Error named: <error>` follow when the output's error lines
+name them and they fit beside the lines after them. Then `Output lines:` and
+the chosen lines follow, each behind `> `, the mark of quoted tool output, the
+last two whole and the lines that state an error in the bytes that remain; or
+one line `Output text withheld: <reason>. The text stands in the result of
+tool call <call> of session <session> while that session's history holds
+it.`, with each id in at most 96 bytes and `<reason>` one of `the
+redactor found credential-shaped content in the output`, `the redactor's
+scan of the output did not finish`, and `the output begins with the heading
+of the harness's report of a refused call`.
+
+The fact's `rationale` is a string that holds a JSON object. Its fields are
+`source` (`tool_failure`), `session` and `call` (the session's id and the tool
+call's native id, each whole), `tool` (the tool's name as the first line shows
+it), `command` (the command as shown), `digest` (the command's digest),
+`state` (`failed` or `resolved`), `output_text` (`kept` or `withheld`),
+`at_ms` and `at` (the creation time of the marked result, in milliseconds and
+as UTC text), and, when the result holds them, `exit_code` (the code its last
+line states), `path`, and `error` (the path and the error its error lines
+name). A resolved fact also holds the passing run:
+`resolved_session`, `resolved_call`, `resolved_at_ms`, and `resolved_at`. The
+Kernel stores the text and the rationale through the durable-text redactor; a
+`summary` or a `rationale` that the redactor would change writes no fact, so
+the stored fact is the fact the daemon composed.
+
+One fact is live per command line of a project, as its redacted text is
+written. The command's fact is the newest decision on its `source_id`, the one
+of the greatest `source_revision`, live or retired and with no successor,
+when the recorder wrote it: its id has the form of a fact's id (`mem_` and 32 lowercase hexadecimal
+digits), it is a `TOOL_FAILURE` decision of the project, its rationale states
+its run (a `state` of `failed` or `resolved`, the session of that run, and its
+time, which a UTC date renders), and the Kernel's commit log holds the
+recorder's commit of that fact for that session. A result follows a fact when
+its creation time is greater than the time of the fact's run; equal times keep
+the fact. A failure writes revision 1 of a command without a fact, the next
+revision after a retired newest fact that it follows, and the next revision in
+place of a live newest fact that it follows. A result that reports no failure
+supersedes a live, unresolved newest fact that it follows with a copy whose
+`state` is `resolved`, and the fact is ordered by its passing run from then
+on. The order is the order of the creation times the harness gives: a harness
+clock that steps backward orders its runs by those times, and a result dated
+more than one hour ahead of the daemon's clock writes no fact (above), so a
+fact's time is at most one hour ahead of the daemon's clock at the pass that
+read its result. A result that
+reports no failure while its command has no live, unresolved fact leaves no
+trace and no receipt in the Kernel's log. A failure that ran before it and is
+judged after it stays unresolved until a passing result that follows it is
+judged: the command's next passing run, or that same passing result when the
+daemon judges it again, which it does after a restart and once the session's
+memo has given the call up, while the window still carries it. A session that
+Pi forks carries its parent's results under a new session id; such a result
+writes nothing in a project that holds the fact of its run or a later one, and
+it is recorded in a project that holds none. When two decisions share the
+greatest revision of a `source_id`, or the newest one is no fact the recorder
+wrote, a result of the command writes nothing and its call is settled.
+
+A fact's id derives from the project, the session, the entry that holds the
+result, and the tool call's native id, each hashed behind its length: the
+marked result for a failure and the unmarked result for a resolved copy. The
+commit that writes a fact is logged under the recorder's own producer name and
+a key that ends in the fact's id, and an execution whose commit the Kernel's
+log holds writes nothing, so a window sent again, also after a restart, writes
+nothing for it, and a later turn that uses a call's id again is judged as the
+execution it is. A fact's id is new to the Kernel when its commit writes: the
+commit looks the id up under the Kernel's writer, on a new lineage and in
+place of a live fact alike, and an id that a row of another writer holds
+leaves that row as it is and the call's result unwritten; the daemon reports
+it on stderr, and the call is settled. The Kernel bars the supersession of a fact
+that a disposition has rejected, contradicted, or quarantined, which are the
+dispositions that hide it from `explicit_search`: a later result of that
+command writes nothing and its call is settled, so the hidden text reaches no
+new fact. `tool_failure` and every `tool_failure:<text>` are reserved as a
+`source_id`. A host `kernel.commit` whose `insert_decision` or
+`insert_observation` names one answers `invalid:invalid_input`, unless the
+Kernel answers the commit from the receipt of an earlier one. A
+`supersede_decision` that the Kernel answers from no receipt, and whose
+domain and project scope the route accepts as for any `source_id`, reaches
+these checks in this order. A replaced fact that is missing or stands in
+another project answers `invalid:not_found`, as on any `source_id`. After the
+check of the replaced fact's user authority, a replaced fact on a reserved
+`source_id`, and a request that names one for its successor, answer
+`invalid:admission_policy`. Then the fact to fold into is looked up: one that
+stands in another project answers `invalid:not_found`, live or retired, and a
+live one of the bound project on a reserved `source_id` answers
+`invalid:admission_policy`. A
+`kernel.artifact.ingest.begin` whose upload id, digests, page layout,
+`provider_egress`, and size the route accepts as for any `source_id`, and
+whose `source_id` is one, answers `invalid:invalid_input`, ahead of the check
+of its operation key. The MemoryReviewer forms no proposal that targets a
+fact on one. Retiring a fact and recording a disposition on it stay open.
+
+The task reads each result ahead of the capture publication gate and judges it
+under the gate, which it takes by polling: it reads the Kernel's log for the
+call's commit, the two newest decisions on the command's `source_id`, the
+newest one's text as it stood while live, the log for that fact's commit, and
+the session's count, and commits. The waits for a Kernel connection of one
+judgment end at one 5 s deadline, its reads of the log and of the lineage stop
+at that deadline between steps of their statements, and a daemon shutdown ends
+them the same way. The daemon's memo of judged calls stands in one Kernel
+history. A pass compares that history with the one the Kernel holds before
+the memo filters its window, and gives the memo's calls up when a restore has
+installed another, so the pass hands the window's results off again. A
+judgment reads the Kernel's history ahead of its other reads, and its commit
+requires that history under the Kernel's writer: a restore that installs
+another history between the reads and the commit leaves the judgment's fact
+unwritten and its call unlearned, and the daemon gives up its memo of judged
+calls. A task judges under one history, the one its pass filtered the window
+under or the first one it reads, and ends when the Kernel holds another, so
+the session's next pass judges the window's results, in window order, against
+the history the Kernel holds. A judged call is learned while the memo stands
+in the history its judgment read: when another pass has given the memo's
+calls up in between, the call stays unlearned and the task ends, and a memo
+that stands in no history holds no judged call. A commit that the Kernel answers from the
+receipt of an earlier commit of the same execution writes nothing and settles
+the call: the history the Kernel holds has that execution's commit. `session.delete` holds the same gate and retires the
+session's place in the daemon's memo of judged calls before it changes either
+store and again as it releases the gate, in one step with respect to a pass's
+handoff, so a task handed off before a `session.delete` of its session, or
+while it holds the gate, writes nothing after it, also when the delete ends
+partway. A fact committed before the delete stands, and a pass of the session
+that hands off after the delete writes as before. A session writes at most 64
+such facts in a project, resolved copies included. The count is the number of
+the session's commits under the recorder's producer name that the Kernel's
+commit log holds for the project, read from the log's index up to 64 entries
+at each write, so a fact that another session supersedes, a retired fact, and
+a restart leave the count as it is. The daemon remembers 1,024 judged
+executions, by project, for each of 256 sessions, and a full session entry gives up the
+call it learned first; a session past the 256 takes the place of the oldest
+session that runs no task, whose results are judged again on its next request,
+where the Kernel's log stops a second write of a call that wrote a fact. The
+task limit, the entry of judged executions, and the fence of `session.delete`
+follow the session id, as the session lane of section 7.10 does. One session
+id routed under two project roots has one task at a time and one entry of
+1,024 judged executions for both roots: a pass under either root that finds
+the task of the other running hands off nothing, and a `session.delete` on a
+route of either root retires the handed-off tasks of both, whose results a
+later pass of each root judges. A fact, its id, the count of 64, and the name
+of a judged execution carry the project, so each root's facts stand in its own
+project and a call judged under one root is judged again under the other. A
+Kernel history that cannot be read, a busy or failing Kernel, a Kernel whose
+handle a failed restore has closed, a fact another writer changed under the
+judgment, and a read that names a commit past the Kernel's tip end the task
+with the call unlearned; any other refusal of the
+Kernel to a judgment settles the call. A result that
+writes nothing for a reason an operator can act on is reported on stderr by a
+fixed sentence that holds no text of the result: a tool name or an id that the
+redactor refuses or that holds a control character, U+2028, or U+2029, a
+command line or a composed fact that the redactor refuses, a newest decision
+the recorder did not write, two decisions that
+share the greatest revision of a `source_id`, a fact's id that another row
+holds, and a refusal of the Kernel. A
+panic of the task is reported through the daemon's redacting panic boundary
+with the gate released, and its call stays unjudged.
+
 ### 7.10 Transform
 
 This section specifies the `transform` method family on the Context route: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). The family has one shape, and a consumer and daemon of one build speak it together.
 
 #### 7.10.1 Per-session admission and `session_busy`
 
-The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. An emergency pass's waits share one `EMERGENCY_WAIT_BUDGET` (3 s), inside the plugins' 5 s transform deadline: a pass that waits on a live history summarizer run and then fires one inline waits at most that budget in total. A history summarizer run that outlasts the budget keeps running, and its publication folds on a later pass. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
+The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. An emergency pass's waits share one `EMERGENCY_WAIT_BUDGET` (3 s), inside the plugins' 5 s transform deadline: a pass that waits on a live history summarizer run and then fires one inline waits at most that budget in total. A pass whose read finds a file to list can also wait up to half a second in its first unit, holding that unit, for the named-file history reader of Section 7.9; that wait is outside the budget, and the two together leave 1.5 s of the deadline. A history summarizer run that outlasts the budget keeps running, and its publication folds on a later pass. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
 
 A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"session_busy"`, `"boundary_unknown"`); `session_busy` is not an error code and is not retried by the transport. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state. The status set may grow: a consumer MUST treat a response whose `status` it does not recognize as a declined pass in the same way.
 
@@ -1746,13 +2477,14 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `previous_output_revision` | optional | the revision of the consumer's retained, applied output, when it offers one |
 | `serializer_profile` | required | `owned-llmrunner`, `pi`, `opencode-aisdk`, or `claude-code-anthropic` |
 | `render_config` | required | string; a change is a render-configuration change |
-| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read is `{"id", "message"}` alone. The daemon reads `type` and `parentId` for source capture only: a row without `type` or whose `type` is not `"message"` contributes no source and is counted as an adapter refusal, and neither field changes the transform or its response |
+| `native_messages` | the window of `pi` and `opencode-aisdk`, empty when absent; absent for the other profiles | the window in the harness's native form, one value per host message in host order: an OpenCode message, or for `pi` a row `{"id": string, "type": string, "parentId": string \| null, "message": AgentMessage}` whose `type` and `parentId` are those of the session entry the row was built from; a row whose entry the plugin cannot read, and a row of a message entry whose message differs from the message the entry holds (a `context` handler that ran before the plugin's changed it), is `{"id", "message"}` alone. The plugin reads the two messages as equal when they serialize to the same JSON text. It serializes a message only after a walk has admitted that message and the entry's as plain JSON data: the walk reads own data properties, so the comparison calls no code of either message, and it refuses a message that holds, for example, a cycle, more than 256 levels, an array hole or an `undefined` item, an accessor, a proxy, a `toJSON`, a class instance, or a value JSON cannot hold. A message the walk refuses reads as changed, and so does a message whose walk, together with its entry's, does not fit in what the comparisons of the pass's attempt have left of 128 MiB, charged as a capture charges a window. A pass that reads its window again after `boundary_unknown` (section 7.10.4) is on its second attempt and compares that read within its own 128 MiB. An attempt compares the newest rows of its window first, so the rows that lose `type` in a window past that charge are its oldest. A live entry that holds a value the walk refuses, such as a class instance in a tool result's `details`, reads as changed until the session is loaded again from its file, although no handler changed it. The comparison alone gives these guarantees: the plugin names a row's entry by the message's `role`, `timestamp`, and `toolCallId`, and for a custom message or a branch summary by its content fields, which it reads as ordinary properties. A row holds the message the handler returned. The pass records each row's content in the synchronous step that compares it and checks that record again before it serializes the request, before it serializes a page series again, and before it publishes the response, so a message of any row that changes in place while the pass awaits, and a `toJSON` that appears on `Object.prototype` or `Array.prototype`, decline the pass. The daemon reads `type` and `parentId` for source capture and `type` for failed-command facts (section 7.9): a row without `type` or whose `type` is not `"message"` contributes no source, is counted as an adapter refusal, and names no execution of a command. Neither field enters the CK window; a recipe matches whole rows, so a row's `type` and `parentId` can decide whether an unchanged message keeps from the previous output or from the input |
 | `messages` | the window of `owned-llmrunner` and `claude-code-anthropic`, empty when absent; absent for `pi` and `opencode-aisdk` | the window in CK form, in canonical order: `[{"mid": string, "ck": CK message}]` |
 | `usage` | optional | `{"current_total_input_tokens", "context_limit_tokens", "final_wire_input_tokens", "final_wire_trusted"}` |
 | `geometry` | optional | `{"usable_soft": integer, "usable_hard": integer, "derivation": string}` |
 | `prev_response_cache_usage` | optional | `{"cache_read_tokens", "cache_write_tokens"}`; a malformed value is dropped |
 | `mid_turn`, `is_subagent`, `tool_present` | optional, default `false` | booleans |
 | `todo_tool_present` | optional | boolean |
+| `working_directory` | optional; `pi` sends it for a session that has a project identity and whose working directory lies beneath the project root | string: the session's working directory, at its physical path, relative to the project root at its physical path, with `/` separators, empty for the root; the named-file records of Section 7.9 are taken for a request whose value is empty, where the relative path a `read` call opens names the file of that path and a `bash` command line is matched by its spelling from the project root, and a request without the field or with another value records none; the daemon keeps the value no longer than the observation |
 | `provider_id`, `model_key`, `cache_ttl`, `system_prompt_hash`, `upgrade_state`, `provider_error` | optional | strings |
 | `prev_response_completed_at_ms`, `request_observed_at_ms` | optional | unsigned integers (milliseconds) |
 | `effective_execute_threshold`, `history_budget_tokens` | optional | numbers |
@@ -1762,6 +2494,8 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `channel2_nudge_state`, `channel2_delivered_id`, `emergency_recovery_armed`, `emergency_recovery_no_head_escape`, `detected_context_limit_model_key` | optional | host delivery and recovery state |
 | `lineage_switched`, `descent_edge_id`, `prior_conversation_key`, `prior_epoch`, `new_epoch`, `constituents`, `compaction_observed` | optional | the lineage owner's descent edge; absent means no switch |
 | `transform_page_id`, `transform_generation`, `transform_page_index`, `transform_page_total`, `transform_page_complete`, `transform_page_digest` | paged requests only, all or none | the paging rule below |
+
+Other Pi extensions. A Pi extension runs in the plugin's process with the plugin's privileges and can read and write everything the plugin can. The plugin's guarantee toward another extension covers a `context` handler that edits messages before the plugin's handler runs: the comparison of the `native_messages` row recognises the edited message, its row carries no entry `type`, and the row yields no failed-command fact and no retained source span. The guarantee ends there. An extension whose code runs inside the plugin's pass, or that changes an object the pass reads while the pass runs, is outside this contract: for example an accessor on a field the pass reads as an ordinary property, a value whose raw-JSON brand or prototype changes after the comparison, a buffer over shared memory, or a handler's array that changes length during the pass. The content rechecks of a row decline the pass for the in-place changes they observe; they are a safeguard, and this contract states no outcome for such an extension.
 
 Native derivation. For `pi` and `opencode-aisdk` the daemon derives the pass's CK window from `native_messages` after the boundary, profile, window-shape, and `base_revision` checks and before any projection or effect of the pass, through the profile's codec: the Pi codec turns each row into one CK message whose `mid` and `meta.harness_id` are the row's `id`; the OpenCode codec turns each message into one CK message whose `mid` is its `info.id` (else its own `id`, else a hash of the message), leaving out a compaction summary message (one whose `info` holds `summary: true` and `finish: "stop"`) and keeping every other message's host position, which names its synthetic tool-call ids. Every later rule of this section reads the derived window as `messages`. The derivation's bounded allocation is charged to the pass's resident reservation before it runs, so a window the pass cannot fund answers before any effect: `invalid_params` ("request body needs more resident bytes than this host can hold") when the host can never hold it, or `queue_full` while other requests hold the pool.
 
@@ -1775,7 +2509,7 @@ Paging rule. A request may be split into pages that share one `transform_page_id
 
 #### 7.10.4 Outcomes and errors
 
-The daemon resolves a window against one snapshot of the session's coverage, before any other work of the pass and without writing:
+The daemon resolves a window against one snapshot of the session's coverage, without writing to that coverage, before any work of the pass that reads the resolved window. Two steps of Section 7.9 read the submitted window before it: the source checkpoint, which can queue capture sources, and the named-file observation, which writes nothing:
 
 - The declared segment is the rendered boundary: the window is served as submitted.
 - The declared segment is older than the rendered boundary and the rendered boundary's message is in the window: the daemon slices the window at that message and serves the rest (a stale slice); the consumer's coordinates are unchanged (Section 7.10.5).
@@ -1788,7 +2522,7 @@ A fold whose newest history segment ends on a message the window no longer holds
 
 A write that races the pass's commit makes the pass resolve again from a fresh snapshot. A revert whose removal committed before its fold commits (a conflict or a crash between the two) leaves the newest surviving segment as the rendered boundary, or, when the removal left none, no coverage; the next pass sends `null`. The reconcile stays pending. The retry after a conflict, or the next pass after a crash, declares that segment, resolves as the rendered boundary, and folds from the surviving history; its fold renders that segment's end message, so it removes nothing further.
 
-Errors, each an application `Error` (Section 10.2) with a stable `code` and a human-readable `message`. Every refusal decided before the pass runs, which is every code below except `transform_failed` and `transform_output_too_large`, changes no session state:
+Errors, each an application `Error` (Section 10.2) with a stable `code` and a human-readable `message`. A refusal decided before the pass reaches its checkpoints hands off nothing and changes no session state. A refusal decided while the daemon resolves the window (`boundary_unknown`, and the `invalid_params` causes below that resolution checks, such as a repeated or overlong `mid` or an identity field past its bound) leaves `row_version`, `meta`, and the stored history segments as they were; the capture and failed-command checkpoints have already read the submitted window (Section 7.9). `transform_failed` and `transform_output_too_large` are decided after the pass runs:
 
 | Code | Cause |
 | --- | --- |

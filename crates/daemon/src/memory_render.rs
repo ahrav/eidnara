@@ -87,41 +87,68 @@ pub(crate) const CURRENT_WORK_SECTION: &str = "CURRENT_WORK";
 
 const CURRENT_WORK_NOTE: &str = "Work the user left open in earlier sessions, newest first, which no later statement of the user ended. It sets no standing rule and may be finished already: check the repository before resuming it.";
 
+pub(crate) const NAMED_FILES_SECTION: &str = "NAMED_FILES";
+
+const NAMED_FILES_NOTE: &str = "Files of this project that a message of the user named in an earlier session and the agent then read or named in a command it ran, most used first. Paths are relative to the project root, and each file existed when this block was composed. This memory holds none of their content: open a file for what it says. A line here ends with when the file last changed: its last commit's time or, marked on disk, its modification time, which a checkout also sets. A User stated line below that ends with a time in square brackets was recorded then, at or after the user made it. A statement made after a file's last change is newer than that file, and a file committed after a statement was recorded is newer than the statement in the lines changed since then.";
+
 pub(crate) fn renders_in_block(category: &str) -> bool {
     memory_category_rank(category).is_some()
 }
 
-/// Appends the opening tag of `category`. The tag of
-/// [`CURRENT_WORK_SECTION`] carries [`CURRENT_WORK_NOTE`].
+/// Appends the opening tag of `category`. The tags of
+/// [`CURRENT_WORK_SECTION`] and [`NAMED_FILES_SECTION`] carry their notes.
 pub(crate) fn push_category_open(out: &mut String, category: &str) {
     out.push('<');
     push_escaped_xml_attr(out, category);
-    if category == CURRENT_WORK_SECTION {
+    let note = match category {
+        CURRENT_WORK_SECTION => Some(CURRENT_WORK_NOTE),
+        NAMED_FILES_SECTION => Some(NAMED_FILES_NOTE),
+        _ => None,
+    };
+    if let Some(note) = note {
         out.push_str(" note=\"");
-        push_escaped_xml_attr(out, CURRENT_WORK_NOTE);
+        push_escaped_xml_attr(out, note);
         out.push('"');
     }
     out.push('>');
 }
 
-/// Sort rank of a positive category: its index in [`MEMORY_CATEGORY_ORDER`], or one rank after
-/// them for the other positive categories. `None` marks a category the native surfaces drop.
-/// [`CURRENT_WORK_SECTION`] ranks last.
+/// The sections that render before the facts, and the ones that render after them. Their rows
+/// render, and enter the block's revision, in the order the caller supplies: the caller ranks
+/// them by use or by recency.
+pub(crate) const SECTIONS_BEFORE_FACTS: &[&str] = &[NAMED_FILES_SECTION];
+pub(crate) const SECTIONS_AFTER_FACTS: &[&str] = &[CURRENT_WORK_SECTION];
+
+pub(crate) fn keeps_supplied_order(category: &str) -> bool {
+    SECTIONS_BEFORE_FACTS.contains(&category) || SECTIONS_AFTER_FACTS.contains(&category)
+}
+
+/// The rank the positive categories outside [`MEMORY_CATEGORY_ORDER`] share.
+const OTHER_POSITIVE_RANK: usize = SECTIONS_BEFORE_FACTS.len() + MEMORY_CATEGORY_ORDER.len();
+
+/// Sort rank of a category the block renders. The sections of [`SECTIONS_BEFORE_FACTS`] rank
+/// first, in the list's order. A positive category ranks after them by its index in
+/// [`MEMORY_CATEGORY_ORDER`], and the other positive categories share
+/// [`OTHER_POSITIVE_RANK`]. The sections of [`SECTIONS_AFTER_FACTS`] rank last, in the list's
+/// order. `None` marks a category the native surfaces drop.
 ///
 /// [`MEMORY_CATEGORY_ORDER`] is a prefix of [`POSITIVE_MEMORY_CATEGORIES`], so one index serves
 /// both lists.
 fn memory_category_rank(category: &str) -> Option<usize> {
-    if category == CURRENT_WORK_SECTION {
-        return Some(MEMORY_CATEGORY_ORDER.len() + 1);
+    let position = |list: &[&str]| list.iter().position(|listed| *listed == category);
+    if let Some(before) = position(SECTIONS_BEFORE_FACTS) {
+        return Some(before);
     }
-    let position = POSITIVE_MEMORY_CATEGORIES
-        .iter()
-        .position(|positive| *positive == category)?;
-    Some(position.min(MEMORY_CATEGORY_ORDER.len()))
+    if let Some(after) = position(SECTIONS_AFTER_FACTS) {
+        return Some(OTHER_POSITIVE_RANK + 1 + after);
+    }
+    let fact = position(&POSITIVE_MEMORY_CATEGORIES)?;
+    Some(SECTIONS_BEFORE_FACTS.len() + fact.min(MEMORY_CATEGORY_ORDER.len()))
 }
 
 /// Ranked categories sort by rank, the rest by name after them, and ties by object id.
-/// Rows of [`CURRENT_WORK_SECTION`] compare equal, so a stable sort preserves their input order.
+/// Rows of a section that [`keeps_supplied_order`] compare equal, so a stable sort preserves
+/// their input order.
 fn memory_render_order(
     (left_rank, left): &(usize, &CanonicalMemory),
     (right_rank, right): &(usize, &CanonicalMemory),
@@ -129,14 +156,14 @@ fn memory_render_order(
     left_rank
         .cmp(right_rank)
         .then_with(|| {
-            if *left_rank == MEMORY_CATEGORY_ORDER.len() {
+            if *left_rank == OTHER_POSITIVE_RANK {
                 left.category.cmp(&right.category)
             } else {
                 Ordering::Equal
             }
         })
         .then_with(|| {
-            if *left_rank > MEMORY_CATEGORY_ORDER.len() {
+            if keeps_supplied_order(&left.category) {
                 Ordering::Equal
             } else {
                 left.object_id.cmp(&right.object_id)
@@ -154,14 +181,18 @@ fn memory_line_content(memory: &CanonicalMemory) -> &str {
 }
 
 fn push_memory_line(out: &mut String, memory: &CanonicalMemory) {
-    // The object id is caller-supplied text; escaping it and folding line breaks keeps it from closing the block or forging a sibling element.
-    for (i, piece) in memory.object_id.split(['\n', '\r']).enumerate() {
-        if i > 0 {
-            out.push(' ');
+    // A fact's line opens with its id, the handle the memory tools take. A `NAMED_FILES` line is
+    // the path and its use alone: its record is no memory the tools address.
+    if memory.category != NAMED_FILES_SECTION {
+        // The object id is caller-supplied text; escaping it and folding line breaks keeps it from closing the block or forging a sibling element.
+        for (i, piece) in memory.object_id.split(['\n', '\r']).enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            push_escaped_xml_content(out, piece);
         }
-        push_escaped_xml_content(out, piece);
+        out.push_str(": ");
     }
-    out.push_str(": ");
     // `<project-memory>` continuation lines must remain indented because m0 byte accounting and the prompt cache depend on its line structure.
     for (i, line) in memory_line_content(memory).split('\n').enumerate() {
         if i > 0 {
@@ -180,14 +211,21 @@ pub fn render_memory_line(memory: &CanonicalMemory) -> String {
     line
 }
 
-/// Renders positive memories grouped in deterministic category and object-id order.
-/// The `CURRENT_WORK` rows render last, in the supplied order.
+/// Renders the rows of the categories that rank: the `NAMED_FILES` rows first, in the supplied
+/// order, the positive memories grouped in deterministic category and object-id order, and the
+/// `CURRENT_WORK` rows last, in the supplied order.
 ///
 /// Native surfaces filter non-positive categories because callers can construct
 /// [`CanonicalMemory`] directly and native surfaces lack a warning renderer.
 /// Category names are escaped for XML attributes, while `wrapper` is interpolated as written, so callers must pass a valid element name.
 /// Memory content is escaped by [`render_memory_line`].
 pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> String {
+    render_block(memories, wrapper, None)
+}
+
+/// `render_block` uses the [`render_memory_block`] format and places a
+/// supplied `note`, as written, on its own line before the closing tag.
+fn render_block(memories: &[CanonicalMemory], wrapper: &str, note: Option<&str>) -> String {
     let mut ordered = memories
         .iter()
         .filter_map(|memory| Some((memory_category_rank(&memory.category)?, memory)))
@@ -207,7 +245,8 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
         })
         .sum::<usize>()
         + 2 * wrapper.len()
-        + 5;
+        + 5
+        + note.map_or(0, |note| note.len() + 1);
     let mut block = String::with_capacity(len_hint);
     block.push('<');
     block.push_str(wrapper);
@@ -232,10 +271,41 @@ pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> Strin
         push_escaped_xml_attr(&mut block, category);
         block.push('>');
     }
+    if let Some(note) = note {
+        block.push('\n');
+        block.push_str(note);
+    }
     block.push_str("\n</");
     block.push_str(wrapper);
     block.push('>');
     block
+}
+
+/// The sentence a delivered `<project-memory>` block ends with, on the line
+/// before its closing tag.
+pub(crate) const PROJECT_MEMORY_NOTE: &str = "The lines above are a partial record of this project's sessions: they hold what was said or recorded there, and conventions kept in the repository's files stay in those files.";
+
+/// The first line of a delivered block.
+const DELIVERED_OPEN: &str = "<project-memory>\n";
+const DELIVERED_CLOSE: &str = "</project-memory>";
+
+/// The frame of a delivered block: its opening line, [`PROJECT_MEMORY_NOTE`],
+/// and its closing tag. The budget charges these bytes for a block that
+/// holds a row, and [`render_delivered_memory_block`] writes the rows'
+/// elements after the opening line.
+pub(crate) fn delivered_memory_frame() -> &'static str {
+    static FRAME: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!("{DELIVERED_OPEN}{PROJECT_MEMORY_NOTE}\n{DELIVERED_CLOSE}")
+    });
+    &FRAME
+}
+
+/// The `<project-memory>` block of a session's m0: the rows' elements as
+/// [`render_memory_block`] writes them, then [`PROJECT_MEMORY_NOTE`] on the
+/// line before the closing tag. The block is an empty string when it renders
+/// no row.
+pub fn render_delivered_memory_block(memories: &[CanonicalMemory]) -> String {
+    render_block(memories, "project-memory", Some(PROJECT_MEMORY_NOTE))
 }
 
 /// The caller token-trims user memories; an empty set renders as an empty string.
@@ -522,9 +592,19 @@ mod tests {
                     content: contents[next() % contents.len()].clone(),
                 })
                 .collect();
+            let reference = replace_chain::block(&memories, "project-memory");
             assert_eq!(
                 render_memory_block(&memories, "project-memory"),
-                replace_chain::block(&memories, "project-memory"),
+                reference,
+                "round {round}"
+            );
+            let delivered = reference
+                .strip_suffix("\n</project-memory>")
+                .map(|rows| format!("{rows}\n{PROJECT_MEMORY_NOTE}\n</project-memory>"))
+                .unwrap_or_default();
+            assert_eq!(
+                render_delivered_memory_block(&memories),
+                delivered,
                 "round {round}"
             );
             for memory in &memories {
@@ -674,6 +754,126 @@ mod tests {
         assert!(renders_in_block(CURRENT_WORK_SECTION));
         assert!(!is_positive_memory_category(CURRENT_WORK_SECTION));
         assert!(!renders_in_block("WARNING"));
+    }
+
+    /// `NAMED_FILES_SECTION` renders before every stored category, under its
+    /// note, with its rows in the supplied order. A row's line is its
+    /// content alone: the record's id is no handle the memory tools take.
+    #[test]
+    fn the_named_files_section_renders_first_with_its_note_in_the_supplied_order() {
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let rows = [
+            row("mem_5", "PROJECT_RULES", "a project rule"),
+            row("nfu_9", NAMED_FILES_SECTION, "docs/guide.md (used most)"),
+            row("mem_2", CURRENT_WORK_SECTION, "an open request"),
+            row("nfu_1", NAMED_FILES_SECTION, "tools/check.sh (used less)"),
+        ];
+        let note = "Files of this project that a message of the user named in an earlier \
+                    session and the agent then read or named in a command it ran, most used \
+                    first. Paths are relative to the project root, and each file existed when \
+                    this block was composed. This memory holds none of their content: open a \
+                    file for what it says. A line here ends with when the file last changed: \
+                    its last commit's time or, marked on disk, its modification time, which a \
+                    checkout also sets. A User stated line below that ends with a time in \
+                    square brackets was recorded then, at or after the user made it. A \
+                    statement made after a file's last change is newer than that file, and a \
+                    file committed after a statement was recorded is newer than the statement \
+                    in the lines changed since then.";
+        assert_eq!(
+            render_memory_block(&rows, "project-memory"),
+            format!(
+                "<project-memory>\n<NAMED_FILES note=\"{note}\">\n\
+                 docs/guide.md (used most)\ntools/check.sh (used less)\n</NAMED_FILES>\n\
+                 <PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 <CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\nmem_2: an open request\n\
+                 </CURRENT_WORK>\n</project-memory>"
+            )
+        );
+        assert_eq!(
+            render_memory_line(&rows[1]),
+            "docs/guide.md (used most)",
+            "the budget prices the line the block renders"
+        );
+        assert!(renders_in_block(NAMED_FILES_SECTION));
+        assert!(!is_positive_memory_category(NAMED_FILES_SECTION));
+        assert!(
+            !NAMED_FILES_NOTE.contains(['<', '>', '&', '"']),
+            "the note renders as written in its attribute"
+        );
+    }
+
+    /// The delivered block holds the rows' elements, then the note on the
+    /// line before the closing tag, and its bytes are the frame's and the
+    /// elements'. The block rendered for the summarizer holds no note, and
+    /// no rows render no block.
+    #[test]
+    fn the_delivered_block_ends_with_its_note_before_the_closing_tag() {
+        let rows = [CanonicalMemory {
+            object_id: "mem_5".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content: "a project rule".to_string(),
+        }];
+        let note = "The lines above are a partial record of this project's sessions: \
+                    they hold what was said or recorded there, and conventions kept in the \
+                    repository's files stay in those files.";
+        let delivered = render_delivered_memory_block(&rows);
+        assert_eq!(
+            delivered,
+            format!(
+                "<project-memory>\n<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 {note}\n</project-memory>"
+            )
+        );
+        let elements = "<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n";
+        assert_eq!(
+            delivered.replacen(elements, "", 1),
+            delivered_memory_frame(),
+            "the frame the budget charges is the frame the block renders"
+        );
+        // Two categories and work in progress: the note follows the last
+        // element.
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let mixed = [
+            row("mem_2", CURRENT_WORK_SECTION, "newest request"),
+            row("mem_9", "WORKFLOW_RULES", "a workflow rule"),
+            row("mem_5", "PROJECT_RULES", "a project rule"),
+        ];
+        assert_eq!(
+            render_delivered_memory_block(&mixed),
+            format!(
+                "<project-memory>\n<PROJECT_RULES>\nmem_5: a project rule\n</PROJECT_RULES>\n\
+                 <WORKFLOW_RULES>\nmem_9: a workflow rule\n</WORKFLOW_RULES>\n\
+                 <CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\nmem_2: newest request\n\
+                 </CURRENT_WORK>\n{note}\n</project-memory>"
+            )
+        );
+        // Work in progress alone: the block still ends with the note.
+        assert_eq!(
+            render_delivered_memory_block(&mixed[..1]),
+            format!(
+                "<project-memory>\n<CURRENT_WORK note=\"{CURRENT_WORK_NOTE}\">\n\
+                 mem_2: newest request\n</CURRENT_WORK>\n{note}\n</project-memory>"
+            )
+        );
+        assert!(!render_memory_block(&rows, "project-memory").contains(note));
+        assert_eq!(render_delivered_memory_block(&[]), "");
+        assert_eq!(
+            render_delivered_memory_block(&[row("mem_7", "WARNING", "a warning")]),
+            "",
+            "rows of dropped categories render no block"
+        );
+        assert!(
+            !PROJECT_MEMORY_NOTE.contains(['<', '>', '&', '\n']),
+            "the note renders as written on one line"
+        );
     }
 
     #[test]

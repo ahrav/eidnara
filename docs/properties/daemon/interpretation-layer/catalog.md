@@ -57,23 +57,23 @@ evidence, not proof.
   request projects its window, so wire flattening (`wire.rs:540`) runs on the
   default path, and the m0 composer reads project documents with
   `inject_docs: true` (`crates/daemon/src/config.rs:168`; the additive-only
-  composer reads them at `crates/daemon/src/transform.rs:2820-2821`).
+  composer reads them at `crates/daemon/src/transform.rs:2853-2854`).
   Selection, reduced-call rendering, and to-do injection do not run under the
   default: `model_chain` defaults empty (`config.rs:149`), so `eidnara_folds()`
   is false (`config.rs:190-194`), and `apply_once` hands the request to
-  `apply_additive_only` (`transform.rs:3352-3353`), which projects the window
+  `apply_additive_only` (`transform.rs:3391-3392`), which projects the window
   and composes m0 without selecting or injecting. The one request that passes
   that gate with folds off, a switched-lineage subagent, returns a passthrough
-  (`transform.rs:3366-3372`).
+  (`transform.rs:3406-3412`).
 - `explicit-config-only`: the fold path runs only when `eidnara_folds()`
   holds: an admitted configuration with `compaction_enabled` (default true,
   `config.rs:151`) and a non-empty `model_chain`. On that path selection is
-  called from `transform.rs:4135`, injection from `transform.rs:4069` and
-  `:4453`, and reduced calls render from `transform.rs:5201` through
-  `transform.rs:11895`. Class-driven supersession (edit markers, the
+  called from `transform.rs:4179`, injection from `transform.rs:4113` and
+  `:4497`, and reduced calls render from `transform.rs:5245` through
+  `transform.rs:11941`. Class-driven supersession (edit markers, the
   `todowrite` keep-one, zero-value drops) also needs `smart_drops`, which
   defaults false (`config.rs:168`) and reaches selection unchanged
-  (`crates/daemon/src/lib.rs:9757`, `transform.rs:4164-4165`), plus an
+  (`crates/daemon/src/lib.rs:9839`, `transform.rs:4208-4209`), plus an
   emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`,
   `:980`). Capture runs only when `source_capture_enabled` is
   set (`config.rs:154` defaults it false; `sc.rs:291-302` gates on it). The
@@ -81,7 +81,7 @@ evidence, not proof.
   non-empty model chain: `model_chain` defaults empty (`config.rs:149`),
   `eidnara_folds` requires it (`config.rs:190-194`),
   `prepare_history_summarizer_with` returns before the trigger estimate when
-  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10149`), and the firing
+  `eidnara_folds` is false (`crates/daemon/src/lib.rs:10234`), and the firing
   assembler returns `NoModels` (`history_summarizer_chunk.rs:890-894`).
 - `test-only`: the subject is a CI step or an authoring-time artifact, not a
   daemon code path: the literal gate (`scripts/forbid-tool-literals.sh`, run
@@ -234,15 +234,15 @@ Open questions:
 ### il-tool-name-matching-differs-across-consumers
 
 Type: safety
-Reachability: explicit-config-only - selection's `classify` (`sel.rs:645`) and tier lookup (`sel.rs:749-755`) and the injection read-back (`injection.rs:435`) run only on the fold path (see Reachability classes); `exit_code` (`to.rs:33`) is capture-only. The source labelled this record default-production.
+Reachability: explicit-config-only - selection's `classify` (`sel.rs:645`) and tier lookup (`sel.rs:749-755`) and the injection read-back (`injection.rs:435`) run only on the fold path (see Reachability classes); `exit_code` (`to.rs:33`) is capture-only. `pi_operand` runs under the default configuration, on a transform pass of a primary Pi session at the project root whose last typed message names a path. The source labelled this record default-production.
 Status: active
-Exercised: yes - `tv-tests:17` `each_consumer_keeps_its_name_rule` pins `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash`, `MCP_READ`, `mcp_mcp_edit`, and every tabled name at each consumer; `tv-tests:257` holds every tabled name under any ASCII case and one `mcp_` prefix.
-Guarantee: Three name rules apply: selection evaluates the name lowercased with one leading `mcp_` removed (`tv.rs:78-84` `normalize`, applied in `classify` at `tv.rs:107` and `tier` at `tv.rs:137`); the injection read-back compares the raw name ignoring ASCII case (`tv.rs:156-158`); `exit_code` compares the raw name exactly (`tv.rs:202`). The summary formatter shows the raw name and matches nothing (`history_summarizer_chunk.rs:1326-1338`).
+Exercised: yes - `tv-tests:17` `each_consumer_keeps_its_name_rule` pins `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash`, `MCP_READ`, `mcp_mcp_edit`, and every tabled name at each consumer; `tv-tests:257` holds every tabled name under any ASCII case and one `mcp_` prefix; `tv-tests:279` `a_pi_operand_is_the_read_path_or_the_bash_command` pins `read` and `bash` against `Read`, `mcp_read`, `ls`, and `edit`.
+Guarantee: Three name rules apply: selection evaluates the name lowercased with one leading `mcp_` removed (`tv.rs:78-84` `normalize`, applied in `classify` at `tv.rs:107` and `tier` at `tv.rs:137`); the injection read-back compares the raw name ignoring ASCII case (`tv.rs:156-158`); `exit_code` compares the raw name exactly (`tv.rs:202`), and so does `pi_operand` (`tv.rs:250-256`), which the named-file recorder asks for the operand of Pi's `read` and `bash`. The summary formatter shows the raw name and matches nothing (`history_summarizer_chunk.rs:1326-1338`).
 Check: `always` - for a name `N`, selection's edit, `todowrite`, `eidnara_*`, and zero-value rules evaluate `classify(N)`; injection evaluates `N.eq_ignore_ascii_case("todowrite")`; `exit_code` evaluates `N == "bash"`. Each is a deterministic function of `N`. `always` because the rules are static.
 Fault/timing angle: none.
 Required faults and enabling state: names `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash`: `Edit` and `mcp_edit` are edit tools for supersession; `MCP_TodoWrite` is `todowrite` for selection's keep-one but not for the injection read-back; `Bash` yields no `exit_code`.
 Confidence: high - [evidence](evidence/il-tool-name-matching-differs-across-consumers.md). Each comparison read; the U4 table asserts each consequence.
-Existing check: `tv-tests:17`, `:215`, `:257`; unaudited.
+Existing check: `tv-tests:17`, `:215`, `:257`, `:279`; unaudited.
 Impact: one rule for every consumer would change supersession or keep-one for mixed-case or prefixed names. Selection's tier lookup normalizes twice (`tv.rs:150-152`), so `mcp_mcp_edit` classifies `Unknown` but takes tier 2; U4 preserved that and documents it in `docs/compression-fidelity.md`.
 Open questions: None. The source asked which rule `classify` applies; U4 keeps the per-caller rules as module data (`tv.rs:57-73` `NameRule`).
 
@@ -264,7 +264,7 @@ Open questions: None.
 ### il-reduced-tool-call-carries-extracted-path
 
 Type: safety
-Reachability: explicit-config-only - `flatten_block` (`wire.rs:520`) stores `extract_file_path(input)` for every `ToolCall` on every transform (`wire.rs:540`, field `wire.rs:568`), but a reduced call renders only on the fold path: `apply_once` builds the output (`transform.rs:5201`), which renders a reduced call from that field (`transform.rs:11895-11901`) through `reduced_block` (`wire.rs:445`); see Reachability classes. The source labelled this record default-production.
+Reachability: explicit-config-only - `flatten_block` (`wire.rs:520`) stores `extract_file_path(input)` for every `ToolCall` on every transform (`wire.rs:540`, field `wire.rs:568`), but a reduced call renders only on the fold path: `apply_once` builds the output (`transform.rs:5245`), which renders a reduced call from that field (`transform.rs:11941-11947`) through `reduced_block` (`wire.rs:445`); see Reachability classes. The source labelled this record default-production.
 Status: active
 Exercised: not yet - no test asserts a reduced `ToolCall` input's `path` against `extract_file_path` of the original; `wire.rs:1260` reduces a result with no path.
 Guarantee: The `path` key of every reduced `ToolCall` input equals `path_arg` of the original input, so the path key list is byte-visible compaction output.
@@ -279,15 +279,15 @@ Open questions: None.
 ### il-synthetic-todowrite-round-trips-under-one-name
 
 Type: safety
-Reachability: explicit-config-only - injection emits the synthetic call and result (`injection.rs:155-180`) and reads to-do state back (`injection.rs:429-457`) only on the fold path (`transform.rs:4069`, `:4453`; see Reachability classes). The source labelled this record default-production.
+Reachability: explicit-config-only - injection emits the synthetic call and result (`injection.rs:155-180`) and reads to-do state back (`injection.rs:429-457`) only on the fold path (`transform.rs:4113`, `:4497`; see Reachability classes). The source labelled this record default-production.
 Status: active
-Exercised: partial - `tv-tests:17` asserts `classify("todowrite") == TodoWrite` and `is_injected_todo_tool("todowrite")`; `injection.rs:553`, `:1047`, `:1052` assert the synthetic constants and names; `transform.rs:29651` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` replays the echoed synthetic pair beside a native `todowrite` call and asserts no duplicate tool-use id. No test asserts that keep-one and the read-back act on the native call alone when the echoed pair is present.
+Exercised: partial - `tv-tests:17` asserts `classify("todowrite") == TodoWrite` and `is_injected_todo_tool("todowrite")`; `injection.rs:553`, `:1047`, `:1052` assert the synthetic constants and names; `transform.rs:29811` `warm_cache_selection_bust_does_not_replay_collapsed_synthetic_todo_as_live` replays the echoed synthetic pair beside a native `todowrite` call and asserts no duplicate tool-use id. No test asserts that keep-one and the read-back act on the native call alone when the echoed pair is present.
 Guarantee: Injection emits a synthetic call and result named `TODO_TOOL` (`injection.rs:158`, `:173`), reads to-do state back from calls `is_injected_todo_tool` accepts (`injection.rs:435`), and selection's keep-one rule counts calls `classify` names `TodoWrite` (`sel.rs:660-663`, `:693`); all three resolve `TODO_TOOL` (`tv.rs:26`).
 Check: `always` - `classify(TODO_TOOL) == ToolClass::TodoWrite` and `is_injected_todo_tool(TODO_TOOL)`. `always` because the constant is static and both queries are pure.
 Fault/timing angle: none.
-Required faults and enabling state: a fold-path window holding the echoed synthetic pair and one native `todowrite` call. Selection and the read-back never see the synthetic pair: ingress marks any message carrying a `synthetic_todo_` id synthetic (`transform.rs:2599-2617`), and `live` drops synthetic blocks (`transform.rs:3469-3473`) before `tail_for_selection` is built (`transform.rs:4065-4066`). The pair therefore exercises the id exclusion, and the native call exercises the shared name.
+Required faults and enabling state: a fold-path window holding the echoed synthetic pair and one native `todowrite` call. Selection and the read-back never see the synthetic pair: ingress marks any message carrying a `synthetic_todo_` id synthetic (`transform.rs:2635-2653`), and `live` drops synthetic blocks (`transform.rs:3509-3513`) before `tail_for_selection` is built (`transform.rs:4109-4110`). The pair therefore exercises the id exclusion, and the native call exercises the shared name.
 Confidence: high - [evidence](evidence/il-synthetic-todowrite-round-trips-under-one-name.md). The three uses read at `41d889ea4`; U4 replaced three spellings with one constant.
-Existing check: `tv-tests:17`; `injection.rs:553`, `:1047`, `:1052`; `transform.rs:29651`; `injection-golden.json`; unaudited.
+Existing check: `tv-tests:17`; `injection.rs:553`, `:1047`, `:1052`; `transform.rs:29811`; `injection-golden.json`; unaudited.
 Impact: the synthetic pair is excluded by id, so a divergent name would not make selection drop it. A divergence would emit the injected to-do state under a tool name that differs from the name the harness's own to-do calls carry, which is the name selection's keep-one and the read-back match.
 Open questions: None.
 
@@ -296,7 +296,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - the summarizer path (see Reachability classes) calls `format_tool_summary` directly at `history_summarizer_chunk.rs:1287-1291` and `crates/daemon/src/boundary.rs:1860`, and through `call_summary` (`to.rs:437`, `:456`) at `history_summarizer_chunk.rs:1295` and `boundary.rs:1867`.
 Status: active
-Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20052` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20338-20344`, the input at `lib.rs:26936`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
+Exercised: partial - `history_summarizer_chunk.rs:3581` `a_call_summary_holds_no_line_separator` covers the description arm and the key-argument arm on separate inputs; `crates/daemon/src/lib.rs:20119` `history_summarizer_boundary_construction_matches_owned_reference` expects `TC: bash` for a call whose input holds only `command` (`lib.rs:20405-20411`, the input at `lib.rs:27153`), the bare-name arm through the boundary construction; `tv-tests:66` covers the 60-scalar cut and the marker; the `TC:` goldens hold short arguments. Only `boundary.rs:3211` gives one input both a description and a key argument, and its differential comparison calls `format_tool_summary` on both sides, so the precedence between the first two arms is not asserted.
 Guarantee: A non-empty string `description` renders `TC: {description}`; otherwise `extract_key_arg` supplies the argument, cut to 60 scalar values plus `…` for a path-like key, and renders `TC: {name}({key_arg})`; otherwise `TC: {name}`; the result passes through `normalize_text`.
 Check: `always` - `history_summarizer_chunk.rs:1326-1338`. `always` because the function is pure.
 Fault/timing angle: none.
@@ -357,7 +357,7 @@ Falsifier or legal witness: Falsifier: `classify("")` panics. Legal witness: `cl
 ### il-unknown-tool-never-dropped-deduped-or-edit-marked
 
 Type: safety
-Reachability: explicit-config-only - the tier lookup (`sel.rs:749-755`) runs for every arc on the fold path (`transform.rs:4135`), and `select_supersession` (`sel.rs:630`) runs there only with `smart_drops` set and an emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`, `:980`); see Reachability classes. The source labelled this record default-production.
+Reachability: explicit-config-only - the tier lookup (`sel.rs:749-755`) runs for every arc on the fold path (`transform.rs:4179`), and `select_supersession` (`sel.rs:630`) runs there only with `smart_drops` set and an emergency or two-pass reclaim batch or an admitted ride (`sel.rs:958`, `:980`); see Reachability classes. The source labelled this record default-production.
 Status: active
 Exercised: yes - `sel.rs:2828` `identical_calls_produce_no_dedup_decision_for_any_tool_name` runs two identical `mcp_foo` calls carrying `filePath` and `oldString` and asserts no decision, beside an `edit` positive control; `tv-tests:133` `an_unknown_tool_takes_every_default`.
 Guarantee: For an `Unknown` tool, selection never drops it as a zero-value meta tool, never deduplicates it, and never compresses it into an `edit_marker` by a class decision; its selection tier is 3 unless the name carries two `mcp_` prefixes over a tabled name, its display argument comes from the generic key list, and `exit_code` is `None`.
@@ -390,7 +390,7 @@ Falsifier or legal witness: Falsifier: the gate exits 1 on the post-U4 tree beca
 ### il-dedup-removal-leaves-goldens-byte-identical
 
 Type: safety
-Reachability: explicit-config-only - the removed selector ran inside selection, which runs only on the fold path (`transform.rs:4135`; see Reachability classes), and the goldens pin selection, summarizer chunking, and compression output. The source labelled this record default-production.
+Reachability: explicit-config-only - the removed selector ran inside selection, which runs only on the fold path (`transform.rs:4179`; see Reachability classes), and the goldens pin selection, summarizer chunking, and compression output. The source labelled this record default-production.
 Status: active
 Exercised: yes - `git diff a91dbc2b6 97afdaff1 -- crates/daemon/testdata` is empty, so U4 changed no golden; `crates/daemon/tests/selection_differential.rs:2248` `optimized_matches_frozen_reference_on_identical_calls` and the rest of the differential pass against a reference without dedup.
 Guarantee: Removing `DEDUP_SAFE_TOOLS`, `select_tool_dedup`, `dedup_name`, and the mirrored differential constants changed no byte of `selection-golden.json`, `differential-golden.json`, `history_summarizer-chunk-golden.json`, or `compression-fidelity.json`, because no tool either harness sends was in the dedup list.
@@ -425,7 +425,7 @@ Falsifier or legal witness: Falsifier: `exit_code(OpenCode, "mcp_foo", {exit: 2}
 Type: safety
 Reachability: test-only - the classification is a static artifact over the source tree ([`literals.md`](literals.md)), checked at authoring time; the literals it classifies are read by production code, but the property itself is not a daemon code path.
 Status: active
-Exercised: partial - [`literals.md`](literals.md) lands the table (256 distinct literals, 173 rows covering every field, tool, and argument-key literal, 100 excluded literals with reasons), checked once at authoring; no recurring check re-runs the classification.
+Exercised: partial - [`literals.md`](literals.md) lands the table, with its counts of literals, rows, and excluded literals, checked at authoring; no recurring check re-runs the classification.
 Guarantee: Every string literal in the interpretation-layer files that names a field, a tool, or an argument key carries exactly one recorded class per site: contract (a harness with zero tools registered still emits it), vocabulary (a tool author chose it), or Eidnara-owned (Eidnara defines it); vocabulary literals live in the module, contract literals stay with their codec or adapter, and Eidnara-owned identifiers are defined once and referenced.
 Check: `always` - the table lists every in-scope occurrence in exactly one row, and the gate's distinctive set equals the vocabulary rows' distinctive subset. `always` because the table is a static artifact checked at authoring.
 Fault/timing angle: none.
@@ -456,10 +456,10 @@ Falsifier or legal witness: Falsifier: `path_arg({filePath: "x"})` differs from 
 ### il-classify-one-case-rule-per-query
 
 Type: safety
-Reachability: explicit-config-only - the selection queries (`sel.rs:645`, `:750`) and the injection read-back (`injection.rs:435`) run only on the fold path (see Reachability classes); the `exit_code` rule is capture-only. The source labelled this record default-production.
+Reachability: explicit-config-only - the selection queries (`sel.rs:645`, `:750`) and the injection read-back (`injection.rs:435`) run only on the fold path (see Reachability classes); the `exit_code` rule is capture-only. `pi_operand` runs under the default configuration, on a transform pass of a primary Pi session at the project root whose last typed message names a path. The source labelled this record default-production.
 Status: active
 Exercised: yes - `tv-tests:17` (the per-consumer table), `tv-tests:215` `every_tabled_name_reaches_a_non_unknown_answer`, `tv-tests:257` `tabled_names_classify_under_any_ascii_case_and_one_mcp_prefix`.
-Guarantee: Each module query applies one declared name rule, and the rules reproduce HEAD at every caller: selection queries (`classify`, `tier`, `selection_tier`) evaluate the name lowercased with a leading `mcp_` removed; the injection read-back evaluates the raw name ignoring ASCII case; `exit_code` evaluates the raw name exactly; the `mcp_` strip is a shipped-default rule whose collision with `edit` or `write` for an MCP tool named `edit` is a known condition, not a guarantee.
+Guarantee: Each module query applies one declared name rule, and the rules reproduce HEAD at every caller: selection queries (`classify`, `tier`, `selection_tier`) evaluate the name lowercased with a leading `mcp_` removed; the injection read-back evaluates the raw name ignoring ASCII case; `exit_code` and `pi_operand` evaluate the raw name exactly; the `mcp_` strip is a shipped-default rule whose collision with `edit` or `write` for an MCP tool named `edit` is a known condition, not a guarantee.
 Check: `always` - the per-consumer table reproduces through the module, and every tabled name is classified non-`Unknown` under its rule. `always` because the rules are static.
 Fault/timing angle: none.
 Required faults and enabling state: the names `Edit`, `mcp_edit`, `MCP_TodoWrite`, `Bash` at each consumer; one tabled name per query.

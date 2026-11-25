@@ -1,6 +1,6 @@
 //! The MemoryReviewer receipt and attempt ledger, and the bounded commit-then-handoff dispatch.
 //!
-//! A receipt row exists per admitted job from its first claim. The run deadline and execution cutoff are written once at generation 1 and never recomputed; a takeover advances the generation and rebinds the claim but inherits both deadlines, so no recovery path resets a budget. Every write after the first claim is fenced on the generation the caller holds, and completion selects exactly one Kernel result for the current generation in the same transaction that completes the task lease, so a losing generation cannot publish.
+//! A receipt row exists per admitted job from its first claim. The run deadline and execution cutoff are written once at the receipt's first generation and never recomputed; a takeover advances the generation and rebinds the claim but inherits both deadlines, so no recovery path resets a budget. Every write after the first claim is fenced on the generation the caller holds, and completion selects exactly one Kernel result for the current generation in the same transaction that completes the task lease, so a losing generation cannot publish.
 //!
 //! An attempt row is the marker that precedes any network disclosure. It is inserted only after the claim, module authority, receipt generation, both incarnations, cancellation, cutoff, and allowance checks hold, and the allowance is the count of committed rows across every generation evaluated inside the insert itself, so no fifth attempt can commit. A committed row stays consumed whether or not bytes were sent; a row finished `not_dispatched` proves no disclosure happened.
 //!
@@ -38,7 +38,7 @@ pub const MEMORY_REVIEWER_MAX_REQUEST_BYTES: u64 = 256 * 1024;
 pub const MEMORY_REVIEWER_MAX_RAW_RESPONSE_BYTES: u64 = 1024 * 1024;
 /// Decoded assistant text bytes one job may consume across every round, attempt, and generation.
 pub const MEMORY_REVIEWER_MAX_DECODED_TEXT_BYTES: u64 = 64 * 1024;
-/// Byte bounds of the marker's caller text. The schema bounds the same columns in characters; these keep every permanent marker inside the receipt charge whatever the encoding.
+/// Byte bounds of the marker's caller text. The schema bounds the same columns in characters; these keep every marker inside the receipt charge whatever the encoding.
 pub const MAX_PROVIDER_BYTES: usize = 128;
 pub const MAX_MODEL_BYTES: usize = 256;
 pub const MAX_CREDENTIAL_ID_BYTES: usize = 256;
@@ -586,7 +586,7 @@ fn job_open_deadline(
     .optional()
 }
 
-/// Writes the receipt at generation 1 for a Ready job, or reports the receipt it already has. The run deadline is the creation time of the first claim ever taken on the job plus [`MEMORY_REVIEWER_RUN_DEADLINE_MS`]; a begin at or after it is refused. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
+/// Writes the receipt for a Ready job at its first generation, one above the highest generation a retired receipt reached, or reports the receipt it already has. The run deadline is the creation time of the first claim ever taken on the job plus [`MEMORY_REVIEWER_RUN_DEADLINE_MS`]; a begin at or after it is refused. The store's own incarnation is read inside the transaction; the caller supplies the Kernel incarnation it validated, which must be the one a staged subject was sealed under.
 pub fn begin_memory_reviewer_receipt_in_tx(
     conn: &GuardedConn<'_>,
     project: &str,
@@ -654,7 +654,9 @@ pub fn begin_memory_reviewer_receipt_in_tx(
              project, causal_identity, database_incarnation_id, kernel_incarnation_id,
              authority_generation, authority_context_store, state, generation, claim_id,
              run_deadline_ms, execution_cutoff_ms, created_at_ms, updated_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?10, 'in_progress', 1, ?6, ?7, ?8, ?9, ?9)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?10, 'in_progress',
+                   1 + COALESCE((SELECT generation FROM memory_reviewer_retired_generation WHERE id = 0), 0),
+                   ?6, ?7, ?8, ?9, ?9)",
         params![
             project,
             causal_identity,
@@ -1017,6 +1019,10 @@ pub fn list_memory_reviewer_attempts_in_tx(
     rows.collect()
 }
 
+/// Every operation a ledger write names in its scan owner key, beside the job's causal identity. The retirement sweep retires the owners of each for the jobs it deletes, and the completion's owner, which the task lease's write registers under its own kind.
+pub(crate) const LEDGER_OPERATIONS: [&str; 5] =
+    ["begin", "take-over", "cancel", "finish-attempt", "dispatch"];
+
 impl MemoryStore {
     fn ledger_transaction<T>(
         &self,
@@ -1025,6 +1031,7 @@ impl MemoryStore {
         causal_identity: &str,
         body: impl FnOnce(&GuardedConn<'_>) -> rusqlite::Result<WriteDisposition<T>>,
     ) -> Result<T, MemoryReviewerLedgerError> {
+        debug_assert!(LEDGER_OPERATIONS.contains(&operation));
         let write = memory_reviewer_write(
             project,
             &["memory_reviewer-ledger", operation, causal_identity],
@@ -1520,7 +1527,7 @@ impl MemoryStore {
                 {
                     return Ok(LeaseCompletion::Stale);
                 }
-                // The candidate id is caller text the receipt keeps for the store incarnation; it is scanned like every other MemoryReviewer identity, and the table trigger refuses it again. The receipt owns the scan beside the claim, so the evidence outlives the claim's retention window.
+                // The candidate id is caller text the receipt keeps until its job is retired; it is scanned like every other MemoryReviewer identity, and the table trigger refuses it again. The receipt owns the scan beside the claim, so the evidence outlives the claim's retention window.
                 if selection.is_some() {
                     coordinated.domain_owner(
                         "project",

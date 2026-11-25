@@ -198,7 +198,8 @@ impl FaultAction {
     /// `ReservationCommit` and `AfterEvents` abort a SQLite transaction and are
     /// consumed; the other ingest faults latch CAS ingestion closed until reopen.
     /// R11 clears only when a reopen rebuilds the projection; R24's receipt
-    /// charges are retained for the store incarnation, so nothing heals it.
+    /// charges are retained for the ninety-day retention window, so nothing
+    /// heals it within a run.
     pub fn heal(&self) -> Heal {
         match self {
             Self::SearchEpisode { .. }
@@ -343,7 +344,7 @@ pub enum Heal {
     Consumed,
     Released,
     Reopen,
-    /// Nothing in the run heals it; the refusal stands for the store incarnation.
+    /// Nothing in the run heals it; the refusal stands until the retirement sweep frees quota, ninety days on.
     Permanent,
 }
 

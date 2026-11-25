@@ -51,6 +51,7 @@ struct ReadRequest {
 struct AcceptRequest {
     causal_identity: String,
     operation_key: String,
+    reference: kernel::ReviewStagedReference,
     target: kernel::ProposalTarget,
 }
 
@@ -387,6 +388,7 @@ impl HandlerCore {
                 (record.kernel_incarnation(), &memstore_incarnation),
                 &parsed.causal_identity,
                 &parsed.operation_key,
+                &parsed.reference,
                 &parsed.target,
             )
             .or_else(|refusal| {

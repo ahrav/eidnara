@@ -82,6 +82,24 @@ function daemon(transform: (body: Json) => unknown) {
 }
 
 describe("Pi context handler under createAgentSession", () => {
+    it("sends the session's directory beneath the checkout root with each pass", async () => {
+        const { call, transforms } = daemon(keepWindow);
+        const checkout = join(root, "checkout");
+        const nested = join(checkout, "packages", "app");
+        mkdirSync(join(checkout, ".git"), { recursive: true });
+        mkdirSync(nested, { recursive: true });
+        try {
+            harness = await createTestAgentSession({
+                cwd: nested,
+                extensionFactories: [eidnaraPiExtension],
+            });
+            await harness.session.prompt("first question");
+            expect(transforms[0]?.working_directory).toBe("packages/app");
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("serves the applied values to the provider and names rows by entry ids", async () => {
         const { call, transforms } = daemon((body) => ({
             status: "ok",

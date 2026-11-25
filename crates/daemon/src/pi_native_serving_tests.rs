@@ -895,6 +895,15 @@ async fn a_canonical_memory_write_rerenders_native_pi_m0_as_hard() {
         "{synthetic:?}"
     );
     assert_eq!(synthetic[0].matches(line).count(), 1, "{synthetic:?}");
+    // The additive composition ends the block with the closing sentence, once.
+    let note = memory_render::PROJECT_MEMORY_NOTE;
+    assert_eq!(synthetic[0].matches(note).count(), 1, "{synthetic:?}");
+    let opened = synthetic[0].find("<project-memory>").unwrap();
+    let closed = synthetic[0][opened..].find("</project-memory>").unwrap() + opened;
+    assert!(
+        synthetic[0][opened..closed].ends_with(&format!("\n{line}\n</PROJECT_RULES>\n{note}\n")),
+        "the block's first closing tag follows the note: {synthetic:?}"
+    );
     let served = serde_json::to_string(&second["native_messages"]).unwrap();
     assert_eq!(
         served.matches(line).count(),

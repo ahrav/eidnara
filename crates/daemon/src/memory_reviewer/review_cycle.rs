@@ -1300,6 +1300,7 @@ pub fn apply_proposal(
             (scope.kernel_incarnation, scope.memstore_incarnation),
             causal_identity,
             APPLY_OPERATION_KEY,
+            &selected.reference,
             &proposal.target,
         ) {
             Ok(outcome) => {
