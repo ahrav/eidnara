@@ -1512,9 +1512,9 @@ impl Run<'_> {
 enum Relation {
     /// The memory cites it.
     Source,
-    /// A reference the memory does not cite, which the selection linked as later evidence: a message written at or after the newest cited message, and every reference that carries no message time, such as a tool result or a repository document.
+    /// A reference the memory does not cite, which the selection linked as later evidence: a message written after the newest cited message, and every reference that carries no message time, such as a tool result or a repository document.
     Later,
-    /// A message written before the newest cited message.
+    /// A message written with the newest cited message or before it: the memory's origin, which is never evidence against it.
     Earlier,
 }
 
@@ -1545,11 +1545,11 @@ impl Unread {
 }
 
 impl Relation {
-    /// Where a reference stands: `cited` by the memory, `written` at its own message time when it has one, beside the time of the newest message the memory cites.
+    /// Where a reference stands: `cited` by the memory, or `written` at its own message time when it has one, beside the time of the newest cited message the run was given. The selection links a message only when it was written after the memory was stated (`review_cycle::written_later`), and a message of the source's own moment is ordered here as it is there.
     fn of(cited: bool, written: Option<i64>, newest_cited: Option<i64>) -> Self {
         match (cited, written, newest_cited) {
             (true, _, _) => Self::Source,
-            (false, Some(written), Some(source)) if written < source => Self::Earlier,
+            (false, Some(written), Some(source)) if written <= source => Self::Earlier,
             (false, _, _) => Self::Later,
         }
     }
@@ -1586,7 +1586,7 @@ impl ReferenceFact {
         label.push_str(match self.relation {
             Relation::Source => "; the memory cites it as its source",
             Relation::Later => "; written after the memory's source",
-            Relation::Earlier => "; written before the memory's source",
+            Relation::Earlier => "; written with the memory's source or before it",
         });
         label
     }
@@ -1637,7 +1637,7 @@ fn reference_facts(
                 let writer = admission.map_or(Writer::Unrecorded, |(prior, _)| {
                     Writer::of_source(prior.source_class)
                 });
-                // A message's revision is its own time in milliseconds; other classes revise by other counters.
+                // A message's revision is its own time in milliseconds, and the run orders messages alone. The selection has ordered every reference it linked, a tool result by the end of its call (`review_cycle::source_time`).
                 let written = (*class == OccurrenceClass::Messages).then_some(*source_revision);
                 (writer, written, cited.contains(evidence_id))
             }
@@ -2098,13 +2098,17 @@ mod tests {
         }
     }
 
-    /// A reference the memory cites is its source. A message older than the newest cited message was written before the memory. Every other reference is later evidence: a message at or after the source, a reference with no message time such as a tool result or a repository document, and every reference of a memory whose source the store no longer retains.
+    /// A reference the memory cites is its source. A message written with the newest cited message or before it is the memory's origin. Every other reference is later evidence: a message written after the source, a reference with no message time such as a tool result or a repository document, and every reference of a memory whose source the store no longer retains.
     #[test]
     fn a_reference_is_placed_against_the_memorys_source() {
         assert_eq!(Relation::of(true, Some(5), Some(5)), Relation::Source);
         assert_eq!(Relation::of(true, None, None), Relation::Source);
         assert_eq!(Relation::of(false, Some(4), Some(5)), Relation::Earlier);
-        assert_eq!(Relation::of(false, Some(5), Some(5)), Relation::Later);
+        assert_eq!(
+            Relation::of(false, Some(5), Some(5)),
+            Relation::Earlier,
+            "a message of the same moment as the source is the source's own"
+        );
         assert_eq!(Relation::of(false, Some(6), Some(5)), Relation::Later);
         assert_eq!(
             Relation::of(false, None, Some(5)),

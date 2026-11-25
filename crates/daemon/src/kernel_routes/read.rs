@@ -697,9 +697,13 @@ impl HandlerCore {
         if parsed.gated {
             let store = scope.store.clone();
             let now_ms = parsed.clock_ms();
+            // The read is judged by the consumers whose output a search serves.
+            let unserved = self.kernel.unserved_consumers();
             let gate = blocking(move || {
                 let tip = store.tip()?;
-                store.outbox_lag(now_ms).map(|lag| (tip, lag))
+                store
+                    .outbox_lag_excluding(now_ms, unserved)
+                    .map(|lag| (tip, lag))
             })
             .await;
             let outcome = match gate {

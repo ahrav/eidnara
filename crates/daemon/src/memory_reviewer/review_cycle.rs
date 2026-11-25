@@ -30,7 +30,7 @@ use super::settlement::{
     AcceptRefusal, ReadRefusal, accept_selected_proposal, read_selected_proposal,
     release_settled_review_hold,
 };
-use super::stage_one::Writer;
+use super::stage_one::{Writer, takes_evidence};
 use crate::attestation_verifier::attest::Identity;
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::claim_sources::{ClaimMaterializer, ClaimProgress, MaterializationEnd};
@@ -137,17 +137,17 @@ fn grant_authority_inner(
     )
 }
 
-/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, a slice is blocked, or `cancelled` answers true, so every live memory decision has its descriptors before a selection reads them. `cancelled` is read before each slice, so a cancelled pass waits for one slice at most. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one.
+/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, a slice is blocked, or `cancelled` answers true, so every live memory decision has its descriptors before a selection reads them. `cancelled` is read before each slice, so a cancelled pass waits for one slice at most. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one. Returns whether the consumer reached its target; a catch-up that was cancelled, blocked, failed, or left slices for a later call returns false.
 pub fn publish_claims(
     kernel: &KernelStore,
     progress: &mut ClaimProgress,
     now: i64,
     cancelled: &dyn Fn() -> bool,
-) {
+) -> bool {
     let budget = EvalBudget::new(Some(Instant::now() + CYCLE_BUDGET), Arc::default());
     for _ in 0..MAX_CLAIM_SLICES {
         if cancelled() {
-            return;
+            return false;
         }
         let report = ClaimMaterializer::new(kernel, ProviderEgress::LocalOnly).run_slice(
             progress,
@@ -157,17 +157,19 @@ pub fn publish_claims(
         );
         match report.map(|report| report.end) {
             Ok(MaterializationEnd::Continues) => {}
-            Ok(MaterializationEnd::ReachedTarget | MaterializationEnd::Exhausted) => return,
+            Ok(MaterializationEnd::ReachedTarget) => return true,
+            Ok(MaterializationEnd::Exhausted) => return false,
             Ok(MaterializationEnd::Blocked(blocked)) => {
                 eprintln!("daemon: memory_reviewer claim catch-up is blocked: {blocked:?}");
-                return;
+                return false;
             }
             Err(error) => {
                 eprintln!("daemon: memory_reviewer claim catch-up failed: {error}");
-                return;
+                return false;
             }
         }
     }
+    false
 }
 
 /// Decision kinds a recorder writes from a tool event and keeps current itself: the record of a command's failure, which its next run replaces or resolves, and the record of a project file's use.
@@ -283,6 +285,8 @@ struct SourceFacts {
     writer: Writer,
     /// The commit that published the source's descriptor. Sources are ordered by it, so a source keeps its place whatever later brings it up as evidence.
     published: i64,
+    /// The source's own time in milliseconds ([`source_time`]). `None` for a repository document, whose revision counts observations.
+    written: Option<i64>,
     /// When a read found the descriptor retired; no job reads a retired source. The lookup is repeated after [`RETIRED_RECHECK`], which bounds how long a remembered answer stands in for the store's.
     retired: Option<Instant>,
 }
@@ -332,6 +336,7 @@ impl SelectionMemory {
                     SourceFacts {
                         writer: Writer::Unrecorded,
                         published: 0,
+                        written: None,
                         retired: Some(Instant::now()),
                     },
                 );
@@ -348,6 +353,7 @@ impl SelectionMemory {
                 Writer::of_source(prior.source_class)
             }),
             published: descriptor.created_commit_seq,
+            written: source_time(&descriptor.detail.class, &descriptor.detail.revision),
             retired: None,
         };
         if self.sources.len() >= MAX_REMEMBERED_SOURCES {
@@ -355,6 +361,24 @@ impl SelectionMemory {
         }
         self.sources.insert(evidence_id.to_string(), facts.clone());
         Ok(Some(facts))
+    }
+
+    /// When a memory was stated, in milliseconds: the time of the newest live source among `cited`, the sources the memory cites, or else `recorded`, the time the Kernel recorded the commit that first stored the memory. A memory outlives its captured messages, and a note the agent writes cites none, so the commit's time stands in for the source's. `None` when the Kernel holds no time for the commit.
+    fn stated_at(
+        &mut self,
+        kernel: &KernelStore,
+        cited: &[String],
+        recorded: Option<i64>,
+        tip: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<i64>, CycleError> {
+        let mut newest = None;
+        for evidence_id in cited {
+            if let Some(source) = self.source(kernel, evidence_id, tip, budget)? {
+                newest = newest.max(source.written);
+            }
+        }
+        Ok(newest.or(recorded))
     }
 
     /// The descriptor a job may read `evidence_id` through now, read from the Kernel at this call, or `None` once the store has retired it. A remembered source found retired is marked, so the passes that follow skip it.
@@ -525,6 +549,8 @@ struct Candidate<'a> {
     trigger: Trigger,
     /// The commit that published the newest later source, so the newest evidence is reviewed first.
     recency: i64,
+    /// Whether a session receives the memory in its block now. Such a memory is reviewed ahead of one served on explicit search alone.
+    delivered: bool,
     cited: Vec<String>,
     /// The later sources' evidence ids, newest first.
     signals: Vec<String>,
@@ -688,7 +714,7 @@ fn reopened_by_later_statements(
     reopened
 }
 
-/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, newest evidence first, each Ready with its starting references. Evidence is a later source the memory does not cite, written by someone who may change it: a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. A user's statement takes evidence only from the user; a fact the assistant reported, and work in progress, take it from anyone. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit that published it. A memory whose change proposal is pending waits for it.
+/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, each Ready with its starting references: the memories a session receives automatically first, and within each group the newest evidence first, so a pass limit or a store bound that ends the selection has spent its room on the rows a session is handed. Evidence is a later source the memory does not cite, written after the memory was stated (`written_later`) by someone who may change it ([`takes_evidence`]): a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit that published it. A memory whose change proposal is pending waits for it.
 pub fn select_and_enqueue(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -780,6 +806,14 @@ pub fn select_and_enqueue(
             walk.bound
         );
     }
+    // When the Kernel recorded the commit that first stored each statement of the walk, read in one statement.
+    let stated_commits: Vec<i64> = rows
+        .iter()
+        .map(|decision| crate::memory_capture::stated_commit(decision))
+        .collect();
+    let recorded = kernel
+        .commits_recorded_at_within_budget(&stated_commits, &budget)
+        .map_err(CycleError::Kernel)?;
     let reopened = reopened_by_later_statements(&rows, &terms);
     let mut candidates = Vec::new();
     let mut candidate_rows = Vec::new().into_iter();
@@ -846,8 +880,9 @@ pub fn select_and_enqueue(
                 }));
             }
         }
-        let own_words =
-            Writer::of_statement(&decision.payload.summary) == Writer::User && !work_in_progress;
+        let said_by = Writer::of_statement(&decision.payload.summary);
+        // When the memory was stated, read once, for the first source that carries a time.
+        let mut stated_at: Option<Option<i64>> = None;
         // Each source the memory does not cite, with the commit that published it. A source keeps that place whichever trigger brings it up and whenever a later memory comes to cite it.
         let mut later = Vec::new();
         for (evidence_id, trigger) in strongest_triggers(evidence) {
@@ -857,9 +892,16 @@ pub fn select_and_enqueue(
             let Some(source) = memory.source(kernel, &evidence_id, tip, &budget)? else {
                 continue;
             };
-            if (own_words && source.writer != Writer::User)
+            if !takes_evidence(said_by, work_in_progress, source.writer)
                 || reviewed_through.is_some_and(|through| source.published <= through)
             {
+                continue;
+            }
+            if source.written.is_some() && stated_at.is_none() {
+                let recorded = recorded.get(&stated).copied();
+                stated_at = Some(memory.stated_at(kernel, &cited, recorded, tip, &budget)?);
+            }
+            if !written_later(&source, stated_at.flatten(), stated) {
                 continue;
             }
             later.push((source.published, evidence_id, trigger));
@@ -888,13 +930,32 @@ pub fn select_and_enqueue(
                 trigger
             },
             recency,
+            delivered: false,
             cited,
             signals,
         });
     }
+    if !candidates.is_empty() {
+        let ids: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.decision.object_id.as_str())
+            .collect();
+        let delivered = automatically_delivered(kernel, &ids)?;
+        for candidate in &mut candidates {
+            candidate.delivered = delivered.contains(&candidate.decision.object_id);
+        }
+    }
     candidates.sort_by(|a, b| {
-        (std::cmp::Reverse(a.recency), &a.decision.object_id)
-            .cmp(&(std::cmp::Reverse(b.recency), &b.decision.object_id))
+        (
+            std::cmp::Reverse(a.delivered),
+            std::cmp::Reverse(a.recency),
+            &a.decision.object_id,
+        )
+            .cmp(&(
+                std::cmp::Reverse(b.delivered),
+                std::cmp::Reverse(b.recency),
+                &b.decision.object_id,
+            ))
     });
     for candidate in candidates {
         if selected.total() >= room {
@@ -1005,11 +1066,16 @@ pub fn select_and_enqueue(
             Ok(_) => {
                 selected.enqueued[candidate.trigger as usize] += 1;
                 eprintln!(
-                    "daemon: memory_reviewer enqueued job={} trigger={} later={} source={}",
+                    "daemon: memory_reviewer enqueued job={} trigger={} later={} source={} delivery={}",
                     &reserved.causal_identity[..16.min(reserved.causal_identity.len())],
                     candidate.trigger.as_str(),
                     signals.len(),
                     cited_sources,
+                    if candidate.delivered {
+                        "automatic"
+                    } else {
+                        "search"
+                    },
                 );
             }
             Err(MemoryReviewerJobError::Refused(refusal)) => eprintln!(
@@ -1028,6 +1094,42 @@ pub fn select_and_enqueue(
         }
     }
     Ok(selected)
+}
+
+/// The time a source of `class` was written, in milliseconds, read from its descriptor's `revision`. A message carries its harness timestamp and a tool span the time its call ended, both as decimal milliseconds. A repository document's revision counts observations, so such a source has no time of its own.
+fn source_time(class: &str, revision: &str) -> Option<i64> {
+    matches!(
+        OccurrenceClass::from_code(class)?,
+        OccurrenceClass::Messages | OccurrenceClass::RawToolSpans
+    )
+    .then(|| revision.parse().ok())?
+}
+
+/// Whether `source` was written after a memory was stated, which is what makes it evidence that the memory changed. A message and a tool result are ordered by their own time: after `stated_at`, the time of the newest source the memory cites or, for a memory that cites none, of the commit that first recorded it. So the message a memory was taken from, a source of the same moment, and every older one are the memory's origin and never evidence against it, whenever their descriptors were published. A source with no time of its own, such as a repository document, and a source beside a memory whose time the store cannot give, are ordered by commit: published after `stated`, the commit that first recorded the memory.
+fn written_later(source: &SourceFacts, stated_at: Option<i64>, stated: i64) -> bool {
+    match (source.written, stated_at) {
+        (Some(written), Some(stated_at)) => written > stated_at,
+        _ => source.published > stated,
+    }
+}
+
+/// Those of the memories `ids` a session receives in its block now: the ones the Kernel serves on the automatic-injection surface. One read over the named rows, inside a five-second wait for a reader, as the read of a source's writer is.
+fn automatically_delivered(
+    kernel: &KernelStore,
+    ids: &[&str],
+) -> Result<BTreeSet<String>, CycleError> {
+    let (_, served) = kernel
+        .preview(Instant::now() + Duration::from_secs(5), |preview| {
+            preview.served_rows_for(ids, None)
+        })
+        .map_err(CycleError::Kernel)?;
+    Ok(served
+        .into_iter()
+        .filter(|(_, row)| {
+            row.visibility(Surface::AutoInject) == kernel::SurfaceVisibility::Visible
+        })
+        .map(|(object_id, _)| object_id)
+        .collect())
 }
 
 /// The decision a claim descriptor names.
@@ -1183,7 +1285,7 @@ pub enum Applied {
     Disputed { disposition: String },
     /// A `revise` of a user statement: the statement stays delivered and its line now names the later memory `by` as contesting it.
     Contested { by: String },
-    /// A `revise` of a user statement the store holds no later memory for, or whose row a contest cannot rewrite: the statement stays as it is.
+    /// A `revise` the mode writes nothing for, so the memory stays as it is: of a user statement the store holds no later memory for or whose row a contest cannot rewrite, and in `contest` of a memory the assistant reported.
     Standing,
     /// `apply`: the Kernel settled the proposal.
     Accepted(Box<kernel::Settlement>),
@@ -1336,7 +1438,7 @@ fn later_memory_citing(
 ///
 /// A `revise` of the user's own statement inside the rule is treated alike in `contest` and `apply`. The model proposes `revise` when a later statement replaces part of what the statement says, as when one sentence gives two rules and the user later changes one. The reviewer writes no successor text for a user statement, and removing the statement would take the part that still stands out of delivery with it. So the statement stays delivered and is marked contested by the memory capture stored for the later message: its line names that memory and both dates, and a session reads the old sentence beside the newer rule. When capture stored no memory for the cited message, the statement stays as it is.
 ///
-/// For every other change inside the rule, `contest` disputes the target, citing the first later reference the proposal names as a contradiction; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs. A `revise` whose new text opens with another writer than the memory's own is dropped, so the reviewer's text never reads as the user's.
+/// A `revise` of a memory the assistant reported says part of it still holds; `contest` writes no successor text and a dispute would take the whole row, so in `contest` the memory stays as it is. For every other change inside the rule, `contest` disputes the target, citing the first later reference the proposal names as a contradiction; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs. A `revise` whose new text opens with another writer than the memory's own is dropped, so the reviewer's text never reads as the user's.
 pub fn apply_proposal(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -1455,6 +1557,10 @@ pub fn apply_proposal(
         };
     }
     if mode == ReviewApply::Contest {
+        // A `revise` of a memory the assistant reported says part of it still holds, and a dispute would take the whole row. `contest` writes no successor text, so the row stays as it is.
+        if proposal.action == ProposalAction::Revise && writer == Writer::Assistant {
+            return release(Applied::Standing);
+        }
         return dispute(
             kernel,
             scope,
@@ -1954,6 +2060,58 @@ mod tests {
             let statement = decision("rule", category, "User stated: Run cargo test.", 3);
             assert!(reviewable(&statement), "{category}");
         }
+    }
+
+    /// A message and a tool result are ordered by the time their descriptor carries; a repository document is ordered by commit.
+    #[test]
+    fn a_message_and_a_tool_result_carry_their_own_time() {
+        assert_eq!(
+            source_time("messages", "1700000000000"),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            source_time("raw_tool_spans", "1700000000000"),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            source_time("repository_documents", "3"),
+            None,
+            "an observation count is no time"
+        );
+        assert_eq!(source_time("messages", "x"), None);
+    }
+
+    /// A message is later evidence when it was written after the memory was stated: one of the same moment, as another block of the source message is, and every older one are the memory's origin whatever commit published them. A source with no time of its own, and a source beside a memory whose time the store cannot give, are ordered by the commit that published them.
+    #[test]
+    fn a_source_is_later_when_written_after_the_memory_was_stated() {
+        let source = |written: Option<i64>, published: i64| SourceFacts {
+            writer: Writer::User,
+            published,
+            written,
+            retired: None,
+        };
+        let (stated_at, stated) = (Some(1_000), 7);
+        assert!(written_later(&source(Some(1_001), 9), stated_at, stated));
+        assert!(
+            !written_later(&source(Some(1_000), 9), stated_at, stated),
+            "a message of the memory's own moment, published after it"
+        );
+        assert!(
+            !written_later(&source(Some(999), 9), stated_at, stated),
+            "an older message, published after the memory"
+        );
+        assert!(
+            written_later(&source(Some(1_001), 3), stated_at, stated),
+            "a message is ordered by its time, whatever commit published it"
+        );
+        assert!(written_later(&source(None, 8), stated_at, stated));
+        assert!(
+            !written_later(&source(None, 7), stated_at, stated),
+            "a repository document published with the memory's own commit"
+        );
+        assert!(!written_later(&source(None, 3), stated_at, stated));
+        assert!(written_later(&source(Some(999), 8), None, stated));
+        assert!(!written_later(&source(Some(1_001), 7), None, stated));
     }
 
     /// One source two triggers found takes one of a job's later slots, under its strongest trigger.

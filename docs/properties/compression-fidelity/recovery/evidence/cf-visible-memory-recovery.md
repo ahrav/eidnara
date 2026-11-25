@@ -35,12 +35,12 @@ Do not build a second fixture or a second three-way disposition oracle.
   resolves the session/project and creates the kernel client. At
   [lines 258-304](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L258)
   object IDs use chunked filtered reads, text queries use `explicit_search`,
-  and nonavailable states remain explicit unless the no-consumer fallback
-  succeeds with its freshness note.
+  and nonavailable states remain explicit unless the stale or no-consumer
+  fallback succeeds with its freshness note.
 - [KernelClient, lines 550-585](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L550)
   serializes these reads as `kernel.read`, preserving surface and optional
   object IDs. This completes the registered-tool transport trace.
-- [Daemon read, lines 674-754](../../../../../crates/daemon/src/kernel_routes/read.rs#L674)
+- [Daemon read, lines 674-758](../../../../../crates/daemon/src/kernel_routes/read.rs#L674)
   binds the request, applies the requested freshness gate, reads project-visible
   rows, and bounds serialized output. This is not native artifact expansion.
 - [Memory ranking, lines 179-182, 255-301](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L179)

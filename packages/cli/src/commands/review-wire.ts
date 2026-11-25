@@ -406,6 +406,7 @@ export const STATUS_COUNTERS = [
     "metadata_bytes",
     "metadata_quota_bytes",
     "metadata_headroom_bytes",
+    "projects_at_metadata_quota",
     "nonadmissions",
     "sessions_with_reservation",
     "latest_nonadmission_memory_reviewer_unavailable",

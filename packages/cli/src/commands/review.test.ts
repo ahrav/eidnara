@@ -975,7 +975,7 @@ describe("review status", () => {
         expect(json.memory_reviewer_state).toBe("starting");
         expect(json.activation_state).toBe("stale");
         expect(json.sampled_at_ms).toBeNull();
-        expect(Object.keys(json.counters)).toHaveLength(36);
+        expect(Object.keys(json.counters)).toHaveLength(37);
         expect(Object.values(json.counters).every((value) => value === null)).toBe(true);
 
         const noActivation = harness({

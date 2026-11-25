@@ -4059,7 +4059,6 @@ impl HandlerCore {
         let memory_reviewer_worker = Arc::clone(&self.memory_reviewer_worker);
         let review_producers = Arc::clone(&self.producer_factory);
         let review_classifiers = Arc::clone(&self.review_classifiers);
-        let review_search_lifecycle = Arc::clone(&self.search_lifecycle);
         let memory_reviewer_host = self
             .memory_reviewer_host
             .lock()
@@ -4169,14 +4168,10 @@ impl HandlerCore {
                                     .get("AWS_REGION")
                                     .map(|region| region.as_str()),
                             );
-                            // The search lifecycle owner publishes claim descriptors where it runs; the worker publishes them for a switched project on a host without one.
+                            // The search lifecycle owner publishes claim descriptors where it runs; the worker publishes them for a switched project on a host without one. The coordinator holds that one fact for the worker, the read gate and the health block.
+                            let claims_source = Arc::clone(&kernel);
                             let claims_published: Arc<dyn Fn() -> bool + Send + Sync> =
-                                Arc::new(move || {
-                                    review_search_lifecycle
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .is_some()
-                                });
+                                Arc::new(move || claims_source.claims_feed_search());
                             let review_config = Mutex::new(config::ConfigCache::default());
                             let worker = Arc::new(memory_reviewer::worker::Worker {
                                 host,
@@ -4363,7 +4358,7 @@ impl HandlerCore {
             eprintln!("daemon: search stays unavailable: the store path is not under a data home");
             return None;
         };
-        let (Ok(kernel), Some(local_embeddings)) = (kernel.kernel_store(), local_embeddings) else {
+        let (Ok(store), Some(local_embeddings)) = (kernel.kernel_store(), local_embeddings) else {
             return None;
         };
         let mut slot = slot
@@ -4378,9 +4373,11 @@ impl HandlerCore {
         {
             eprintln!("daemon: search admission record refused: {refusal}");
         }
+        // The owner runs the claim consumer from here on, so its lag counts toward a read's freshness.
+        kernel.set_claims_feed_search();
         let roster = Arc::clone(bindings);
         let owner = Arc::new(
-            search_lifecycle_owner::SearchLifecycleOwner::for_home(home, kernel, local_embeddings)
+            search_lifecycle_owner::SearchLifecycleOwner::for_home(home, store, local_embeddings)
                 .with_claims_paused(claim_sources_paused)
                 .with_roster(Arc::new(move || {
                     roster

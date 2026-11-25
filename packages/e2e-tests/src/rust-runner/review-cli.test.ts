@@ -104,7 +104,7 @@ describe("review command against the direct host", () => {
                 expect(["ready", "starting", "unavailable"]).toContain(
                     snapshot.memory_reviewer_state ?? "unreported",
                 );
-                expect(Object.keys(snapshot.counters)).toHaveLength(36);
+                expect(Object.keys(snapshot.counters)).toHaveLength(37);
                 if (snapshot.memory_reviewer_state === "ready") {
                     expect(
                         Object.values(snapshot.counters).some((value) => typeof value === "number"),

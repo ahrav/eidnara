@@ -774,6 +774,8 @@ pub struct MemoryReviewerStatusFacts {
     pub metadata_bytes: u64,
     pub metadata_quota_bytes: u64,
     pub metadata_headroom_bytes: u64,
+    /// Projects whose review metadata leaves less than one job's charge and allowance under the per-project quota: the store refuses a new review job for each until its pending jobs settle and release room for one job's charge and allowance, or the retirement sweep deletes older ones.
+    pub projects_at_metadata_quota: u64,
     /// Producer-owned facts summed over every session: nonadmissions recorded, sessions with a recorded reservation, and the latest reason per session by closed code.
     pub nonadmissions: u64,
     pub sessions_with_reservation: u64,
@@ -952,6 +954,8 @@ impl MemoryStore {
                 facts.metadata_headroom_bytes = facts
                     .metadata_quota_bytes
                     .saturating_sub(facts.metadata_bytes);
+                facts.projects_at_metadata_quota =
+                    memory_reviewer_jobs::projects_at_metadata_quota(conn)?;
                 grouped::<Option<String>>(
                     conn,
                     "SELECT json_extract(meta, '$.history_summarizer.memory_reviewer_nonadmission.latest.code.code'),

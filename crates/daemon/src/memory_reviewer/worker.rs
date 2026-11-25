@@ -541,6 +541,40 @@ impl Worker {
         route.review.is_some() && self.switched.producers.is_some()
     }
 
+    /// Brings the claim consumer up to the Kernel's tip on a host where this worker runs it, on the blocking pool, and returns whether it reached the tip. A caught-up consumer costs one checkpoint read and one tip read. A host whose search lifecycle owner runs the consumer returns false at once.
+    async fn catch_up_claims(
+        self: &Arc<Self>,
+        kernel: &Arc<kernel::KernelStore>,
+        cancel: &CancellationToken,
+    ) -> bool {
+        if self
+            .switched
+            .claims_published
+            .as_ref()
+            .is_some_and(|published| published())
+        {
+            return false;
+        }
+        let worker = Arc::clone(self);
+        let kernel = Arc::clone(kernel);
+        let cancel = cancel.clone();
+        let caught_up = tokio::task::spawn_blocking(move || {
+            let mut claims = worker
+                .switched
+                .claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms(), &|| {
+                cancel.is_cancelled()
+            })
+        })
+        .await;
+        caught_up.unwrap_or_else(|error| {
+            eprintln!("daemon: memory_reviewer claim catch-up task ended: {error}");
+            false
+        })
+    }
+
     /// The pass over switched projects: claim descriptors are brought up to the Kernel's tip, each project's most suspicious unreviewed memories are enqueued, its Ready jobs run through the host's model execution, and each published proposal is treated as the project's apply mode says.
     async fn switched_pass(
         self: &Arc<Self>,
@@ -569,26 +603,12 @@ impl Worker {
         let Some(kernel) = (self.kernel)() else {
             return 0;
         };
+        // A catch-up that reached the tip is repeated before each review. One that stopped short, as a blocked slice does, has said so once and is left to the next pass, and so is the consumer a search lifecycle owner runs.
+        let mut repeat_catch_up = self.catch_up_claims(&kernel, cancel).await;
         let prepared = {
             let worker = Arc::clone(self);
             let kernel = Arc::clone(&kernel);
-            let cancel = cancel.clone();
             tokio::task::spawn_blocking(move || {
-                if !worker
-                    .switched
-                    .claims_published
-                    .as_ref()
-                    .is_some_and(|published| published())
-                {
-                    let mut claims = worker
-                        .switched
-                        .claims
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms(), &|| {
-                        cancel.is_cancelled()
-                    });
-                }
                 let budget = kernel::applicability::EvalBudget::new(
                     Some(std::time::Instant::now() + Duration::from_secs(5)),
                     Arc::default(),
@@ -745,7 +765,7 @@ impl Worker {
             };
             // The switch reviews stored memories. A fact-set job of the project belongs to the owner's record and its pass.
             ready.retain(reviews_memory);
-            // A selection numbers its jobs newest evidence first; the jobs of one selection share a queue deadline, so its order decides which run first.
+            // A selection numbers its jobs in its own order, the automatically delivered memories first and the newest evidence first among them; the jobs of one selection share a queue deadline, so its order decides which run first.
             ready.sort_by_key(|job| (job.queue_deadline_ms, job.producer.ordinal));
             let mut runs = 0;
             for job in ready {
@@ -754,6 +774,10 @@ impl Worker {
                     || stage_one_failing()
                 {
                     break;
+                }
+                // While the last catch-up reached the tip, the claim consumer reads the commits of the reviews before this one, so its checkpoint trails the Kernel's tip by one review at most however long the pass runs.
+                if repeat_catch_up {
+                    repeat_catch_up = self.catch_up_claims(&kernel, cancel).await;
                 }
                 // A pass over many reviews outlasts one evaluation's lifetime, so each run restates that a switched project is under review and evaluates the owner's record again, which is what admits fact sets meanwhile.
                 self.status.set_switched_review(true);
