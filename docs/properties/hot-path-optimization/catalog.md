@@ -231,8 +231,15 @@ selected IDs, order, content, revision, and truncation must remain equal.
 Rows of the `named-files` domain are selected by the pass and are no noise:
 they enter the selected rows, the served ids, and the revision, and their
 charge of up to an eighth of the budget can displace lasting facts. The
-pass's work on them runs in this order. It looks for a regular file at the
-paths of the first 32 recorded files. It samples up to eight of those that
+pass's work on them runs in this order. It reads the project's records of the
+domain at the pass's tip: the Kernel query has no row limit and returns every
+served decision of the domain that its scope prefilter keeps for the project,
+and the daemon keeps the newest 8,192 of them within the read's payload budget
+and parses the rationale of each kept row the recorder wrote. A session writes
+one record for each path it records and the recorder retires none, so this
+read grows with the project's sessions, and past 8,192 records the older uses
+leave the session counts that order the lines. It looks for a regular file at
+the paths of the first 32 recorded files. It samples up to eight of those that
 exist: each one's status and, for a file of at most 256 KiB, its bytes and
 one byte more and its status again, a second time when the two statuses or
 the byte count disagree, of which it hashes at most 256 KiB. When a sample
@@ -811,7 +818,7 @@ them without creating implementation tickets.
 [r1]: #prepared-field-output-and-audit-policy-agree
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
-[pass-read]: ../../../crates/daemon/src/lib.rs#L8786
+[pass-read]: ../../../crates/daemon/src/lib.rs#L8797
 [memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L508
 [memory-default]: ../../../crates/daemon/src/config.rs#L125
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
