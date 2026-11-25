@@ -748,7 +748,7 @@ impl Worker {
             };
             // The switch reviews stored memories. A fact-set job of the project belongs to the owner's record and its pass.
             ready.retain(reviews_memory);
-            // A selection numbers its jobs newest evidence first; the jobs of one selection share a queue deadline, so its order decides which run first.
+            // A selection numbers its jobs in its own order, the automatically delivered memories first and the newest evidence first among them; the jobs of one selection share a queue deadline, so its order decides which run first.
             ready.sort_by_key(|job| (job.queue_deadline_ms, job.producer.ordinal));
             let mut runs = 0;
             for job in ready {

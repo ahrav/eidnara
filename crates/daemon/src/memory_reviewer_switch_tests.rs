@@ -817,7 +817,7 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
     );
 }
 
-/// In `contest` a `revise` of a fact the assistant reported writes nothing: the proposal says part of the fact still holds, so the row keeps its text and its place on search and the review hold ends. A `retire` of the same fact on the user's later message disputes it.
+/// In `contest` a `revise` of a fact the assistant reported writes nothing: the proposal says part of the fact still holds, so the row keeps its text and its place on search and the review hold ends. A `retire` of the same fact on the user's later message disputes it, and so does a `revise` of a note, which is the agent's own record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
     const REPORTED: &str =
@@ -855,6 +855,29 @@ async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
     rig.flagged(&[RETIRE_CITING_LATER]);
     assert_eq!(rig.drain().await, 1);
     assert_eq!(rig.active_review_holds(), 1, "a dispute holds its memory");
+
+    const NOTE: &str = "Changelog entries are kept in reverse chronological order.";
+    commit_decision(
+        &rig,
+        "mem_note_changelog",
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        "repo",
+        NOTE,
+    );
+    rig.user_says_later(
+        "later-3",
+        later_than_now(60_000),
+        "Keep the changelog entries in chronological order, oldest entries first.",
+    )
+    .await;
+    let revise_note = r#"{"v":1,"step":{"kind":"propose","action":"revise","new_text":"Changelog entries are kept in chronological order.","support":[],"contradictions":[{"alias":"ref-2"}],"limitations":[],"uncertainty":"low"}}"#;
+    rig.flagged(&[revise_note]);
+    assert_eq!(rig.drain().await, 1);
+    assert_eq!(
+        rig.active_review_holds(),
+        2,
+        "a revise of a note disputes it, as before"
+    );
 }
 
 /// A selection reviews the memories a session receives automatically before the ones served on search alone, whatever the order of their evidence. Here the note's evidence is the newer, and the delivered statement's review runs first.
@@ -1803,6 +1826,63 @@ async fn a_message_written_before_the_source_starts_no_review() {
     assert!(outcomes.is_empty(), "no review job was started");
     assert_eq!(rig.active_review_holds(), 0);
     assert!(rig.block().await.contains(&stated(THURSDAY)));
+}
+
+/// A review whose later evidence the store retires between the selection and the run holds no later reference when it runs. The host keeps the memory without a request: the receipt completes as the abstention `expectation_changed`, no proposal is staged, no hold is taken, and the statement stays delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_review_whose_evidence_is_retired_before_it_runs_is_kept_without_a_request() {
+    use crate::memory_reviewer::review_cycle::{
+        SelectionMemory, SelectionScope, select_and_enqueue,
+    };
+    use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
+    let rig = Rig::open(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    assert_eq!(rig.drain().await, 0);
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let root = rig.project.to_string_lossy().to_string();
+    let digest = kernel_routes::ProjectBinding::new(&rig.project)
+        .digest()
+        .to_string();
+    let selected = select_and_enqueue(
+        &kernel,
+        &rig.store,
+        &mut SelectionMemory::default(),
+        &SelectionScope {
+            project: &kernel::ProjectScope::new(&digest).unwrap(),
+            project_digest: &digest,
+            ledger_project: &root,
+        },
+        8,
+        crate::now_ms(),
+    )
+    .unwrap();
+    assert_eq!(selected.total(), 1, "the later message queued one review");
+    let forty_days_on = crate::now_ms() + 40 * 24 * 60 * 60 * 1_000;
+    let expired = kernel.expire_harness_captures(forty_days_on).unwrap();
+    assert!(expired.retired >= 1, "{expired:?}");
+
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    assert!(rig.attempts().is_empty(), "no request was made");
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16)
+        .unwrap()
+        .outcomes;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].terminal,
+        MemoryReviewerReceiptTerminal::Abstained
+    );
+    assert_eq!(
+        outcomes[0].abstained_reason,
+        Some(AbstainReason::ExpectationChanged)
+    );
+    assert!(!outcomes[0].selected);
+    assert_eq!(rig.active_review_holds(), 0);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert_eq!(rig.drain().await, 0);
+    assert!(rig.attempts().is_empty());
 }
 
 /// A note the agent writes through the memory tool cites no source, and source capture publishes the user's message of that turn after the note is stored. The message the note was written from, and the statement capture stores for it, are the note's origin: they start no review of the note, so a note of a rule in force is left as it is. A message the user writes after the note is evidence, and the review is shown that message alone.

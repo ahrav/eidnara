@@ -256,6 +256,8 @@ pub struct SelectionMemory {
     large: BTreeSet<String>,
     /// Each entry identifies a project whose reservation the store's metadata quota refused during an earlier selection.
     quota: BTreeSet<String>,
+    /// When the Kernel recorded each commit a selection has asked about, in milliseconds. A commit's time is fixed, so it is read once.
+    commit_times: HashMap<i64, i64>,
     /// The bounds of one selection's walk; `None` is [`Walk::PRODUCTION`].
     walk: Option<Walk>,
 }
@@ -383,11 +385,21 @@ impl SelectionMemory {
         if newest.is_some() {
             return Ok(newest);
         }
-        Ok(kernel
+        if let Some(recorded) = self.commit_times.get(&stated) {
+            return Ok(Some(*recorded));
+        }
+        let recorded = kernel
             .commits_recorded_at(&[stated])
             .map_err(CycleError::Kernel)?
             .get(&stated)
-            .copied())
+            .copied();
+        if let Some(recorded) = recorded {
+            if self.commit_times.len() >= MAX_REMEMBERED_SOURCES {
+                self.commit_times.clear();
+            }
+            self.commit_times.insert(stated, recorded);
+        }
+        Ok(recorded)
     }
 
     /// The descriptor a job may read `evidence_id` through now, read from the Kernel at this call, or `None` once the store has retired it. A remembered source found retired is marked, so the passes that follow skip it.
@@ -723,7 +735,7 @@ fn reopened_by_later_statements(
     reopened
 }
 
-/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, each Ready with its starting references: the memories a session receives automatically first, and within each group the newest evidence first, so a pass limit or a store bound that ends the selection has spent its room on the rows a session is handed. Evidence is a later source the memory does not cite, written after the memory was stated ([`written_later`]) by someone who may change it ([`takes_evidence`]): a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit that published it. A memory whose change proposal is pending waits for it.
+/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, each Ready with its starting references: the memories a session receives automatically first, and within each group the newest evidence first, so a pass limit or a store bound that ends the selection has spent its room on the rows a session is handed. Evidence is a later source the memory does not cite, written after the memory was stated (`written_later`) by someone who may change it ([`takes_evidence`]): a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit that published it. A memory whose change proposal is pending waits for it.
 pub fn select_and_enqueue(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -942,7 +954,11 @@ pub fn select_and_enqueue(
         });
     }
     if !candidates.is_empty() {
-        let delivered = automatically_delivered(kernel, scope.project_digest, tip, &budget)?;
+        let ids: Vec<&str> = candidates
+            .iter()
+            .map(|candidate| candidate.decision.object_id.as_str())
+            .collect();
+        let delivered = automatically_delivered(kernel, &ids)?;
         for candidate in &mut candidates {
             candidate.delivered = delivered.contains(&candidate.decision.object_id);
         }
@@ -1106,29 +1122,22 @@ fn written_later(source: &SourceFacts, stated_at: Option<i64>, stated: i64) -> b
     }
 }
 
-/// The memories of the project a session receives in its block at `tip`: the decisions of the memory domain the Kernel serves on the automatic-injection surface.
+/// Those of the memories `ids` a session receives in its block now: the ones the Kernel serves on the automatic-injection surface. One read over the named rows, inside a five-second wait for a reader.
 fn automatically_delivered(
     kernel: &KernelStore,
-    project_digest: &str,
-    tip: i64,
-    budget: &EvalBudget,
+    ids: &[&str],
 ) -> Result<BTreeSet<String>, CycleError> {
-    Ok(kernel
-        .visible_domain_decisions_as_of_in_scope_within_budget(
-            Surface::AutoInject,
-            tip,
-            MEMORY_DOMAIN_ID,
-            Some(kernel::ScopeTermFilter {
-                dimension: kernel::Dimension::Project,
-                value: project_digest,
-            }),
-            budget,
-        )
-        .map_err(CycleError::Kernel)?
-        .rows
+    let (_, served) = kernel
+        .preview(Instant::now() + Duration::from_secs(5), |preview| {
+            preview.served_rows_for(ids, None)
+        })
+        .map_err(CycleError::Kernel)?;
+    Ok(served
         .into_iter()
-        .filter(|row| row.visibility == kernel::SurfaceVisibility::Visible)
-        .map(|row| row.object.object_id)
+        .filter(|(_, row)| {
+            row.visibility(Surface::AutoInject) == kernel::SurfaceVisibility::Visible
+        })
+        .map(|(object_id, _)| object_id)
         .collect())
 }
 
@@ -1285,7 +1294,7 @@ pub enum Applied {
     Disputed { disposition: String },
     /// A `revise` of a user statement: the statement stays delivered and its line now names the later memory `by` as contesting it.
     Contested { by: String },
-    /// A `revise` the mode writes nothing for, so the memory stays as it is: of a user statement the store holds no later memory for or whose row a contest cannot rewrite, and in `contest` of any other memory.
+    /// A `revise` the mode writes nothing for, so the memory stays as it is: of a user statement the store holds no later memory for or whose row a contest cannot rewrite, and in `contest` of a fact the assistant reported.
     Standing,
     /// `apply`: the Kernel settled the proposal.
     Accepted(Box<kernel::Settlement>),
@@ -1438,7 +1447,7 @@ fn later_memory_citing(
 ///
 /// A `revise` of the user's own statement inside the rule is treated alike in `contest` and `apply`. The model proposes `revise` when a later statement replaces part of what the statement says, as when one sentence gives two rules and the user later changes one. The reviewer writes no successor text for a user statement, and removing the statement would take the part that still stands out of delivery with it. So the statement stays delivered and is marked contested by the memory capture stored for the later message: its line names that memory and both dates, and a session reads the old sentence beside the newer rule. When capture stored no memory for the cited message, the statement stays as it is.
 ///
-/// For a `retire` inside the rule, `contest` disputes the target, citing the first later reference the proposal names as a contradiction; the statement leaves automatic delivery and stays on explicit search as a labeled row. A `revise` of a memory other than the user's statement says part of the memory still holds; `contest` writes no successor text and a dispute would take the whole row, so the memory stays as it is. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs. A `revise` whose new text opens with another writer than the memory's own is dropped, so the reviewer's text never reads as the user's.
+/// A `revise` of a fact the assistant reported says part of the fact still holds; `contest` writes no successor text and a dispute would take the whole row, so in `contest` the fact stays as it is. For every other change inside the rule, `contest` disputes the target, citing the first later reference the proposal names as a contradiction; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs. A `revise` whose new text opens with another writer than the memory's own is dropped, so the reviewer's text never reads as the user's.
 pub fn apply_proposal(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -1557,8 +1566,11 @@ pub fn apply_proposal(
         };
     }
     if mode == ReviewApply::Contest {
-        // A `revise` says part of the memory still holds, and a dispute would take the whole row. `contest` writes no successor text, so the row stays as it is.
-        if proposal.action == ProposalAction::Revise {
+        // A `revise` of a fact the assistant reported says part of it still holds, and a dispute would take the whole row. `contest` writes no successor text, so the row stays as it is.
+        if proposal.action == ProposalAction::Revise
+            && writer == Writer::Assistant
+            && !crate::memory_capture::states_current_work(&memory)
+        {
             return release(Applied::Standing);
         }
         return dispute(
@@ -2063,6 +2075,39 @@ mod tests {
     }
 
     /// One source two triggers found takes one of a job's later slots, under its strongest trigger.
+    /// A message is later evidence when it was written after the memory was stated: one of the same moment, as another block of the source message is, and every older one are the memory's origin whatever commit published them. A source with no message time, and a message beside a memory whose time the store cannot give, are ordered by the commit that published them.
+    #[test]
+    fn a_source_is_later_when_written_after_the_memory_was_stated() {
+        let source = |written: Option<i64>, published: i64| SourceFacts {
+            writer: Writer::User,
+            published,
+            written,
+            retired: None,
+        };
+        let (stated_at, stated) = (Some(1_000), 7);
+        assert!(written_later(&source(Some(1_001), 9), stated_at, stated));
+        assert!(
+            !written_later(&source(Some(1_000), 9), stated_at, stated),
+            "a message of the memory's own moment, published after it"
+        );
+        assert!(
+            !written_later(&source(Some(999), 9), stated_at, stated),
+            "an older message, published after the memory"
+        );
+        assert!(
+            written_later(&source(Some(1_001), 3), stated_at, stated),
+            "a message is ordered by its time, whatever commit published it"
+        );
+        assert!(written_later(&source(None, 8), stated_at, stated));
+        assert!(
+            !written_later(&source(None, 7), stated_at, stated),
+            "a tool span published with the memory's own commit"
+        );
+        assert!(!written_later(&source(None, 3), stated_at, stated));
+        assert!(written_later(&source(Some(999), 8), None, stated));
+        assert!(!written_later(&source(Some(1_001), 7), None, stated));
+    }
+
     #[test]
     fn a_source_found_twice_is_one_piece_of_evidence() {
         let later = |evidence_id: &str, trigger| LaterEvidence {
