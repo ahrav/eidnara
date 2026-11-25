@@ -256,8 +256,6 @@ pub struct SelectionMemory {
     large: BTreeSet<String>,
     /// Each entry identifies a project whose reservation the store's metadata quota refused during an earlier selection.
     quota: BTreeSet<String>,
-    /// When the Kernel recorded each commit a selection has asked about, in milliseconds, with the Kernel incarnation the times were read from. A commit's time is fixed within an incarnation, so it is read once; a selection over another incarnation starts the map over.
-    commit_times: (String, HashMap<i64, i64>),
     /// The bounds of one selection's walk; `None` is [`Walk::PRODUCTION`].
     walk: Option<Walk>,
 }
@@ -365,12 +363,12 @@ impl SelectionMemory {
         Ok(Some(facts))
     }
 
-    /// When a memory was stated, in milliseconds: the time of the newest live source among `cited`, the sources the memory cites, or else the time the Kernel recorded `stated`, the commit that first recorded the memory. A memory outlives its captured messages, and a note the agent writes cites none, so the commit's time stands in for the source's. `None` when the Kernel holds no time for the commit.
+    /// When a memory was stated, in milliseconds: the time of the newest live source among `cited`, the sources the memory cites, or else `recorded`, the time the Kernel recorded the commit that first stored the memory. A memory outlives its captured messages, and a note the agent writes cites none, so the commit's time stands in for the source's. `None` when the Kernel holds no time for the commit.
     fn stated_at(
         &mut self,
         kernel: &KernelStore,
         cited: &[String],
-        stated: i64,
+        recorded: Option<i64>,
         tip: i64,
         budget: &EvalBudget,
     ) -> Result<Option<i64>, CycleError> {
@@ -380,24 +378,7 @@ impl SelectionMemory {
                 newest = newest.max(source.written);
             }
         }
-        if newest.is_some() {
-            return Ok(newest);
-        }
-        if let Some(recorded) = self.commit_times.1.get(&stated) {
-            return Ok(Some(*recorded));
-        }
-        let recorded = kernel
-            .commits_recorded_at_within_budget(&[stated], budget)
-            .map_err(CycleError::Kernel)?
-            .get(&stated)
-            .copied();
-        if let Some(recorded) = recorded {
-            if self.commit_times.1.len() >= MAX_REMEMBERED_SOURCES {
-                self.commit_times.1.clear();
-            }
-            self.commit_times.1.insert(stated, recorded);
-        }
-        Ok(recorded)
+        Ok(newest.or(recorded))
     }
 
     /// The descriptor a job may read `evidence_id` through now, read from the Kernel at this call, or `None` once the store has retired it. A remembered source found retired is marked, so the passes that follow skip it.
@@ -753,9 +734,6 @@ pub fn select_and_enqueue(
     let incarnation = kernel
         .database_incarnation_id_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
-    if memory.commit_times.0 != incarnation {
-        memory.commit_times = (incarnation.clone(), HashMap::new());
-    }
     let walk = memory.walk();
     let (descriptors, next) = subject_descriptors(
         kernel,
@@ -828,6 +806,14 @@ pub fn select_and_enqueue(
             walk.bound
         );
     }
+    // When the Kernel recorded the commit that first stored each statement of the walk, read in one statement.
+    let stated_commits: Vec<i64> = rows
+        .iter()
+        .map(|decision| crate::memory_capture::stated_commit(decision))
+        .collect();
+    let recorded = kernel
+        .commits_recorded_at_within_budget(&stated_commits, &budget)
+        .map_err(CycleError::Kernel)?;
     let reopened = reopened_by_later_statements(&rows, &terms);
     let mut candidates = Vec::new();
     let mut candidate_rows = Vec::new().into_iter();
@@ -912,7 +898,8 @@ pub fn select_and_enqueue(
                 continue;
             }
             if source.written.is_some() && stated_at.is_none() {
-                stated_at = Some(memory.stated_at(kernel, &cited, stated, tip, &budget)?);
+                let recorded = recorded.get(&stated).copied();
+                stated_at = Some(memory.stated_at(kernel, &cited, recorded, tip, &budget)?);
             }
             if !written_later(&source, stated_at.flatten(), stated) {
                 continue;
@@ -953,7 +940,7 @@ pub fn select_and_enqueue(
             .iter()
             .map(|candidate| candidate.decision.object_id.as_str())
             .collect();
-        let delivered = automatically_delivered(kernel, &ids, &budget)?;
+        let delivered = automatically_delivered(kernel, &ids)?;
         for candidate in &mut candidates {
             candidate.delivered = delivered.contains(&candidate.decision.object_id);
         }
@@ -1126,18 +1113,15 @@ fn written_later(source: &SourceFacts, stated_at: Option<i64>, stated: i64) -> b
     }
 }
 
-/// Those of the memories `ids` a session receives in its block now: the ones the Kernel serves on the automatic-injection surface. One read over the named rows, whose wait for a reader ends at five seconds or at `budget`'s deadline, whichever comes first.
+/// Those of the memories `ids` a session receives in its block now: the ones the Kernel serves on the automatic-injection surface. One read over the named rows, inside a five-second wait for a reader, as the read of a source's writer is.
 fn automatically_delivered(
     kernel: &KernelStore,
     ids: &[&str],
-    budget: &EvalBudget,
 ) -> Result<BTreeSet<String>, CycleError> {
-    let wait = Instant::now() + Duration::from_secs(5);
-    let deadline = budget
-        .deadline()
-        .map_or(wait, |deadline| deadline.min(wait));
     let (_, served) = kernel
-        .preview(deadline, |preview| preview.served_rows_for(ids, None))
+        .preview(Instant::now() + Duration::from_secs(5), |preview| {
+            preview.served_rows_for(ids, None)
+        })
         .map_err(CycleError::Kernel)?;
     Ok(served
         .into_iter()
