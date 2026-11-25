@@ -650,3 +650,19 @@ mod tests {
         assert!(coordinator.kernel_store().is_err());
     }
 }
+
+// Placed after the test module so the cited lines above keep their numbers.
+/// Whether `id` is an id one of the daemon's own writers derives: an id
+/// under one of the verifier's prefixes
+/// ([`crate::attestation_verifier::attest::ID_PREFIXES`]), which the verifier
+/// derives from `(model decision, oid)`, or an id of the named-file recorder
+/// ([`crate::named_files::is_reserved_id`]). `kernel.commit` and artifact
+/// ingest refuse a caller's row under one: it would occupy the writer's id
+/// for good.
+#[allow(clippy::items_after_test_module)]
+pub(crate) fn is_writer_reserved_id(id: &str) -> bool {
+    crate::attestation_verifier::attest::ID_PREFIXES
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+        || crate::named_files::is_reserved_id(id)
+}

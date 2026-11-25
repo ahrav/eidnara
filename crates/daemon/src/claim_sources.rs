@@ -140,7 +140,11 @@ pub fn claim_units(
     // A statement record approves one captured memory and repeats its text.
     // The memory's own units carry that text, so the record publishes none
     // and a statement is ranked once.
-    if subject.domain_id == crate::memory_capture::STATEMENT_DOMAIN_ID {
+    // A named-file record holds a path and a use, which the block's
+    // `NAMED_FILES` element delivers, so search ranks none of them.
+    if subject.domain_id == crate::memory_capture::STATEMENT_DOMAIN_ID
+        || subject.domain_id == crate::named_files::DOMAIN_ID
+    {
         out.exclusions.push(ClaimExclusion::OutsideMemoryDomain);
         return Ok(out);
     }

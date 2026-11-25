@@ -22,12 +22,15 @@ references that moved are updated. The `tool_outcome.rs` rows, the `lib.rs`
 references, and the counts were re-checked when the summarizer digest gained
 its whole-output form, which adds the one literal `; output="`, and again
 when the stored transcript gained its scanned digest, which adds one
-occurrence of `\n`.
+occurrence of `\n`. When the vocabulary gained the operands of Pi's `read`
+and `bash` calls, the three occurrences it adds, one each of `read`, `path`,
+and `command` in `tool_vocabulary.rs`, were added to the rows and the
+counts; the other rows were left as they were.
 
-The extraction finds 257 distinct string literals at 897 occurrences.
+The extraction finds 257 distinct string literals at 900 occurrences.
 156 of them name a field, a tool, an argument key, or a discriminator
-value; they fill the 173 rows below (39 vocabulary, 35 Eidnara-owned,
-99 contract) and cover 755 occurrences. The other 101 are listed under
+value; they fill the 174 rows below (40 vocabulary, 35 Eidnara-owned,
+99 contract) and cover 758 occurrences. The other 101 are listed under
 [Excluded literals](#excluded-literals) with the reason each is outside the rule.
 
 ## Classes
@@ -47,9 +50,9 @@ Where Eidnara's own media-source object reuses a harness spelling (`type`,
 `url`, `data`, `mime`, `filename`), the row takes the harness's class,
 contract, because the spelling originates in the harness record.
 
-One row is one literal under one class and one meaning. Thirteen spellings
+One row is one literal under one class and one meaning. Fourteen spellings
 carry more than one meaning at different sites and so have more than one
-row: `action`, `cancelled`, `completed`, `file`, `image`, `input`, `output`,
+row: `action`, `cancelled`, `command`, `completed`, `file`, `image`, `input`, `output`,
 `path`, `read`, and `status` have two rows each; `content` has three (a diff
 key and a `todowrite` item key, both vocabulary, and the contract message
 field); `summary` has three (the reduced-call key, the OpenCode flag, and the
@@ -119,6 +122,7 @@ not defined once:
 | `bash_kill` | vocabulary | tool name in a tool-vocabulary table | yes | `tool_vocabulary.rs:29` |
 | `bash_status` | vocabulary | tool name in a tool-vocabulary table | yes | `tool_vocabulary.rs:29` |
 | `cancelled` | vocabulary | `todowrite` item status value | no | `injection.rs:23` |
+| `command` | vocabulary | key of the command line Pi's `bash` runs | no | `tool_vocabulary.rs:236` |
 | `completed` | vocabulary | `todowrite` item status value | no | `injection.rs:22, 23, 24` |
 | `content` | vocabulary | `todowrite` item key the injection read-back parses | no | `injection.rs:407` |
 | `content` | vocabulary | diff key | no | `tool_vocabulary.rs:50` |
@@ -136,11 +140,11 @@ not defined once:
 | `newString` | vocabulary | diff key | yes | `tool_vocabulary.rs:49` |
 | `old_string` | vocabulary | diff key | yes | `tool_vocabulary.rs:51` |
 | `oldString` | vocabulary | diff key | yes | `tool_vocabulary.rs:48` |
-| `path` | vocabulary | path and display key | no | `tool_vocabulary.rs:41, 43` |
+| `path` | vocabulary | path and display key, and the path key of Pi's `read` | no | `tool_vocabulary.rs:41, 43, 234` |
 | `pattern` | vocabulary | display key truncated | no | `tool_vocabulary.rs:43` |
 | `priority` | vocabulary | `todowrite` item key | no | `injection.rs:409` |
 | `query` | vocabulary | display key truncated | no | `tool_vocabulary.rs:43` |
-| `read` | vocabulary | tool name in `T1_TOOLS` | no | `tool_vocabulary.rs:31` |
+| `read` | vocabulary | tool name in `T1_TOOLS` and of Pi's reading tool | no | `tool_vocabulary.rs:31, 233` |
 | `status` | vocabulary | `todowrite` item key | no | `injection.rs:408` |
 | `symbol` | vocabulary | display key shown whole | no | `tool_vocabulary.rs:45` |
 | `task` | vocabulary | tool name in a tool-vocabulary table | no | `tool_vocabulary.rs:31` |

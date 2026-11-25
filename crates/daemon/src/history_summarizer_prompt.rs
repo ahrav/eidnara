@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use crate::canonical_memory::CanonicalMemory;
-use crate::memory_render::render_memory_block;
+use crate::memory_render::{NAMED_FILES_SECTION, render_memory_block};
 use memory_store::StoredHistorySegment;
 use serde::Deserialize;
 
@@ -417,9 +417,15 @@ pub fn build_reference_blocks_from_stored(
 }
 
 /// Project memory uses the row and category format of the m0 `<project-memory>` block, without
-/// the closing sentence the delivered block ends with.
+/// the closing sentence the delivered block ends with. The summarizer reads the block for the
+/// project's stated facts, so the `NAMED_FILES` rows, which list paths, are left out.
 pub fn render_history_summarizer_memory_block(memories: &[CanonicalMemory]) -> String {
-    render_memory_block(memories, "project-memory")
+    let facts: Vec<CanonicalMemory> = memories
+        .iter()
+        .filter(|memory| memory.category != NAMED_FILES_SECTION)
+        .cloned()
+        .collect();
+    render_memory_block(&facts, "project-memory")
 }
 
 /// Assemble the history_summarizer user prompt in its required section order.
@@ -527,6 +533,23 @@ mod tests {
     struct GoldenFile {
         seed_cases: Vec<SeedCase>,
         prompt_cases: Vec<PromptCase>,
+    }
+
+    /// The summarizer's block holds the facts and none of the named-file rows.
+    #[test]
+    fn the_summarizers_block_leaves_out_named_files() {
+        let row = |object_id: &str, category: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let fact = row("mem_1", "PROJECT_RULES", "Use pnpm for installs.");
+        let file = row("nfu_1", NAMED_FILES_SECTION, "docs/guide.md (used once)");
+        assert_eq!(
+            render_history_summarizer_memory_block(&[file.clone(), fact.clone()]),
+            render_memory_block(std::slice::from_ref(&fact), "project-memory")
+        );
+        assert_eq!(render_history_summarizer_memory_block(&[file]), "");
     }
 
     fn memory(row: &GoldenMemory) -> CanonicalMemory {

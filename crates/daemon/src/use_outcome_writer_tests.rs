@@ -512,7 +512,7 @@ async fn an_equal_served_set_at_a_later_known_as_of_replays() {
     assert_eq!(later["action"], "HARD", "{later}");
     let first_seq = first["project_memory"]["known_as_of"].as_i64().unwrap();
     assert!(later["project_memory"]["known_as_of"].as_i64().unwrap() > first_seq);
-    // An equal revision digests equal rendered rows, so the later fold served the same set.
+    // Both folds serve the one seeded memory: the commit between them adds a domain alone.
     assert_eq!(
         later["project_memory"]["revision"], first["project_memory"]["revision"],
         "{later}"

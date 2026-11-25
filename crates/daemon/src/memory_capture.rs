@@ -14,7 +14,7 @@ pub(crate) use cite::CITATION_EVENT_KIND;
 pub(crate) use failures::{DeleteFence, FailureMemo, is_failure_lineage};
 #[cfg(test)]
 pub(crate) use head::fixtures as head_fixtures;
-pub(crate) use head::{FrozenHead, observe_head};
+pub(crate) use head::{FrozenHead, observe_head, observe_head_in};
 #[cfg(test)]
 pub(crate) use native::CaptureWaits;
 #[cfg(test)]
@@ -2315,7 +2315,7 @@ fn is_replaceable(object: &kernel::ObjectRow) -> bool {
 }
 
 /// The attribution native capture prefixes to a user message's quotation.
-const USER_STATED: &str = "User stated";
+pub(crate) const USER_STATED: &str = "User stated";
 /// The attribution native capture prefixes to an assistant message's
 /// quotation.
 const ASSISTANT_REPORTED: &str = "Assistant reported";

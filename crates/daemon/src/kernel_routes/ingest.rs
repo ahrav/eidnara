@@ -632,6 +632,16 @@ impl HandlerCore {
             ));
         };
         let artifact = parsed.request;
+        // The daemon's own writers alone write their ids and source kinds,
+        // and the named-file recorder its domain; an artifact under one
+        // would occupy a writer's id or pass as its row.
+        if super::is_writer_reserved_id(&artifact.object_id)
+            || artifact.domain_id == crate::named_files::DOMAIN_ID
+            || artifact.source_kind == crate::named_files::SOURCE_KIND
+            || artifact.source_kind == crate::attestation_verifier::classify::VERIFIER_SOURCE_KIND
+        {
+            return state_only(KernelOutcome::invalid(InvalidReason::InvalidInput));
+        }
         let upload = Upload {
             upload_id: parsed.upload_id.clone(),
             generation: 0,

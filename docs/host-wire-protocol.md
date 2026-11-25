@@ -1207,7 +1207,8 @@ redacted text, and the failed-command facts this section specifies below.
 A failed-command fact holds a command's name and lines of its tool output,
 so it also needs `source_capture.enabled`, the consent under which the
 daemon retains tool output: with that key at its default no such fact is
-written.
+written. For a Pi session the two keys also gate the named-file use records
+(below).
 A captured fact is the user's statement when its source message has the user
 role and reaches capture under its own message id (a source id of the form
 `<sha256 hex>:<byte offset>`, which capture gives fragments of a long message
@@ -1457,7 +1458,7 @@ last line, before its closing tag, is one fixed sentence: it says that the lines
 project's sessions, that they hold what was said or recorded there, and that
 conventions kept in the repository's files stay in those files. The sentence
 is charged to the budget with the block's tags. The summarizer's prompt
-carries a block of the facts the same selection chose and no such line. A
+carries a block of the facts its read selected (below) and no such line. A
 session replays the m0 an earlier build composed until its next
 recomposition, and a block that recomposition composes ends with the
 sentence. A
@@ -1467,7 +1468,237 @@ they take no place from another session's facts. The read loads at most
 eight pages of that size, the payloads of up to 64 MiB of a session's own
 newer facts and of work in progress past its bounds (below); past that it stops, keeps the facts it had selected, and
 leaves the older facts out of the block. A fact whose stored payload alone
-passes 8 MiB is left unloaded and ends the read the same way. Live work in
+passes 8 MiB is left unloaded and ends the read the same way. The block's
+first element, `<NAMED_FILES note="...">`, lists project files that a
+message of the user named and the agent then used. Each transform pass of a
+primary Pi session whose configuration permits memory capture, and whose
+request carries the empty `working_directory` (the session works in the
+project root), is observed before its window is resolved. The observation
+reads the last message of the user and the rows after it. A message of the
+user is a row that Pi gives the user role: a prompt the user types, a
+template the user invokes, or a prompt an extension sends in the user's
+name; the daemon's own synthetic and summary rows, which another harness's
+window can hold under the user role, are none. The rows
+before that message show nothing, since a fork copies its parent's rows
+into a session of another id. A message whose text parts hold more than
+64 KiB together names no file. A text part names files when it is text
+someone typed, by the test the summarizer's lift evidence applies to a user
+message: a part that opens with a marker the transform reads as injected
+by a plugin, such as `[SYSTEM DIRECTIVE:` or a whole `<system-reminder>`
+element, and the text the Pi codec gives a bash execution, name nothing
+and count toward the 64 KiB. A prompt an extension
+sends with no such marker reads as the user's. Each typed text part is read up to its first `<`
+that an ASCII letter or a `/` follows, where a tag opens: a block another
+writer adds to a message, such as an attached file or a hint, opens with a
+tag, so the text after it, the sender's included, names no file. From that
+text the daemon
+takes the runs of ASCII letters, digits, and `._-/+@` that hold a `.` or a
+`/` once the periods that end them are dropped, and reads the first 32
+distinct ones, each as one path: the run as written, or, for a run that
+opens with Pi's file-reference mark `@`, the run without that one
+character, as Pi's `read` opens it, so `@docs/a.md` names `docs/a.md` and
+`@@scope/pkg.json` names `@scope/pkg.json`. A path is held relative to
+the project root: a relative path is taken without its leading `./` marks,
+an absolute path that opens with the root as the daemon spells it and one
+`/`, which a root that ends with `/` supplies itself, as the root `/` does,
+is taken relative to it, and the result names a file when it is at most 256 bytes of
+those characters and passes the confined-path rules (at most 16 components,
+none of them empty, `.`, `..`, or `.git` or `.eidnara` in any letter case).
+The daemon normalizes nothing, and a `read` argument that holds another
+character names no file, so a root spelled with another character admits
+relative paths alone.
+A call after the message uses a named file when it is a call of Pi's `read`
+whose `path` argument, read without one leading `@` as Pi opens it, names
+the file, or a call of Pi's `bash` whose `command` names the file in one of
+its first 256 such runs, read as written with their periods, and when the
+call's id is the id of no other call
+after the message and of exactly one
+result, which follows the call, is text, JSON, or content that carries
+no error, and whose Pi row states the outcome: its `isError` is the boolean
+`false` and its `content` is an array. A result whose row holds no
+`isError`, or one of another type, shows no use. The Pi codec decodes such
+a row as a result that carries no error, as text or as content by what its
+`content` holds, so the window holds it as it holds any result. An id here is the one the row
+itself holds, item suffix included: a call part's string `id`, else its
+string `callId`, and a result row's string `toolCallId`. A call or a result
+whose row holds no such string shows no use; the window holds it under an
+id the codec makes, subject to the tool pairing rule of Section 7.10. The `bash` match is one of spelling: a
+path the command line names in a comment, or after a `cd`, matches as the
+same path elsewhere in the line does. A file the
+turn also edits is used the same way. When the pass's transform has
+succeeded, the first eight observed paths that the daemon does not hold as
+recorded for the session, that are regular files beneath
+the project root, reached through no symbolic link or mount point, and that
+the Kernel's durable-text redaction leaves as written, are offered to a
+tracked background write that the reply does not wait for, which takes
+them except in the cases named below; a pass whose
+transform the daemon refuses offers nothing. Each path is recorded once for the
+session: one labeled decision of kind `named_file_use` in the Kernel domain
+`named-files`, scoped to the project, with source kind
+`named_file_recorder`, whose summary is the path and whose rationale holds
+`source` (`named_file_use`), `session`, and `used_ms`, the time of the pass.
+Its id derives from the project, the session, and the path, so a second
+write replays the first and leaves its time. A session records 64 distinct
+paths at most while the daemon holds its recorded paths, which it does for
+the 256 sessions that recorded a path last and until it restarts; a path
+the store already holds for the session then takes one of a pass's eight
+places once more, and its write replays. At most four passes' records
+are written at once, a write that waits for its turn among them. A write
+that finds the Kernel ready takes the gate that capture's publications and
+`session.delete` take. Once it holds the gate, the paths of the pass share
+one five-second deadline for the Kernel's writer and are committed one by one: a path
+whose commit that deadline ends or the Kernel refuses stays unrecorded,
+the paths committed before it stay recorded, and the paths after it are
+tried under the same deadline. A pass that finds four being written, a
+pass observed before a `session.delete` that its write follows, also when
+the delete ends partway, a session
+id the redaction would rewrite, a project root that cannot be opened, a
+Kernel that is unavailable, and a daemon that is shutting down record
+nothing; a
+later pass that shows the same use is observed and written under the same
+rules. The records hold no text of a file. The domain's own row takes the
+id `domain:named-files`. In a store where another row holds that id, which
+a caller could write before the id was reserved, it takes the first of
+`nfd_0` to `nfd_7` that the registry holds no row for, live or invalidated;
+the older rows stay as they are, the records name the domain by
+`named-files` whichever id its row has, and a store that holds a row under
+every one of the nine ids refuses each named-file write. The daemon alone writes and
+changes the domain: a `kernel.commit` operation that names `named-files`,
+that writes a row under the id prefixes `nfu_`, `dnf_`, or `nfd_`, the id
+`domain:named-files`, or an id under the attestation verifier's prefixes
+(`verattest:`, `verattestdec:`, `verwitness:`, `verwitnessobj:`), or that
+replaces, retires, or marks one of the
+domain's rows, is refused as `invalid_input`, and so is a
+`kernel.artifact.ingest.begin` whose artifact's object id is one of those
+ids, or whose artifact names the
+domain, the source kind `named_file_recorder`, or the verifier's source
+kind `verifier`; a path leaves the element a pass composes when its file
+does, and a pass that serves the m0 of an earlier pass serves that pass's
+element. The search projection publishes none of the records, so
+`eidnara_search` ranks none, and a `kernel.read` page returns them with
+`domain_id` `named-files`. A pass reads the newest records
+under the read's row and byte bounds, counts the ones the recorder wrote,
+leaves out the reading session's own,
+groups them by path, orders the paths by the number of sessions that used
+each, then by the last use, then by path, looks for the files of the first
+32, and lists up to eight that are regular files beneath the project root at
+that moment, so a path enters a block only while its file exists; a read
+its bounds cut short marks the composition truncated. A line is
+`<path> (the agent used it in <n> earlier session(s), last on <date>; last changed <time>)`,
+the date being the UTC day of `used_ms`; it carries no id, and the record's
+id is no handle of `eidnara_memory`. The clause after `; last changed` says
+when the file last changed, as the composing pass reads it. The pass reads
+the file through one descriptor: its status and, when it holds at most
+256 KiB, its bytes, with one byte more that shows a file that grew, and
+its status again; a larger file is read no further than its first status.
+A reading whose two statuses differ in inode, link count, size, or
+modification or change time, or whose bytes are not as many as the status
+states, is taken once more; a write that leaves all of those as they were
+goes unseen. A file
+whose bytes no reading holds whole, one that does not open for reading or
+whose reading failed that comparison twice, keeps its line with the modification time of
+one status taken then, and a path that then names no regular file has no
+line. These reads of the listed files have no deadline, as the pass's
+reads of the project's documents have none. When the project root is the work tree of the SHA-1 Git repository
+that opens there, HEAD names a commit, and the tree of that commit
+holds a regular or executable blob at the path that the file's bytes hash
+to, the clause is the committer time of the commit that gave the file
+those bytes, as a UTC minute (`2026-03-01T09:30Z`): the walk goes from HEAD
+to the first parent that holds the same blob, as `git log` simplifies the
+history of one file, and ends at the commit none of whose parents holds
+it. A walk reads at most 256 parents. A walk that would read a 257th, and
+one that meets a tree of HEAD's commit, a parent commit, or a parent's
+tree that it cannot read whole, as a shallow clone has, gives no time, and
+the clause reads `at a time the read history does not show`; a commit
+whose committer line states no time that parses is one the walk cannot
+read. Any other file reads `<time> on disk`, the modification
+time its reading took: a file HEAD holds no blob for, a file edited since
+its commit, a larger file, a file whose bytes no reading held whole, a
+file whose checkout filters change its bytes,
+and a file of a project whose root is the work tree of no repository that
+opens there (a directory beneath a repository's root, and the root of a
+repository whose configuration names another work tree, among them) or
+whose HEAD names no commit the read takes. The commit time is chosen over the modification time because a
+clone or a checkout writes the file anew and leaves the commit time as it
+is; both times are shown as their sources hold them, a time ahead of the
+daemon's clock included, and a time outside the years 0000 to 9999 reads
+`at an unknown time`. No pass reads the repository. One thread of the
+daemon reads it for every pass: HEAD as capture's head observation reads
+it, and each commit and tree through the attestation verifier's object
+reader, which takes an object only when its bytes hash to its id. The
+thread reads the repository's own files (HEAD, references, configuration,
+and object and pack files) as those two readers read them for capture and
+for verification, with the bounds and the file mappings they have there:
+a file of the repository that is truncated while it is mapped raises
+`SIGBUS` in the daemon, as it does during capture's read. What this reader
+bounds is the parents of a walk, the time it works for a pass, and the
+answers it keeps. A pass waits at most half a second
+for its answer, in its first unit and holding that unit, and then shows
+the files' modification times. The thread takes up no job whose pass has
+stopped waiting. It works on a job until half a second after its pass
+stops waiting, so a walk that needs longer than the wait settles for the
+next pass: it checks that time before it opens the repository and before
+each object it reads, and gives each file's walk an equal share of the
+time left, so a walk that time ends dates nothing and leaves the files
+after it their own time. Four jobs wait in a queue beside the one
+the thread works on, and a pass that finds the queue full asks nothing. A
+repository that blocks or spins a read, such as one whose `HEAD` is a
+pipe, therefore costs the passes of the daemon that half second each
+until the queue is full, and holds the one thread until the daemon stops.
+For every job the thread
+reads HEAD and checks that the repository's work tree is the directory the
+pass opened. It
+keeps the answers that a HEAD settles, which are a commit time, a path
+HEAD holds other bytes or nothing for, and a walk the parent bound ended,
+for the path and the blob, for the 64 project roots it answered at a HEAD
+commit last and 64 paths of each, while the root is the same directory at
+the same HEAD commit; an answer an unreadable object gave is read again. A
+job at an unchanged HEAD therefore costs the thread those two reads, and a
+walk for each path and blob it keeps no answer for, and a HEAD that moved
+is read anew. The
+block's revision reads a line up to `; last changed`, and the budget
+charges every line up to there and then for one fixed clause, the form of
+the most tokens, so an edit or a commit of a listed file changes neither
+the rows a budget admits nor the revision, and folds no m0; the line a
+session holds is the one its last composition read. When the read lists a
+file, each fact that capture stored as the user's statement ends with
+` [<time>]`, the UTC minute of the commit that first recorded the
+statement, read from the commit log in one statement for the pass.
+Capture records a statement after the user made it, so
+the statement was made at that minute or before it, and a statement the
+user repeats later keeps the time of its first record; a time outside the
+years 0000 to 9999 reads `[at an unknown time]`. A
+statement shown with its contest already carries the day it was first
+recorded, as `stated <day>`, and takes no second mark, a statement whose
+commit the log holds no time for is shown as stored, the facts carry the
+mark also when the budget then admits no line of the element, and
+`eidnara_search` shows no such mark. A summarizer
+that fires on a pass whose read serves it holds the facts as that read
+rendered them, the times and the contest marks included; a summarizer read
+that no pass read serves lists no file and so carries no such time. The
+daemon's clock dates a record and a committer's clock dates a commit, so
+two machines whose clocks disagree can order a record and a commit made
+within that disagreement the other way. The element is charged first, to an
+eighth of `memory.injection_budget_tokens`: it holds the longest leading run
+of the lines that fits that share with its tags, the other facts are then
+selected against the rest of the budget, and the element is absent when no
+line fits. Its `note` says that a message of the user named the files, that
+the agent read them or named them in a command it ran, that the paths are relative
+to the project root, that each file existed when the block was composed,
+that memory holds none of their content, that a line ends with when the
+file last changed, which is its last commit's time or, marked on disk, its
+modification time, which a checkout also sets, that a `User stated` line
+that ends with a time in square brackets was recorded then, at or after
+the user made it, and what the times order: a statement made after a
+file's last change is newer than the file, and a file committed after a
+statement was recorded is newer than the statement in the lines changed
+since then. A pass that re-renders m0
+composes the element anew; a pass that serves the m0 of an earlier pass
+serves that pass's list. The block the summarizer's prompt carries holds no
+`NAMED_FILES` element: a summarizer that fires on a pass whose read serves it
+holds the facts that read selected beside the element, and a summarizer
+read that no pass read serves, the wrapup's among them, selects the facts
+against the whole budget. Live work in
 progress renders after the categories in one element,
 `<CURRENT_WORK note="...">`, whose `note` states that its lines are work the
 user left open in earlier sessions that no later statement of the user ended,
@@ -1482,7 +1713,8 @@ against bounds of its own, a quarter of the read's row and byte bounds, each
 rounded down and the row bound at least one,
 taken in the read's order, which is by the commit that wrote each fact's
 current row, so the other facts keep the whole of the read's row and byte
-bounds, and they are selected against the whole token budget first. The
+bounds, and they are selected first, against the token budget the
+`NAMED_FILES` element left. The
 read ends for a session when one of the other facts is refused at those
 bounds, so the element holds work in progress the read judged before that
 fact, and the
@@ -1746,7 +1978,8 @@ and defaults to true; the daemon ignores a project-tier value with a warning,
 and each plugin strips it from the project tier. False composes m0 with
 neither the `<project-memory>` nor the user-profile block and m1 with no
 `<new-user-profile>` delta, and turning it off rebuilds m0, while explicit
-search, capture, and the history summarizer's memory read are unchanged. Session deletion
+search and capture are unchanged and the history summarizer reads the
+project's facts itself, without the `NAMED_FILES` element. Session deletion
 fences publication and removes queued sources; committed memories remain
 project-owned. Lifecycle hooks store sources and return; the drain that runs
 model work continues after them until the harness shuts down. Shutdown closes
@@ -2218,7 +2451,7 @@ This section specifies the `transform` method family on the Context route: the p
 
 #### 7.10.1 Per-session admission and `session_busy`
 
-The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. An emergency pass's waits share one `EMERGENCY_WAIT_BUDGET` (3 s), inside the plugins' 5 s transform deadline: a pass that waits on a live history summarizer run and then fires one inline waits at most that budget in total. A history summarizer run that outlasts the budget keeps running, and its publication folds on a later pass. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
+The daemon admits a transform pass through its global admission first; a pass the global bound refuses answers the `queue_full` error of Section 7.4, unchanged. An admitted pass then joins its session's lane, keyed by `session_id` whatever route carries the request. A lane holds at most one active pass and one waiting pass, and passes execute in the order they joined. A waiting pass holds the bytes its request was charged, but no unit of blocking work and no store connection; its wait counts against its own request deadline, and a cancelled or expired wait leaves the lane. An active pass keeps its place until every unit of its blocking work, every emergency wait, and its final settlement have finished, so a cancellation cannot let the next pass start while a unit of the cancelled pass can still commit. An emergency pass's waits share one `EMERGENCY_WAIT_BUDGET` (3 s), inside the plugins' 5 s transform deadline: a pass that waits on a live history summarizer run and then fires one inline waits at most that budget in total. A pass whose read finds a file to list can also wait up to half a second in its first unit, holding that unit, for the named-file history reader of Section 7.9; that wait is outside the budget, and the two together leave 1.5 s of the deadline. A history summarizer run that outlasts the budget keeps running, and its publication folds on a later pass. A paged pass refuses a concurrent unpaged pass of the same session with `authority_transform_page_in_progress` before that pass reaches the lane, and a waiting unpaged pass is refused the same way when it activates if a page stream of its session began staging while it waited; so while the waiting place is held by a paged pass, a further unpaged pass receives that error rather than `session_busy`.
 
 A pass that finds its session's lane holding an active and a waiting pass is answered at once with a response whose `status` is `"session_busy"` and whose `action` is `"SESSION_BUSY"`, carrying no recipe (`operations` absent) and `committed: false`. The daemon changes no session state for it: `row_version`, `meta`, and the stored history segments are as they were. `status` is the transform status discriminator (`"ok"`, `"session_busy"`, `"boundary_unknown"`); `session_busy` is not an error code and is not retried by the transport. A consumer MUST treat it as a declined pass: it publishes nothing from the response and promotes no per-session state. The status set may grow: a consumer MUST treat a response whose `status` it does not recognize as a declined pass in the same way.
 
@@ -2247,6 +2480,7 @@ A `transform` request is one JSON object on the Context route, discriminated by 
 | `prev_response_cache_usage` | optional | `{"cache_read_tokens", "cache_write_tokens"}`; a malformed value is dropped |
 | `mid_turn`, `is_subagent`, `tool_present` | optional, default `false` | booleans |
 | `todo_tool_present` | optional | boolean |
+| `working_directory` | optional; `pi` sends it for a session that has a project identity and whose working directory lies beneath the project root | string: the session's working directory, at its physical path, relative to the project root at its physical path, with `/` separators, empty for the root; the named-file records of Section 7.9 are taken for a request whose value is empty, where the relative path a `read` call opens names the file of that path and a `bash` command line is matched by its spelling from the project root, and a request without the field or with another value records none; the daemon keeps the value no longer than the observation |
 | `provider_id`, `model_key`, `cache_ttl`, `system_prompt_hash`, `upgrade_state`, `provider_error` | optional | strings |
 | `prev_response_completed_at_ms`, `request_observed_at_ms` | optional | unsigned integers (milliseconds) |
 | `effective_execute_threshold`, `history_budget_tokens` | optional | numbers |
@@ -2271,7 +2505,7 @@ Paging rule. A request may be split into pages that share one `transform_page_id
 
 #### 7.10.4 Outcomes and errors
 
-The daemon resolves a window against one snapshot of the session's coverage, before any other work of the pass and without writing:
+The daemon resolves a window against one snapshot of the session's coverage, without writing to that coverage, before any work of the pass that reads the resolved window. Two steps of Section 7.9 read the submitted window before it: the source checkpoint, which can queue capture sources, and the named-file observation, which writes nothing:
 
 - The declared segment is the rendered boundary: the window is served as submitted.
 - The declared segment is older than the rendered boundary and the rendered boundary's message is in the window: the daemon slices the window at that message and serves the rest (a stale slice); the consumer's coordinates are unchanged (Section 7.10.5).

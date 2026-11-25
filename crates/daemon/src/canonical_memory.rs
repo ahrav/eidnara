@@ -15,7 +15,8 @@ use crate::kernel_routes::read::{MAX_READ_ROW_BYTES, MAX_READ_ROWS, ReadResponse
 use crate::kernel_routes::{KernelOpenCoordinator, KernelOutcome, ProjectBinding};
 use crate::m0_compose::trim_block_to_budget;
 use crate::memory_render::{
-    CURRENT_WORK_SECTION, is_positive_memory_category, render_memory_line, renders_in_block,
+    CURRENT_WORK_SECTION, SECTIONS_AFTER_FACTS, SECTIONS_BEFORE_FACTS, is_positive_memory_category,
+    keeps_supplied_order, render_memory_line, renders_in_block,
 };
 
 pub(crate) const MEMORY_DOMAIN_ID: &str = "memory";
@@ -29,9 +30,10 @@ pub struct CanonicalMemory {
     pub content: String,
 }
 
-/// Injectable rows visible at one kernel snapshot, the lasting rows newest
-/// first and then the work in progress newest first, with the digest of the
-/// block they render computed once at construction.
+/// The rows one kernel snapshot's block renders: the named files, most used
+/// first, the lasting rows newest first, and then the work in progress
+/// newest first, with the revision of those rows computed once at
+/// construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalMemorySnapshot {
     known_as_of: i64,
@@ -45,20 +47,44 @@ pub struct CanonicalMemorySnapshot {
 impl CanonicalMemorySnapshot {
     /// Builds the snapshot and digests the rows the block renders from.
     ///
-    /// Each rendered row contributes its category and the exact line
-    /// `render_memory_line` emits. Edits past the renderer's content cap and
-    /// changes to `truncated` preserve the rendered bytes and the digest.
+    /// Each rendered row contributes its category and the line
+    /// `render_memory_line` emits, a `NAMED_FILES` line up to its
+    /// last-change clause. Edits past the renderer's content cap, changes
+    /// to `truncated`, and a file's last change preserve the digest.
     pub fn new(known_as_of: i64, truncated: bool, rows: Vec<CanonicalMemory>) -> Self {
         let rendered = rendered_rows(&rows);
         let mut hasher = DefaultHasher::new();
         "eidnara-project-memory-revision-v1".hash(&mut hasher);
-        // Swapping two `CURRENT_WORK_SECTION` rows with different rendered
-        // lines changes the digest input.
-        let in_section = |row: &&CanonicalMemory| row.category == CURRENT_WORK_SECTION;
-        let lasting = rendered.iter().copied().filter(|row| !in_section(row));
-        for row in lasting.chain(rows.iter().filter(in_section)) {
+        // The digest's own order: the sections the block renders before the
+        // facts, each in the supplied order, the facts by object id across
+        // their categories, then the sections after the facts, each in the
+        // supplied order. Swapping two rows of a section that keeps the
+        // supplied order changes the digest input when their rendered lines
+        // differ, and how those sections interleave in `rows` changes
+        // nothing.
+        let supplied: &[CanonicalMemory] = &rows;
+        let in_sections = |sections: &'static [&'static str]| {
+            sections.iter().flat_map(move |section| {
+                supplied.iter().filter(move |row| row.category == *section)
+            })
+        };
+        let lasting = rendered
+            .iter()
+            .copied()
+            .filter(|row| !keeps_supplied_order(&row.category));
+        for row in in_sections(SECTIONS_BEFORE_FACTS)
+            .chain(lasting)
+            .chain(in_sections(SECTIONS_AFTER_FACTS))
+        {
             row.category.hash(&mut hasher);
-            render_memory_line(row).hash(&mut hasher);
+            let line = render_memory_line(row);
+            // A `NAMED_FILES` line enters the revision without its
+            // last-change clause, which reads the work tree.
+            if row.category == crate::memory_render::NAMED_FILES_SECTION {
+                crate::named_files::revised_part(&line).hash(&mut hasher);
+            } else {
+                line.hash(&mut hasher);
+            }
         }
         let served_set_digest =
             kernel::served_set_digest(rendered.iter().map(|row| row.object_id.as_str()));
@@ -101,7 +127,8 @@ impl CanonicalMemorySnapshot {
     }
 
     /// Digest over the rendered inputs: two snapshots with equal digests
-    /// render identical block bytes.
+    /// render the same block apart from the last-change clauses of its
+    /// `NAMED_FILES` lines.
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -145,13 +172,17 @@ impl ServedSet {
     }
 }
 
-/// The rows the block renders, in object-id order. The served-set digest derives from them, and the revision reads them with the `CURRENT_WORK` rows in the supplied order.
+/// The rows the block renders, in object-id order, rows of one id in category order. The served-set digest derives from them, and the revision reads them with the `NAMED_FILES` and `CURRENT_WORK` rows in the supplied order.
 fn rendered_rows(rows: &[CanonicalMemory]) -> Vec<&CanonicalMemory> {
     let mut rendered: Vec<&CanonicalMemory> = rows
         .iter()
         .filter(|row| renders_in_block(&row.category))
         .collect();
-    rendered.sort_by(|left, right| left.object_id.cmp(&right.object_id));
+    rendered.sort_by(|left, right| {
+        left.object_id
+            .cmp(&right.object_id)
+            .then_with(|| left.category.cmp(&right.category))
+    });
     rendered
 }
 
@@ -196,7 +227,10 @@ impl CanonicalMemoryRead {
 }
 
 /// Reads the project's injectable memory at the kernel tip, trimmed to
-/// `memory_budget_tokens`.
+/// `memory_budget_tokens`: the facts, and the `NAMED_FILES` lines of
+/// [`crate::named_files::delivered`], read at the same tip, whose files
+/// exist when the read runs. A failed read of either withholds the
+/// composition.
 ///
 /// The visible-row read is bound to the tip captured first, so the rows a served read pins are the canonical rows at that commit.
 ///
@@ -211,7 +245,35 @@ pub(crate) fn read_project_memory(
     session_id: &str,
     memory_budget_tokens: f64,
 ) -> CanonicalMemoryRead {
-    let read = read_at_tip(kernel, project, session_id, memory_budget_tokens);
+    report_read(
+        kernel,
+        project,
+        read_at_tip(kernel, project, session_id, memory_budget_tokens, true),
+    )
+}
+
+/// Reads the project's facts at the kernel tip, trimmed to
+/// `memory_budget_tokens`, as [`read_project_memory`] does, without the
+/// `NAMED_FILES` lines. The summarizer reads its block this way when no pass
+/// read serves it, so the facts take the whole budget.
+pub(crate) fn read_project_facts(
+    kernel: &KernelOpenCoordinator,
+    project: &ProjectBinding,
+    session_id: &str,
+    memory_budget_tokens: f64,
+) -> CanonicalMemoryRead {
+    report_read(
+        kernel,
+        project,
+        read_at_tip(kernel, project, session_id, memory_budget_tokens, false),
+    )
+}
+
+fn report_read(
+    kernel: &KernelOpenCoordinator,
+    project: &ProjectBinding,
+    read: CanonicalMemoryRead,
+) -> CanonicalMemoryRead {
     let published = kernel.health_block();
     let fresh = !published.is_stale();
     let facts = published.block.facts.as_ref().filter(|_| fresh);
@@ -227,6 +289,7 @@ fn read_at_tip(
     project: &ProjectBinding,
     session_id: &str,
     memory_budget_tokens: f64,
+    named_files: bool,
 ) -> CanonicalMemoryRead {
     let store = match kernel.kernel_store() {
         Ok(store) => store,
@@ -236,19 +299,35 @@ fn read_at_tip(
         Ok(tip) => tip,
         Err(error) => return CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     };
-    match read_other_sessions(
-        &store,
-        project,
-        &[Some(session_id)],
-        tip,
-        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
-    ) {
-        Ok(mut response) => match show_contests(&store, project, &mut response) {
-            Ok(()) => {
-                CanonicalMemoryRead::Available(injectable_snapshot(response, memory_budget_tokens))
+    let read = || -> Result<CanonicalMemorySnapshot, kernel::KernelError> {
+        let mut response = read_other_sessions(
+            &store,
+            project,
+            &[Some(session_id)],
+            tip,
+            (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+        )?;
+        let mut files = Vec::new();
+        let mut statements = Vec::new();
+        if named_files {
+            let (lines, cut_short) =
+                crate::named_files::delivered(&store, project, session_id, response.known_as_of)?;
+            // The flag covers both reads the composition selects from.
+            response.truncated |= cut_short;
+            // A read that finds a file to list dates the user's statements,
+            // before the budget trims its lines, so a reader can order a
+            // statement and a file's last change.
+            if !lines.is_empty() {
+                statements = crate::named_files::user_statements(&response);
             }
-            Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
-        },
+            files = lines;
+        }
+        show_contests(&store, project, &mut response)?;
+        crate::named_files::date_statements(&store, &mut response, &statements)?;
+        Ok(injectable_snapshot(response, files, memory_budget_tokens))
+    };
+    match read() {
+        Ok(snapshot) => CanonicalMemoryRead::Available(snapshot),
         Err(error) => CanonicalMemoryRead::Withheld(KernelOutcome::from(error)),
     }
 }
@@ -801,12 +880,14 @@ impl ReadReport {
 /// kind is a positive memory category. Labeled rows never reach `auto_inject`;
 /// the guard keeps a label-bearing row out of a block that has no label
 /// renderer. The rows are then trimmed to `memory_budget_tokens` by
-/// [`trim_block_to_budget`]: the lasting rows in serving order, then the
-/// work in progress ordered by the commit that first recorded each
-/// statement, newest first, with ties in object-id order. The snapshot
-/// holds only rows the block renders.
+/// [`trim_block_to_budget`]: `named_files`, the rows the read of the
+/// named-files domain supplied, in their order, then the lasting rows in
+/// serving order, then the work in progress ordered by the commit that
+/// first recorded each statement, newest first, with ties in object-id
+/// order. The snapshot holds only rows the block renders.
 fn injectable_snapshot(
     response: ReadResponse,
+    named_files: Vec<CanonicalMemory>,
     memory_budget_tokens: f64,
 ) -> CanonicalMemorySnapshot {
     let ReadResponse {
@@ -852,6 +933,7 @@ fn injectable_snapshot(
     let current_work: Vec<CanonicalMemory> =
         current_work.into_iter().map(|(_, memory)| memory).collect();
     let rows = trim_block_to_budget(
+        &named_files,
         &lasting,
         &current_work,
         memory_budget_tokens,
@@ -868,6 +950,10 @@ mod tests {
 
     use super::*;
     use crate::kernel_routes::UnavailableReason;
+
+    fn injectable_snapshot(response: ReadResponse, budget: f64) -> CanonicalMemorySnapshot {
+        super::injectable_snapshot(response, Vec::new(), budget)
+    }
 
     fn lagging(lag_positions: i64) -> Observed {
         Observed::ServedWhileDerivedLag {
@@ -1808,6 +1894,68 @@ mod tests {
         );
     }
 
+    /// The block renders the rows of `NAMED_FILES_SECTION` in the supplied
+    /// order and serves their ids, so a named file added to a block is a new
+    /// revision and a new served set, and two orders of the same files are
+    /// two revisions with one served set.
+    #[test]
+    fn the_revision_reads_the_named_files_in_the_supplied_order() {
+        let file = |object_id: &str, content: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: crate::memory_render::NAMED_FILES_SECTION.to_string(),
+            content: content.to_string(),
+        };
+        let rule = CanonicalMemory {
+            object_id: "rule".to_string(),
+            category: "PROJECT_RULES".to_string(),
+            content: "Keep the public contract.".to_string(),
+        };
+        let files = [
+            file("nfu_b", "docs/guide.md"),
+            file("nfu_a", "tools/check.sh"),
+        ];
+        let alone = CanonicalMemorySnapshot::new(1, false, vec![rule.clone()]);
+        let most_used_first = CanonicalMemorySnapshot::new(
+            1,
+            false,
+            vec![files[0].clone(), rule.clone(), files[1].clone()],
+        );
+        assert_ne!(alone.revision(), most_used_first.revision());
+        assert_ne!(
+            alone.served_set_digest(),
+            most_used_first.served_set_digest()
+        );
+        assert_eq!(most_used_first.served_ids(), ["nfu_a", "nfu_b", "rule"]);
+        let other_order =
+            CanonicalMemorySnapshot::new(1, false, vec![files[1].clone(), files[0].clone(), rule]);
+        assert_ne!(most_used_first.revision(), other_order.revision());
+        assert_eq!(
+            most_used_first.served_set_digest(),
+            other_order.served_set_digest()
+        );
+
+        // The block renders the named files before the work in progress
+        // however the caller interleaves the two sections, so the bytes, the
+        // revision, and the served set are the same.
+        let work = |object_id: &str| CanonicalMemory {
+            object_id: object_id.to_string(),
+            category: CURRENT_WORK_SECTION.to_string(),
+            content: "an open request".to_string(),
+        };
+        let files_first = vec![files[0].clone(), files[1].clone(), work("w1"), work("w2")];
+        let interleaved = vec![work("w1"), files[0].clone(), work("w2"), files[1].clone()];
+        assert_eq!(
+            crate::memory_render::render_delivered_memory_block(&files_first),
+            crate::memory_render::render_delivered_memory_block(&interleaved)
+        );
+        let (left, right) = (
+            CanonicalMemorySnapshot::new(1, false, files_first),
+            CanonicalMemorySnapshot::new(1, false, interleaved),
+        );
+        assert_eq!(left.revision(), right.revision());
+        assert_eq!(left.served_set_digest(), right.served_set_digest());
+    }
+
     /// The block renders the rows of `CURRENT_WORK_SECTION` in the supplied
     /// order, so two orders of the same rows are two revisions with one
     /// served set.
@@ -1953,5 +2101,80 @@ mod tests {
         ));
         assert!(empty.rows().is_empty());
         assert_ne!(withheld.composition(), empty.composition());
+    }
+
+    /// The revision reads a `NAMED_FILES` line up to its last-change clause:
+    /// two blocks whose lines differ in that clause alone have one revision,
+    /// and a line that differs before the clause is another revision. A
+    /// fact's line enters whole, the same words included.
+    #[test]
+    fn the_revision_leaves_out_a_named_files_last_change() {
+        let block = |file: &str, fact: &str| {
+            CanonicalMemorySnapshot::new(
+                1,
+                false,
+                vec![
+                    CanonicalMemory {
+                        object_id: "nfu_a".to_string(),
+                        category: crate::memory_render::NAMED_FILES_SECTION.to_string(),
+                        content: file.to_string(),
+                    },
+                    CanonicalMemory {
+                        object_id: "rule".to_string(),
+                        category: "PROJECT_RULES".to_string(),
+                        content: fact.to_string(),
+                    },
+                ],
+            )
+        };
+        let used = "docs/guide.md (the agent used it in 1 earlier session, last on 2026-01-02";
+        let fact = "The guide moved; last changed 2026-03-01.";
+        let committed = block(&format!("{used}; last changed 2026-03-01T09:30Z)"), fact);
+        let edited = block(
+            &format!("{used}; last changed 2026-04-02T10:00Z on disk)"),
+            fact,
+        );
+        assert_ne!(committed.rows(), edited.rows());
+        assert_eq!(committed.revision(), edited.revision());
+        assert_eq!(committed.served_set_digest(), edited.served_set_digest());
+        let used_twice = used.replace("1 earlier session", "2 earlier sessions");
+        let again = block(
+            &format!("{used_twice}; last changed 2026-03-01T09:30Z)"),
+            fact,
+        );
+        assert_ne!(committed.revision(), again.revision());
+        let other_fact = block(
+            &format!("{used}; last changed 2026-03-01T09:30Z)"),
+            "The guide moved; last changed 2026-04-02.",
+        );
+        assert_ne!(committed.revision(), other_fact.revision());
+    }
+
+    /// Two rows of one id in two categories enter the revision in category
+    /// order, whichever the caller supplies first: the block renders the
+    /// same bytes for both orders, and the revision and the served set are
+    /// the same.
+    #[test]
+    fn rows_of_one_id_enter_the_revision_in_category_order() {
+        let row = |category: &str, content: &str| CanonicalMemory {
+            object_id: "mem_shared".to_string(),
+            category: category.to_string(),
+            content: content.to_string(),
+        };
+        let naming = row("NAMING", "Types are nouns.");
+        let rule = row("PROJECT_RULES", "Keep the public contract.");
+        let one = vec![naming.clone(), rule.clone()];
+        let other = vec![rule, naming];
+        assert_eq!(
+            crate::memory_render::render_delivered_memory_block(&one),
+            crate::memory_render::render_delivered_memory_block(&other)
+        );
+        let (one, other) = (
+            CanonicalMemorySnapshot::new(1, false, one),
+            CanonicalMemorySnapshot::new(1, false, other),
+        );
+        assert_eq!(one.revision(), other.revision());
+        assert_eq!(one.served_ids(), other.served_ids());
+        assert_eq!(one.served_set_digest(), other.served_set_digest());
     }
 }

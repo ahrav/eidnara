@@ -36,11 +36,12 @@ use crate::git_sources;
 /// buffer for an admitted chain can reach about twice the limit plus the delta bytes.
 pub const MAX_BLOB_BYTES: u64 = crate::project_docs::MAX_PROJECT_DOC_BYTES;
 
-const ALLOCATION_LIMIT: std::num::NonZeroU64 = std::num::NonZeroU64::new(MAX_BLOB_BYTES).unwrap();
+pub(crate) const ALLOCATION_LIMIT: std::num::NonZeroU64 =
+    std::num::NonZeroU64::new(MAX_BLOB_BYTES).unwrap();
 
 /// The pack index slots of the object store the driver opens. A store lookup that exhausts them
 /// reopens the repository through `Objects::resize`.
-const INDEX_SLOTS: u16 = 32;
+pub(crate) const INDEX_SLOTS: u16 = 32;
 
 /// Bytes at a path in a commit's tree, named by their sha256 digest and length.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,7 +399,7 @@ fn poll(deadline: &impl Deadline, stage: Stage) -> Result<(), Reason> {
     }
 }
 
-struct Objects<'repo> {
+pub(crate) struct Objects<'repo> {
     root: &'repo Path,
     repo: &'repo gix::Repository,
     reopened: bool,
@@ -409,7 +410,7 @@ struct Objects<'repo> {
 }
 
 impl<'repo> Objects<'repo> {
-    fn new(root: &'repo Path, repo: &'repo gix::Repository) -> Self {
+    pub(crate) fn new(root: &'repo Path, repo: &'repo gix::Repository) -> Self {
         let options = gix::odb::loose::Options {
             alloc_limit_bytes: usize::try_from(MAX_BLOB_BYTES).ok(),
             ..Default::default()
@@ -482,7 +483,7 @@ impl<'repo> Objects<'repo> {
         }
     }
 
-    fn read(
+    pub(crate) fn read(
         &mut self,
         id: gix::ObjectId,
         class: ObjectClass,
