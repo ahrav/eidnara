@@ -507,20 +507,40 @@ impl KernelStore {
         if commit_seqs.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let sequences =
-            serde_json::to_string(commit_seqs).map_err(|_| KernelError::InvalidInput)?;
         let reader = self.lock_reader()?;
-        let mut statement = reader
-            .prepare_cached(
-                "SELECT commit_seq, recorded_at FROM commit_log
-                 WHERE commit_seq IN (SELECT value FROM json_each(?1))",
-            )
-            .map_err(map_sqlite)?;
-        let times = statement
-            .query_map([sequences], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(map_sqlite)?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(map_sqlite)?;
-        Ok(times)
+        commits_recorded_at_on(&reader, commit_seqs)
     }
+
+    /// [`Self::commits_recorded_at`] whose wait for a pooled reader ends at `budget`'s deadline or interrupt with [`KernelError::Deadline`].
+    pub fn commits_recorded_at_within_budget(
+        &self,
+        commit_seqs: &[i64],
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<std::collections::HashMap<i64, i64>, KernelError> {
+        if commit_seqs.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let reader = self.lock_reader_within(&budget.acquire_limit())?;
+        commits_recorded_at_on(&reader, commit_seqs)
+    }
+}
+
+/// The recorded times of `commit_seqs` read in one statement on `reader`.
+fn commits_recorded_at_on(
+    reader: &rusqlite::Connection,
+    commit_seqs: &[i64],
+) -> Result<std::collections::HashMap<i64, i64>, KernelError> {
+    let sequences = serde_json::to_string(commit_seqs).map_err(|_| KernelError::InvalidInput)?;
+    let mut statement = reader
+        .prepare_cached(
+            "SELECT commit_seq, recorded_at FROM commit_log
+             WHERE commit_seq IN (SELECT value FROM json_each(?1))",
+        )
+        .map_err(map_sqlite)?;
+    let times = statement
+        .query_map([sequences], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(map_sqlite)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(map_sqlite)?;
+    Ok(times)
 }

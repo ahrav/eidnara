@@ -176,6 +176,42 @@ impl Rig {
             .run();
     }
 
+    /// Publishes one tool result of session `s2`, whose call ended at `at_ms`, as source capture does after a pass, and waits for the candidate row its pass writes.
+    async fn tool_returns_later(&self, id: &str, at_ms: u64, text: &str) {
+        let rows = || self.store.candidate_sweep_page(0, 1_000).unwrap().len();
+        let before = rows();
+        self.settle_capture().await;
+        let row = json!({
+            "type": "message", "id": id, "parentId": format!("{id}-call"),
+            "message": {
+                "role": "toolResult", "toolCallId": format!("{id}-call"), "toolName": "bash",
+                "isError": false, "content": [{ "type": "text", "text": text }], "timestamp": at_ms,
+            },
+        });
+        self.handler
+            .capture_after_response(source_capture::Offer {
+                profile: SerializerProfile::Pi,
+                session_id: "s2".to_owned(),
+                project: kernel_routes::ProjectBinding::new(&self.project),
+                window: vec![Arc::new(row)],
+                epoch: self.handler.source_capture.epoch(),
+                documents: None,
+                candidates: true,
+            })
+            .expect("a charged window")
+            .run();
+        for _ in 0..1_000 {
+            if rows() > before && self.handler.contradiction_candidates.is_idle() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "the tool result produced no candidate row: {}",
+            self.handler.contradiction_candidates.report()
+        );
+    }
+
     /// Publishes one user message of session `s2` and waits for the candidate row its pass writes.
     async fn user_says_later(&self, id: &str, at_ms: u64, text: &str) {
         self.says_later("user", id, at_ms, text).await;
@@ -817,7 +853,7 @@ async fn whose_message_it_is_decides_whether_it_is_evidence() {
     );
 }
 
-/// In `contest` a `revise` of a fact the assistant reported writes nothing: the proposal says part of the fact still holds, so the row keeps its text and its place on search and the review hold ends. A `retire` of the same fact on the user's later message disputes it, and so does a `revise` of a note, which is the agent's own record.
+/// In `contest` a `revise` of a fact the assistant reported writes nothing: the proposal says part of the fact still holds, so the row keeps its text and its place on search and the review hold ends. A `retire` of the same fact on the user's later message disputes it, and so does a `revise` of a note, which carries no writer's label.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
     const REPORTED: &str =
@@ -880,6 +916,78 @@ async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
     );
 }
 
+/// A tool result carries the time its call ended. One that ended before a note was stored is published after the note and starts no review of it; one that ended after the note is evidence, and the review state names the tool as its writer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_note_is_reviewed_on_a_tool_result_that_ended_after_it() {
+    const NOTE: &str = "The integration suite reads its fixtures from tests/data/fixtures.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    let before_the_note = later_than_now(-6_000);
+    commit_decision(
+        &rig,
+        "mem_note_fixtures",
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        "repo",
+        NOTE,
+    );
+    rig.tool_returns_later(
+        "tool-1",
+        before_the_note,
+        "ls: the integration suite reads its fixtures from tests/data/fixtures",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(
+        rig.drain().await,
+        0,
+        "a result of the turn that wrote the note is its origin"
+    );
+    assert!(rig.attempts().is_empty());
+
+    rig.tool_returns_later(
+        "tool-2",
+        later_than_now(60_000),
+        "ls: no such directory tests/data/fixtures; the integration suite fixtures moved",
+    )
+    .await;
+    assert_eq!(rig.drain().await, 1);
+    let attempts = rig.attempts();
+    let state: Value = serde_json::from_str(&attempts[0].prompt).expect("the state is JSON text");
+    assert_eq!(state["memory"]["text"], NOTE);
+    let later = state["later"].as_array().unwrap();
+    assert_eq!(later.len(), 1, "{state}");
+    assert_eq!(later[0]["writer"], "tool");
+}
+
+/// Work the user left in progress ends when anyone reports it done: the assistant's later message brings the statement to review, where the same message starts no review of a lasting statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_in_progress_takes_evidence_from_the_assistant() {
+    const OPEN: &str = "Next session, finish migrating the billing export to the new queue.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.publish("s1", "w0", "user", STATED_AT_MS, OPEN).await;
+    rig.settle_capture().await;
+    memory_auto_delivery_tests::capture(
+        &rig.handler,
+        FIRST,
+        "s1",
+        &[("w0", "user", OPEN)],
+        |text, _| vec![memory_auto_delivery_tests::classed(text, "current_work")],
+    )
+    .await;
+    rig.says_later(
+        "assistant",
+        "later-1",
+        1_700_000_000_000,
+        "Finished migrating the billing export to the new queue in this session.",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.drain().await, 1);
+    let attempts = rig.attempts();
+    let state: Value = serde_json::from_str(&attempts[0].prompt).expect("the state is JSON text");
+    assert_eq!(state["memory"]["work_in_progress"], true, "{state}");
+    assert_eq!(state["later"][0]["writer"], "assistant");
+}
+
 /// A selection reviews the memories a session receives automatically before the ones served on search alone, whatever the order of their evidence. Here the note's evidence is the newer, and the delivered statement's review runs first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {
@@ -894,6 +1002,11 @@ async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {
         NOTE,
     );
     assert_eq!(rig.drain().await, 0);
+    let block = rig.block().await;
+    assert!(
+        block.contains(THURSDAY) && !block.contains(NOTE),
+        "the statement is delivered and the note is served on search alone: {block}"
+    );
     rig.user_says_later(
         "later-1",
         later_than_now(60_000),

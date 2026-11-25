@@ -651,7 +651,7 @@ payload, a reason string, or a project.
 | `attempts_attempted`, `attempts_acknowledged`, `attempts_failed`, `attempts_cancelled`, `attempts_unknown`, `attempts_not_dispatched`, `attempts_open` | unsigned integer | model attempts consumed, by terminal kind; `acknowledged` is a complete provider response, `open` has no terminal yet |
 | `receipts_in_progress`, `receipts_complete` | unsigned integer | execution receipts by state |
 | `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | receipt charges of jobs and frozen selection pages the store still holds, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
-| `projects_at_metadata_quota` | unsigned integer | projects whose review metadata leaves less than one job's charge and allowance under the per-project quota, so the store refuses a new review job for each until older jobs retire |
+| `projects_at_metadata_quota` | unsigned integer | projects whose review metadata leaves less than one job's charge and allowance under the per-project quota, so the store refuses a new review job for each until one of its pending jobs settles and releases its allowance or older jobs retire |
 | `nonadmissions`, `sessions_with_reservation` | unsigned integer | producer-owned History Summarizer nonadmissions summed over sessions, and sessions whose producer state records a MemoryReviewer reservation |
 | `latest_nonadmission_memory_reviewer_unavailable`, `latest_nonadmission_capacity_full`, `latest_nonadmission_evidence_unavailable`, `latest_nonadmission_fact_set_rejected`, `latest_nonadmission_subject_refused` | unsigned integer | sessions whose latest nonadmission carries each closed code |
 
@@ -661,7 +661,7 @@ absent, never reported as `null`; unknown fields are dropped; fields are
 additive. A job keeps its receipt charge until the retirement sweep deletes
 it, ninety days after its queue deadline, and a terminal selection page until the sweep deletes it after its jobs, so `metadata_headroom_bytes`
 reaching zero means new review work is refused until older jobs and pages retire; the
-quota bounds the review work of one ninety-day window. A project has its own quota, a quarter of the host's, and `projects_at_metadata_quota` counts the projects that have reached theirs while the host still has headroom. The job, selection, attempt, and receipt counters count the rows the store still holds.
+quota bounds the review work of one ninety-day window. A project has its own quota, a quarter of the host's, and `projects_at_metadata_quota` counts the projects that have reached theirs, whatever headroom the host has; `metadata_headroom_bytes` shows the host's alone. The job, selection, attempt, and receipt counters count the rows the store still holds.
 
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of

@@ -287,7 +287,7 @@ struct SourceFacts {
     writer: Writer,
     /// The commit that published the source's descriptor. Sources are ordered by it, so a source keeps its place whatever later brings it up as evidence.
     published: i64,
-    /// A message's own time in milliseconds, which a message descriptor carries as its revision. `None` for a tool span and a repository document, which revise by other counters.
+    /// The source's own time in milliseconds ([`source_time`]). `None` for a repository document, whose revision counts observations.
     written: Option<i64>,
     /// When a read found the descriptor retired; no job reads a retired source. The lookup is repeated after [`RETIRED_RECHECK`], which bounds how long a remembered answer stands in for the store's.
     retired: Option<Instant>,
@@ -355,9 +355,7 @@ impl SelectionMemory {
                 Writer::of_source(prior.source_class)
             }),
             published: descriptor.created_commit_seq,
-            written: (descriptor.detail.class == OccurrenceClass::Messages.code())
-                .then(|| descriptor.detail.revision.parse().ok())
-                .flatten(),
+            written: source_time(&descriptor.detail.class, &descriptor.detail.revision),
             retired: None,
         };
         if self.sources.len() >= MAX_REMEMBERED_SOURCES {
@@ -367,7 +365,7 @@ impl SelectionMemory {
         Ok(Some(facts))
     }
 
-    /// When a memory was stated, in milliseconds: the time of the newest live message among `cited`, the sources the memory cites, or else the time the Kernel recorded `stated`, the commit that first recorded the memory. A memory outlives its captured messages, and a note the agent writes cites none, so the commit's time stands in for the source's. `None` when the Kernel holds no time for the commit.
+    /// When a memory was stated, in milliseconds: the time of the newest live source among `cited`, the sources the memory cites, or else the time the Kernel recorded `stated`, the commit that first recorded the memory. A memory outlives its captured messages, and a note the agent writes cites none, so the commit's time stands in for the source's. `None` when the Kernel holds no time for the commit.
     fn stated_at(
         &mut self,
         kernel: &KernelStore,
@@ -389,7 +387,7 @@ impl SelectionMemory {
             return Ok(Some(*recorded));
         }
         let recorded = kernel
-            .commits_recorded_at(&[stated])
+            .commits_recorded_at_within_budget(&[stated], budget)
             .map_err(CycleError::Kernel)?
             .get(&stated)
             .copied();
@@ -1114,7 +1112,16 @@ pub fn select_and_enqueue(
     Ok(selected)
 }
 
-/// Whether `source` was written after a memory was stated, which is what makes it evidence that the memory changed. A message is ordered by its own time: after `stated_at`, the time of the newest message the memory cites or, for a memory that cites none, of the commit that first recorded it. So the message a memory was taken from, a message of the same moment, and every older one are the memory's origin and never evidence against it, whenever their descriptors were published. A source with no message time, such as a tool span or a repository document, and a message beside a memory whose time the store cannot give, are ordered by commit: published after `stated`, the commit that first recorded the memory.
+/// The time a source of `class` was written, in milliseconds, read from its descriptor's `revision`. A message carries its harness timestamp and a tool span the time its call ended, both as decimal milliseconds. A repository document's revision counts observations, so such a source has no time of its own.
+fn source_time(class: &str, revision: &str) -> Option<i64> {
+    [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans]
+        .iter()
+        .any(|timed| timed.code() == class)
+        .then(|| revision.parse().ok())
+        .flatten()
+}
+
+/// Whether `source` was written after a memory was stated, which is what makes it evidence that the memory changed. A message and a tool result are ordered by their own time: after `stated_at`, the time of the newest source the memory cites or, for a memory that cites none, of the commit that first recorded it. So the message a memory was taken from, a source of the same moment, and every older one are the memory's origin and never evidence against it, whenever their descriptors were published. A source with no time of its own, such as a repository document, and a source beside a memory whose time the store cannot give, are ordered by commit: published after `stated`, the commit that first recorded the memory.
 fn written_later(source: &SourceFacts, stated_at: Option<i64>, stated: i64) -> bool {
     match (source.written, stated_at) {
         (Some(written), Some(stated_at)) => written > stated_at,
@@ -1294,7 +1301,7 @@ pub enum Applied {
     Disputed { disposition: String },
     /// A `revise` of a user statement: the statement stays delivered and its line now names the later memory `by` as contesting it.
     Contested { by: String },
-    /// A `revise` the mode writes nothing for, so the memory stays as it is: of a user statement the store holds no later memory for or whose row a contest cannot rewrite, and in `contest` of a fact the assistant reported.
+    /// A `revise` the mode writes nothing for, so the memory stays as it is: of a user statement the store holds no later memory for or whose row a contest cannot rewrite, and in `contest` of a memory the assistant reported.
     Standing,
     /// `apply`: the Kernel settled the proposal.
     Accepted(Box<kernel::Settlement>),
@@ -1447,7 +1454,7 @@ fn later_memory_citing(
 ///
 /// A `revise` of the user's own statement inside the rule is treated alike in `contest` and `apply`. The model proposes `revise` when a later statement replaces part of what the statement says, as when one sentence gives two rules and the user later changes one. The reviewer writes no successor text for a user statement, and removing the statement would take the part that still stands out of delivery with it. So the statement stays delivered and is marked contested by the memory capture stored for the later message: its line names that memory and both dates, and a session reads the old sentence beside the newer rule. When capture stored no memory for the cited message, the statement stays as it is.
 ///
-/// A `revise` of a fact the assistant reported says part of the fact still holds; `contest` writes no successor text and a dispute would take the whole row, so in `contest` the fact stays as it is. For every other change inside the rule, `contest` disputes the target, citing the first later reference the proposal names as a contradiction; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs. A `revise` whose new text opens with another writer than the memory's own is dropped, so the reviewer's text never reads as the user's.
+/// A `revise` of a memory the assistant reported says part of it still holds; `contest` writes no successor text and a dispute would take the whole row, so in `contest` the memory stays as it is. For every other change inside the rule, `contest` disputes the target, citing the first later reference the proposal names as a contradiction; the statement leaves automatic delivery and stays on explicit search as a labeled row. `apply` accepts the proposal through the Kernel acceptance `review.accept` runs. A `revise` whose new text opens with another writer than the memory's own is dropped, so the reviewer's text never reads as the user's.
 pub fn apply_proposal(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -1566,11 +1573,8 @@ pub fn apply_proposal(
         };
     }
     if mode == ReviewApply::Contest {
-        // A `revise` of a fact the assistant reported says part of it still holds, and a dispute would take the whole row. `contest` writes no successor text, so the row stays as it is.
-        if proposal.action == ProposalAction::Revise
-            && writer == Writer::Assistant
-            && !crate::memory_capture::states_current_work(&memory)
-        {
+        // A `revise` of a memory the assistant reported says part of it still holds, and a dispute would take the whole row. `contest` writes no successor text, so the row stays as it is.
+        if proposal.action == ProposalAction::Revise && writer == Writer::Assistant {
             return release(Applied::Standing);
         }
         return dispute(
@@ -2074,8 +2078,26 @@ mod tests {
         }
     }
 
-    /// One source two triggers found takes one of a job's later slots, under its strongest trigger.
-    /// A message is later evidence when it was written after the memory was stated: one of the same moment, as another block of the source message is, and every older one are the memory's origin whatever commit published them. A source with no message time, and a message beside a memory whose time the store cannot give, are ordered by the commit that published them.
+    /// A message and a tool result are ordered by the time their descriptor carries; a repository document is ordered by commit.
+    #[test]
+    fn a_message_and_a_tool_result_carry_their_own_time() {
+        assert_eq!(
+            source_time("messages", "1700000000000"),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            source_time("raw_tool_spans", "1700000000000"),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(
+            source_time("repository_documents", "3"),
+            None,
+            "an observation count is no time"
+        );
+        assert_eq!(source_time("messages", "x"), None);
+    }
+
+    /// A message is later evidence when it was written after the memory was stated: one of the same moment, as another block of the source message is, and every older one are the memory's origin whatever commit published them. A source with no time of its own, and a source beside a memory whose time the store cannot give, are ordered by the commit that published them.
     #[test]
     fn a_source_is_later_when_written_after_the_memory_was_stated() {
         let source = |written: Option<i64>, published: i64| SourceFacts {
@@ -2101,13 +2123,14 @@ mod tests {
         assert!(written_later(&source(None, 8), stated_at, stated));
         assert!(
             !written_later(&source(None, 7), stated_at, stated),
-            "a tool span published with the memory's own commit"
+            "a repository document published with the memory's own commit"
         );
         assert!(!written_later(&source(None, 3), stated_at, stated));
         assert!(written_later(&source(Some(999), 8), None, stated));
         assert!(!written_later(&source(Some(1_001), 7), None, stated));
     }
 
+    /// One source two triggers found takes one of a job's later slots, under its strongest trigger.
     #[test]
     fn a_source_found_twice_is_one_piece_of_evidence() {
         let later = |evidence_id: &str, trigger| LaterEvidence {
