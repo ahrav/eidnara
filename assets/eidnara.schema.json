@@ -707,8 +707,9 @@
           ]
         },
         "classifier": {
-          "description": "User-only: the provider/model of a typed classifier that decides stage 1 in place of the small chat model, for example typesafe/jev-latest. A harness that can call it answers the daemon's classifier work, which sends the memory and the messages under review to the classifier's provider. Absent, or on a harness that cannot call a classifier, the small chat model decides.",
-          "type": "string"
+          "description": "User-only: the provider/model of a typed classifier that decides stage 1 in place of the small chat model, for example typesafe/jev-latest, as a literal; {env:} and {file:} references are not supported. A harness that can call it answers the daemon's classifier work, which sends the memory and the messages under review to the classifier's provider. Absent, or on a harness that cannot call a classifier, the small chat model decides.",
+          "type": "string",
+          "pattern": "^(?![\\s\\S]*\\{(?:env|file):)\\s*(?:[^\\s/][^/]*\\/[\\s\\S]*\\S)?\\s*$"
         }
       },
       "additionalProperties": false

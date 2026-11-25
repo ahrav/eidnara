@@ -4361,6 +4361,21 @@ mod memory_reviewer_model_parity {
                 row["verdict"].as_str().expect("a verdict"),
                 "{value:?}"
             );
+            // The classifier key gets the row's verdict through its own arm of the tier merge.
+            let tier = serde_json::json!({
+                "history_summarizer": { "module_model": "prov/summarizer" },
+                "memory_reviewer": { "enabled": true, "classifier": value },
+            });
+            let (cfg, warnings) = merge_tiers_with_warnings(Some(&tier), None);
+            let warned = warnings
+                .iter()
+                .any(|warning| warning.contains("/memory_reviewer/classifier"));
+            let classifier = match (cfg.memory_reviewer_classifier(), warned) {
+                (Some(_), false) => "named",
+                (None, false) => "unset",
+                _ => "refused",
+            };
+            assert_eq!(classifier, verdict, "classifier {value:?}");
         }
     }
 }

@@ -1,5 +1,5 @@
 {
-    "description": "Shared parity fixture for the memory_reviewer.model and memory_reviewer.stage1_model values. The Rust daemon (model_reference in crates/daemon/src/config.rs) and the plugin schema (packages/opencode-plugin/src/config/schema/eidnara.ts, published as a pattern in assets/eidnara.schema.json) judge every row and must agree.",
+    "description": "Shared parity fixture for the memory_reviewer.model, memory_reviewer.stage1_model and memory_reviewer.classifier values. The Rust daemon (model_reference in crates/daemon/src/config.rs) and the plugin schema (packages/opencode-plugin/src/config/schema/eidnara.ts, published as a pattern in assets/eidnara.schema.json) judge every row and must agree. The daemon alone also refuses a classifier longer than 256 bytes or one that holds a control character; no row reaches those two bounds.",
     "contract": [
         "named: the daemon uses the value, trimmed, as the provider/model reference, and the schema accepts it.",
         "unset: the daemon reads a blank value as an absent key, and the schema accepts it.",

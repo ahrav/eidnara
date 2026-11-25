@@ -182,6 +182,8 @@ export function createReviewClassifierPump(
                     "memory review classifier call",
                 ),
             );
+            // The pump reports `provider_unavailable` when the classifier returns a result after the work's `max_duration_ms` deadline.
+            if (timedOut) throw new ReviewClassifierError("provider_unavailable");
             // The daemon takes an answers object whose JSON text fits `MAX_ANSWERS_BYTES`. A classifier result of another shape or size fails the call with `model_failed`.
             if (!answers || Buffer.byteLength(JSON.stringify(answers)) > MAX_ANSWERS_BYTES) {
                 throw new ReviewClassifierError("model_failed");

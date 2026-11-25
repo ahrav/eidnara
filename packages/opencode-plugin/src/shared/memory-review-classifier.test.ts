@@ -251,6 +251,23 @@ describe("createReviewClassifierPump", () => {
         await pump.close();
     });
 
+    it("reports a result that arrives after the work's duration as provider_unavailable", async () => {
+        const fake = daemon([work({ max_duration_ms: 5 }), { state: "disabled" }]);
+        // The call ignores its abort signal and resolves inside the settle grace.
+        const pump = createReviewClassifierPump(
+            fake.client,
+            () => new Promise((resolve) => setTimeout(() => resolve({ late: true }), 30)),
+            { settleGraceMs: 500 },
+        );
+        pump.start(SCOPE);
+        await pump.idle();
+        const submitted = fake.calls.find(
+            (call) => call.method === "memory.review.classify.submit",
+        );
+        expect(submitted?.body.error).toBe("provider_unavailable");
+        expect(submitted?.body.answers).toBeUndefined();
+    });
+
     it("closes while a classifier call that ignores its abort signal is still running", async () => {
         const fake = daemon([work({ max_duration_ms: 5 })]);
         const pump = createReviewClassifierPump(fake.client, () => new Promise(() => undefined), {
