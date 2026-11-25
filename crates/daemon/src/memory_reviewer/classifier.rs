@@ -385,7 +385,7 @@ impl ClassifierExchange {
         })
     }
 
-    /// Hands `result` to the review that waits under `lease`; `false` when no request of `project` for `classifier` waits under it.
+    /// Hands `result` to the review that waits under `lease`; `false` when no request of `project` for `classifier` waits under it, which includes a request whose wait has ended.
     pub fn submit(
         &self,
         project: &str,
@@ -393,11 +393,13 @@ impl ClassifierExchange {
         lease: &str,
         result: Result<Value, String>,
     ) -> bool {
+        let now = Instant::now();
         let mut inner = self.lock();
         let Some(parked) = inner.parked.iter_mut().find(|parked| {
             parked.project == project
                 && parked.classifier == classifier
                 && parked.lease.as_deref() == Some(lease)
+                && parked.expires > now
         }) else {
             return false;
         };
@@ -705,6 +707,31 @@ mod tests {
         for run in [long, short, ended] {
             assert_eq!(run.await.unwrap(), Err(ClassifyError::Cancelled));
         }
+    }
+
+    /// A submission that arrives after the review's wait has ended is refused, also while the run has yet to observe that end.
+    #[tokio::test]
+    async fn a_submission_after_the_wait_ended_is_refused() {
+        let exchange = Arc::new(ClassifierExchange::default());
+        let run = {
+            let exchange = Arc::clone(&exchange);
+            tokio::spawn(async move {
+                exchange
+                    .classify(
+                        "project",
+                        "c/m",
+                        "{}".to_string(),
+                        Duration::from_millis(20),
+                        &CancellationToken::new(),
+                    )
+                    .await
+            })
+        };
+        let work = pull(&exchange, "project", "c/m").await;
+        // This thread also runs the review's task, so the review observes the end of its wait after the submission.
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(!exchange.submit("project", "c/m", &work.lease, Ok(json!({}))));
+        assert_eq!(run.await.unwrap(), Err(ClassifyError::Unanswered));
     }
 
     /// A harness counts as present for [`PRESENCE_WINDOW`] after a pull. A request that waits unpulled for [`ABSENCE_WAIT`] ends the presence, and a shorter wait keeps it.
