@@ -108,7 +108,7 @@ impl ReviewState {
         serde_json::to_string(&self.wire()).expect("the state serializes")
     }
 
-    fn wire(&self) -> WireState<'_> {
+    pub(super) fn wire(&self) -> WireState<'_> {
         fn references(references: &[StateReference]) -> Vec<WireReference<'_>> {
             references
                 .iter()
@@ -151,7 +151,7 @@ impl ReviewState {
 }
 
 #[derive(Serialize)]
-struct WireState<'a> {
+pub(super) struct WireState<'a> {
     memory: WireMemory<'a>,
     source: Vec<WireReference<'a>>,
     later: Vec<WireReference<'a>>,
@@ -173,20 +173,21 @@ struct WireReference<'a> {
     text: &'a str,
 }
 
-const CHANGES_QUESTION: &str = "Does an entry of `later` change what later sessions should be told by this memory? A statement of the user changes only on a later message the user wrote. A fact the assistant reported changes on a later assistant message or tool result that states the new value, or on a later user message.";
-const CHANGES_TRUE: &str = "A later message withdraws the memory's statement, gives a different value for the same subject and the same slot, or reports that the work the memory describes is finished or dropped.";
-const CHANGES_FALSE: &str = "No later message does that: the later messages repeat, acknowledge or build on the memory, add a separate rule or fact beside it, or concern something else.";
-const RELATION_QUESTION: &str = "Take the entry of `later` that bears most strongly on `memory`. How does it relate to the memory's statement?";
-const RELATION_REPLACES: &str = "It sets a different value for the same subject and the same slot as the memory (the same kind of name in the same position, the same tool for the same purpose, the same setting), or it withdraws the memory's statement.";
-const RELATION_ADDS: &str = "It states a separate rule or fact about another subject or another slot, such as another kind of name, a suffix beside a prefix, another tool, or another scope. The memory and the later message can both hold.";
-const RELATION_RESTATES: &str =
+pub(super) const CHANGES_QUESTION: &str = "Does an entry of `later` change what later sessions should be told by this memory? A statement of the user changes only on a later message the user wrote. A fact the assistant reported changes on a later assistant message or tool result that states the new value, or on a later user message.";
+pub(super) const CHANGES_TRUE: &str = "A later message withdraws the memory's statement, gives a different value for the same subject and the same slot, or reports that the work the memory describes is finished or dropped.";
+pub(super) const CHANGES_FALSE: &str = "No later message does that: the later messages repeat, acknowledge or build on the memory, add a separate rule or fact beside it, or concern something else.";
+pub(super) const RELATION_QUESTION: &str = "Take the entry of `later` that bears most strongly on `memory`. How does it relate to the memory's statement?";
+pub(super) const RELATION_REPLACES: &str = "It sets a different value for the same subject and the same slot as the memory (the same kind of name in the same position, the same tool for the same purpose, the same setting), or it withdraws the memory's statement.";
+pub(super) const RELATION_ADDS: &str = "It states a separate rule or fact about another subject or another slot, such as another kind of name, a suffix beside a prefix, another tool, or another scope. The memory and the later message can both hold.";
+pub(super) const RELATION_RESTATES: &str =
     "It repeats, confirms, acknowledges or builds on the memory without changing it.";
-const RELATION_UNRELATED: &str = "It does not bear on the memory, or `later` is empty.";
-const WORK_ENDED_QUESTION: &str = "When `memory.work_in_progress` is true the memory describes work that was unfinished when it was stored. Does an entry of `later` say that this work is finished or dropped?";
-const WORK_ENDED_TRUE: &str = "A later message says the work the memory describes is finished, merged, shipped, abandoned or no longer needed.";
-const WORK_ENDED_FALSE: &str =
+pub(super) const RELATION_UNRELATED: &str = "It does not bear on the memory, or `later` is empty.";
+pub(super) const WORK_ENDED_QUESTION: &str = "When `memory.work_in_progress` is true the memory describes work that was unfinished when it was stored. Does an entry of `later` say that this work is finished or dropped?";
+pub(super) const WORK_ENDED_TRUE: &str = "A later message says the work the memory describes is finished, merged, shipped, abandoned or no longer needed.";
+pub(super) const WORK_ENDED_FALSE: &str =
     "The memory describes no work in progress, or no later message says its work ended.";
-const STRONGEST_QUESTION: &str = "Which entry of `later` bears most strongly on `memory`?";
+pub(super) const STRONGEST_QUESTION: &str =
+    "Which entry of `later` bears most strongly on `memory`?";
 
 /// The system text of every stage-1 chat request: what the state holds, the four questions with the closed answers of each, and the answer's form. It quotes no review, so every request of every project sends the same bytes ahead of its state.
 pub fn system_text() -> String {
@@ -317,26 +318,60 @@ impl Stage1 {
     }
 }
 
-/// The chat decider flags a review when an eligible later reference exists and `changes` is `yes` or `unsure`, or when the memory is work in progress with a later reference and `work_ended` is `yes` or `unsure`. A review whose answer [`ChatAnswers::parse`] could not read is flagged, so the review model decides it.
-pub fn decide(state: &ReviewState, answers: Option<&ChatAnswers>) -> Stage1 {
-    let Some(answers) = answers else {
-        return Stage1::Flagged;
-    };
-    let changed = state.has_eligible_later() && answers.changes.flags();
-    let ended = state.work_in_progress && !state.later.is_empty() && answers.work_ended.flags();
-    if changed || ended {
-        Stage1::Flagged
-    } else {
-        Stage1::Keep
+impl ReviewState {
+    /// The flag rule of every decider: a review is flagged when an eligible later reference exists and the decider answered that the memory `changes`, or when the memory is work in progress with a later reference and the decider answered that the `work_ended`.
+    pub fn flag(&self, changes: bool, work_ended: bool) -> Stage1 {
+        let changed = self.has_eligible_later() && changes;
+        let ended = self.work_in_progress && !self.later.is_empty() && work_ended;
+        if changed || ended {
+            Stage1::Flagged
+        } else {
+            Stage1::Keep
+        }
     }
 }
 
-/// What stage 1 decided for one review and which model decided it.
+/// The chat decider answers `changes` and `work_ended` for [`ReviewState::flag`] with `yes` or `unsure`. A review whose answer [`ChatAnswers::parse`] could not read is flagged, so the review model decides it.
+pub fn decide(state: &ReviewState, answers: Option<&ChatAnswers>) -> Stage1 {
+    answers.map_or(Stage1::Flagged, |answers| {
+        state.flag(answers.changes.flags(), answers.work_ended.flags())
+    })
+}
+
+/// Which decider answered a review's stage 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decider {
+    /// A chat model, named by its `provider/model`, answered through the host's model execution.
+    ChatModel(String),
+    /// The typed classifier the project names answered through the harness.
+    Classifier(String),
+    /// The host decided without a request: a review with no later reference that may change its memory is a keep, and a state too large for one request is flagged.
+    Host,
+}
+
+impl Decider {
+    /// The decider's kind as the worker's log names it.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::ChatModel(_) => "chat_model",
+            Self::Classifier(_) => "classifier",
+            Self::Host => "none",
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::ChatModel(model) | Self::Classifier(model) => model,
+            Self::Host => "none",
+        }
+    }
+}
+
+/// What stage 1 decided for one review and who decided it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stage1Record {
     pub decision: Stage1,
-    /// The `provider/model` of the chat model that answered; empty when the host decided without a request.
-    pub model: String,
+    pub decider: Decider,
     /// The evidence ids of the later references the review was shown that count as evidence against the memory ([`ReviewState::eligible`]). A change proposal acts only when it cites one of them.
     pub later: Vec<String>,
 }
@@ -452,6 +487,22 @@ pub(super) mod tests {
         format!(
             r#"{{"strongest":"ref-3","relation":"replaces","changes":"{changes}","work_ended":"{work_ended}"}}"#
         )
+    }
+
+    /// The worker's log names each decider by these two words, and a report splits results on them.
+    #[test]
+    fn a_decider_is_logged_by_its_kind_and_model() {
+        let chat = Decider::ChatModel("prov/small".to_string());
+        let classifier = Decider::Classifier("typesafe/jev-latest".to_string());
+        assert_eq!((chat.kind(), chat.model()), ("chat_model", "prov/small"));
+        assert_eq!(
+            (classifier.kind(), classifier.model()),
+            ("classifier", "typesafe/jev-latest")
+        );
+        assert_eq!(
+            (Decider::Host.kind(), Decider::Host.model()),
+            ("none", "none")
+        );
     }
 
     /// The state text carries the memory, its source and the later references in one fixed member order, and writes a reference without a time as `null`.
@@ -660,7 +711,7 @@ pub(super) mod tests {
         let book = StageOneBook::default();
         let record = Stage1Record {
             decision: Stage1::Flagged,
-            model: "prov/small".to_string(),
+            decider: Decider::ChatModel("prov/small".to_string()),
             later: vec!["evidence".to_string()],
         };
         book.record("job", record.clone());

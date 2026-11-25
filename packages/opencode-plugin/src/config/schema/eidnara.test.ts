@@ -106,6 +106,10 @@ describe("EidnaraConfigSchema", () => {
                 apply: "apply",
             });
             expect(
+                parse({ enabled: true, classifier: "typesafe/jev-latest" }).data?.memory_reviewer,
+            ).toEqual({ enabled: true, apply: "contest", classifier: "typesafe/jev-latest" });
+            expect(parse({ classifier: 1 }).success).toBe(false);
+            expect(
                 parse({ enabled: true, stage1_model: "provider/small", apply: "propose" }).data
                     ?.memory_reviewer,
             ).toEqual({ enabled: true, stage1_model: "provider/small", apply: "propose" });
@@ -129,7 +133,7 @@ describe("EidnaraConfigSchema", () => {
             ) as { rows: { value: string; verdict: "named" | "unset" | "refused" }[] };
             expect(fixture.rows.length).toBeGreaterThan(0);
             for (const { value, verdict } of fixture.rows) {
-                for (const key of ["model", "stage1_model"]) {
+                for (const key of ["model", "stage1_model", "classifier"]) {
                     const parsed = EidnaraConfigSchema.safeParse({
                         memory_reviewer: { enabled: true, [key]: value },
                     });

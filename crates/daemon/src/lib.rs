@@ -2936,6 +2936,8 @@ pub struct HandlerCore {
     memory_reviewer_acceptance_record: Arc<Mutex<Option<projection_lifecycle::HeldRecord>>>,
     source_health: Mutex<Option<host_runtime::model_execution::source_health::SourceHealthCell>>,
     memory_reviewer_permits: Arc<memory_reviewer::coordinator::InvestigationPermits>,
+    /// Where review runs park classifier requests for the harness; the worker and the `memory.review.classify` handlers share it.
+    review_classifiers: Arc<memory_reviewer::classifier::ClassifierExchange>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
     /// Evaluator registrations exist only in memory and are keyed by notes-authority project.
@@ -3884,6 +3886,7 @@ impl Handler {
             memory_reviewer_acceptance_record: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
+            review_classifiers: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel,
@@ -4055,6 +4058,7 @@ impl HandlerCore {
         let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
         let memory_reviewer_worker = Arc::clone(&self.memory_reviewer_worker);
         let review_producers = Arc::clone(&self.producer_factory);
+        let review_classifiers = Arc::clone(&self.review_classifiers);
         let review_search_lifecycle = Arc::clone(&self.search_lifecycle);
         let memory_reviewer_host = self
             .memory_reviewer_host
@@ -4203,6 +4207,7 @@ impl HandlerCore {
                                 switched: memory_reviewer::worker::SwitchedReview::through(
                                     review_producers,
                                     Some(claims_published),
+                                    review_classifiers,
                                 ),
                             });
                             let _ = memory_reviewer_worker.set(Arc::clone(&worker));
@@ -4463,6 +4468,7 @@ impl Handler {
             memory_reviewer_acceptance_record: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
+            review_classifiers: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
             cancel: CancellationToken::new(),
@@ -14836,6 +14842,12 @@ impl HandlerCore {
                     self.handle_native_capture_submit(channel, &request).await
                 }
                 "memory.capture" => self.handle_memory_capture(channel, &request).await,
+                memory_reviewer::classifier_wire::NEXT => {
+                    self.handle_review_classify_next(channel, &request)
+                }
+                memory_reviewer::classifier_wire::SUBMIT => {
+                    self.handle_review_classify_submit(channel, &request)
+                }
                 "memory.capture.status" => self.handle_memory_capture_status(channel, &request),
                 "memory_classifier.run_task" => {
                     self.handle_memory_classifier_run_task(channel, &request)

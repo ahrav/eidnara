@@ -1249,7 +1249,7 @@ describe("fold-authority parity fixture", () => {
     });
 
     it("leaves a memory reviewer model that holds a reference unset before substitution and warns with its key", () => {
-        for (const key of ["model", "stage1_model"] as const) {
+        for (const key of ["model", "stage1_model", "classifier"] as const) {
             const user = JSON.stringify({
                 memory_reviewer: { enabled: true, [key]: "{env:REVIEW_MODEL}" },
             });
