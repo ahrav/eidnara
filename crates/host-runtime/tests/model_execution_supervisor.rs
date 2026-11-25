@@ -396,6 +396,75 @@ async fn early_and_late_subscribers_replay_byte_identical_units() {
     assert_eq!(unit_json(&early_units[2])["unit"]["type"], "run_finished");
 }
 
+/// A backend that names the model of its answer has the id replayed in an `answering_model` unit ahead of the answer's `assistant_message` unit. An id over the bound the terminal headroom reserves for is left out, and the answer is replayed unnamed.
+#[tokio::test(start_paused = true)]
+async fn an_answering_model_unit_precedes_the_answer_it_names() {
+    use host_runtime::model_execution::backend::{BackendEvent, FinishReason};
+
+    let named = |model: String| {
+        ScriptedBackend::with_behavior(move |_request, events, _cancel| {
+            let model = model.clone();
+            Box::pin(async move {
+                events.emit(BackendEvent::AnsweringModel { model });
+                events.emit(BackendEvent::AssistantText {
+                    text: "answer".to_owned(),
+                    finish_reason: None,
+                });
+                BackendTerminal::Completed {
+                    finish_reason: FinishReason::Completed,
+                }
+            })
+        })
+    };
+    let replay_types = |units: &[Vec<u8>]| -> Vec<String> {
+        units
+            .iter()
+            .map(|unit| unit_json(unit)["unit"]["type"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let supervisor = Supervisor::with_limits(
+        named("prov-model-1".to_owned()) as Arc<_>,
+        ModelExecutionLimits::default(),
+    );
+    let run_id = send(&supervisor, "s-named", "prompt");
+    until(
+        || supervisor.status(&key("s-named"), &run_id) == Ok("completed"),
+        "the named run completes",
+    )
+    .await;
+    let units = drain_bytes(supervisor.subscribe(&key("s-named")).expect("subscribes")).await;
+    assert_eq!(
+        replay_types(&units),
+        [
+            "run_started",
+            "answering_model",
+            "assistant_message",
+            "run_finished"
+        ]
+    );
+    assert_eq!(unit_json(&units[1])["unit"]["model"], "prov-model-1");
+    assert_eq!(unit_json(&units[1])["unit"]["run_id"], run_id);
+    supervisor.shutdown().await;
+
+    let supervisor = Supervisor::with_limits(
+        named("m".repeat(protocol::MAX_ANSWERING_MODEL_BYTES + 1)) as Arc<_>,
+        ModelExecutionLimits::default(),
+    );
+    let run_id = send(&supervisor, "s-long", "prompt");
+    until(
+        || supervisor.status(&key("s-long"), &run_id) == Ok("completed"),
+        "the run with an oversized id completes",
+    )
+    .await;
+    let units = drain_bytes(supervisor.subscribe(&key("s-long")).expect("subscribes")).await;
+    assert_eq!(
+        replay_types(&units),
+        ["run_started", "assistant_message", "run_finished"]
+    );
+    supervisor.shutdown().await;
+}
+
 #[tokio::test]
 async fn subscriber_caps_enforce_per_run_and_total_without_leaking_permits() {
     let (backend, gate) = ScriptedBackend::gated("out");

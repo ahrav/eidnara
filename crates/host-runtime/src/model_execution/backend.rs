@@ -127,18 +127,41 @@ pub(crate) const OPENCODE_PROVIDER_ERROR_MESSAGE: &str = "opencode provider repo
 /// `BackendError::message` of a Pi run whose model provider rejected the request.
 pub(crate) const PI_PROVIDER_ERROR_MESSAGE: &str = "pi assistant stopped with reason \"error\"";
 
+/// A first line of `system` with which a caller asks that the model receive the rest of the text exactly as written, without the lines a harness adds about its own process, such as the current date. A caller whose evidence carries its own times asks for this. [`plain_system`] reads it, and each adapter removes it before the text reaches a harness. The Pi adapter sends the text as written. The OpenCode adapter sends it as the agent prompt, after which OpenCode appends its environment block with the working directory and the date.
+pub const PLAIN_SYSTEM_DIRECTIVE: &str = "[eidnara: send this system text as written]\n";
+
+/// Splits `system` into whether it opens with [`PLAIN_SYSTEM_DIRECTIVE`] and the text after the directive.
+pub fn plain_system(system: &str) -> (bool, &str) {
+    system
+        .strip_prefix(PLAIN_SYSTEM_DIRECTIVE)
+        .map_or((false, system), |rest| (true, rest))
+}
+
+/// `BackendError::message` of a Pi run whose provider completed the response under a stop outside end, length, and tool use, such as a content filter, and so returned no answer.
+pub const PI_PROVIDER_STOP_MESSAGE: &str = "pi provider ended the response without an answer";
+
+/// Whether a `BackendError::message` says the provider itself ended the response without an answer. The same request meets the same stop again, so a caller with a bounded number of requests settles on the first one. Pi 0.80.2 writes one text for every stop of a completed response outside end, length, tool use, and an Anthropic refusal, so this is also true of the few such stops a second request can pass.
+pub fn is_provider_stop(message: &str) -> bool {
+    message
+        .strip_prefix(PI_PROVIDER_STOP_MESSAGE)
+        .is_some_and(ends_or_reports_cleanup)
+}
+
+/// Whether `rest`, the text after a fixed message, is empty or the `; additionally ...` decoration `merge_cleanup` and `merge_record_retained` append. The decoration reports host cleanup, so the fixed message before it still names the run's failure.
+fn ends_or_reports_cleanup(rest: &str) -> bool {
+    rest.is_empty() || rest.starts_with("; additionally ")
+}
+
 /// Whether a `BackendError::message` names a failure the model provider reported about the request's content, as opposed to one the host raised while preparing, launching, or supervising the harness, or one about the configuration.
 /// `ErrorClass::Permanent` covers all of these; a caller that reacts to the request's content needs the distinction, because a host or configuration failure recurs for any request until the environment changes.
 /// Only an OpenCode terminal carrying a status from `CONTENT_REJECTION_STATUSES` qualifies. A Pi `"error"` stop drops the provider's text, and an OpenCode terminal without a status keeps only a text classification whose default is `Permanent`, so neither separates a content refusal from an unknown model or an exhausted account.
-/// `merge_cleanup` and `merge_record_retained` may append `; additionally ...`; the decoration reports host cleanup, not the provider.
 pub fn is_provider_reported_failure(message: &str) -> bool {
     message
         .strip_prefix(OPENCODE_PROVIDER_ERROR_MESSAGE)
         .and_then(|rest| rest.strip_prefix(" (status "))
         .and_then(|rest| rest.split_once(')'))
         .is_some_and(|(status, rest)| {
-            CONTENT_REJECTION_STATUSES.contains(&status)
-                && (rest.is_empty() || rest.starts_with("; additionally "))
+            CONTENT_REJECTION_STATUSES.contains(&status) && ends_or_reports_cleanup(rest)
         })
 }
 
@@ -168,6 +191,10 @@ pub enum BackendTerminal {
 pub enum BackendEvent {
     HarnessDispatch {
         harness: Harness,
+    },
+    /// The model id the harness's deciding assistant message reports, so a producer can hold the answer to the model its request named.
+    AnsweringModel {
+        model: String,
     },
     AssistantText {
         text: String,

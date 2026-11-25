@@ -14,19 +14,26 @@
 // since that API refuses the field and a refused request costs a whole
 // retried run.
 // The hook preserves every
-// unrelated payload field, and REJECTS (throws, failing the request)
-// payload shapes it does not recognize — silently dropping generation
-// controls would let a provider default exceed the caller's budget.
+// unrelated payload field, and throws on payload shapes it does not
+// recognize. Pi's runner logs a handler's throw and sends the payload it
+// had, so a throw here is a diagnostic on standard error; the system-text
+// guard in the handler ends the process, which is what fails a run.
 //
 // The hook also owns where a run writes provider cache entries; see
 // `withoutConversationCacheMarkers`.
 //
-// The requested values arrive through two adapter-owned environment
-// variables set by host-runtime's Pi backend; they are plain bounded numbers,
-// never prompt or credential material.
+// The requested values arrive through adapter-owned environment
+// variables set by host-runtime's Pi backend; they are plain bounded numbers
+// and one flag, never prompt or credential material.
+//
+// The flag asks for the caller's system text as written. Pi appends the
+// current date and the working directory to a custom system prompt; a caller
+// whose evidence carries its own times sets the flag, and the hook gives the
+// model the custom prompt alone.
 
 const MAX_OUTPUT_TOKENS_ENV = "EIDNARA_MODEL_EXECUTION_MAX_OUTPUT_TOKENS";
 const TEMPERATURE_ENV = "EIDNARA_MODEL_EXECUTION_TEMPERATURE";
+const PLAIN_SYSTEM_ENV = "EIDNARA_MODEL_EXECUTION_PLAIN_SYSTEM";
 
 function requiredNumber(name) {
 	const raw = process.env[name];
@@ -84,8 +91,47 @@ function withoutConversationCacheMarkers(messages) {
 	});
 }
 
+// A provider adapter can add system text after the agent start replaced the
+// prompt, as Pi's Anthropic adapter does with an identity block for an OAuth
+// credential. A `system` array, the Anthropic Messages and Bedrock Converse
+// spelling, passes when its one text block equals the caller's text; blocks
+// without text, such as a `cachePoint`, are skipped. A payload that spells the
+// system text another way passes on the replaced prompt alone.
+function carriesWrittenSystem(written, payload) {
+	if (written === undefined) return false;
+	const system = isPlainObject(payload) ? payload.system : undefined;
+	if (!Array.isArray(system)) return true;
+	let found = false;
+	for (const block of system) {
+		if (!isPlainObject(block) || typeof block.text !== "string") continue;
+		if (found || block.text !== written) return false;
+		found = true;
+	}
+	return found;
+}
+
 export default function (pi) {
+	const plainSystem = process.env[PLAIN_SYSTEM_ENV] === "1";
+	let written;
+	pi.on("before_agent_start", (event) => {
+		if (!plainSystem) return undefined;
+		const custom = event?.systemPromptOptions?.customPrompt;
+		if (typeof custom !== "string" || custom === "") return undefined;
+		written = custom;
+		return { systemPrompt: custom };
+	});
 	pi.on("before_provider_request", (event, ctx) => {
+		// A flagged run whose system text was not replaced, or whose request holds
+		// other system text, would send the harness's own lines to
+		// the model while its caller counts on the text as written. Pi catches a
+		// handler's throw and sends the request anyway, so the run ends here with a
+		// failing exit status, which the adapter reports as a failed run.
+		if (plainSystem && !carriesWrittenSystem(written, event?.payload)) {
+			process.stderr.write(
+				"model_execution payload hook: the system text could not be sent as written\n",
+			);
+			process.exit(1);
+		}
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
 		const requestedTemperature = process.env[TEMPERATURE_ENV] === undefined
 			? undefined : requiredNumber(TEMPERATURE_ENV);
