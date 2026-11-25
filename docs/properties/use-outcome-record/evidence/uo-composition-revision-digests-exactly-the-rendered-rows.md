@@ -25,7 +25,7 @@ were read at the tree that holds
   `CURRENT_WORK` rows in the supplied order (`crates/daemon/src/canonical_memory.rs:57-86`).
 - The rows come from the injectable snapshot, trimmed to the memory budget
   before rendering (`injectable_snapshot`
-  (`crates/daemon/src/canonical_memory.rs:822`)).
+  (`crates/daemon/src/canonical_memory.rs:888`)).
 - The spec cited the `fn` lines of the first four tests named under Existing
   check, and the production code was not cited. The fifth covers the order
   of the `CURRENT_WORK` rows, the sixth the `NAMED_FILES` rows and how
@@ -40,21 +40,21 @@ were read at the tree that holds
   in the supplied order. The last-change clause of a `NAMED_FILES` line reads
   the work tree when the block is composed and is no input of the digest.
 - Existing check: `revision_changes_only_when_the_rendered_inputs_change`
-  (`crates/daemon/src/canonical_memory.rs:1350`);
+  (`crates/daemon/src/canonical_memory.rs:1701`);
   `rows_the_renderer_drops_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1646`);
+  (`crates/daemon/src/canonical_memory.rs:1997`);
   `bytes_past_the_render_cap_do_not_move_the_revision`
-  (`crates/daemon/src/canonical_memory.rs:1663`);
+  (`crates/daemon/src/canonical_memory.rs:2014`);
   `rows_past_the_memory_budget_are_neither_injected_nor_digested`
-  (`crates/daemon/src/canonical_memory.rs:1685`);
+  (`crates/daemon/src/canonical_memory.rs:2036`);
   `the_revision_reads_the_current_work_section_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1612`);
+  (`crates/daemon/src/canonical_memory.rs:1963`);
   `the_revision_reads_the_named_files_in_the_supplied_order`
-  (`crates/daemon/src/canonical_memory.rs:1551`);
+  (`crates/daemon/src/canonical_memory.rs:1902`);
   `the_revision_leaves_out_a_named_files_last_change`
-  (`crates/daemon/src/canonical_memory.rs:1760`);
+  (`crates/daemon/src/canonical_memory.rs:2111`);
   `rows_of_one_id_enter_the_revision_in_category_order`
-  (`crates/daemon/src/canonical_memory.rs:1807`). Status: unaudited.
+  (`crates/daemon/src/canonical_memory.rs:2158`). Status: unaudited.
 
 ## Failure scenario
 

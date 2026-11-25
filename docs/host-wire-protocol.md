@@ -650,17 +650,17 @@ payload, a reason string, or a project.
 | `selections_frozen`, `selections_enqueued`, `selections_expired`, `selections_failed_slot` | unsigned integer | Memory Classifier selection pages by state |
 | `attempts_attempted`, `attempts_acknowledged`, `attempts_failed`, `attempts_cancelled`, `attempts_unknown`, `attempts_not_dispatched`, `attempts_open` | unsigned integer | model attempts consumed, by terminal kind; `acknowledged` is a complete provider response, `open` has no terminal yet |
 | `receipts_in_progress`, `receipts_complete` | unsigned integer | execution receipts by state |
-| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | permanent receipt charges, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
+| `receipt_charge_bytes`, `allowance_bytes`, `metadata_bytes`, `metadata_quota_bytes`, `metadata_headroom_bytes` | unsigned integer | receipt charges of jobs and frozen selection pages the store still holds, temporary allowances still held by jobs and frozen selection pages, their total, the host quota, and what remains under it |
 | `nonadmissions`, `sessions_with_reservation` | unsigned integer | producer-owned History Summarizer nonadmissions summed over sessions, and sessions whose producer state records a MemoryReviewer reservation |
 | `latest_nonadmission_memory_reviewer_unavailable`, `latest_nonadmission_capacity_full`, `latest_nonadmission_evidence_unavailable`, `latest_nonadmission_fact_set_rejected`, `latest_nonadmission_subject_refused` | unsigned integer | sessions whose latest nonadmission carries each closed code |
 
 The same integer rules as `kernel` apply: every counter MUST be no greater
 than 2^53; a larger, negative, non-integer, or `null` counter is dropped to
 absent, never reported as `null`; unknown fields are dropped; fields are
-additive. Permanent receipt charges never shrink within a store incarnation,
-so `metadata_headroom_bytes` reaching zero means new review work is refused
-until a new incarnation; it is a safety ceiling, not a measured service
-lifetime.
+additive. A job keeps its receipt charge until the retirement sweep deletes
+it, ninety days after its queue deadline, and a terminal selection page until the sweep deletes it after its jobs, so `metadata_headroom_bytes`
+reaching zero means new review work is refused until older jobs and pages retire; the
+quota bounds the review work of one ninety-day window. The job, selection, attempt, and receipt counters count the rows the store still holds.
 
 The `context` component MAY also carry a sanitized `metrics.source_capture`
 object describing source capture (Section 7.9), the background publication of
@@ -858,7 +858,7 @@ A **context** is `{"context_revision": string, "representation": string, "spans"
 
 `review.read` carries `causal_identity` (hex64; any other spelling is `invalid_params`) and answers the proposal its completed receipt selects. The receipt's selection records the Kernel project digest the proposal was staged under, and the read binds to that recorded digest, so every root bound to the project reads the same proposal whichever root bound most recently and across a daemon restart: `{"kind":"proposal","causal_identity","reference":{"database_incarnation_id","candidate_id","payload_digest"},"proposal": <staged proposal>,"review_expires_at": i64}`. The proposal is the Kernel's staged `ReviewProposal` as serialized: `action`, `target`, optional `new_text`, `support`, `contradictions`, `limitations`, `uncertainty`, `manifest`, `policy_dependencies`. `review_expires_at` is the live review hold's expiry and the only source of the review deadline. Otherwise the answer is `{"kind":"terminal","terminal": t}` with `t` one of `not_selected` (no job, no receipt, a receipt in progress, or a terminal that selected nothing, including every abstention), `incarnation_mismatch` (the receipt binds another Kernel or Memory Store incarnation than the live pair), `selection_mismatch`, `kernel_refused`, `review_expired` (the review hold ended; selection never refreshes a deadline), `dependency_refused` (a disclosed input no longer passes the Kernel for a local reader), or `store_unavailable`. A staged row the Kernel classifies `Secret` is `dependency_refused`; its proposal is never returned.
 
-`review.accept` carries `causal_identity` (hex64), `operation_key` (1 to 128 visible ASCII bytes, 0x21 to 0x7E: the caller's idempotency key, scoped to the job), and `target`, the selected proposal's `target` exactly as `review.read` returned it; any other spelling of a field is `invalid_params`. It applies the proposal the job's completed receipt selects through one Kernel envelope that checks the exact target, every disclosed input under the live review hold, and every policy-union member, or replays the settlement an earlier acceptance of the proposal recorded under any operation key. The replay is answered before the review hold or the queue deadline is consulted. It answers `{"kind":"settled","replayed": bool,"settlement": <settlement>}`, the settlement as the Kernel records it: `version`, `proposal_id`, `payload_digest`, `receipt_generation`, `kernel_incarnation`, `memstore_incarnation`, `project_digest`, `action`, `target`, `commit_seq`, and `effect`, one of `{"kind":"unchanged"}`, `{"kind":"retired","object_id","object_kind","invalidated_commit_seq","granted_authority_before","demoted","deferred"}`, `{"kind":"created","object_id","admission"}`, or `{"kind":"revised","object_id","predecessor_object_id","predecessor_source_revision","source_revision","predecessor_disposition","admission"}`, where `admission` is `{"disposition","effective_maturity","visibility","source_class","taint_class","sensitivity_class"}`. A create is scoped to the bound project's scope, which a kernel route materializes on its first commit. Acceptance has its own gate. After the body is validated and the route's state is answered as for `review.read`, and until the deployment owner's acceptance record names the live Kernel and Memory Store incarnations, it answers `{"kind":"terminal","terminal":"disabled"}`; the disclosure activation gate neither opens nor closes it, and the connection key is the caller's authority on any route, observational or not. Otherwise the answer is `{"kind":"terminal","terminal": t}` with `t` one of `not_selected`, `incarnation_mismatch`, `selection_mismatch` (each as for `review.read`), `unavailable` (no selected proposal of this run is readable, or a create finds no scope of the bound project), `review_expired` (the review hold ended, or the queue deadline was not after the selection), `changed` (the target, an owner, or a disclosed input moved, or the request names another target than the proposal's), `conflict` (the job's operation key was used for another target), `invalid`, or `store_unavailable`. A refused acceptance writes nothing.
+`review.accept` carries `causal_identity` (hex64), `operation_key` (1 to 128 visible ASCII bytes, 0x21 to 0x7E: the caller's idempotency key, scoped to the job's causal identity), `reference`, the object `review.read` returned under that name with its `database_incarnation_id`, `candidate_id`, and `payload_digest` unchanged, and `target`, the selected proposal's `target` exactly as `review.read` returned it; any other spelling of a field, a missing field included, is `invalid_params`. It applies the proposal the job's completed receipt selects, when `reference` names that proposal, through one Kernel envelope that checks the exact target, every disclosed input under the live review hold, and every policy-union member, or replays the settlement an earlier acceptance of the proposal recorded under any operation key. The replay is answered before the review hold or the queue deadline is consulted. A job the retirement sweep deleted, ninety days after its queue deadline, has no receipt, so a replay that names it answers `not_selected`. A request whose `reference` names another proposal than the job's completed receipt selects answers `not_selected` as well and writes nothing: once a later job of the same inputs holds the causal identity, an acceptance built from a read of the retired job's proposal carries that proposal's `reference`, and the caller reads again. It answers `{"kind":"settled","replayed": bool,"settlement": <settlement>}`, the settlement as the Kernel records it: `version`, `proposal_id`, `payload_digest`, `receipt_generation`, `kernel_incarnation`, `memstore_incarnation`, `project_digest`, `action`, `target`, `commit_seq`, and `effect`, one of `{"kind":"unchanged"}`, `{"kind":"retired","object_id","object_kind","invalidated_commit_seq","granted_authority_before","demoted","deferred"}`, `{"kind":"created","object_id","admission"}`, or `{"kind":"revised","object_id","predecessor_object_id","predecessor_source_revision","source_revision","predecessor_disposition","admission"}`, where `admission` is `{"disposition","effective_maturity","visibility","source_class","taint_class","sensitivity_class"}`. A create is scoped to the bound project's scope, which a kernel route materializes on its first commit. Acceptance has its own gate. After the body is validated and the route's state is answered as for `review.read`, and until the deployment owner's acceptance record names the live Kernel and Memory Store incarnations, it answers `{"kind":"terminal","terminal":"disabled"}`; the disclosure activation gate neither opens nor closes it, and the connection key is the caller's authority on any route, observational or not. Otherwise the answer is `{"kind":"terminal","terminal": t}` with `t` one of `not_selected` (as for `review.read`, or the request names another proposal than the receipt selects), `incarnation_mismatch`, `selection_mismatch` (each as for `review.read`), `unavailable` (no selected proposal of this run is readable, or a create finds no scope of the bound project), `review_expired` (the review hold ended, or the queue deadline was not after the selection), `changed` (the target, an owner, or a disclosed input moved, or the request names another target than the proposal's), `conflict` (the job's operation key was used for another target), `invalid`, or `store_unavailable`. A refused acceptance writes nothing.
 
 `review.use_outcome` carries `object_id` (a decision object id of 1 to 512 bytes; any other spelling of the field, or an id outside that length, is `invalid_params`) and answers the use-outcome counts of that decision within the bound project: `{"kind":"counts","object_id": string,"served_sessions": u64,"disputed_after_serve": u64}`. `served_sessions` is the number of unretired use-outcome serving records of the bound project whose decision rows name the object, one per (harness, session, served set), and `disputed_after_serve` the number of those records after whose `served_commit_seq` a committed `mark_disputed` or `contradict` admission on the object's lineage followed; both are derived at one Kernel snapshot, so `disputed_after_serve <= served_sessions`, and a decision the project never served answers `0` for both. The answer names counts only, never a session. The method reads the Kernel alone and binds through the kernel-route scope, so the route's state is answered before the body is validated: a route bound to a root the binding does not accept answers the kernel routes' `invalid`/`project_mismatch` state, and an unready Kernel answers its `unavailable` state (reason `store_starting`, `store_unavailable`, or `store_unsupported`). A failed read answers the kernel state its failure maps to, such as `unavailable`/`store_busy`; the read, including its wait for a Kernel reader, runs under a 5 s bound, and a read that exceeds the bound answers `unavailable`/`store_busy`. No state answer carries a count. An uninstalled Memory Store, a root without MODULE memories authority, and a closed activation gate do not change the answer, so no `disabled` terminal applies. The connection key is the caller's authority on any route, observational or not, and the read authorizes nothing else. A daemon that predates the method answers the `unrecognized_request_shape` error. A client decodes each count as an exact integer no greater than 2^53 and treats any other answer, any count outside that range, a body it cannot decode, and the `unrecognized_request_shape` error as unavailable; any other error fails the request. No answer and no error yields a zero count.
 
@@ -1877,7 +1877,34 @@ fact's unchanged row. A stored plan whose fact names more than four contests
 is refused as invalid. A fact the Kernel does not serve as approved, or serves above normal
 sensitivity, is left as it is, so a contest returns no fact to `auto_inject`. A later contest by another
 fact supersedes the statement again and names that newer fact, and a contest
-by the fact already named writes nothing. The `<project-memory>` block renders
+by the fact already named writes nothing. A fact that capture writes as the
+user's statement, its stored text being the label and the quotation alone,
+holds `replaces_observation` in its rationale when it names at least one
+fact under `replaces` or `also_replaces` and every fact the plan's facts of
+its quotation name there is an observation: a fact the Kernel serves as
+unapproved that is no quotation capture stored under the `User stated: `
+label, which an assistant's report and a memory the host memory tool wrote
+are. Two facts share a quotation when their quotations are equal once edge
+whitespace and one closing `.` or `!` are dropped. The named facts of a
+quotation are judged together before the plan writes any fact, so one
+statement stored as two facts is judged as one. The
+record is an object with `recorded_seq`, the commit sequence that recorded
+the earliest of those observations. A statement that names no fact holds no
+record. A statement whose quotation names a fact the Kernel serves as
+approved, one a labeled correction keeps live and contests included, or a
+labeled quotation of the user, holds none, and a note retired because a
+replaced statement restated it is not counted. Each fact that later rewrites
+the statement, for a contest, a settlement, or its end, keeps the record. The
+`<project-memory>` block renders a statement whose rationale holds the record
+as
+`<statement> (stated <date>; it replaces a value recorded <date> that the user had not stated)`
+on every pass that shows no contest of the statement, a pass whose Kernel
+serves the contesting fact no longer among them,
+the dates being the UTC days on which the statement's first commit and the
+commit `recorded_seq` names were recorded, `unknown date` when the commit log
+holds none; a record of another shape marks nothing. The stored summary holds
+the user's words alone, and explicit search shows the rationale with the
+record as it shows every rationale field. The `<project-memory>` block renders
 a contested statement as
 `<statement> (stated <date>; contested <date> by <fact id>: "<excerpt>")`,
 the dates being the UTC days on which the statement's first commit and the
@@ -1898,9 +1925,11 @@ the store state of the statements it renders, and shows the contest only
 while that read serves the fact: live, not hidden, and of normal sensitivity.
 A labeled fact, such as an assistant's report, is served there; a fact a
 disposition hides, a retired fact, and a fact of another project contest
-nothing a reader is shown. The block shows the stored statement alone in
-those cases, and a pass whose contest read fails is withheld as any failed
-read of the pass is. Every session whose block holds the statement is shown
+nothing a reader is shown. In those cases the block shows the replacement
+line (above) for a statement whose rationale holds a `replaces_observation`
+record and the stored statement alone for any other, and names neither the
+contesting fact nor its text. A pass whose contest read or commit-time read
+fails is withheld as any failed read of the pass is. Every session whose block holds the statement is shown
 the contest, the one whose message recorded it included: the excerpt is the
 one text from a session's own messages that its block carries, because that
 session's observation of the newer value can leave its conversation at a

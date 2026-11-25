@@ -93,6 +93,9 @@ enum WireEvent {
     HarnessDispatch {
         harness: String,
     },
+    AnsweringModel {
+        model: String,
+    },
     AssistantText {
         text: String,
         finish_reason: Option<String>,
@@ -129,6 +132,9 @@ impl From<&BackendEvent> for WireEvent {
         match event {
             BackendEvent::HarnessDispatch { harness } => Self::HarnessDispatch {
                 harness: harness.as_str().to_string(),
+            },
+            BackendEvent::AnsweringModel { model } => Self::AnsweringModel {
+                model: model.clone(),
             },
             BackendEvent::AssistantText {
                 text,
@@ -203,6 +209,7 @@ impl TryFrom<WireEvent> for BackendEvent {
             WireEvent::HarnessDispatch { harness } => Self::HarnessDispatch {
                 harness: Harness::parse(&harness).ok_or(harness)?,
             },
+            WireEvent::AnsweringModel { model } => Self::AnsweringModel { model },
             WireEvent::AssistantText {
                 text,
                 finish_reason: reason,

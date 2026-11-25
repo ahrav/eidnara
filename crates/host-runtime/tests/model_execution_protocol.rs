@@ -81,6 +81,18 @@ fn each_valid_operation_decodes_its_exact_schema() {
     assert_eq!(send.max_output_tokens, 32_000);
     assert_eq!(send.temperature, Some(0.1));
 
+    // A system text that opens with the plain-system directive is admitted whole: the adapter, not admission, removes the directive.
+    let flagged = format!(
+        "{}guidance",
+        host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE
+    );
+    let request = protocol::parse_request(&send_body("hello", Some(&flagged)), false)
+        .expect("a directive followed by text decodes");
+    let Request::Send(send) = request else {
+        panic!("expected a send");
+    };
+    assert_eq!(send.system.as_deref(), Some(flagged.as_str()));
+
     // Canonical model strings split at the first slash; remaining slashes belong to the model segment.
     let request = protocol::parse_request(
         &body(serde_json::json!({
@@ -213,6 +225,14 @@ fn every_malformed_shape_is_rejected_with_schema_violation() {
         ),
         ("empty prompt", send_body("", None), false),
         ("empty system", send_body("p", Some("")), false),
+        (
+            "system of a directive alone",
+            send_body(
+                "p",
+                Some(host_runtime::model_execution::backend::PLAIN_SYSTEM_DIRECTIVE),
+            ),
+            false,
+        ),
         (
             "flat model string",
             mutate(
@@ -380,7 +400,7 @@ fn the_512kib_boundary_admits_exactly_and_rejects_one_byte_over() {
 fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
     use host_runtime::model_execution::backend::{BackendError, ErrorClass};
 
-    // Admission headroom must accommodate the worst-case encoding of two diagnostic fields plus the `run_started` unit that shares the reserved slice.
+    // Admission headroom must accommodate the worst-case encoding of two diagnostic fields plus the `run_started`, `harness_dispatch`, and `answering_model` units that share the reserved slice.
     let hostile = "\u{1}".repeat(4096);
     let run_id = "r".repeat(protocol::MAX_RUN_ID_BYTES);
     let unit = protocol::error_unit(
@@ -394,11 +414,19 @@ fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
         protocol::ErrorScope::CredentialSource,
     );
     let started = protocol::run_started_unit(&run_id);
+    let dispatch = protocol::harness_dispatch_unit(&run_id, Harness::OpenCode);
+    let answering = protocol::answering_model_unit(
+        &run_id,
+        &"\u{1}".repeat(protocol::MAX_ANSWERING_MODEL_BYTES),
+    );
     assert!(
-        unit.len() + started.len() <= config::TERMINAL_HEADROOM_BYTES,
-        "terminal ({}) plus run_started ({}) must fit the {}-byte headroom",
+        unit.len() + started.len() + dispatch.len() + answering.len()
+            <= config::TERMINAL_HEADROOM_BYTES,
+        "terminal ({}), run_started ({}), harness_dispatch ({}), and answering_model ({}) must fit the {}-byte headroom",
         unit.len(),
         started.len(),
+        dispatch.len(),
+        answering.len(),
         config::TERMINAL_HEADROOM_BYTES
     );
 }
@@ -676,6 +704,21 @@ fn harness_vocabulary_is_closed() {
                 "type": "harness_dispatch",
                 "run_id": "model_execution-run-1",
                 "harness": "pi",
+            },
+        })
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&protocol::answering_model_unit(
+            "model_execution-run-1",
+            "prov-model-1",
+        ))
+        .expect("answering model unit JSON"),
+        serde_json::json!({
+            "kind": "control",
+            "unit": {
+                "type": "answering_model",
+                "run_id": "model_execution-run-1",
+                "model": "prov-model-1",
             },
         })
     );

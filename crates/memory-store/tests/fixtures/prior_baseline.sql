@@ -1263,3 +1263,53 @@ CREATE TABLE scan_detections (
             action TEXT NOT NULL CHECK (action IN ('substitute', 'preserve', 'reject')),
             PRIMARY KEY (scan_id, detection_ordinal)
         ) WITHOUT ROWID;
+
+-- A contradiction candidate names a decision a published descriptor overlapped
+-- lexically at one Kernel tip under one matcher digest. Rows hold ids,
+-- integers, and times only; the daemon re-proves liveness at read time.
+CREATE TABLE contradiction_candidates (
+            project_digest TEXT NOT NULL CHECK (
+                length(project_digest) = 64 AND unhex(project_digest) IS NOT NULL
+                AND project_digest = lower(project_digest)
+            ),
+            evidence_id TEXT NOT NULL CHECK (length(evidence_id) BETWEEN 1 AND 512),
+            decision_object_id TEXT NOT NULL CHECK (length(decision_object_id) BETWEEN 1 AND 512),
+            decision_id TEXT NOT NULL CHECK (length(decision_id) BETWEEN 1 AND 512),
+            matched_terms INTEGER NOT NULL CHECK (matched_terms >= 1),
+            decision_terms INTEGER NOT NULL CHECK (decision_terms >= matched_terms),
+            score_bp INTEGER NOT NULL CHECK (score_bp = matched_terms * 10000 / decision_terms),
+            publish_tip INTEGER NOT NULL CHECK (publish_tip >= 0),
+            kernel_incarnation_id TEXT NOT NULL CHECK (
+                length(kernel_incarnation_id) = 32 AND unhex(kernel_incarnation_id) IS NOT NULL
+                AND kernel_incarnation_id = lower(kernel_incarnation_id)
+            ),
+            matcher_digest TEXT NOT NULL CHECK (
+                length(matcher_digest) = 64 AND unhex(matcher_digest) IS NOT NULL
+                AND matcher_digest = lower(matcher_digest)
+            ),
+            created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+            PRIMARY KEY (project_digest, evidence_id, decision_object_id)
+        );
+
+CREATE INDEX idx_contradiction_candidates_decision
+            ON contradiction_candidates(
+                project_digest, decision_object_id, score_bp DESC, created_at_ms DESC, evidence_id
+            );
+
+CREATE INDEX idx_contradiction_candidates_eviction
+            ON contradiction_candidates(
+                project_digest, score_bp, created_at_ms, evidence_id, decision_object_id
+            );
+
+-- The row count and row bytes of each project holding candidates. Only the
+-- memory store's candidate module writes either candidate table, and every
+-- write there updates this row in the transaction that changes the rows; a
+-- project without rows has no row here.
+CREATE TABLE contradiction_candidate_totals (
+            project_digest TEXT PRIMARY KEY CHECK (
+                length(project_digest) = 64 AND unhex(project_digest) IS NOT NULL
+                AND project_digest = lower(project_digest)
+            ),
+            row_count INTEGER NOT NULL CHECK (row_count > 0),
+            row_bytes INTEGER NOT NULL CHECK (row_bytes > 0)
+        ) WITHOUT ROWID;

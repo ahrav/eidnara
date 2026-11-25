@@ -993,9 +993,9 @@ impl KernelStore {
         Self::tip_on(&reader)
     }
 
-    /// When the commit `commit_seq` was recorded, in milliseconds since the
-    /// Unix epoch by the writer's clock, or `None` for a sequence the log
-    /// does not hold. One statement is its own snapshot.
+    /// When commit `commit_seq` was recorded, in writer-clock milliseconds
+    /// since the Unix epoch, or `None` for a sequence the log does not hold.
+    #[cfg(feature = "test-support")]
     pub fn commit_recorded_at(&self, commit_seq: i64) -> Result<Option<i64>, KernelError> {
         let reader = self.lock_reader()?;
         reader
