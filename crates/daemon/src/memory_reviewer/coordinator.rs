@@ -1583,7 +1583,7 @@ fn reference_facts(
                 let writer = admission.map_or(Writer::Unrecorded, |(prior, _)| {
                     Writer::of_source(prior.source_class)
                 });
-                // A message's revision is its own time in milliseconds; other classes revise by other counters.
+                // A message's revision is its own time in milliseconds, and the run orders messages alone. The selection has ordered every reference it linked, a tool result by the end of its call (`review_cycle::source_time`).
                 let written = (*class == OccurrenceClass::Messages).then_some(*source_revision);
                 (writer, written, cited.contains(evidence_id))
             }

@@ -157,11 +157,16 @@ impl Rig {
 
     /// Publishes one message `role` wrote in `session` as source capture does after a pass.
     async fn publish(&self, session: &str, id: &str, role: &str, at_ms: u64, text: &str) {
-        self.settle_capture().await;
         let row = json!({
             "type": "message", "id": id, "parentId": null,
             "message": { "role": role, "content": text, "timestamp": at_ms },
         });
+        self.publish_row(session, row).await;
+    }
+
+    /// Offers one Pi session row to source capture once the last window has settled.
+    async fn publish_row(&self, session: &str, row: Value) {
+        self.settle_capture().await;
         self.handler
             .capture_after_response(source_capture::Offer {
                 profile: SerializerProfile::Pi,
@@ -176,11 +181,28 @@ impl Rig {
             .run();
     }
 
+    /// The candidate rows the store holds.
+    fn candidate_rows(&self) -> usize {
+        self.store.candidate_sweep_page(0, 1_000).unwrap().len()
+    }
+
+    /// Waits until the candidate pass has written a row beyond `before` and ended.
+    async fn candidate_row_arrives(&self, before: usize, what: &str) {
+        for _ in 0..1_000 {
+            if self.candidate_rows() > before && self.handler.contradiction_candidates.is_idle() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "{what} produced no candidate row: {}",
+            self.handler.contradiction_candidates.report()
+        );
+    }
+
     /// Publishes one tool result of session `s2`, whose call ended at `at_ms`, as source capture does after a pass, and waits for the candidate row its pass writes.
     async fn tool_returns_later(&self, id: &str, at_ms: u64, text: &str) {
-        let rows = || self.store.candidate_sweep_page(0, 1_000).unwrap().len();
-        let before = rows();
-        self.settle_capture().await;
+        let before = self.candidate_rows();
         let row = json!({
             "type": "message", "id": id, "parentId": format!("{id}-call"),
             "message": {
@@ -188,28 +210,8 @@ impl Rig {
                 "isError": false, "content": [{ "type": "text", "text": text }], "timestamp": at_ms,
             },
         });
-        self.handler
-            .capture_after_response(source_capture::Offer {
-                profile: SerializerProfile::Pi,
-                session_id: "s2".to_owned(),
-                project: kernel_routes::ProjectBinding::new(&self.project),
-                window: vec![Arc::new(row)],
-                epoch: self.handler.source_capture.epoch(),
-                documents: None,
-                candidates: true,
-            })
-            .expect("a charged window")
-            .run();
-        for _ in 0..1_000 {
-            if rows() > before && self.handler.contradiction_candidates.is_idle() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!(
-            "the tool result produced no candidate row: {}",
-            self.handler.contradiction_candidates.report()
-        );
+        self.publish_row("s2", row).await;
+        self.candidate_row_arrives(before, "the tool result").await;
     }
 
     /// Publishes one user message of session `s2` and waits for the candidate row its pass writes.
@@ -300,19 +302,10 @@ impl Rig {
 
     /// Publishes one message `role` wrote in session `s2` and waits for the candidate row its pass writes.
     async fn says_later(&self, role: &str, id: &str, at_ms: u64, text: &str) {
-        let rows = || self.store.candidate_sweep_page(0, 1_000).unwrap().len();
-        let before = rows();
+        let before = self.candidate_rows();
         self.publish("s2", id, role, at_ms, text).await;
-        for _ in 0..1_000 {
-            if rows() > before && self.handler.contradiction_candidates.is_idle() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!(
-            "the later message produced no candidate row: {}",
-            self.handler.contradiction_candidates.report()
-        );
+        self.candidate_row_arrives(before, "the later message")
+            .await;
     }
 
     fn active_review_holds(&self) -> usize {
@@ -369,6 +362,24 @@ impl Rig {
 
 fn stated(quote: &str) -> String {
     format!("User stated: {quote}")
+}
+
+/// The object id of the memory explicit search serves with the statement `summary`.
+async fn memory_id(rig: &Rig, summary: &str) -> String {
+    let request = kernel_route_fixtures::read_request(&rig.project, "s3", "explicit_search", None);
+    let body = memory_auto_delivery_tests::body(
+        rig.handler
+            .dispatch_value_for_test(test_route(THIRD), request)
+            .await,
+    );
+    body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["decision"]["payload"]["summary"] == summary)
+        .and_then(|row| row["object"]["object_id"].as_str())
+        .expect("the memory is served on search")
+        .to_string()
 }
 
 /// A message time `after_ms` past the daemon's clock, for a message written after a memory the store has just recorded.
@@ -863,6 +874,19 @@ async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
     let reported = format!("Assistant reported: {REPORTED}");
     let row = |rows: Vec<(String, String)>| rows.into_iter().find(|(text, _)| *text == reported);
     let before = row(rig.search().await).expect("the reported fact is served on search");
+    // A disputed report keeps its text and its place on search, so the Kernel's disposition of the row is what tells a dispute from a row left as it is.
+    let fact = memory_id(&rig, &reported).await;
+    let disposition = || {
+        let kernel = rig.handler.kernel.kernel_store().unwrap();
+        let (_, admission) = kernel
+            .preview(
+                std::time::Instant::now() + Duration::from_secs(5),
+                |preview| preview.subject_admission(&fact),
+            )
+            .unwrap();
+        admission.expect("the fact has an admission").0.disposition
+    };
+    let stored = disposition();
     rig.user_says_later(
         "later-1",
         1_700_000_000_000,
@@ -877,6 +901,7 @@ async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
         Some(before.clone()),
         "a revise leaves the row as it is"
     );
+    assert_eq!(disposition(), stored, "a revise writes no disposition");
     assert_eq!(
         rig.active_review_holds(),
         0,
@@ -891,6 +916,8 @@ async fn contest_leaves_a_reported_fact_a_revise_names_as_it_is() {
     rig.flagged(&[RETIRE_CITING_LATER]);
     assert_eq!(rig.drain().await, 1);
     assert_eq!(rig.active_review_holds(), 1, "a dispute holds its memory");
+    assert_eq!(disposition(), kernel::Disposition::Disputed);
+    assert_ne!(stored, kernel::Disposition::Disputed);
 
     const NOTE: &str = "Changelog entries are kept in reverse chronological order.";
     commit_decision(
@@ -1891,7 +1918,7 @@ fn commit_decision(rig: &Rig, object: &str, domain_id: &str, source_kind: &str, 
         .unwrap();
 }
 
-/// Reviewer selection skips both the architecture decision and the verifier attestation even though their summaries share terms with the later user statement.
+/// Reviewer selection skips both the architecture decision and the verifier attestation even though their summaries share terms with the later user statement, which is written after both. A stored note beside them that shares those terms is reviewed on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_decision_that_is_not_a_stored_memory_is_left_unreviewed() {
     let rig = Rig::open(ReviewApply::Apply).await;
@@ -1911,15 +1938,22 @@ async fn a_decision_that_is_not_a_stored_memory_is_left_unreviewed() {
         crate::attestation_verifier::classify::VERIFIER_SOURCE_KIND,
         "Release branches are cut from main on the Thursday of every week.",
     );
-    rig.user_states_later("later-1", 1_700_000_000_000, TUESDAY)
-        .await;
-    rig.flagged(&[RETIRE_CITING_LATER, RETIRE_CITING_LATER]);
-    assert_eq!(rig.drain().await, 0);
-    assert_eq!(
-        rig.attempts().len(),
-        0,
-        "no request carried either decision"
+    const NOTE: &str = "Release branches are cut from main each Thursday morning.";
+    commit_decision(
+        &rig,
+        "mem_note_release",
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        "repo",
+        NOTE,
     );
+    rig.user_states_later("later-1", later_than_now(60_000), TUESDAY)
+        .await;
+    rig.decides(&[KEEP, KEEP, KEEP]);
+    assert_eq!(rig.drain().await, 1, "the stored note alone is reviewed");
+    let attempts = rig.attempts();
+    assert_eq!(attempts.len(), 1, "no request carried either decision");
+    let state: Value = serde_json::from_str(&attempts[0].prompt).expect("the state is JSON text");
+    assert_eq!(state["memory"]["text"], NOTE);
 }
 
 /// A reference is evidence of change only when it was written after the memory was stated. A message written before the memory's source, whose descriptor is published after the memory, starts no review and sends no request.

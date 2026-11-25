@@ -256,8 +256,8 @@ pub struct SelectionMemory {
     large: BTreeSet<String>,
     /// Each entry identifies a project whose reservation the store's metadata quota refused during an earlier selection.
     quota: BTreeSet<String>,
-    /// When the Kernel recorded each commit a selection has asked about, in milliseconds. A commit's time is fixed, so it is read once.
-    commit_times: HashMap<i64, i64>,
+    /// When the Kernel recorded each commit a selection has asked about, in milliseconds, with the Kernel incarnation the times were read from. A commit's time is fixed within an incarnation, so it is read once; a selection over another incarnation starts the map over.
+    commit_times: (String, HashMap<i64, i64>),
     /// The bounds of one selection's walk; `None` is [`Walk::PRODUCTION`].
     walk: Option<Walk>,
 }
@@ -383,7 +383,7 @@ impl SelectionMemory {
         if newest.is_some() {
             return Ok(newest);
         }
-        if let Some(recorded) = self.commit_times.get(&stated) {
+        if let Some(recorded) = self.commit_times.1.get(&stated) {
             return Ok(Some(*recorded));
         }
         let recorded = kernel
@@ -392,10 +392,10 @@ impl SelectionMemory {
             .get(&stated)
             .copied();
         if let Some(recorded) = recorded {
-            if self.commit_times.len() >= MAX_REMEMBERED_SOURCES {
-                self.commit_times.clear();
+            if self.commit_times.1.len() >= MAX_REMEMBERED_SOURCES {
+                self.commit_times.1.clear();
             }
-            self.commit_times.insert(stated, recorded);
+            self.commit_times.1.insert(stated, recorded);
         }
         Ok(recorded)
     }
@@ -753,6 +753,9 @@ pub fn select_and_enqueue(
     let incarnation = kernel
         .database_incarnation_id_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
+    if memory.commit_times.0 != incarnation {
+        memory.commit_times = (incarnation.clone(), HashMap::new());
+    }
     let walk = memory.walk();
     let (descriptors, next) = subject_descriptors(
         kernel,
@@ -892,7 +895,7 @@ pub fn select_and_enqueue(
             }
         }
         let said_by = Writer::of_statement(&decision.payload.summary);
-        // When the memory was stated, read once for the first message that needs it.
+        // When the memory was stated, read once, for the first source that carries a time.
         let mut stated_at: Option<Option<i64>> = None;
         // Each source the memory does not cite, with the commit that published it. A source keeps that place whichever trigger brings it up and whenever a later memory comes to cite it.
         let mut later = Vec::new();
@@ -908,16 +911,10 @@ pub fn select_and_enqueue(
             {
                 continue;
             }
-            let stated_at = match (source.written, stated_at) {
-                (None, _) => None,
-                (Some(_), Some(at)) => at,
-                (Some(_), None) => {
-                    let at = memory.stated_at(kernel, &cited, stated, tip, &budget)?;
-                    stated_at = Some(at);
-                    at
-                }
-            };
-            if !written_later(&source, stated_at, stated) {
+            if source.written.is_some() && stated_at.is_none() {
+                stated_at = Some(memory.stated_at(kernel, &cited, stated, tip, &budget)?);
+            }
+            if !written_later(&source, stated_at.flatten(), stated) {
                 continue;
             }
             later.push((source.published, evidence_id, trigger));
@@ -956,7 +953,7 @@ pub fn select_and_enqueue(
             .iter()
             .map(|candidate| candidate.decision.object_id.as_str())
             .collect();
-        let delivered = automatically_delivered(kernel, &ids)?;
+        let delivered = automatically_delivered(kernel, &ids, &budget)?;
         for candidate in &mut candidates {
             candidate.delivered = delivered.contains(&candidate.decision.object_id);
         }
@@ -1114,11 +1111,11 @@ pub fn select_and_enqueue(
 
 /// The time a source of `class` was written, in milliseconds, read from its descriptor's `revision`. A message carries its harness timestamp and a tool span the time its call ended, both as decimal milliseconds. A repository document's revision counts observations, so such a source has no time of its own.
 fn source_time(class: &str, revision: &str) -> Option<i64> {
-    [OccurrenceClass::Messages, OccurrenceClass::RawToolSpans]
-        .iter()
-        .any(|timed| timed.code() == class)
-        .then(|| revision.parse().ok())
-        .flatten()
+    matches!(
+        OccurrenceClass::from_code(class)?,
+        OccurrenceClass::Messages | OccurrenceClass::RawToolSpans
+    )
+    .then(|| revision.parse().ok())?
 }
 
 /// Whether `source` was written after a memory was stated, which is what makes it evidence that the memory changed. A message and a tool result are ordered by their own time: after `stated_at`, the time of the newest source the memory cites or, for a memory that cites none, of the commit that first recorded it. So the message a memory was taken from, a source of the same moment, and every older one are the memory's origin and never evidence against it, whenever their descriptors were published. A source with no time of its own, such as a repository document, and a source beside a memory whose time the store cannot give, are ordered by commit: published after `stated`, the commit that first recorded the memory.
@@ -1129,15 +1126,18 @@ fn written_later(source: &SourceFacts, stated_at: Option<i64>, stated: i64) -> b
     }
 }
 
-/// Those of the memories `ids` a session receives in its block now: the ones the Kernel serves on the automatic-injection surface. One read over the named rows, inside a five-second wait for a reader.
+/// Those of the memories `ids` a session receives in its block now: the ones the Kernel serves on the automatic-injection surface. One read over the named rows, whose wait for a reader ends at five seconds or at `budget`'s deadline, whichever comes first.
 fn automatically_delivered(
     kernel: &KernelStore,
     ids: &[&str],
+    budget: &EvalBudget,
 ) -> Result<BTreeSet<String>, CycleError> {
+    let wait = Instant::now() + Duration::from_secs(5);
+    let deadline = budget
+        .deadline()
+        .map_or(wait, |deadline| deadline.min(wait));
     let (_, served) = kernel
-        .preview(Instant::now() + Duration::from_secs(5), |preview| {
-            preview.served_rows_for(ids, None)
-        })
+        .preview(deadline, |preview| preview.served_rows_for(ids, None))
         .map_err(CycleError::Kernel)?;
     Ok(served
         .into_iter()

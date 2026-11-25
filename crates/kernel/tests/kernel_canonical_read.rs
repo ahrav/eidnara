@@ -1055,4 +1055,12 @@ fn a_batch_of_commits_reports_the_time_each_was_recorded() {
     }
     assert!(store.commits_recorded_at(&[]).unwrap().is_empty());
     assert!(store.commits_recorded_at(&[tip + 1]).unwrap().is_empty());
+    // The budgeted read answers the same times under a budget with room.
+    let budget = kernel::applicability::EvalBudget::unbounded();
+    assert_eq!(
+        store
+            .commits_recorded_at_within_budget(&asked, &budget)
+            .unwrap(),
+        times
+    );
 }

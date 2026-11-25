@@ -55,6 +55,10 @@ fn assert_all_refuse(
         Err(KernelError::Deadline)
     );
     assert_eq!(
+        store.commits_recorded_at_within_budget(&[1], &budget()),
+        Err(KernelError::Deadline)
+    );
+    assert_eq!(
         store.capture_commit_read_target_within_budget(&budget()),
         Err(KernelError::Deadline)
     );
