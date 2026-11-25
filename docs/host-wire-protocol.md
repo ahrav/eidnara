@@ -616,7 +616,7 @@ kernel is unknown, not healthy.
 | `outbox_position_lag` | unsigned integer or `null` | `null` means no consumer position |
 | `oldest_unconsumed_age_ms` | unsigned integer or `null` | `null` means nothing unconsumed |
 | `retained_outbox_rows` | unsigned integer | |
-| `required_consumer_count` | unsigned integer | |
+| `required_consumer_count` | unsigned integer | the registered outbox consumers a read's freshness is judged by; `outbox_position_lag`, `oldest_unconsumed_age_ms` and `lag_threshold_tripped` describe the same consumers. The claim consumer counts where a search lifecycle owner runs it |
 | `core_file_warn` | boolean | |
 | `artifact_warn` | boolean | |
 | `lag_threshold_tripped` | boolean | |
