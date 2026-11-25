@@ -7518,9 +7518,6 @@ async fn a_lagging_claim_consumer_leaves_a_gated_read_and_health_as_they_are() {
 
     // Beside a serving consumer that has read through the tip, the read is available and serves the row.
     daemon.register_caught_up_consumer("projector");
-    store
-        .acknowledge_outbox("projector", daemon.tip(), 1)
-        .unwrap();
     let served = daemon.gated_read("explicit_search", late).await;
     assert_state(&served, "available", None);
     assert_eq!(object_ids(&served), ["decision-object-1"]);

@@ -496,13 +496,13 @@ async fn a_lagging_claim_consumer_counts_on_a_host_with_a_search_lifecycle_owner
         claims_at < daemon.tip(),
         "the claim consumer trails the tip"
     );
-    let all = store.outbox_lag(i64::MAX / 2).unwrap();
+    let late = i64::MAX / 2;
+    let all = store.outbox_lag(late).unwrap();
     assert!(
         daemon::kernel_routes::serving::lag_threshold_tripped(&all),
         "{all:?}"
     );
 
-    let late = i64::MAX / 2;
     let stale = daemon
         .call(json!({
             "method": "kernel.read",

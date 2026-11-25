@@ -251,8 +251,8 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
     // which each commit writes itself, so the read is repeated ungated and the result carries the lag as a note (`canonicalTipNote`).
     // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name.
     const idQuery = parseObjectIdQuery(query);
-    // The gate judges the lag of registered consumers. A deployment with no consumer at all
-    // (no admitted search projection) has no derived state that can lag behind the canonical
+    // A deployment with none of those consumers registered (no admitted search projection)
+    // answers `no_required_consumer`: it has no derived state that can lag behind the canonical
     // rows this read returns, so the same read is repeated ungated and the result says that
     // freshness was not judged, instead of the search failing for the deployment's lifetime.
     const readMemory = async (gated: boolean): Promise<MemoryRead> => {

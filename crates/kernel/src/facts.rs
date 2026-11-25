@@ -39,7 +39,7 @@ pub struct ArtifactBudgetFacts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboxLag {
     /// Published outbox rows the slowest required consumer has not acknowledged.
-    /// `None` when no consumer is registered.
+    /// `None` when the lag counts no registered consumer.
     pub position_lag: Option<i64>,
     pub oldest_unconsumed_age_ms: Option<i64>,
     pub consumer_count: u64,

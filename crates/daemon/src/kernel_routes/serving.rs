@@ -23,7 +23,7 @@ pub fn unserved_consumers(claims_feed_search: bool) -> &'static [&'static str] {
     }
 }
 
-/// True at or past either threshold. `None` lag, meaning no registered
+/// True at or past either threshold. `None` lag, meaning no counted
 /// consumer, never trips; that case is reported as `no_required_consumer`.
 pub fn lag_threshold_tripped(lag: &OutboxLag) -> bool {
     lag.position_lag

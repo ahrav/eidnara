@@ -586,8 +586,8 @@ impl Worker {
         let Some(kernel) = (self.kernel)() else {
             return 0;
         };
-        // A catch-up that reached the tip is repeated before each review. One that stopped short, as a blocked slice does, has said so once and is left to the next pass.
-        let mut claims_current = self.catch_up_claims(&kernel, cancel).await;
+        // A catch-up that reached the tip is repeated before each review. One that stopped short, as a blocked slice does, has said so once and is left to the next pass, and so is the consumer a search lifecycle owner runs.
+        let mut repeat_catch_up = self.catch_up_claims(&kernel, cancel).await;
         let prepared = {
             let worker = Arc::clone(self);
             let kernel = Arc::clone(&kernel);
@@ -758,9 +758,9 @@ impl Worker {
                 {
                     break;
                 }
-                // The claim consumer reads the commits of the reviews before this one, so its checkpoint trails the Kernel's tip by one review at most however long the pass runs.
-                if claims_current {
-                    claims_current = self.catch_up_claims(&kernel, cancel).await;
+                // While the last catch-up reached the tip, the claim consumer reads the commits of the reviews before this one, so its checkpoint trails the Kernel's tip by one review at most however long the pass runs.
+                if repeat_catch_up {
+                    repeat_catch_up = self.catch_up_claims(&kernel, cancel).await;
                 }
                 // A pass over many reviews outlasts one evaluation's lifetime, so each run restates that a switched project is under review and evaluates the owner's record again, which is what admits fact sets meanwhile.
                 self.status.set_switched_review(true);

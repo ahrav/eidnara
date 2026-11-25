@@ -343,6 +343,7 @@ fn new_worker(
     status: &Arc<MemoryReviewerStatus>,
 ) -> Arc<Worker> {
     let kernel = Arc::clone(&handler.kernel);
+    let claims = Arc::clone(&handler.kernel);
     let (project_store, bindings) = (Arc::clone(store), Arc::clone(&handler.bindings));
     Arc::new(Worker {
         host: Arc::new(MemoryReviewerHost {
@@ -363,7 +364,8 @@ fn new_worker(
             Arc::new(TestProducerFactory {
                 state: Arc::clone(state),
             }),
-            None,
+            // As the daemon builds it: the coordinator says whether a search lifecycle owner runs the claim consumer.
+            Some(Arc::new(move || claims.claims_feed_search())),
         ),
     })
 }
@@ -2273,12 +2275,88 @@ async fn a_pass_that_outlasts_the_staleness_window_leaves_search_and_the_block_a
         "{block}"
     );
     let project = kernel_routes::ProjectBinding::new(&rig.project);
+    let report = rig.handler.kernel.memory_read_report();
+    let served = || report.observe(&project, crate::canonical_memory::Observed::Served);
+    assert_eq!(served(), None);
+    // The same read is recorded as served while consumers lag once the claim consumer counts, as it does on a host whose search lifecycle owner runs it.
+    rig.handler.kernel.set_claims_feed_search();
+    rig.handler.sample_kernel_health_for_test(late).await;
+    assert!(!rig.block().await.is_empty());
+    assert!(served().is_some(), "the report holds the lag verdict");
+}
+
+/// On a host whose search lifecycle owner runs the claim consumer the worker leaves the consumer to it: a pass registers no claim consumer and publishes no claim descriptor, so it selects nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_worker_leaves_the_claim_consumer_to_a_search_lifecycle_owner() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.handler.kernel.set_claims_feed_search();
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 0);
+    assert!(rig.attempts().is_empty());
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
     assert_eq!(
-        rig.handler
-            .kernel
-            .memory_read_report()
-            .observe(&project, crate::canonical_memory::Observed::Served),
-        None
+        kernel
+            .outbox_consumer_checkpoint(crate::claim_sources::CLAIM_CONSUMER)
+            .unwrap(),
+        None,
+        "the worker registered no claim consumer"
+    );
+}
+
+/// A claim catch-up reports whether the consumer reached the Kernel's tip, which is what lets a pass repeat it before each review: true once the consumer has read through the tip, false for a cancelled catch-up and for one a slice blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_catch_up_reports_whether_it_reached_the_tip() {
+    use crate::claim_sources::{CLAIM_CONSUMER, ClaimProgress};
+    use crate::memory_reviewer::review_cycle::publish_claims;
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let mut progress = ClaimProgress::default();
+    assert!(
+        !publish_claims(&kernel, &mut progress, crate::now_ms(), &|| true),
+        "a cancelled catch-up"
+    );
+    assert_eq!(
+        kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER).unwrap(),
+        None,
+        "a cancelled catch-up runs no slice"
+    );
+    assert!(publish_claims(
+        &kernel,
+        &mut progress,
+        crate::now_ms(),
+        &|| false
+    ));
+    assert!(
+        publish_claims(&kernel, &mut progress, crate::now_ms(), &|| false),
+        "a caught-up consumer reaches the tip again"
+    );
+    // With its consumer removed from the Kernel, the next slice is blocked.
+    let tip = kernel.tip().unwrap();
+    kernel
+        .acknowledge_outbox(CLAIM_CONSUMER, tip, crate::now_ms())
+        .unwrap();
+    kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "memory_reviewer-switch-test".to_string(),
+                operation_key: "deregister-claims".to_string(),
+                request_digest: "0".repeat(64),
+                actor: "test".to_string(),
+                cause: "proof".to_string(),
+            },
+            |envelope| {
+                envelope.deregister_outbox_consumer(CLAIM_CONSUMER, crate::now_ms())?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    assert!(
+        !publish_claims(&kernel, &mut progress, crate::now_ms(), &|| false),
+        "a blocked catch-up"
     );
 }
 
