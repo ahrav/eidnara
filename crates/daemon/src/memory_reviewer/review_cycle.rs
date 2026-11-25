@@ -45,6 +45,8 @@ pub const SELECTION_PRODUCER: &str = "memory-reviewer-switch";
 pub const APPLY_OPERATION_KEY: &str = "memory-reviewer-switch";
 /// Claim descriptors one walk examines, of every project and representation in the store, so the work of one walk's reads is bounded whatever the inventory's size. A selection runs one walk a pass and covers a larger store over successive passes. The lookup of the memory a contest names runs walk after walk to the inventory's end within one cycle budget.
 pub const MAX_WALKED_DESCRIPTORS: usize = 4096;
+/// Postings steps the later-statement association of one selection takes at most. A walk of 2,896 statements that all share two subject terms costs this much; a walk whose statements share more ends sooner and the next pass continues it.
+pub const MAX_ASSOCIATION_STEPS: usize = 1 << 24;
 /// Later overlapping sources a job carries as starting references, newest first. The newest names the job.
 pub const MAX_LATER_SOURCES: usize = 4;
 /// Cited message blocks a job carries as starting references.
@@ -135,10 +137,18 @@ fn grant_authority_inner(
     )
 }
 
-/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, or a slice is blocked, so every live memory decision has its descriptors before a selection reads them. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one.
-pub fn publish_claims(kernel: &KernelStore, progress: &mut ClaimProgress, now: i64) {
+/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, a slice is blocked, or `cancelled` answers true, so every live memory decision has its descriptors before a selection reads them. `cancelled` is read before each slice, so a cancelled pass waits for one slice at most. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one.
+pub fn publish_claims(
+    kernel: &KernelStore,
+    progress: &mut ClaimProgress,
+    now: i64,
+    cancelled: &dyn Fn() -> bool,
+) {
     let budget = EvalBudget::new(Some(Instant::now() + CYCLE_BUDGET), Arc::default());
     for _ in 0..MAX_CLAIM_SLICES {
+        if cancelled() {
+            return;
+        }
         let report = ClaimMaterializer::new(kernel, ProviderEgress::LocalOnly).run_slice(
             progress,
             crate::search_lifecycle_owner::CLAIM_SLICE_BOUNDS,
@@ -255,12 +265,15 @@ pub struct Walk {
     pub page_rows: usize,
     /// Descriptors one selection examines before it leaves the rest to the next pass.
     pub bound: usize,
+    /// Postings steps the later-statement association of one selection may take, [`MAX_ASSOCIATION_STEPS`] in production; the selection ends its walk at the last statement inside them.
+    pub association_steps: usize,
 }
 
 impl Walk {
-    const PRODUCTION: Self = Self {
+    pub(crate) const PRODUCTION: Self = Self {
         page_rows: 256,
         bound: MAX_WALKED_DESCRIPTORS,
+        association_steps: MAX_ASSOCIATION_STEPS,
     };
 }
 
@@ -590,15 +603,42 @@ fn stem(term: &str) -> &str {
     cut(stem, "e").unwrap_or(stem)
 }
 
+/// The subject terms of each decision's statement, in the decisions' order.
+fn statement_terms(decisions: &[&DecisionRow]) -> Vec<BTreeSet<String>> {
+    decisions
+        .iter()
+        .map(|decision| subject_terms(&decision.payload.summary))
+        .collect()
+}
+
+/// How many of the statements, from the first, one selection associates within `steps` postings steps. [`reopened_by_later_statements`] walks, for every statement and each of its terms, the statements that hold the term, so a walk costs the sum over terms of the squared count of its holders, and one more statement adds `2n + 1` for each of its terms that `n` earlier ones hold. Admission ends before the first statement that would pass `steps`, and admits one statement always, so every walk moves its cursor.
+fn admitted_within(terms: &[BTreeSet<String>], steps: usize) -> usize {
+    let mut holders: HashMap<&str, usize> = HashMap::new();
+    let mut cost = 0_usize;
+    for (index, statement) in terms.iter().enumerate() {
+        let added: usize = statement
+            .iter()
+            .map(|term| 2 * holders.get(term.as_str()).copied().unwrap_or(0) + 1)
+            .sum();
+        if index > 0 && cost.saturating_add(added) > steps {
+            return index;
+        }
+        cost = cost.saturating_add(added);
+        for term in statement {
+            *holders.entry(term.as_str()).or_default() += 1;
+        }
+    }
+    terms.len()
+}
+
 /// For each decision, the later decisions that share enough subject terms with it: [`MIN_SHARED_SUBJECT_TERMS`] within one category and [`MIN_SHARED_SUBJECT_TERMS_ACROSS_CATEGORIES`] across two. Each later decision names at most [`REOPENED_PER_STATEMENT`] earlier ones. A statement is ordered by the commit that first recorded it, which a contest's rewrite of its row leaves unchanged. This is the second way a memory comes back to review beside the ledger's candidate rows: a later statement about the same subject reaches the earlier one even when it shares too few words for a candidate row.
-fn reopened_by_later_statements(decisions: &[&DecisionRow]) -> Vec<Vec<usize>> {
+fn reopened_by_later_statements(
+    decisions: &[&DecisionRow],
+    terms: &[BTreeSet<String>],
+) -> Vec<Vec<usize>> {
     let stated: Vec<i64> = decisions
         .iter()
         .map(|decision| crate::memory_capture::stated_commit(decision))
-        .collect();
-    let terms: Vec<BTreeSet<String>> = decisions
-        .iter()
-        .map(|decision| subject_terms(&decision.payload.summary))
         .collect();
     let mut postings: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, terms) in terms.iter().enumerate() {
@@ -677,12 +717,6 @@ pub fn select_and_enqueue(
         memory.resume.get(scope.project_digest).map(String::as_str),
         walk,
     )?;
-    if next.is_some() && memory.large.insert(scope.project_digest.to_string()) {
-        eprintln!(
-            "daemon: memory_reviewer selection examines {} claim descriptors a pass and the store holds more; each pass continues where the last one ended",
-            walk.bound
-        );
-    }
     let ids: Vec<String> = descriptors
         .iter()
         .filter_map(|row| decision_of(row).map(str::to_string))
@@ -726,8 +760,27 @@ pub fn select_and_enqueue(
             reviewable(decision).then_some((descriptor, decision))
         })
         .collect();
-    let rows: Vec<&DecisionRow> = subjects.iter().map(|(_, decision)| *decision).collect();
-    let reopened = reopened_by_later_statements(&rows);
+    let mut subjects = subjects;
+    let mut next = next;
+    let mut rows: Vec<&DecisionRow> = subjects.iter().map(|(_, decision)| *decision).collect();
+    let mut terms = statement_terms(&rows);
+    // A walk whose later-statement association would pass its step allowance ends at the last statement inside it, and the cursor resumes after that statement's descriptor, so the next pass starts with the statement that did not fit.
+    let admitted = admitted_within(&terms, walk.association_steps);
+    if admitted < subjects.len() {
+        subjects.truncate(admitted);
+        rows.truncate(admitted);
+        terms.truncate(admitted);
+        next = subjects
+            .last()
+            .map(|(descriptor, _)| descriptor.object_id.clone());
+    }
+    if next.is_some() && memory.large.insert(scope.project_digest.to_string()) {
+        eprintln!(
+            "daemon: memory_reviewer selection examines at most {} claim descriptors a pass, fewer where its statements share many terms, and the store holds more; each pass continues where the last one ended",
+            walk.bound
+        );
+    }
+    let reopened = reopened_by_later_statements(&rows, &terms);
     let mut candidates = Vec::new();
     let mut candidate_rows = Vec::new().into_iter();
     for (index, (descriptor, decision)) in subjects.iter().enumerate() {
@@ -1729,6 +1782,28 @@ mod tests {
         assert_eq!(memory.pending["project"].waiting["mem_1"], "job-d");
     }
 
+    /// The association of a walk costs, for each term, the square of the number of statements that hold it. A selection admits the statements, from the first, whose association fits the allowance, and always one.
+    #[test]
+    fn a_walk_is_admitted_while_its_association_fits_the_allowance() {
+        let terms = |words: &[&str]| -> BTreeSet<String> {
+            words.iter().map(|word| (*word).to_string()).collect()
+        };
+        // Statements that share two terms: one costs 2 steps, two cost 8, three 18, four 32.
+        let shared = vec![terms(&["release", "branch"]); 4];
+        for (steps, admitted) in [(32, 4), (31, 3), (18, 3), (17, 2), (8, 2), (7, 1), (0, 1)] {
+            assert_eq!(admitted_within(&shared, steps), admitted, "{steps}");
+        }
+        // Statements with no term in common cost their own terms: 2 steps each.
+        let apart = [
+            terms(&["release", "branch"]),
+            terms(&["linter", "commit"]),
+            terms(&["suffix", "test"]),
+        ];
+        assert_eq!(admitted_within(&apart, 4), 2);
+        assert_eq!(admitted_within(&apart, 6), 3);
+        assert_eq!(admitted_within(&[], 0), 0);
+    }
+
     /// The subject terms of a statement leave out who said it and the words every rule uses, and cut each term to its stem, so two statements about one subject share terms whatever their wording around it.
     #[test]
     fn subject_terms_keep_what_a_statement_is_about() {
@@ -1777,7 +1852,7 @@ mod tests {
             ),
         ];
         let refs: Vec<&DecisionRow> = rows.iter().collect();
-        let reopened = reopened_by_later_statements(&refs);
+        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
         assert_eq!(
             reopened[0],
             [3],
@@ -1810,7 +1885,7 @@ mod tests {
             10,
         ));
         let refs: Vec<&DecisionRow> = many.iter().collect();
-        let reopened = reopened_by_later_statements(&refs);
+        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
         let by_latest = reopened.iter().filter(|later| later.contains(&6)).count();
         assert_eq!(by_latest, REOPENED_PER_STATEMENT);
         assert!(
@@ -1844,7 +1919,7 @@ mod tests {
             ),
         ];
         let refs: Vec<&DecisionRow> = rows.iter().collect();
-        let reopened = reopened_by_later_statements(&refs);
+        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
         assert_eq!(
             reopened[0],
             [2],

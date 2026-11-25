@@ -555,6 +555,7 @@ impl Worker {
         let prepared = {
             let worker = Arc::clone(self);
             let kernel = Arc::clone(&kernel);
+            let cancel = cancel.clone();
             tokio::task::spawn_blocking(move || {
                 if !worker
                     .switched
@@ -567,7 +568,9 @@ impl Worker {
                         .claims
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms());
+                    review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms(), &|| {
+                        cancel.is_cancelled()
+                    });
                 }
                 let budget = kernel::applicability::EvalBudget::new(
                     Some(std::time::Instant::now() + Duration::from_secs(5)),

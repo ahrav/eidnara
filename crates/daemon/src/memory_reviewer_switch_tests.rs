@@ -1013,6 +1013,7 @@ async fn a_store_larger_than_one_selection_is_covered_over_successive_passes() {
     rig.worker.switched.walk_within(Walk {
         page_rows: 1,
         bound: 1,
+        ..Walk::PRODUCTION
     });
     rig.state_rules(&[THURSDAY, LINTER]).await;
     rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
@@ -1029,6 +1030,76 @@ async fn a_store_larger_than_one_selection_is_covered_over_successive_passes() {
         settled += rig.worker.pass(&CancellationToken::new()).await;
     }
     assert_eq!(settled, 2, "both statements were reviewed");
+    assert_eq!(rig.attempts().len(), 2);
+}
+
+/// A cancelled pass runs no claim catch-up: the catch-up reads the cancellation before its first slice and between slices, so a shutdown or a `drain` caller waits for one slice at most. The next pass publishes the claims.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_pass_runs_no_claim_catch_up() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    let claims = || {
+        let kernel = rig.handler.kernel.kernel_store().unwrap();
+        let budget = kernel::applicability::EvalBudget::new(
+            Some(std::time::Instant::now() + Duration::from_secs(5)),
+            Arc::default(),
+        );
+        let tip = kernel.tip_within_budget(&budget).unwrap();
+        kernel
+            .live_source_descriptors(
+                kernel::source_identity::OccurrenceClass::CanonicalClaims,
+                tip,
+                None,
+                std::num::NonZeroUsize::new(16).unwrap(),
+                &budget,
+            )
+            .unwrap()
+            .rows
+            .len()
+    };
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(rig.worker.pass(&cancelled).await, 0);
+    assert_eq!(claims(), 0, "the cancelled pass published no claim");
+    rig.worker.pass(&CancellationToken::new()).await;
+    assert_ne!(
+        claims(),
+        0,
+        "the next pass published the statement's claims"
+    );
+}
+
+/// A walk whose later-statement association would pass its step allowance ends at the last statement inside it, and the next selection continues after that statement. Here the allowance admits one statement a walk, and both statements are reviewed over successive passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_walk_the_association_allowance_ends_is_continued_by_the_next_pass() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.worker.switched.walk_within(Walk {
+        association_steps: 1,
+        ..Walk::PRODUCTION
+    });
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Run the formatter instead of the linter before every commit.",
+    )
+    .await;
+    rig.decides(&[KEEP, KEEP]);
+    let mut settled = Vec::new();
+    for _ in 0..8 {
+        settled.push(rig.worker.pass(&CancellationToken::new()).await);
+    }
+    assert_eq!(
+        settled.iter().sum::<usize>(),
+        2,
+        "both statements were reviewed: {settled:?}"
+    );
+    assert!(
+        settled.iter().all(|pass| *pass <= 1),
+        "one statement a walk: {settled:?}"
+    );
     assert_eq!(rig.attempts().len(), 2);
 }
 
@@ -1206,6 +1277,7 @@ async fn a_later_memory_past_the_first_walk_contests_the_statement() {
     rig.worker.switched.walk_within(Walk {
         page_rows: 1,
         bound: 1,
+        ..Walk::PRODUCTION
     });
     rig.flagged(&[REVISE_CITING_LATER, REVISE_CITING_LATER]);
     let mut settled = 0;
