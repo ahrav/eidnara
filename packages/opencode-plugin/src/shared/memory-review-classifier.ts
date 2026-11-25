@@ -119,7 +119,8 @@ export function reviewClassifierWork(response: unknown): ReviewClassifierWork | 
  * `memory.review.classify.submit`. The daemon reads each `next` call it answers `work` or
  * `ready` as the sign that this project's harness has a classifier, so a harness that cannot call one starts no loop and the
  * chat model decides. A `disabled` reply ends the loop: the project names no classifier, or
- * another one.
+ * another one. A classifier call reported `cancelled` ends the loop after its report, and a
+ * later `start` begins another.
  */
 export function createReviewClassifierPump(
     client: Pick<RustModeModuleClient, "call">,
@@ -188,6 +189,7 @@ export function createReviewClassifierPump(
                   : error instanceof ReviewClassifierError
                     ? error.code
                     : "model_failed";
+            if (code === "cancelled") loop.stopped = true;
             outcome = { error: code };
         } finally {
             clearTimeout(timer);

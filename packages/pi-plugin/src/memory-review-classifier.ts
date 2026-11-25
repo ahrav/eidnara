@@ -53,7 +53,7 @@ export function piHasReviewClassifier(ctx: ExtensionContext, classifier: string)
 /**
  * Runs one classifier request inside the active harness, which resolves the model and its
  * credential. The answers go back to the daemon as Pi returned them; a failure crosses as one
- * content-free code.
+ * content-free code, which is `cancelled` for a classifier whose credential is no longer configured.
  */
 export function piReviewClassifierExecutor(ctx: ExtensionContext): ReviewClassifierExecutor {
     return async (work, signal) => {
@@ -65,6 +65,7 @@ export function piReviewClassifierExecutor(ctx: ExtensionContext): ReviewClassif
             work.classifier.slice(separator + 1),
         );
         if (!registry || !model) throw new ReviewClassifierError("provider_unavailable");
+        if (!registry.hasConfiguredAuth(model)) throw new ReviewClassifierError("cancelled");
         const result = await registry.classify(
             model,
             { state: work.state, questions: work.questions },

@@ -276,6 +276,65 @@ describe("Pi daemon transport across runtime teardown", () => {
         }
     });
 
+    it.each([
+        ["answers classifier work while the session stays in its project", false],
+        ["leaves classifier work unanswered once the session is in a root with no project", true],
+    ] as const)("%s", async (_name, moves) => {
+        const asked: string[] = [];
+        const pulled = Promise.withResolvers<unknown>();
+        const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(
+            async (input) => {
+                if (!input.method.startsWith("memory.review.classify.")) return { state: "ready" };
+                asked.push(input.method);
+                return asked.length === 1 ? pulled.promise : { state: "ready" };
+            },
+        );
+        try {
+            const { registrations, shutdown } = await registeredHandlers({
+                memory_reviewer: { enabled: true, classifier: "typesafe/jev-latest" },
+            });
+            const sessionStart = registrations.handlers.get("session_start");
+            if (typeof sessionStart !== "function") throw new Error("session_start not registered");
+            let classified = 0;
+            const ctx = {
+                ...captureContext({}),
+                modelRegistry: {
+                    getModelOfType: () => ({}),
+                    hasConfiguredAuth: () => true,
+                    classify: async () => {
+                        classified += 1;
+                        return { stopReason: "stop", answers: {} };
+                    },
+                },
+            };
+            await sessionStart({ reason: "startup" }, ctx);
+            let current = ctx;
+            if (moves) {
+                // The user's home directory is a root with no project unless allow_home_project opts in.
+                const created = mkdtempSync(join(tmpdir(), "eidnara-pi-home-"));
+                tempRoots.push(created);
+                const home = resolveProjectRootDirectory(created);
+                __setProjectIdentityTestHooks({ homeDirectory: () => home });
+                current = { ...ctx, cwd: home };
+            }
+            await sessionStart({ reason: "startup" }, current);
+            // The daemon answers the pull that was in flight across the session's second start.
+            pulled.resolve({
+                state: "work",
+                lease: "a".repeat(32),
+                classifier: "typesafe/jev-latest",
+                request: JSON.stringify({ state: {}, questions: {} }),
+                max_duration_ms: 10_000,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            expect(classified).toBe(moves ? 0 : 1);
+            expect(asked.includes("memory.review.classify.submit")).toBe(!moves);
+            await shutdown({ reason: "quit" }, ctx);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("returns from agent_end while the drain is still waiting on the daemon", async () => {
         const next = Promise.withResolvers<unknown>();
         const call = spyOn(HostModuleTransport.prototype, "call").mockImplementation(

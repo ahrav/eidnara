@@ -1915,13 +1915,13 @@ decided by the small chat model, as it is for a project that names no
 classifier, so a harness that cannot call a classifier makes no `next` call. A
 request whose wait ends with no `submit` spends its attempt, and the mark ends
 when that wait lasted ten seconds or more; a `cancelled` that the waiting review
-took, which a harness sends as it closes, ends the mark too. The small chat model then decides the attempts
+took, which a harness sends as it closes or once it can no longer call the classifier, ends the mark too. The small chat model then decides the attempts
 that follow until a harness calls `next` again. A harness that answers these
 methods sends the memory and the messages under review to the classifier's
 provider; the `request` text holds no `Secret`-class content. The Pi harness answers these methods when its model
 registry has the classifier surface with `hasConfiguredAuth` (Pi 1.6.0 has both)
 and reports a configured credential for the named classifier. It calls `next`
-every two seconds for the project its session is open on;
+every two seconds for the project its session is open on, and a session that leaves that project stops calling for it at its next lifecycle event. A Pi that pulls work once the credential is gone submits `cancelled` and stops calling;
 a Pi whose registry lacks that surface or that credential, and the OpenCode
 harness, make no call.
 

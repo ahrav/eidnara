@@ -160,6 +160,44 @@ describe("createReviewClassifierPump", () => {
         expect(submitted?.body.error).toBe("provider_unavailable");
     });
 
+    it("ends the loop with the report of a classifier call the harness cancelled on its own", async () => {
+        const ready = Array.from({ length: 20 }, () => ({ state: "ready" }));
+        // A `provider_unavailable` classifier error keeps the pump polling for work.
+        const failed = daemon([work(), ...ready]);
+        const asking = createReviewClassifierPump(
+            failed.client,
+            async () => {
+                throw new ReviewClassifierError("provider_unavailable");
+            },
+            { pollIntervalMs: 1 },
+        );
+        asking.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        expect(failed.calls.length).toBeGreaterThan(2);
+        await asking.close();
+
+        const fake = daemon([work(), ...ready]);
+        const pump = createReviewClassifierPump(
+            fake.client,
+            async () => {
+                throw new ReviewClassifierError("cancelled");
+            },
+            { pollIntervalMs: 1 },
+        );
+        pump.start(SCOPE);
+        await pump.idle();
+        expect(fake.calls.map((call) => call.method)).toEqual([
+            "memory.review.classify.next",
+            "memory.review.classify.submit",
+        ]);
+        expect(fake.calls[1]?.body.error).toBe("cancelled");
+        // Classifier cancellation ends only the active polling loop.
+        pump.start(SCOPE);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        expect(fake.calls.length).toBeGreaterThan(2);
+        await pump.close();
+    });
+
     it("bounds a classifier call that ignores its abort signal and waits for it before the next call", async () => {
         const fake = daemon(Array.from({ length: 50 }, () => work({ max_duration_ms: 5 })));
         let executions = 0;

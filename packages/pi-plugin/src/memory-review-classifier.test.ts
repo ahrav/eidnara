@@ -86,4 +86,20 @@ describe("piReviewClassifierExecutor", () => {
             "cancelled",
         );
     });
+
+    it("reports cancelled, without a classifier call, once the classifier's credential is gone", async () => {
+        const calls: unknown[] = [];
+        const answering = registry({ stopReason: "stop", answers: {} }, calls);
+        let configured = true;
+        const execute = piReviewClassifierExecutor(
+            context({ ...answering, hasConfiguredAuth: () => configured }),
+        );
+        expect(await execute(WORK, new AbortController().signal)).toEqual({});
+        expect(calls).toHaveLength(1);
+        configured = false;
+        const refused = await execute(WORK, new AbortController().signal).catch((error) => error);
+        expect(refused).toBeInstanceOf(ReviewClassifierError);
+        expect((refused as ReviewClassifierError).code).toBe("cancelled");
+        expect(calls).toHaveLength(1);
+    });
 });
