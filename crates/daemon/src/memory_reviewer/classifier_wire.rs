@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::classifier::{HARNESS_CANCELLED, MAX_CLASSIFY_DURATION_MS};
+use super::classifier::HARNESS_CANCELLED;
 use crate::{HandlerCore, PreparedOutcome, RouteHandle, invalid_params_error, respond};
 
 pub(crate) const NEXT: &str = "memory.review.classify.next";
@@ -64,7 +64,7 @@ impl HandlerCore {
                 "lease": work.lease,
                 "classifier": work.classifier,
                 "request": &*work.request,
-                "max_duration_ms": MAX_CLASSIFY_DURATION_MS,
+                "max_duration_ms": work.max_duration_ms,
             })),
             None => respond(json!({"state":"ready"})),
         }

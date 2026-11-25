@@ -31,7 +31,7 @@ pub const ABSENCE_WAIT: Duration = Duration::from_millis(200);
 const _: () = assert!(ABSENCE_WAIT.as_millis() <= CLASSIFY_WAIT.as_millis());
 /// How long after a pull a project's harness counts as answering classifier work. A harness pulls every few seconds, so the window spans many pulls.
 pub const PRESENCE_WINDOW: Duration = Duration::from_secs(120);
-/// The longest classifier call a work response allows the harness.
+/// The longest classifier call a work response allows the harness. A response states less when less of the review's wait is left.
 pub const MAX_CLASSIFY_DURATION_MS: u64 = 10_000;
 /// The requests the exchange parks at once; one past it is refused.
 pub const MAX_PARKED_REQUESTS: usize = 64;
@@ -225,6 +225,8 @@ pub struct ClassifierWork {
     pub classifier: String,
     /// The request as [`ReviewState::request_json`] wrote it.
     pub request: Arc<str>,
+    /// How long the harness may let the classifier call run: the time left of the review's wait, at most [`MAX_CLASSIFY_DURATION_MS`].
+    pub max_duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -249,6 +251,8 @@ struct Parked {
     reply: Option<oneshot::Sender<Result<Value, ClassifyError>>>,
     /// Set when a harness pulls the request. It names the request to `submit` for as long as the review waits.
     lease: Option<String>,
+    /// When the review's wait ends.
+    expires: Instant,
 }
 
 #[derive(Default)]
@@ -291,6 +295,8 @@ impl ClassifierExchange {
         cancel: &CancellationToken,
     ) -> Result<Value, ClassifyError> {
         let (reply, answered) = oneshot::channel();
+        // The wait starts after this instant, so a work response states at most the time the review still waits.
+        let expires = Instant::now() + wait;
         let id = {
             let mut inner = self.lock();
             if inner.parked.len() >= MAX_PARKED_REQUESTS {
@@ -305,6 +311,7 @@ impl ClassifierExchange {
                 request: request.into(),
                 reply: Some(reply),
                 lease: None,
+                expires,
             });
             id
         };
@@ -337,7 +344,7 @@ impl ClassifierExchange {
         outcome
     }
 
-    /// The oldest request of `project` for `classifier` that no harness holds, under a new lease. Every call marks the project's harness present.
+    /// The oldest request of `project` for `classifier` that no harness holds and whose review still waits, under a new lease. Every call marks the project's harness present.
     pub fn next(&self, project: &str, classifier: &str) -> Option<ClassifierWork> {
         self.next_at(project, classifier, Instant::now())
     }
@@ -356,15 +363,25 @@ impl ClassifierExchange {
                 && parked.classifier == classifier
                 && parked.reply.is_some()
                 && parked.lease.is_none()
+                && parked.expires > now
         })?;
         let mut nonce = [0_u8; 16];
         getrandom::getrandom(&mut nonce).ok()?;
         let lease: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
         parked.lease = Some(lease.clone());
+        // The time left rounds up to a whole millisecond, so the harness ends its call no earlier than the review's wait ends.
+        let left = parked
+            .expires
+            .saturating_duration_since(now)
+            .as_nanos()
+            .div_ceil(1_000_000);
         Some(ClassifierWork {
             lease,
             classifier: parked.classifier.clone(),
             request: Arc::clone(&parked.request),
+            max_duration_ms: u64::try_from(left)
+                .unwrap_or(MAX_CLASSIFY_DURATION_MS)
+                .min(MAX_CLASSIFY_DURATION_MS),
         })
     }
 
@@ -645,6 +662,49 @@ mod tests {
             None,
             "a cancelled request left"
         );
+    }
+
+    /// A work response states the time left of the review's wait, at most [`MAX_CLASSIFY_DURATION_MS`], and a request whose wait has ended is offered to no one.
+    #[tokio::test]
+    async fn a_pull_states_the_time_left_of_the_wait() {
+        let exchange = Arc::new(ClassifierExchange::default());
+        let cancel = CancellationToken::new();
+        let park = |wait: Duration| {
+            let (exchange, cancel) = (Arc::clone(&exchange), cancel.clone());
+            tokio::spawn(async move {
+                exchange
+                    .classify("project", "c/m", "{}".to_string(), wait, &cancel)
+                    .await
+            })
+        };
+        let long = park(Duration::from_secs(30));
+        let work = pull(&exchange, "project", "c/m").await;
+        assert_eq!(work.max_duration_ms, MAX_CLASSIFY_DURATION_MS);
+        let short = park(Duration::from_secs(5));
+        while exchange.lock().parked.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        let late = exchange
+            .next_at("project", "c/m", Instant::now() + Duration::from_secs(3))
+            .unwrap();
+        assert!(
+            (1..=2_000).contains(&late.max_duration_ms),
+            "{}",
+            late.max_duration_ms
+        );
+        let ended = park(Duration::from_secs(5));
+        while exchange.lock().parked.len() < 3 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            exchange.next_at("project", "c/m", Instant::now() + Duration::from_secs(5)),
+            None,
+            "a request whose wait has ended"
+        );
+        cancel.cancel();
+        for run in [long, short, ended] {
+            assert_eq!(run.await.unwrap(), Err(ClassifyError::Cancelled));
+        }
     }
 
     /// A harness counts as present for [`PRESENCE_WINDOW`] after a pull. A request that waits unpulled for [`ABSENCE_WAIT`] ends the presence, and a shorter wait keeps it.

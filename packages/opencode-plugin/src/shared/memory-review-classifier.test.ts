@@ -65,6 +65,10 @@ describe("reviewClassifierWork", () => {
         });
     });
 
+    it("keeps a duration below the cap as the work states it", () => {
+        expect(reviewClassifierWork(work({ max_duration_ms: 4_200 }))?.maxDurationMs).toBe(4_200);
+    });
+
     it("refuses a response outside the contract", () => {
         for (const broken of [
             work({ lease: "short" }),
@@ -278,6 +282,23 @@ describe("createReviewClassifierPump", () => {
         const started = Date.now();
         await pump.close();
         expect(Date.now() - started).toBeLessThan(1_000);
+    });
+
+    it("closes during the wait for a classifier call that ignores its abort signal", async () => {
+        const fake = daemon([work({ max_duration_ms: 400 })]);
+        const pump = createReviewClassifierPump(fake.client, () => new Promise(() => undefined), {
+            settleGraceMs: 400,
+        });
+        pump.start(SCOPE);
+        // The classifier call is running and its duration has 380 ms left.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const started = Date.now();
+        await pump.close();
+        expect(Date.now() - started).toBeLessThan(200);
+        const submitted = fake.calls.find(
+            (call) => call.method === "memory.review.classify.submit",
+        );
+        expect(submitted?.body.error).toBe("cancelled");
     });
 
     it("leaves work unanswered that arrives for a session released during the call", async () => {

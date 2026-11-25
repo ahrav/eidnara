@@ -1,5 +1,5 @@
 import type { RustModeModuleClient } from "../hooks/context/transform-session-client";
-import { TimeoutError, withTimeout } from "./with-timeout";
+import { TimeoutError } from "./with-timeout";
 
 /** One stage-1 request of a memory review, as the daemon hands it to the harness. */
 export interface ReviewClassifierWork {
@@ -164,24 +164,30 @@ export function createReviewClassifierPump(
         let running: Promise<unknown> | undefined;
         let stuck: { call: Promise<unknown> } | undefined;
         const controller = new AbortController();
-        const cancel = () => controller.abort();
+        // Even if the classifier ignores the abort signal, the pump stops waiting on closure or after `work.maxDurationMs + settleGraceMs`, whichever comes first.
+        let endWait: (error: Error) => void = () => undefined;
+        const waitEnded = new Promise<never>((_resolve, reject) => {
+            endWait = reject;
+        });
+        const cancel = () => {
+            controller.abort();
+            endWait(new ReviewClassifierError("cancelled"));
+        };
         closing.signal.addEventListener("abort", cancel, { once: true });
         let timedOut = false;
         const timer = setTimeout(() => {
             timedOut = true;
-            cancel();
+            controller.abort();
         }, work.maxDurationMs);
+        const settleTimer = setTimeout(
+            () => endWait(new TimeoutError("memory review classifier call")),
+            work.maxDurationMs + settleGraceMs,
+        );
         let outcome: Record<string, unknown>;
         try {
             if (closing.signal.aborted) throw new ReviewClassifierError("cancelled");
             running = execute(work, controller.signal);
-            const answers = record(
-                await withTimeout(
-                    running,
-                    work.maxDurationMs + settleGraceMs,
-                    "memory review classifier call",
-                ),
-            );
+            const answers = record(await Promise.race([running, waitEnded]));
             // The pump reports `provider_unavailable` when the classifier returns a result after the work's `max_duration_ms` deadline.
             if (timedOut) throw new ReviewClassifierError("provider_unavailable");
             // The daemon takes an answers object whose JSON text fits `MAX_ANSWERS_BYTES`. A classifier result of another shape or size fails the call with `model_failed`.
@@ -202,6 +208,7 @@ export function createReviewClassifierPump(
             outcome = { error: code };
         } finally {
             clearTimeout(timer);
+            clearTimeout(settleTimer);
             closing.signal.removeEventListener("abort", cancel);
         }
         // The lease belongs to the project, so the report travels on the session the loop serves when the call has ended. A report the daemon does not receive leaves the review to the end of its own wait.

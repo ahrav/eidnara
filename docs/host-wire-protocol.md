@@ -2594,7 +2594,8 @@ The response `state` is one of:
 - `work`: `lease` (32 lowercase hexadecimal characters), `classifier` (the
   configured reference), `request` (a string of at most 128 KiB holding one
   JSON object with the members `state` and `questions`), and
-  `max_duration_ms: 10000`.
+  `max_duration_ms` (a positive integer of at most 10000: the time left of the
+  review's wait in milliseconds, or ten seconds when more is left).
 - `ready`: no request of this project waits.
 - `disabled`: the configuration the route loaded at its bind leaves the review
   switch off or without a model to name, names no classifier, or names another

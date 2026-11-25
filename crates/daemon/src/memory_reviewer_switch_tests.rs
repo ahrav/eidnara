@@ -13,6 +13,7 @@ use memory_store::memory_reviewer_ledger::{
 
 use super::*;
 use crate::config::{MemoryReviewerConfig, ReviewApply};
+use crate::memory_reviewer::classifier::CLASSIFY_WAIT;
 use crate::memory_reviewer::classifier_wire::{NEXT, SUBMIT};
 use crate::memory_reviewer::coordinator::InvestigationPermits;
 use crate::memory_reviewer::host_execution::CHILD_SESSION_PREFIX;
@@ -329,7 +330,11 @@ impl Rig {
             }
             assert_eq!(work["classifier"], CLASSIFIER);
             // The harness reads a work response by these forms.
-            assert_eq!(work["max_duration_ms"], 10_000);
+            let duration = work["max_duration_ms"].as_u64().unwrap();
+            assert!(
+                (1..=u64::try_from(CLASSIFY_WAIT.as_millis()).unwrap()).contains(&duration),
+                "{duration}"
+            );
             let lease = work["lease"].as_str().unwrap();
             assert!(
                 lease.len() == 32
@@ -1812,6 +1817,9 @@ async fn a_lease_is_settled_only_under_the_classifier_it_was_pulled_for() {
         }
         tokio::task::yield_now().await;
     };
+    // The review waits five seconds from parking, so the work states at most that long for the call.
+    let duration = work["max_duration_ms"].as_u64().unwrap();
+    assert!((1..=5_000).contains(&duration), "{duration}");
     let other_route = memory_auto_delivery_tests::body(
         rig.handler
             .dispatch_value_for_test(
