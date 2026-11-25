@@ -274,8 +274,9 @@ Impact: The record's `subagent` rows would be attributed to the wrong engine.
 Open questions:
 - OQ3-13: is the additive engine's subagent serve intended? Owner: product owner
   with #1142 (needs human input).
-- Correction: a native subagent lineage switch routes to `apply_once` and
-  answers a passthrough (`crates/daemon/src/transform.rs:3391`), so "no subagent
+- Correction: a native subagent lineage switch routes to `apply_once`
+  (`crates/daemon/src/transform.rs:3391`) and answers a passthrough
+  (`crates/daemon/src/transform.rs:3406-3412`), so "no subagent
   rule applies under native authority" holds for the plan, not for routing.
 
 ### uo-known-as-of-is-the-tip-bound-read-sequence
