@@ -96,7 +96,7 @@ impl KernelStore {
             tx.commit().map_err(|_| KernelError::Io)?;
             (commit_seq, consumers, lag, retained_outbox_rows)
         };
-        // `None` distinguishes no registered consumer from a caught-up consumer.
+        // `None` distinguishes no counted consumer from a caught-up consumer.
         let commit_lag = consumers
             .minimum_checkpoint
             .map(|checkpoint| commit_seq.saturating_sub(checkpoint));

@@ -2276,13 +2276,18 @@ async fn a_pass_that_outlasts_the_staleness_window_leaves_search_and_the_block_a
     );
     let project = kernel_routes::ProjectBinding::new(&rig.project);
     let report = rig.handler.kernel.memory_read_report();
-    let served = || report.observe(&project, crate::canonical_memory::Observed::Served);
-    assert_eq!(served(), None);
+    // Recording a served read returns the log line of a change of verdict, so it returns one only when the read before it left a lag verdict.
+    let line_for_a_served_read =
+        || report.observe(&project, crate::canonical_memory::Observed::Served);
+    assert_eq!(line_for_a_served_read(), None);
     // The same read is recorded as served while consumers lag once the claim consumer counts, as it does on a host whose search lifecycle owner runs it.
     rig.handler.kernel.set_claims_feed_search();
     rig.handler.sample_kernel_health_for_test(late).await;
     assert!(!rig.block().await.is_empty());
-    assert!(served().is_some(), "the report holds the lag verdict");
+    assert!(
+        line_for_a_served_read().is_some(),
+        "the report holds the lag verdict"
+    );
 }
 
 /// On a host whose search lifecycle owner runs the claim consumer the worker leaves the consumer to it: a pass registers no claim consumer and publishes no claim descriptor, so it selects nothing.
@@ -2334,20 +2339,15 @@ async fn a_claim_catch_up_reports_whether_it_reached_the_tip() {
         publish_claims(&kernel, &mut progress, crate::now_ms(), &|| false),
         "a caught-up consumer reaches the tip again"
     );
-    // With its consumer removed from the Kernel, the next slice is blocked.
-    let tip = kernel.tip().unwrap();
-    kernel
-        .acknowledge_outbox(CLAIM_CONSUMER, tip, crate::now_ms())
-        .unwrap();
+    assert_eq!(
+        kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER).unwrap(),
+        Some(kernel.tip().unwrap()),
+        "the consumer has read through the tip"
+    );
+    // With its consumer removed from the Kernel, the next slice is blocked. The Kernel deregisters a consumer only at the tip.
     kernel
         .commit(
-            kernel::CommitIntent {
-                producer: "memory_reviewer-switch-test".to_string(),
-                operation_key: "deregister-claims".to_string(),
-                request_digest: "0".repeat(64),
-                actor: "test".to_string(),
-                cause: "proof".to_string(),
-            },
+            kernel_route_fixtures::intent("deregister-claims"),
             |envelope| {
                 envelope.deregister_outbox_consumer(CLAIM_CONSUMER, crate::now_ms())?;
                 Ok(String::new())
