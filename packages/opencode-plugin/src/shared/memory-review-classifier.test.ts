@@ -125,6 +125,26 @@ describe("createReviewClassifierPump", () => {
         });
     });
 
+    it("leaves work unanswered that names another classifier than the loop asked for", async () => {
+        const fake = daemon([work({ classifier: "other/model" }), { state: "disabled" }]);
+        let executed = 0;
+        const pump = createReviewClassifierPump(
+            fake.client,
+            async () => {
+                executed += 1;
+                return {};
+            },
+            { pollIntervalMs: 1 },
+        );
+        pump.start(SCOPE);
+        await pump.idle();
+        expect(executed).toBe(0);
+        expect(fake.calls.map((call) => call.method)).toEqual([
+            "memory.review.classify.next",
+            "memory.review.classify.next",
+        ]);
+    });
+
     it("reports a failed classifier call as one content-free code", async () => {
         for (const [thrown, code] of [
             [new ReviewClassifierError("provider_unavailable"), "provider_unavailable"],

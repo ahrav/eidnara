@@ -283,8 +283,8 @@ export function createReviewClassifierPump(
                     continue;
                 }
                 const work = reviewClassifierWork(response);
-                // Work outside the contract, and work that arrives for a session released during the call, stays unanswered; its review's wait ends the attempt.
-                if (!work || loop.stopped) continue;
+                // Matching `work.classifier` to `scope.classifier` confines review text to the model named in the poll. The review's wait deadline ends each skipped attempt.
+                if (!work || work.classifier !== scope.classifier || loop.stopped) continue;
                 const stuck = await answer(loop, work);
                 sinceWork = 0;
                 // A call that ignored its abort signal is still running in the harness. The loop waits for it, so a project has one such call at a time.
