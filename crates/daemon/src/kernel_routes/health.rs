@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use kernel::{KernelFacts, MAIN_FILE_WARN_BYTES, OutboxLag};
+use kernel::{KernelFacts, MAIN_FILE_WARN_BYTES};
 use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -51,11 +51,11 @@ pub struct KernelFactsBlock {
 
 impl KernelFactsBlock {
     /// Every lag field, including the threshold verdict, comes from the one
-    /// outbox snapshot `lag`, so the displayed lag and the flag agree. `lag`
-    /// is the lag of the consumers a read is judged by
-    /// ([`super::serving::unserved_consumers`] names the rest), so the block
-    /// and a gated read report one verdict.
-    pub fn from_facts(facts: &KernelFacts, lag: &OutboxLag) -> Self {
+    /// outbox snapshot inside `facts`, so the displayed lag and the flag agree.
+    /// The sampler reads `facts` over the consumers a read is judged by, so
+    /// the block and a gated read report one verdict.
+    pub fn from_facts(facts: &KernelFacts) -> Self {
+        let lag = &facts.outbox_lag;
         Self {
             core_file_bytes: facts.main_file_bytes,
             core_file_warn: facts.main_file_bytes >= MAIN_FILE_WARN_BYTES,
@@ -225,11 +225,9 @@ impl KernelOpenCoordinator {
         let cancel = cancel.clone();
         let unserved = self.unserved_consumers();
         let worker = tokio::task::spawn_blocking(move || {
-            let Some(facts) = store.facts_unless(now_ms, &|| cancel.is_cancelled())? else {
-                return Ok(None);
-            };
-            let lag = store.outbox_lag_excluding(now_ms, unserved)?;
-            Ok::<_, kernel::KernelError>(Some(KernelFactsBlock::from_facts(&facts, &lag)))
+            store
+                .facts_unless(now_ms, unserved, &|| cancel.is_cancelled())
+                .map(|facts| facts.as_ref().map(KernelFactsBlock::from_facts))
         });
         let block = match worker.await {
             Ok(Ok(Some(facts))) => KernelHealthBlock::ready(now_ms, facts),

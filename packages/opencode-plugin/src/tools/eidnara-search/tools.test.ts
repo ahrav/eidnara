@@ -373,6 +373,7 @@ describe("createEidnaraSearchTools", () => {
 
     it("renders the state text when the memory source is not available", async () => {
         const harness = kernelHarness();
+        // A daemon answers a busy store on every read, gated or ungated.
         harness.kernel.surfaceStates.set("explicit_search", {
             kind: "unavailable",
             reason: "store_busy",
@@ -387,38 +388,6 @@ describe("createEidnaraSearchTools", () => {
         );
         const implicit = await tools.eidnara_search.execute({ query: "anything" }, toolContext());
         expect(implicit).toBe(memoryOnly);
-    });
-
-    it("answers from the canonical tip while a serving consumer lags, and says so", async () => {
-        const harness = kernelHarness();
-        seed(harness.kernel, OBJECT_A, "The cache must stay offline.", "CONSTRAINTS");
-        harness.kernel.gatedSurfaceStates.set("explicit_search", {
-            kind: "stale",
-            lag_positions: 4,
-            oldest_unconsumed_age_ms: 61_000,
-        });
-        const tools = createEidnaraSearchTools(harness.deps);
-        const result = await tools.eidnara_search.execute(
-            { query: "cache offline", sources: ["memory"] },
-            toolContext(),
-        );
-        expect(result).toContain(`id=${OBJECT_A}`);
-        expect(result).toContain(
-            "Memory: Memory results may lag recent changes; the projector has not caught up. Results are read from the canonical tip.",
-        );
-        expect(result).not.toContain("Error:");
-        expect(kernelReads(harness).map((call) => (call.body as { gated: boolean }).gated)).toEqual(
-            [true, false],
-        );
-
-        // An id query takes the same path through the chunked read.
-        harness.transport.calls.length = 0;
-        const byId = await tools.eidnara_search.execute({ query: OBJECT_A }, toolContext());
-        expect(byId).toContain(`id=${OBJECT_A}`);
-        expect(byId).toContain("Results are read from the canonical tip.");
-        expect(kernelReads(harness).map((call) => (call.body as { gated: boolean }).gated)).toEqual(
-            [true, false],
-        );
     });
 
     it("re-reads ungated from the canonical tip when no consumer is registered, and says so", async () => {
@@ -685,5 +654,40 @@ describe("eidnara_search expiry across the legacy scan", () => {
         const newerExpired = await search(twoAntiMemories(START - 1), { limit: 1 });
         expect(newerExpired).toContain(OBJECT_A);
         expect(newerExpired).not.toContain(OBJECT_B);
+    });
+});
+
+describe("eidnara_search while a consumer it serves from lags", () => {
+    it("answers from the canonical tip and says that a consumer is behind", async () => {
+        const harness = kernelHarness();
+        seed(harness.kernel, OBJECT_A, "The cache must stay offline.", "CONSTRAINTS");
+        // A daemon answers `stale` to a gated read alone.
+        harness.kernel.gatedSurfaceStates.set("explicit_search", {
+            kind: "stale",
+            lag_positions: 4,
+            oldest_unconsumed_age_ms: 61_000,
+        });
+        const tools = createEidnaraSearchTools(harness.deps);
+        const result = await tools.eidnara_search.execute(
+            { query: "cache offline", sources: ["memory"] },
+            toolContext(),
+        );
+        expect(result).toContain(`id=${OBJECT_A}`);
+        expect(result).toContain(
+            "Memory: a search consumer is behind recent changes. These results are read from the canonical tip and include them.",
+        );
+        expect(result).not.toContain("Error:");
+        expect(kernelReads(harness).map((call) => (call.body as { gated: boolean }).gated)).toEqual(
+            [true, false],
+        );
+
+        // An id query takes the same path through the chunked read.
+        harness.transport.calls.length = 0;
+        const byId = await tools.eidnara_search.execute({ query: OBJECT_A }, toolContext());
+        expect(byId).toContain(`id=${OBJECT_A}`);
+        expect(byId).toContain("These results are read from the canonical tip and include them.");
+        expect(kernelReads(harness).map((call) => (call.body as { gated: boolean }).gated)).toEqual(
+            [true, false],
+        );
     });
 });

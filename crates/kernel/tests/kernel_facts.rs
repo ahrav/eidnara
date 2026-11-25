@@ -230,6 +230,15 @@ fn lag_excluding_a_consumer_is_the_lag_of_the_rest() {
     assert_eq!(rest.consumer_count, 1);
     assert_eq!(rest.position_lag, Some(0));
     assert_eq!(rest.oldest_unconsumed_age_ms, None);
+    // The facts sample takes the same exclusion in its own snapshot, with the checkpoint and commit lag of the rest.
+    let facts = store
+        .facts_unless(1, &["background"], &|| false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.outbox_lag, rest);
+    assert_eq!(facts.minimum_required_checkpoint, Some(3));
+    assert_eq!(facts.commit_lag, Some(0));
+    assert_eq!(store.facts(1).unwrap().outbox_lag, all);
 
     let slow = store.outbox_lag_excluding(1, &["serving"]).unwrap();
     assert_eq!(slow.consumer_count, 1);

@@ -2256,18 +2256,30 @@ async fn a_pass_that_outlasts_the_staleness_window_leaves_search_and_the_block_a
     );
     assert_eq!(gated["state"]["kind"], "unavailable", "{gated}");
     assert_eq!(gated["state"]["reason"], "no_required_consumer", "{gated}");
+    // The search repeats that read ungated, as it does with the reviewer off, and is served the rows.
     let served: Vec<String> = rig.search().await.into_iter().map(|row| row.0).collect();
     assert_eq!(served, [stated(THURSDAY), stated(LINTER)]);
+    rig.handler.sample_kernel_health_for_test(late).await;
+    {
+        let facts = rig.handler.kernel.health_block();
+        let facts = facts.block.facts.as_ref().expect("a sampled block");
+        assert_eq!(facts.required_consumer_count, 0);
+        assert!(!facts.lag_threshold_tripped);
+    }
+    // The block is read under those facts and recorded as plainly served: a served read after it changes no recorded verdict, where a read recorded as served while consumers lag would report the change.
     let block = rig.block().await;
     assert!(
         block.contains(THURSDAY) && block.contains(LINTER),
         "{block}"
     );
-    rig.handler.sample_kernel_health_for_test(late).await;
-    let facts = rig.handler.kernel.health_block();
-    let facts = facts.block.facts.as_ref().expect("a sampled block");
-    assert_eq!(facts.required_consumer_count, 0);
-    assert!(!facts.lag_threshold_tripped);
+    let project = kernel_routes::ProjectBinding::new(&rig.project);
+    assert_eq!(
+        rig.handler
+            .kernel
+            .memory_read_report()
+            .observe(&project, crate::canonical_memory::Observed::Served),
+        None
+    );
 }
 
 /// The worker brings the claim consumer up to the tip before each review of a pass, so after a pass of two reviews the consumer trails the tip by the commits of the last review alone, as it does after a pass of one.

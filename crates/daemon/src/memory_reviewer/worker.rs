@@ -524,19 +524,19 @@ impl Worker {
         route.review.is_some() && self.switched.producers.is_some()
     }
 
-    /// Brings the claim consumer up to the Kernel's tip on a host where this worker runs it, on the blocking pool. A caught-up consumer costs one checkpoint read and one tip read. A host whose search lifecycle owner runs the consumer returns at once.
+    /// Brings the claim consumer up to the Kernel's tip on a host where this worker runs it, on the blocking pool, and returns whether it reached the tip. A caught-up consumer costs one checkpoint read and one tip read. A host whose search lifecycle owner runs the consumer returns false at once.
     async fn catch_up_claims(
         self: &Arc<Self>,
         kernel: &Arc<kernel::KernelStore>,
         cancel: &CancellationToken,
-    ) {
+    ) -> bool {
         if self
             .switched
             .claims_published
             .as_ref()
             .is_some_and(|published| published())
         {
-            return;
+            return false;
         }
         let worker = Arc::clone(self);
         let kernel = Arc::clone(kernel);
@@ -549,12 +549,13 @@ impl Worker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             review_cycle::publish_claims(&kernel, &mut claims, crate::now_ms(), &|| {
                 cancel.is_cancelled()
-            });
+            })
         })
         .await;
-        if let Err(error) = caught_up {
+        caught_up.unwrap_or_else(|error| {
             eprintln!("daemon: memory_reviewer claim catch-up task ended: {error}");
-        }
+            false
+        })
     }
 
     /// The pass over switched projects: claim descriptors are brought up to the Kernel's tip, each project's most suspicious unreviewed memories are enqueued, its Ready jobs run through the host's model execution, and each published proposal is treated as the project's apply mode says.
@@ -585,7 +586,8 @@ impl Worker {
         let Some(kernel) = (self.kernel)() else {
             return 0;
         };
-        self.catch_up_claims(&kernel, cancel).await;
+        // A catch-up that reached the tip is repeated before each review. One that stopped short, as a blocked slice does, has said so once and is left to the next pass.
+        let mut claims_current = self.catch_up_claims(&kernel, cancel).await;
         let prepared = {
             let worker = Arc::clone(self);
             let kernel = Arc::clone(&kernel);
@@ -757,7 +759,9 @@ impl Worker {
                     break;
                 }
                 // The claim consumer reads the commits of the reviews before this one, so its checkpoint trails the Kernel's tip by one review at most however long the pass runs.
-                self.catch_up_claims(&kernel, cancel).await;
+                if claims_current {
+                    claims_current = self.catch_up_claims(&kernel, cancel).await;
+                }
                 // A pass over many reviews outlasts one evaluation's lifetime, so each run restates that a switched project is under review and evaluates the owner's record again, which is what admits fact sets meanwhile.
                 self.status.set_switched_review(true);
                 let _ = self.recorded_gate(&kernel).await;

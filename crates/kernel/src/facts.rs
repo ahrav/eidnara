@@ -52,15 +52,19 @@ impl KernelStore {
     /// Future-dated outbox rows report age zero. Missing database sidecar files contribute zero bytes.
     pub fn facts(&self, now_ms: i64) -> Result<KernelFacts, KernelError> {
         Ok(self
-            .facts_unless(now_ms, &|| false)?
+            .facts_unless(now_ms, &[], &|| false)?
             .expect("an uncancellable sample completes"))
     }
 
     /// [`facts`](Self::facts) whose artifact traversal, the one unbounded step,
-    /// stops once `cancelled` returns true and yields `None`.
+    /// stops once `cancelled` returns true and yields `None`. The consumer
+    /// facts (`minimum_required_checkpoint`, `commit_lag`, `outbox_lag`)
+    /// describe the registered consumers other than `excluded`, read in the
+    /// transaction that reads the commit counters.
     pub fn facts_unless(
         &self,
         now_ms: i64,
+        excluded: &[&str],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<KernelFacts>, KernelError> {
         if now_ms < 0 {
@@ -80,7 +84,7 @@ impl KernelStore {
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(|_| KernelError::Io)?;
-            let consumers = consumer_horizon(&tx, &[])?;
+            let consumers = consumer_horizon(&tx, excluded)?;
             let lag = outbox_lag_in(&tx, &consumers, now_ms)?;
             let retained_outbox_rows: u64 = tx
                 .query_row("SELECT COUNT(*) FROM outbox", [], |row| {

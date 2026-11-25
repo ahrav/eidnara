@@ -588,11 +588,11 @@ fn facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled() {
     store.ingest_artifact(request("one", b"1234")).unwrap();
     store.ingest_artifact(request("two", b"56")).unwrap();
 
-    let complete = store.facts_unless(1, &|| false).unwrap().unwrap();
+    let complete = store.facts_unless(1, &[], &|| false).unwrap().unwrap();
     assert_eq!(complete.artifact_budget.usage_bytes, 6);
     assert_eq!(complete, store.facts(1).unwrap());
     // A held count is read without a walk, so cancellation is never polled.
-    let held = store.facts_unless(1, &|| true).unwrap().unwrap();
+    let held = store.facts_unless(1, &[], &|| true).unwrap().unwrap();
     assert_eq!(held.artifact_budget.usage_bytes, 6);
 
     // Without a count the sampler walks, polling before every entry at both
@@ -604,7 +604,7 @@ fn facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled() {
         polls.set(polls.get() + 1);
         polls.get() > 1
     };
-    assert_eq!(store.facts_unless(1, &cancelled).unwrap(), None);
+    assert_eq!(store.facts_unless(1, &[], &cancelled).unwrap(), None);
     assert_eq!(polls.get(), 2, "walk stopped at the first true poll");
     // Two objects in distinct shards: a full walk polls the two shard entries,
     // the `.`/`..` entries at each level, and every object.
@@ -615,7 +615,7 @@ fn facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled() {
     };
     assert_eq!(
         store
-            .facts_unless(1, &counting)
+            .facts_unless(1, &[], &counting)
             .unwrap()
             .unwrap()
             .artifact_budget
@@ -627,7 +627,7 @@ fn facts_read_the_count_and_abandon_a_fallback_walk_once_cancelled() {
         "only {} polls for two shards",
         polls.get()
     );
-    assert_eq!(store.facts_unless(1, &|| true).unwrap(), None);
+    assert_eq!(store.facts_unless(1, &[], &|| true).unwrap(), None);
 }
 
 #[test]

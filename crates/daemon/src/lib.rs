@@ -4055,7 +4055,6 @@ impl HandlerCore {
         let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
         let memory_reviewer_worker = Arc::clone(&self.memory_reviewer_worker);
         let review_producers = Arc::clone(&self.producer_factory);
-        let review_search_lifecycle = Arc::clone(&self.search_lifecycle);
         let memory_reviewer_host = self
             .memory_reviewer_host
             .lock()
@@ -4165,14 +4164,10 @@ impl HandlerCore {
                                     .get("AWS_REGION")
                                     .map(|region| region.as_str()),
                             );
-                            // The search lifecycle owner publishes claim descriptors where it runs; the worker publishes them for a switched project on a host without one.
+                            // The search lifecycle owner publishes claim descriptors where it runs; the worker publishes them for a switched project on a host without one. The coordinator holds that one fact for the worker, the read gate and the health block.
+                            let claims_source = Arc::clone(&kernel);
                             let claims_published: Arc<dyn Fn() -> bool + Send + Sync> =
-                                Arc::new(move || {
-                                    review_search_lifecycle
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .is_some()
-                                });
+                                Arc::new(move || claims_source.claims_feed_search());
                             let review_config = Mutex::new(config::ConfigCache::default());
                             let worker = Arc::new(memory_reviewer::worker::Worker {
                                 host,

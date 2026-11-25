@@ -14,7 +14,7 @@ pub const LAG_POSITION_THRESHOLD: i64 = 10_000;
 /// Age of the oldest unconsumed outbox row, in milliseconds.
 pub const LAG_AGE_THRESHOLD_MS: i64 = 60_000;
 
-/// The registered consumers a gated read's freshness leaves out, given whether a search lifecycle owner runs the claim consumer. A read is judged by the consumers whose output it serves. The claim consumer's descriptors reach the search projection through the owner's export, so a host with an owner counts it. On a host without one the review worker runs the claim consumer for its own selection and no read serves its output, so the read is judged without it.
+/// The registered consumers a gated read's freshness leaves out, given whether a search lifecycle owner runs the claim consumer. A read is judged by the consumers whose output it serves. The claim consumer's descriptors reach the search projection through the owner's export, so a host with an owner counts it. On a host without one the review worker runs the claim consumer for its own selection and no search ranks its output, so the read is judged without it.
 pub fn unserved_consumers(claims_feed_search: bool) -> &'static [&'static str] {
     if claims_feed_search {
         &[]

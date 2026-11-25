@@ -35,8 +35,8 @@ Do not build a second fixture or a second three-way disposition oracle.
   resolves the session/project and creates the kernel client. At
   [lines 258-304](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L258)
   object IDs use chunked filtered reads, text queries use `explicit_search`,
-  and nonavailable states remain explicit unless the no-consumer fallback
-  succeeds with its freshness note.
+  and nonavailable states remain explicit unless the stale or no-consumer
+  fallback succeeds with its freshness note.
 - [KernelClient, lines 550-585](../../../../../packages/opencode-plugin/src/shared/kernel-client/client.ts#L550)
   serializes these reads as `kernel.read`, preserving surface and optional
   object IDs. This completes the registered-tool transport trace.

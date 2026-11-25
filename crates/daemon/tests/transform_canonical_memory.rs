@@ -474,3 +474,52 @@ async fn rows_past_the_configured_budget_are_dropped_by_the_reader() {
     );
     daemon.shutdown().await;
 }
+
+/// On a host whose search lifecycle owner runs the claim consumer, the consumer's descriptors reach the search projection, so its lag counts toward a read's freshness: while it trails the tip past the age threshold, a gated explicit search reports `stale` and the health block counts the consumer and reports the lag. The harness installs the owner through the daemon's activation and holds its claim slices, so the consumer registered here stays behind.
+#[tokio::test]
+async fn a_lagging_claim_consumer_counts_on_a_host_with_a_search_lifecycle_owner() {
+    use daemon::claim_sources::{CLAIM_CONSUMER, ClaimMaterializer};
+    let daemon = KernelDaemon::start().await;
+    assert!(
+        daemon.handler().search_lifecycle().is_some(),
+        "the harness installs a search lifecycle owner"
+    );
+    let store = daemon.store();
+    ClaimMaterializer::register(&store, 1).unwrap();
+    let asserted = daemon.commit("asserted", vec![insert_decision(1)]).await;
+    assert_eq!(state_kind(&asserted), "available");
+    let claims_at = store
+        .outbox_consumer_checkpoint(CLAIM_CONSUMER)
+        .unwrap()
+        .expect("the claim consumer is registered");
+    assert!(
+        claims_at < daemon.tip(),
+        "the claim consumer trails the tip"
+    );
+    let all = store.outbox_lag(i64::MAX / 2).unwrap();
+    assert!(
+        daemon::kernel_routes::serving::lag_threshold_tripped(&all),
+        "{all:?}"
+    );
+
+    let late = i64::MAX / 2;
+    let stale = daemon
+        .call(json!({
+            "method": "kernel.read",
+            "session_id": SESSION,
+            "project_root": daemon.project().to_str().unwrap(),
+            "surface": "explicit_search",
+            "as_of": null,
+            "gated": true,
+            "now_ms": late,
+        }))
+        .await;
+    assert_eq!(state_kind(&stale), "stale", "{stale}");
+    daemon.handler().sample_kernel_health_for_test(late).await;
+    let health = host_runtime::CompositeComponent::health(daemon.handler()).await;
+    let kernel = &health.metrics.as_ref().expect("health metrics")["kernel"];
+    assert_eq!(kernel["required_consumer_count"], all.consumer_count);
+    assert_eq!(kernel["lag_threshold_tripped"], true);
+    assert_eq!(health.status, host_runtime::HealthStatus::Degraded);
+    daemon.shutdown().await;
+}

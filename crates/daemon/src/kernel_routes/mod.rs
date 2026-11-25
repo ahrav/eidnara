@@ -165,9 +165,14 @@ impl KernelOpenCoordinator {
         self.claims_feed_search.store(true, Ordering::Release);
     }
 
+    /// Whether a search lifecycle owner runs the claim consumer on this host. The review worker runs it where this is false.
+    pub(crate) fn claims_feed_search(&self) -> bool {
+        self.claims_feed_search.load(Ordering::Acquire)
+    }
+
     /// The registered consumers a gated read and the health block leave out of their lag: [`serving::unserved_consumers`] for this host.
     pub(crate) fn unserved_consumers(&self) -> &'static [&'static str] {
-        serving::unserved_consumers(self.claims_feed_search.load(Ordering::Acquire))
+        serving::unserved_consumers(self.claims_feed_search())
     }
 
     pub(crate) fn memory_read_report(&self) -> &crate::canonical_memory::ReadReport {
