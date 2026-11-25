@@ -14,6 +14,15 @@ pub const LAG_POSITION_THRESHOLD: i64 = 10_000;
 /// Age of the oldest unconsumed outbox row, in milliseconds.
 pub const LAG_AGE_THRESHOLD_MS: i64 = 60_000;
 
+/// The registered consumers a gated read's freshness leaves out, given whether a search lifecycle owner runs the claim consumer. A read is judged by the consumers whose output it serves. The claim consumer's descriptors reach the search projection through the owner's export, so a host with an owner counts it. On a host without one the review worker runs the claim consumer for its own selection and no read serves its output, so the read is judged without it.
+pub fn unserved_consumers(claims_feed_search: bool) -> &'static [&'static str] {
+    if claims_feed_search {
+        &[]
+    } else {
+        &[crate::claim_sources::CLAIM_CONSUMER]
+    }
+}
+
 /// True at or past either threshold. `None` lag, meaning no registered
 /// consumer, never trips; that case is reported as `no_required_consumer`.
 pub fn lag_threshold_tripped(lag: &OutboxLag) -> bool {
@@ -107,6 +116,16 @@ mod tests {
         assert!(lag_threshold_tripped(&lag(Some(10_000), Some(0))));
         assert!(lag_threshold_tripped(&lag(Some(0), Some(60_000))));
         assert!(!lag_threshold_tripped(&lag(None, None)));
+    }
+
+    /// The claim consumer is left out of a read's freshness exactly where no search lifecycle owner runs it.
+    #[test]
+    fn the_claim_consumer_counts_only_where_it_feeds_search() {
+        assert_eq!(
+            unserved_consumers(false),
+            [crate::claim_sources::CLAIM_CONSUMER]
+        );
+        assert!(unserved_consumers(true).is_empty());
     }
 
     #[test]

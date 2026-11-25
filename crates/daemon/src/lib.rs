@@ -4358,7 +4358,7 @@ impl HandlerCore {
             eprintln!("daemon: search stays unavailable: the store path is not under a data home");
             return None;
         };
-        let (Ok(kernel), Some(local_embeddings)) = (kernel.kernel_store(), local_embeddings) else {
+        let (Ok(store), Some(local_embeddings)) = (kernel.kernel_store(), local_embeddings) else {
             return None;
         };
         let mut slot = slot
@@ -4373,9 +4373,11 @@ impl HandlerCore {
         {
             eprintln!("daemon: search admission record refused: {refusal}");
         }
+        // The owner runs the claim consumer from here on, so its lag counts toward a read's freshness.
+        kernel.set_claims_feed_search();
         let roster = Arc::clone(bindings);
         let owner = Arc::new(
-            search_lifecycle_owner::SearchLifecycleOwner::for_home(home, kernel, local_embeddings)
+            search_lifecycle_owner::SearchLifecycleOwner::for_home(home, store, local_embeddings)
                 .with_claims_paused(claim_sources_paused)
                 .with_roster(Arc::new(move || {
                     roster

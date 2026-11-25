@@ -141,6 +141,8 @@ pub(crate) struct KernelOpenCoordinator {
     expected: AtomicBool,
     /// The canonical memory reader's last recorded verdict and its count of verdict changes, which each logged line carries as `verdict_seq`.
     memory_read_report: crate::canonical_memory::ReadReport,
+    /// Whether a search lifecycle owner runs the claim consumer, so its descriptors reach the search projection and its lag counts toward a read's freshness.
+    claims_feed_search: AtomicBool,
 }
 
 impl KernelOpenCoordinator {
@@ -154,7 +156,18 @@ impl KernelOpenCoordinator {
             background_sampler: AtomicBool::new(true),
             expected: AtomicBool::new(true),
             memory_read_report: crate::canonical_memory::ReadReport::default(),
+            claims_feed_search: AtomicBool::new(false),
         }
+    }
+
+    /// Records that a search lifecycle owner runs the claim consumer from now on.
+    pub(crate) fn set_claims_feed_search(&self) {
+        self.claims_feed_search.store(true, Ordering::Release);
+    }
+
+    /// The registered consumers a gated read and the health block leave out of their lag: [`serving::unserved_consumers`] for this host.
+    pub(crate) fn unserved_consumers(&self) -> &'static [&'static str] {
+        serving::unserved_consumers(self.claims_feed_search.load(Ordering::Acquire))
     }
 
     pub(crate) fn memory_read_report(&self) -> &crate::canonical_memory::ReadReport {

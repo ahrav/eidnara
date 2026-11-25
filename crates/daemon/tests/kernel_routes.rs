@@ -2615,6 +2615,56 @@ fn assert_stale(value: &Value, lag_positions: i64) {
     assert!(value.get("rows").is_none(), "{value}");
 }
 
+/// A gated read and the health block are judged by the consumers a search serves from. On a host with no search lifecycle owner the claim consumer serves review selection alone: while it trails the tip past the age threshold, a read beside a caught-up serving consumer is available, a read with no serving consumer answers as a host with no consumer does, and the health block counts the serving consumers.
+#[tokio::test]
+async fn a_lagging_claim_consumer_leaves_a_gated_read_and_health_as_they_are() {
+    use daemon::claim_sources::{CLAIM_CONSUMER, ClaimMaterializer};
+    let daemon = Daemon::start().await;
+    let store = daemon.store();
+    seed_domain(&store);
+    ClaimMaterializer::register(&store, 1).unwrap();
+    daemon
+        .commit("create-1", vec![insert_decision(1)], vec![])
+        .await;
+    let claims_at = store.outbox_consumer_checkpoint(CLAIM_CONSUMER).unwrap();
+    let claims_at = claims_at.expect("the claim consumer is registered");
+    assert!(
+        claims_at < daemon.tip(),
+        "the claim consumer trails the tip"
+    );
+    let late = oldest_unconsumed_created_at(&daemon, claims_at) + 120_000;
+    assert!(
+        daemon::kernel_routes::serving::lag_threshold_tripped(&store.outbox_lag(late).unwrap()),
+        "the lag over every consumer is past the age threshold"
+    );
+
+    // The claim consumer alone: the read answers as it does on a host with no consumer, which explicit search serves from the canonical tip.
+    let alone = daemon.gated_read("explicit_search", late).await;
+    assert_state(&alone, "unavailable", Some("no_required_consumer"));
+    daemon.handler.sample_kernel_health_for_test(late).await;
+    let health = daemon.handler.health().await;
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok, "{health:?}");
+    let kernel = kernel_block(&health);
+    assert_eq!(kernel["required_consumer_count"], 0);
+    assert_eq!(kernel["lag_threshold_tripped"], false);
+
+    // Beside a serving consumer that has read through the tip, the read is available and serves the row.
+    daemon.register_caught_up_consumer("projector");
+    store
+        .acknowledge_outbox("projector", daemon.tip(), 1)
+        .unwrap();
+    let served = daemon.gated_read("explicit_search", late).await;
+    assert_state(&served, "available", None);
+    assert_eq!(object_ids(&served), ["decision-object-1"]);
+    daemon.handler.sample_kernel_health_for_test(late).await;
+    let health = daemon.handler.health().await;
+    assert_eq!(health.status, host_runtime::HealthStatus::Ok, "{health:?}");
+    let kernel = kernel_block(&health);
+    assert_eq!(kernel["required_consumer_count"], 1);
+    assert_eq!(kernel["lag_threshold_tripped"], false);
+    daemon.handler.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn search_returns_stale_marker_and_injection_abstains_past_threshold() {
     let daemon = Daemon::start().await;

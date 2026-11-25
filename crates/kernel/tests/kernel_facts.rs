@@ -208,6 +208,47 @@ fn lag_uses_outbox_positions_and_the_required_consumer_minimum() {
     assert_eq!(caught_up.retained_outbox_rows, 10);
 }
 
+/// The lag over the consumers other than an excluded one is the lag of the rest: its count, positions and age.
+#[test]
+fn lag_excluding_a_consumer_is_the_lag_of_the_rest() {
+    let root = private_dir();
+    let store = KernelStore::open(root.path()).unwrap();
+    assert_eq!(insert_domains(&store, 1, 2), 1);
+    assert_eq!(register(&store, "serving"), 2);
+    assert_eq!(register(&store, "background"), 3);
+    store.mark_outbox_published_through(4, 1).unwrap();
+    // `serving` reads through the tip while `background` stays at its registration checkpoint.
+    store.acknowledge_outbox("serving", 3, 1).unwrap();
+
+    let all = store.outbox_lag(1).unwrap();
+    assert_eq!(all.consumer_count, 2);
+    assert_eq!(all.position_lag, Some(4));
+    assert!(all.oldest_unconsumed_age_ms.is_some());
+    assert_eq!(store.outbox_lag_excluding(1, &[]).unwrap(), all);
+
+    let rest = store.outbox_lag_excluding(1, &["background"]).unwrap();
+    assert_eq!(rest.consumer_count, 1);
+    assert_eq!(rest.position_lag, Some(0));
+    assert_eq!(rest.oldest_unconsumed_age_ms, None);
+
+    let slow = store.outbox_lag_excluding(1, &["serving"]).unwrap();
+    assert_eq!(slow.consumer_count, 1);
+    assert_eq!(slow.position_lag, all.position_lag);
+    assert_eq!(slow.oldest_unconsumed_age_ms, all.oldest_unconsumed_age_ms);
+
+    // With every registered consumer excluded the lag reads as it does for an empty consumer set.
+    let none = store
+        .outbox_lag_excluding(1, &["serving", "background", "unregistered"])
+        .unwrap();
+    assert_eq!(none.consumer_count, 0);
+    assert_eq!(none.position_lag, None);
+    assert_eq!(none.oldest_unconsumed_age_ms, None);
+    assert_eq!(
+        store.outbox_lag_excluding(-1, &["background"]),
+        Err(kernel::KernelError::InvalidInput)
+    );
+}
+
 #[test]
 fn no_consumers_report_absent_lag_rather_than_zero_and_count_retained_rows() {
     let root = private_dir();

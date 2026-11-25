@@ -80,7 +80,7 @@ impl KernelStore {
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(|_| KernelError::Io)?;
-            let consumers = consumer_horizon(&tx)?;
+            let consumers = consumer_horizon(&tx, &[])?;
             let lag = outbox_lag_in(&tx, &consumers, now_ms)?;
             let retained_outbox_rows: u64 = tx
                 .query_row("SELECT COUNT(*) FROM outbox", [], |row| {
@@ -128,6 +128,20 @@ impl KernelStore {
     /// Returns [`KernelError::InvalidInput`] if `now_ms` is negative or
     /// [`KernelError::Io`] if a database operation fails.
     pub fn outbox_lag(&self, now_ms: i64) -> Result<OutboxLag, KernelError> {
+        self.outbox_lag_excluding(now_ms, &[])
+    }
+
+    /// [`outbox_lag`](Self::outbox_lag) over the registered consumers other than `excluded`, so a caller that serves a read from some consumers' output measures the lag of those consumers alone. The count, the position lag and the age all describe the remaining consumers; with none remaining the lag reads as it does for an empty consumer set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] if `now_ms` is negative or
+    /// [`KernelError::Io`] if a database operation fails.
+    pub fn outbox_lag_excluding(
+        &self,
+        now_ms: i64,
+        excluded: &[&str],
+    ) -> Result<OutboxLag, KernelError> {
         if now_ms < 0 {
             return Err(KernelError::InvalidInput);
         }
@@ -135,7 +149,7 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| KernelError::Io)?;
-        let consumers = consumer_horizon(&tx)?;
+        let consumers = consumer_horizon(&tx, excluded)?;
         let lag = outbox_lag_in(&tx, &consumers, now_ms)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(lag)
@@ -169,10 +183,16 @@ struct ConsumerHorizon {
     count: u64,
 }
 
-fn consumer_horizon(tx: &Transaction<'_>) -> Result<ConsumerHorizon, KernelError> {
+/// The slowest checkpoint and the count of the registered consumers other than `excluded`.
+fn consumer_horizon(
+    tx: &Transaction<'_>,
+    excluded: &[&str],
+) -> Result<ConsumerHorizon, KernelError> {
+    let excluded = serde_json::to_string(excluded).map_err(|_| KernelError::InvalidInput)?;
     tx.query_row(
-        "SELECT MIN(checkpoint_commit_seq), COUNT(*) FROM outbox_consumers",
-        [],
+        "SELECT MIN(checkpoint_commit_seq), COUNT(*) FROM outbox_consumers
+         WHERE consumer_id NOT IN (SELECT value FROM json_each(?1))",
+        [excluded],
         |row| {
             Ok(ConsumerHorizon {
                 minimum_checkpoint: row.get::<_, Option<i64>>(0)?,
