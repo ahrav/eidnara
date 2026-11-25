@@ -643,6 +643,31 @@ impl MemoryStore {
         query.page(items)
     }
 
+    /// Returns the items from the first [`Self::candidates_for_decision`] page for each ID in `decision_object_ids`, in input order. After validation, a nonempty batch reads all pages through one connection.
+    pub fn first_candidates_for_decisions(
+        &self,
+        project_digest: &str,
+        decision_object_ids: &[&str],
+        limit: usize,
+    ) -> Result<Vec<Vec<StoredCandidate>>, MemoryStoreError> {
+        let queries = decision_object_ids
+            .iter()
+            .map(|decision| PageQuery::new(project_digest, decision, None, limit))
+            .collect::<Result<Vec<_>, _>>()?;
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pages = self
+            .inner
+            .with_conn(|conn| queries.iter().map(|query| query.read(conn)).collect())
+            .map_err(MemoryStoreError::from)?;
+        queries
+            .into_iter()
+            .zip::<Vec<Vec<StoredCandidate>>>(pages)
+            .map(|(query, items)| query.page(items).map(|page| page.items))
+            .collect()
+    }
+
     /// [`Self::module_authority_for_route`] whose connection wait ends at `deadline`.
     ///
     /// # Errors

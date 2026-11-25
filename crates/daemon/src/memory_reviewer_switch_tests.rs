@@ -1325,6 +1325,49 @@ async fn an_answer_from_another_model_is_withheld_and_closes_review() {
     }
 }
 
+/// At either review stage, a host-reported `auth_required` failure counts as an attempt and keeps review closed on the next pass. Previously delivered statements remain visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_credential_the_host_reports_refused_closes_review() {
+    use crate::history_summarizer_producer::{ErrorClass, ErrorClassification};
+    use host_runtime::model_execution::protocol::ErrorScope;
+    let refused = || {
+        Err(HistorySummarizerProducerError::RunFailed {
+            run_id: "run".to_string(),
+            detail: "provider returned 401".to_string(),
+            classification: Some(ErrorClassification {
+                class: ErrorClass::AuthRequired,
+                retry_after_secs: None,
+                scope: ErrorScope::Model,
+            }),
+            class_field_present: true,
+        })
+    };
+    for (requests, stage) in [(1, "stage 1"), (2, "the proposal request")] {
+        let rig = Rig::open(ReviewApply::Apply).await;
+        rig.state_rules(&[THURSDAY, LINTER]).await;
+        rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+            .await;
+        if requests == 2 {
+            rig.decides(&[FLAG]);
+        }
+        rig.state.await_results.lock().unwrap().push_back(refused());
+        assert_eq!(rig.drain().await, 0, "{stage}");
+        assert_eq!(rig.attempts().len(), requests, "{stage}");
+        assert_eq!(
+            rig.status.activation_state(),
+            ActivationState::Closed("unavailable"),
+            "{stage}"
+        );
+        let root = rig.project.to_string_lossy().to_string();
+        let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+        assert!(outcomes.outcomes.is_empty(), "{stage}");
+        let block = rig.block().await;
+        assert!(block.contains(&stated(THURSDAY)), "{block}");
+        assert_eq!(rig.drain().await, 0, "{stage}");
+        assert_eq!(rig.attempts().len(), requests, "{stage}");
+    }
+}
+
 /// A session's memories are reviewed by the worker pass that follows it, which can run after the session's route has closed. A root that set the switch stays listed for the worker when every route on it is gone, and its statements are reviewed then; a later bind of the root with the switch off takes it out of review.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_switched_root_is_reviewed_after_its_last_route_closes() {
@@ -1401,6 +1444,112 @@ async fn a_project_without_the_switch_is_left_unreviewed() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Reviewer selection tests use this fixture to model direct Kernel producers.
+fn commit_decision(rig: &Rig, object: &str, domain_id: &str, source_kind: &str, summary: &str) {
+    use sha2::{Digest, Sha256};
+    let key = object;
+    rig.handler
+        .kernel
+        .kernel_store()
+        .unwrap()
+        .commit(
+            kernel::CommitIntent {
+                producer: "memory_reviewer-switch-test".to_string(),
+                operation_key: key.to_string(),
+                request_digest: format!("{:x}", Sha256::digest(key.as_bytes())),
+                actor: "test".to_string(),
+                cause: "proof".to_string(),
+            },
+            |envelope| {
+                let (_, scope) = kernel_route_fixtures::ensure_route_scope(envelope, &rig.project)?;
+                kernel_route_fixtures::ensure_domain(envelope, domain_id)?;
+                envelope.insert_decision(kernel::DecisionSpec {
+                    source_kind: source_kind.to_string(),
+                    ..kernel_route_fixtures::decision_spec_in_domain(
+                        object, &scope, domain_id, "lasting", summary,
+                    )
+                })?;
+                envelope.record_admission(kernel::AdmissionRequest {
+                    candidate_id: None,
+                    subject_object_id: Some(object.to_string()),
+                    source_class: Some(kernel::SourceClass::ExplicitUser),
+                    taint_class: Some(kernel::TaintClass::UserExplicit),
+                    event: kernel::AdmissionEvent {
+                        kind: kernel::EventKind::Other,
+                        trigger_object_id: None,
+                        approval_object_id: None,
+                        evidence_id: None,
+                        reason: "test".to_string(),
+                    },
+                })?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+}
+
+/// Reviewer selection skips both the architecture decision and the verifier attestation even though their summaries share terms with the later user statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_that_is_not_a_stored_memory_is_left_unreviewed() {
+    let rig = Rig::open(ReviewApply::Apply).await;
+    commit_decision(
+        &rig,
+        "decision-architecture",
+        "architecture",
+        "repo",
+        THURSDAY,
+    );
+    let attestation =
+        crate::attestation_verifier::attest::Identity::of("decision-attested", "oid").object_id;
+    commit_decision(
+        &rig,
+        &attestation,
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        crate::attestation_verifier::classify::VERIFIER_SOURCE_KIND,
+        "Release branches are cut from main on the Thursday of every week.",
+    );
+    rig.user_states_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.flagged(&[RETIRE_CITING_LATER, RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 0);
+    assert_eq!(
+        rig.attempts().len(),
+        0,
+        "no request carried either decision"
+    );
+}
+
+/// Selection uses publication order; the run counts later references by message time. A message written before the memory's source but published after the memory qualifies for review and contributes zero later references.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_written_before_the_source_is_kept_without_a_request() {
+    use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
+    let rig = Rig::open(ReviewApply::Apply).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("earlier-1", STATED_AT_MS - 60_000, TUESDAY)
+        .await;
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 1);
+    assert!(rig.attempts().is_empty(), "no request was made");
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16)
+        .unwrap()
+        .outcomes;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].terminal,
+        MemoryReviewerReceiptTerminal::Abstained
+    );
+    assert_eq!(
+        outcomes[0].abstained_reason,
+        Some(AbstainReason::ExpectationChanged)
+    );
+    assert!(!outcomes[0].selected);
+    assert_eq!(rig.active_review_holds(), 0);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert_eq!(rig.drain().await, 0);
+    assert!(rig.attempts().is_empty());
 }
 
 /// A job is named by the newest later source it was shown. When an older source ages out of the store's candidate rows, the memory's evidence is a part of what it was reviewed on, and neither the worker nor one started afterwards reviews it again.

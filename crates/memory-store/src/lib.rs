@@ -8703,6 +8703,31 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
+    /// Returns the route's bound `(context_store_uuid, project)` when any domain has a matching authority row in `PREPARING`, `MODULE`, or `DRAINING`.
+    pub fn bound_authority_identity_for_route(
+        &self,
+        route_project_root: &str,
+    ) -> Result<Option<(String, String)>, MemoryStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT binding.context_store_uuid, binding.project
+                       FROM authority_route_bindings binding
+                      WHERE binding.route_project_root = ?1
+                        AND EXISTS (
+                            SELECT 1 FROM authority authority
+                             WHERE authority.context_store_uuid = binding.context_store_uuid
+                               AND authority.project = binding.project
+                               AND authority.state IN ('PREPARING', 'MODULE', 'DRAINING')
+                        )",
+                    params![route_project_root],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+            })
+            .map_err(Into::into)
+    }
+
     /// Return the authority identity bound to this daemon route only while ownership is active
     /// or draining. PREPARING remains route-keyed so transforms cannot observe a partial seed;
     /// the verified MODULE acknowledgement publishes the identity-key flip.

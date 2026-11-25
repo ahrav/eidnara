@@ -167,6 +167,8 @@ pub struct JobContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
     Status(u16),
+    /// The daemon maps the host's `auth_required` model execution result to this rejection.
+    AuthRequired,
     /// `reported` is the provider's model id cut to [`MAX_REPORTED_MODEL_CHARS`] characters, or `None` when the response named none; it is never response content.
     ModelMismatch {
         reported: Option<String>,
@@ -181,6 +183,10 @@ impl Rejection {
     /// The rejection a disclosure refusal carries, if any, including the cause behind an attempt whose terminal was not recorded.
     fn of(refusal: &DisclosureRefusal) -> Option<Self> {
         match refusal {
+            DisclosureRefusal::Send {
+                error: SendError::AuthRequired,
+                ..
+            } => Some(Self::AuthRequired),
             DisclosureRefusal::Send { error, .. } => error.refused_credential().map(Self::Status),
             DisclosureRefusal::ModelMismatch {
                 reported, expected, ..
@@ -203,6 +209,7 @@ impl std::fmt::Display for Rejection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Status(status) => write!(formatter, "status {status}"),
+            Self::AuthRequired => formatter.write_str("auth_required"),
             Self::ModelMismatch { reported, expected } => {
                 match reported {
                     Some(model) => {
@@ -899,7 +906,9 @@ impl Run<'_> {
                 return Ok(self.unread_later(code));
             }
             self.decided_by_host(stage, Stage1::Keep);
-            return Ok(Classified::Keep);
+            return Ok(Classified::Ended(RunResult::Refused(
+                RefusalCode::ExpectationChanged,
+            )));
         }
         // A request to an unproven default that failed moved this run's stage 1 to the review model.
         let (sender, approval) = match (&coordinator.approval, self.stage_one_by_review_model) {

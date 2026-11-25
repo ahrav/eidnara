@@ -1,0 +1,30 @@
+{
+    "description": "Shared parity fixture for the memory_reviewer.model and memory_reviewer.stage1_model values. The Rust daemon (model_reference in crates/daemon/src/config.rs) and the plugin schema (packages/opencode-plugin/src/config/schema/eidnara.ts, published as a pattern in assets/eidnara.schema.json) judge every row and must agree.",
+    "contract": [
+        "named: the daemon uses the value, trimmed, as the provider/model reference, and the schema accepts it.",
+        "unset: the daemon reads a blank value as an absent key, and the schema accepts it.",
+        "refused: the daemon ignores the value with a warning and falls back as for an absent key, and the schema rejects it."
+    ],
+    "rows": [
+        { "value": "provider/model", "verdict": "named" },
+        { "value": "amazon-bedrock/global.anthropic.claude-opus-5-5", "verdict": "named" },
+        { "value": "  provider/model\t", "verdict": "named" },
+        { "value": "provider/org/model", "verdict": "named" },
+        { "value": "provider/model with space", "verdict": "named" },
+        { "value": "pro vider/model", "verdict": "named" },
+        { "value": "provider/ model", "verdict": "named" },
+        { "value": "provider//", "verdict": "named" },
+        { "value": "", "verdict": "unset" },
+        { "value": " \t\n", "verdict": "unset" },
+        { "value": "reviewer", "verdict": "refused" },
+        { "value": "claude-opus-5-5", "verdict": "refused" },
+        { "value": "/model", "verdict": "refused" },
+        { "value": "provider/", "verdict": "refused" },
+        { "value": " provider/ ", "verdict": "refused" },
+        { "value": "/", "verdict": "refused" },
+        { "value": "{env:REVIEW_MODEL}", "verdict": "refused" },
+        { "value": "provider/{env:REVIEW_MODEL}", "verdict": "refused" },
+        { "value": "{file:model.txt}/model", "verdict": "refused" },
+        { "value": "provider/model\n{file:x}", "verdict": "refused" }
+    ]
+}

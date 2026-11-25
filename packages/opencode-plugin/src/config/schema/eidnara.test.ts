@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
     assertKnownConfigKeys,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
@@ -111,6 +113,31 @@ describe("EidnaraConfigSchema", () => {
             expect(parse({ enabled: "yes" }).success).toBe(false);
             expect(parse({ apply: "always" }).success).toBe(false);
             expect(parse({ enabled: true, extra: 1 }).success).toBe(false);
+        });
+
+        it("judges a memory reviewer model value as the daemon does", () => {
+            const fixture = JSON.parse(
+                readFileSync(
+                    join(
+                        import.meta.dir,
+                        "..",
+                        "__fixtures__",
+                        "memory-reviewer-model-parity.json",
+                    ),
+                    "utf-8",
+                ),
+            ) as { rows: { value: string; verdict: "named" | "unset" | "refused" }[] };
+            expect(fixture.rows.length).toBeGreaterThan(0);
+            for (const { value, verdict } of fixture.rows) {
+                for (const key of ["model", "stage1_model"]) {
+                    const parsed = EidnaraConfigSchema.safeParse({
+                        memory_reviewer: { enabled: true, [key]: value },
+                    });
+                    expect(`${key}=${JSON.stringify(value)}: ${parsed.success}`).toBe(
+                        `${key}=${JSON.stringify(value)}: ${verdict !== "refused"}`,
+                    );
+                }
+            }
         });
 
         it("keeps the verifier off unless the key enables it", () => {

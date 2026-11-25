@@ -316,6 +316,66 @@ fn a_decision_pages_in_reader_order_with_a_stable_cursor() {
 }
 
 #[test]
+fn a_batch_read_answers_each_decision_as_its_own_first_page_does() {
+    let (_dir, store) = open();
+    for index in 0..40_i64 {
+        let decision = format!("decision-{}", index % 3);
+        let matched = 3 + u32::try_from(index % 3).unwrap();
+        let rows = [score(&decision, matched, 5)];
+        let evidence = format!("ev-{index:03}");
+        store
+            .replace_candidates_for_descriptor(
+                &write(PROJECT, &evidence, 1, index / 4, &rows),
+                CAPS,
+            )
+            .unwrap();
+    }
+    let decisions = [
+        "decision-1",
+        "absent",
+        "decision-0",
+        "decision-2",
+        "decision-1",
+    ];
+    for limit in [0, 1, 4, 16, 100] {
+        let batch = store
+            .first_candidates_for_decisions(PROJECT, &decisions, limit)
+            .unwrap();
+        let single: Vec<Vec<StoredCandidate>> = decisions
+            .iter()
+            .map(|decision| {
+                store
+                    .candidates_for_decision(PROJECT, decision, None, limit)
+                    .unwrap()
+                    .items
+            })
+            .collect();
+        assert_eq!(batch, single, "limit {limit}");
+    }
+    assert!(batch_is_empty(&store, OTHER_PROJECT, &decisions));
+    assert_eq!(
+        store
+            .first_candidates_for_decisions(PROJECT, &[], 4)
+            .unwrap(),
+        Vec::<Vec<StoredCandidate>>::new()
+    );
+    assert!(
+        store
+            .first_candidates_for_decisions(PROJECT, &["decision-0", ""], 4)
+            .is_err(),
+        "one malformed id refuses the batch, as it refuses its own page"
+    );
+}
+
+fn batch_is_empty(store: &MemoryStore, project: &str, decisions: &[&str]) -> bool {
+    store
+        .first_candidates_for_decisions(project, decisions, 4)
+        .unwrap()
+        .iter()
+        .all(Vec::is_empty)
+}
+
+#[test]
 fn the_sweep_pages_by_rowid_and_deletes_remove_exactly_the_named_keys() {
     let (dir, store) = open();
     for index in 0..5 {

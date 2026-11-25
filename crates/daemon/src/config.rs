@@ -4262,6 +4262,35 @@ mod fold_authority_parity {
 }
 
 #[cfg(test)]
+mod memory_reviewer_model_parity {
+    use super::*;
+
+    const FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/config/__fixtures__/memory-reviewer-model-parity.json"
+    );
+
+    #[test]
+    fn every_fixture_row_gets_its_verdict() {
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("the parity fixture parses");
+        let rows = fixture["rows"].as_array().expect("rows");
+        assert!(!rows.is_empty());
+        for row in rows {
+            let value = row["value"].as_str().expect("a value");
+            let verdict = match model_reference(value) {
+                Ok(Some(_)) => "named",
+                Ok(None) => "unset",
+                Err(()) => "refused",
+            };
+            assert_eq!(
+                verdict,
+                row["verdict"].as_str().expect("a verdict"),
+                "{value:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod project_docs_parity {
     use super::*;
 
