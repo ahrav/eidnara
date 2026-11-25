@@ -810,6 +810,61 @@ async fn a_pass_observed_before_a_deletion_writes_no_record() {
     assert_eq!(write(&handler, record), 1);
 }
 
+/// A `session.delete` that ends between its Kernel step and its memory-store step fences
+/// the record of a pass observed before it: the record's write stores nothing. A pass
+/// observed after that delete records.
+#[tokio::test]
+async fn a_deletion_that_ends_partway_fences_a_pass_observed_before_it() {
+    let (handler, _dir, project) = project_with(&[(NOTES, BODY)]).await;
+    handler.bind_route(test_route(WRITER), session_binding(&project, "writer"));
+    let binding = session_binding(&project, "writer");
+    let said = format!("Read {NOTES} first.");
+    let mut messages = vec![ck("writer-u1", 1, &said)];
+    messages.extend(read("a1", 2, NOTES));
+    let observed = handler
+        .observe_named_files(&binding, &window("writer", &messages))
+        .expect("the window shows a use");
+    let record = handler
+        .named_files
+        .keep(
+            &binding.kernel_project,
+            &binding.session,
+            &observed,
+            now_ms(),
+        )
+        .expect("the file exists");
+    handler
+        .source_capture
+        .stop_after_retirement
+        .store(true, std::sync::atomic::Ordering::Release);
+    let stopped = handler
+        .dispatch_value_for_test(
+            test_route(WRITER),
+            json!({"method": "session.delete", "session_id": "writer"}),
+        )
+        .await;
+    assert!(
+        matches!(&stopped, PreparedOutcome::Error { code, .. } if code == "injected_stop"),
+        "{stopped:?}"
+    );
+    assert_eq!(write(&handler, record), 0);
+    assert!(stored_records(&handler, &project).is_empty());
+
+    let observed = handler
+        .observe_named_files(&binding, &window("writer", &messages))
+        .expect("the window shows a use");
+    let record = handler
+        .named_files
+        .keep(
+            &binding.kernel_project,
+            &binding.session,
+            &observed,
+            now_ms(),
+        )
+        .expect("the file exists");
+    assert_eq!(write(&handler, record), 1);
+}
+
 /// Two records taken of one observation before either is written: the first write records
 /// the path, and the second finds the path recorded under the gate and writes nothing. A
 /// record taken while the session had a place writes nothing once the places are taken.

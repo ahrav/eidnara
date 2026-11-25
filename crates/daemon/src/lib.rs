@@ -7101,6 +7101,8 @@ impl HandlerCore {
                     &core.failure_memo,
                     &session_id,
                 );
+                // Named-file records check the deletion count under the gate. Advancing it before either store changes fences earlier observations even if deletion fails.
+                core.named_files.delete_session(&session_id);
                 // Captured sources retire and the session's use-outcome records are marked deleted before the memory rows go, so no deleted session keeps a live descriptor or reads as live.
                 core.delete_kernel_step(&binding, &session_id)?;
                 #[cfg(test)]
@@ -7124,6 +7126,7 @@ impl HandlerCore {
                     .lock()
                     .expect("capture memo mutex")
                     .remove_session(&session_id);
+                // The second advance fences a pass observed while this delete held the gate.
                 core.named_files.delete_session(&session_id);
                 // A source capture handed off before this delete rechecks its ticket under the same gate and publishes nothing.
                 core.source_capture.invalidate_sessions();

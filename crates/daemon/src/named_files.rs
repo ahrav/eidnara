@@ -125,8 +125,9 @@ struct NamedFileMemo {
     sessions: HashMap<Owner, HashSet<u64>>,
     /// The held sessions, the one that recorded a path longest ago first.
     order: VecDeque<Owner>,
-    /// How many session deletions the memo has seen. A pass observed before
-    /// a deletion writes no record after it.
+    /// `session.delete` advances `deletes` before either store changes and
+    /// again after both store deletions succeed. A record of a pass observed
+    /// before a deletion fails the writer's `deletes` check.
     deletes: u64,
 }
 
@@ -186,7 +187,7 @@ impl Default for NamedFiles {
 #[derive(Debug)]
 pub(crate) struct Observed {
     paths: Vec<String>,
-    /// The memo's count of session deletions before the window was read.
+    /// The memo's deletion count before the window was read.
     deletes: u64,
 }
 
@@ -526,7 +527,7 @@ pub(crate) struct NamedFileRecord {
     paths: Vec<String>,
     /// The time of the pass that showed the use.
     used_ms: i64,
-    /// The memo's count of session deletions before the pass was observed.
+    /// The memo's deletion count before the pass was observed.
     deletes: u64,
 }
 
@@ -742,8 +743,8 @@ impl NamedFiles {
         }
     }
 
-    /// Forgets the paths `session` recorded and counts one deletion. The
-    /// caller holds the gate the record writes take.
+    /// Forgets the paths `session` recorded and advances the deletion count.
+    /// The caller holds the gate the record writes take.
     pub(crate) fn delete_session(&self, session: &str) {
         self.memo().delete_session(session);
     }

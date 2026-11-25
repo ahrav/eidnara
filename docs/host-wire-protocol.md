@@ -1550,7 +1550,8 @@ one five-second deadline for the Kernel's writer and are committed one by one: a
 whose commit that deadline ends or the Kernel refuses stays unrecorded,
 the paths committed before it stay recorded, and the paths after it are
 tried under the same deadline. A pass that finds four being written, a
-pass observed before a `session.delete` that its write follows, a session
+pass observed before a `session.delete` that its write follows, also when
+the delete ends partway, a session
 id the redaction would rewrite, a project root that cannot be opened, a
 Kernel that is unavailable, and a daemon that is shutting down record
 nothing; a
