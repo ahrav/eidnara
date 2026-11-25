@@ -1248,6 +1248,43 @@ describe("fold-authority parity fixture", () => {
         }
     });
 
+    it("leaves a memory reviewer model that holds a reference unset before substitution and warns with its key", () => {
+        for (const key of ["model", "stage1_model"] as const) {
+            const user = JSON.stringify({
+                memory_reviewer: { enabled: true, [key]: "{env:REVIEW_MODEL}" },
+            });
+            const { config } = loadDetailedWithTierFiles(
+                { "eidnara.jsonc": user },
+                {},
+                {
+                    REVIEW_MODEL: "provider/model",
+                },
+            );
+            const reviewer = (config as { memory_reviewer?: Record<string, unknown> })
+                .memory_reviewer;
+            expect([key, reviewer?.enabled, reviewer?.[key] ?? ""]).toEqual([key, true, ""]);
+            expect([
+                key,
+                config.configWarnings?.some((w) => w.includes(`memory_reviewer.${key}`)),
+            ]).toEqual([key, true]);
+        }
+        // A literal reference is the value the daemon names, and it draws no warning.
+        const { config } = loadDetailedWithTierFiles(
+            {
+                "eidnara.jsonc": JSON.stringify({
+                    memory_reviewer: { enabled: true, model: "provider/model" },
+                }),
+            },
+            {},
+        );
+        expect(
+            (config as { memory_reviewer?: Record<string, unknown> }).memory_reviewer?.model,
+        ).toBe("provider/model");
+        expect(config.configWarnings?.some((w) => w.includes("memory_reviewer.model"))).not.toBe(
+            true,
+        );
+    });
+
     it("rejects a raw lenient read that skips the loader pipeline", () => {
         const mismatches = fixture.rows.filter((row) => {
             const actual = outcome(() => {

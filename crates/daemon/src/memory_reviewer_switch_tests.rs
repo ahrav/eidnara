@@ -1389,6 +1389,58 @@ async fn contest_moves_a_contradicted_statement_from_the_block_to_labeled_search
     );
 }
 
+/// A proposal whose target `contest` disputed stays acceptable: the dispute is recorded as an admission of its own, the statement's last change is the one the proposal names, and the Kernel acceptance `review.accept` runs retires the statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_proposal_whose_target_contest_disputed_is_still_accepted() {
+    let rig = reviewed(ReviewApply::Contest).await;
+    assert_eq!(rig.active_review_holds(), 1);
+    let root = rig.project.to_string_lossy().to_string();
+    let outcomes = list_review_outcomes(&rig.store, &root, None, 16).unwrap();
+    let identity = outcomes.outcomes[0].causal_identity.clone();
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let budget = kernel::applicability::EvalBudget::new(
+        Some(std::time::Instant::now() + Duration::from_secs(5)),
+        Arc::default(),
+    );
+    let kernel_incarnation = kernel
+        .database_incarnation_id_within_budget(&budget)
+        .unwrap();
+    let memstore_incarnation = rig.store.memory_reviewer_store_incarnation().unwrap();
+    let selected = crate::memory_reviewer::settlement::read_selected_proposal(
+        &kernel,
+        &rig.store,
+        &root,
+        &identity,
+        crate::now_ms(),
+    )
+    .expect("the disputed proposal reads under its hold");
+    let accepted = crate::memory_reviewer::settlement::accept_selected_proposal(
+        &kernel,
+        rig.store
+            .lookup_memory_reviewer_receipt(&root, &identity)
+            .unwrap(),
+        (&kernel_incarnation, &memstore_incarnation),
+        &identity,
+        "reader-1",
+        &selected.reference,
+        &selected.proposal.target,
+    )
+    .expect("the Kernel accepts the proposal after the dispute");
+    assert!(
+        matches!(
+            accepted.settlement.effect,
+            kernel::SettlementEffect::Retired { .. }
+        ),
+        "{:?}",
+        accepted.settlement.effect
+    );
+    assert_eq!(
+        rig.search().await,
+        [(stated(LINTER), "visible".to_string())],
+        "the retired statement left explicit search"
+    );
+}
+
 /// In `apply` mode the worker accepts the proposal through the Kernel acceptance: the retired statement leaves the block and explicit search, and the retained one stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn apply_retires_a_replaced_statement_from_the_block_and_from_search() {
