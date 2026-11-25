@@ -100,8 +100,9 @@ export function usage(): string {
         "Outcome prints how many unretired serves a decision has, one per harness, session, and",
         "served set, and how many of those serves a dispute or contradiction followed, or",
         "unavailable when the Kernel cannot answer.",
-        "Status is host-wide and names no project. An open activation state means the",
-        "deployment owner admits model disclosure; it is not compaction status and applies",
+        "Status is host-wide and names no project. An open activation state means model",
+        "disclosure for review is admitted, by the deployment owner's activation record or by",
+        "the user's memory_reviewer.enabled switch; it is not compaction status and applies",
         "nothing. The daemon connection is a bearer key, not an OS sandbox.",
     ].join("\n");
 }

@@ -75,19 +75,45 @@ function writtenTierRejections(written: unknown): string[] {
 }
 
 const CHAIN_KEYS: readonly string[] = [...CHAIN_MODEL_KEYS, ...CHAIN_FALLBACK_KEYS];
+// `model_reference` in `crates/daemon/src/config.rs` reads these keys from the written file and
+// ignores a value that holds a reference, so the loader leaves such a value unset as well.
+const REVIEWER_MODEL_KEYS: readonly string[] = ["model", "stage1_model"];
 
-function excludedChainValues(rawText: string): { offset: number; length: number; key: string }[] {
-    const spans: { offset: number; length: number; key: string }[] = [];
+interface ExcludedValue {
+    offset: number;
+    length: number;
+    warning: string;
+}
+
+/** The written model values the loader leaves unset before variable substitution, each with its warning. */
+function excludedModelValues(rawText: string): ExcludedValue[] {
+    const spans: ExcludedValue[] = [];
     visit(rawText, {
         onLiteralValue: (value, offset, length, _line, _column, pathSupplier) => {
+            if (typeof value !== "string") return;
             const [block, key, index, ...rest] = pathSupplier();
             const chainValue =
                 block === "history_summarizer" &&
                 CHAIN_KEYS.includes(String(key)) &&
                 (index === undefined || typeof index === "number") &&
                 rest.length === 0;
-            if (chainValue && typeof value === "string" && literalChainModel(value) === undefined) {
-                spans.push({ offset, length, key: String(key) });
+            if (chainValue && literalChainModel(value) === undefined) {
+                spans.push({
+                    offset,
+                    length,
+                    warning: `Ignoring a history_summarizer.${String(key)} value: summarizer chain keys take a literal, non-blank model id without {env:} or {file:} references.`,
+                });
+            }
+            const reviewerModel =
+                block === "memory_reviewer" &&
+                REVIEWER_MODEL_KEYS.includes(String(key)) &&
+                index === undefined;
+            if (reviewerModel && hasVariableReference(value)) {
+                spans.push({
+                    offset,
+                    length,
+                    warning: `Ignoring a memory_reviewer.${String(key)} value: the key takes a literal provider/model reference without {env:} or {file:} references.`,
+                });
             }
         },
     });
@@ -111,11 +137,9 @@ export function screenUserTier(rawText: string): {
     }
     let text = rawText;
     const warnings: string[] = [];
-    for (const { offset, length, key } of excludedChainValues(rawText).reverse()) {
+    for (const { offset, length, warning } of excludedModelValues(rawText).reverse()) {
         text = `${text.slice(0, offset)}""${text.slice(offset + length)}`;
-        warnings.push(
-            `Ignoring a history_summarizer.${key} value: summarizer chain keys take a literal, non-blank model id without {env:} or {file:} references.`,
-        );
+        warnings.push(warning);
     }
     return { text, rejections: writtenTierRejections(written), warnings };
 }

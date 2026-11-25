@@ -117,6 +117,30 @@ describe("stripUnsafeProjectConfigFields", () => {
         }
     });
 
+    it("strips memory_reviewer from project config whatever it sets", () => {
+        for (const reviewer of [
+            { enabled: true },
+            { enabled: false },
+            { model: "provider/model" },
+            { apply: "apply" },
+            { stage1_model: "provider/small" },
+        ]) {
+            const raw: Record<string, unknown> = { protected_tags: 3, memory_reviewer: reviewer };
+
+            const warnings = stripUnsafeProjectConfigFields(raw);
+
+            expect(raw).toEqual({ protected_tags: 3 });
+            expect(warnings).toEqual([
+                expect.stringContaining("Ignoring memory_reviewer from project config"),
+            ]);
+        }
+        for (const reviewer of [{}, true, null]) {
+            const raw: Record<string, unknown> = { memory_reviewer: reviewer };
+            expect(stripUnsafeProjectConfigFields(raw)).toEqual([]);
+            expect(raw).toEqual({});
+        }
+    });
+
     it("strips verifier from project config in either direction", () => {
         for (const enabled of [true, false]) {
             const raw: Record<string, unknown> = { protected_tags: 3, verifier: { enabled } };

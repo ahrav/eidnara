@@ -10,7 +10,7 @@ use kernel::{
     MemoryReviewerHoldRefusal, PolicyDependencies, REVIEW_EXPIRY_MAX_MS, ReviewBinding,
     ReviewDependencies, ReviewOwner, ReviewPayload, ReviewProposal, ReviewReadError,
     ReviewReadRefusal, ReviewStageError, ReviewStageRefusal, ReviewStagedReference,
-    ReviewStagingSpec, StagingTerminalState, provisional_result_identity,
+    ReviewStagedRow, ReviewStagingSpec, StagingTerminalState, provisional_result_identity,
 };
 use memory_store::memory_reviewer_ledger::{
     AbstainReason, MAX_RECEIPT_PAGE, MemoryReviewerAttempt, MemoryReviewerAttemptTerminal,
@@ -931,6 +931,36 @@ fn copy_selection(
     })
 }
 
+/// Ends the review hold of the proposal `receipt` selects, after the Kernel settled that proposal: the settlement is the decision the hold kept the evidence for, so the hold's place in the project's allowance returns at once. Returns whether a live hold was released; a hold that already ended is left as it is.
+pub fn release_settled_review_hold(
+    store: &KernelStore,
+    receipt: MemoryReviewerReceipt,
+    live_memstore: &str,
+    causal_identity: &str,
+    now: i64,
+) -> Result<bool, String> {
+    let CopiedSelection { reference, run, .. } =
+        copy_selection(receipt, live_memstore, causal_identity)
+            .map_err(|refusal| refusal.to_string())?;
+    let review = MemoryReviewerHoldBinding {
+        subject: reference.candidate_id,
+        ..run
+    };
+    let Some(hold) = store
+        .lookup_review_hold(&review, now)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(false);
+    };
+    match store.release_review_hold(&hold.hold_id, &review) {
+        Ok(()) => Ok(true),
+        Err(MemoryReviewerHoldError::Refused(
+            MemoryReviewerHoldRefusal::Released | MemoryReviewerHoldRefusal::Expired,
+        )) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Reads the proposal the job's completed receipt selects. The proposal row carries the binding its settlement staged it under; the read requires that binding to name the selection's project digest and this job's generation as the proposal owner, and a row bound otherwise is a scope mismatch. The row's queue deadline is judged against the receipt's completion time, which the Memory Store fenced against that same deadline, so a result selected while its queue was live stays readable afterward exactly as long as its review hold is live and every disclosed input still passes local policy.
 pub fn read_selected_proposal(
     store: &KernelStore,
@@ -1093,6 +1123,28 @@ pub enum AcceptRefusal {
     Kernel(kernel::AcceptanceRefusal),
 }
 
+/// The template an acceptance names: the one the proposal was written under, which the selected row records. A settled proposal replays before any revision is compared, so a row the Kernel refuses to read names the fact-set template. A read the store fails is the acceptance's store refusal, which a caller retries.
+fn accepted_template(
+    selected: Result<ReviewStagedRow, ReviewReadError>,
+) -> Result<QuestionTemplate, AcceptRefusal> {
+    Ok(match selected {
+        Ok(row) => match row.payload {
+            ReviewPayload::Proposal(proposal) => {
+                QuestionTemplate::of_staged(proposal.policy_dependencies.question_template)
+            }
+            _ => QuestionTemplate::ExtractedFacts,
+        },
+        Err(ReviewReadError::Store(error)) => {
+            return Err(AcceptRefusal::Receipt(ReadRefusal::Store(
+                error.to_string(),
+            )));
+        }
+        Err(ReviewReadError::Refused(_) | ReviewReadError::Invalid) => {
+            QuestionTemplate::ExtractedFacts
+        }
+    })
+}
+
 /// Accepts the proposal the job's completed `receipt` selects, the copy the caller read from the Memory Store and released before this call. `expected` names the Kernel and Memory Store incarnations the acceptance runs under; a receipt bound to a different incarnation yields `IncarnationMismatch`, no receipt yields `NotSelected`, a receipt that selects another proposal than `read`, the reference the caller's `review.read` returned, yields `NotSelected` before the Kernel is entered, and the Kernel refuses `Unavailable` before reading anything else when its live incarnation is not the expected one. The Kernel replays an existing settlement before checking the review hold, queue deadline, or payload; otherwise, it applies the selected proposal at `target` in one envelope. Creates use the project's scope, `project:<digest>`. The caller intent's identity is the run's project digest, the job's causal identity, and the digest of `operation_key`; reusing the key for a different target causes a conflict.
 pub fn accept_selected_proposal(
     store: &KernelStore,
@@ -1119,13 +1171,14 @@ pub fn accept_selected_proposal(
         return Err(AcceptRefusal::Receipt(ReadRefusal::NotSelected));
     }
     let scope_id = format!("project:{}", run.project_digest);
+    let question = accepted_template(store.read_selected_review_input(&reference, selected_at))?;
     let acceptance = kernel::ProposalAcceptance {
         intent: caller_intent(&run, causal_identity, operation_key, target),
         run,
         proposal: reference,
         selected_at,
         target: target.clone(),
-        question_template_revision: QuestionTemplate::ExtractedFacts.revision(),
+        question_template_revision: question.revision(),
         scope_id: Some(scope_id),
     };
     store
@@ -1167,6 +1220,22 @@ fn caller_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store failure of the selected row's read is the acceptance's store refusal, so the caller retries; a row the Kernel refuses to read names the fact-set template, under which a settled proposal replays.
+    #[test]
+    fn a_store_failure_reading_the_selected_row_refuses_the_acceptance_as_a_store_failure() {
+        let failed = accepted_template(Err(ReviewReadError::Store(kernel::KernelError::Busy)));
+        assert!(
+            matches!(failed, Err(AcceptRefusal::Receipt(ReadRefusal::Store(_)))),
+            "{failed:?}"
+        );
+        for refusal in [ReviewReadRefusal::Missing, ReviewReadRefusal::Expired] {
+            assert_eq!(
+                accepted_template(Err(ReviewReadError::Refused(refusal))).ok(),
+                Some(QuestionTemplate::ExtractedFacts)
+            );
+        }
+    }
 
     /// The caller intent's identity carries the run's project digest, the causal identity, and the key's digest as hex, whatever bytes the key holds, so a key or project the Kernel's secret scanner would match cannot make it `invalid`; two keys yield two identities and one key yields one.
     #[test]

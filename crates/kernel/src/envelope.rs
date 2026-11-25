@@ -65,8 +65,8 @@ impl Sensitivity {
     }
 
     /// Why this class alone denies `destination`, before any provider-egress
-    /// rule: a secret is denied everywhere, and a remote model admits only
-    /// `Normal`. Every egress judgement derives its class rule from here so
+    /// rule: a secret is denied everywhere, a remote model admits only
+    /// `Normal`, and the configured model admits what a local reader is served. Every egress judgement derives its class rule from here so
     /// artifacts, served objects, and staged rows cannot drift apart.
     pub fn denies_destination(
         self,
@@ -74,7 +74,11 @@ impl Sensitivity {
     ) -> Option<crate::EligibilityDeniedReason> {
         match (self, destination) {
             (Self::Secret, _) => Some(crate::EligibilityDeniedReason::Secret),
-            (Self::Normal, _) | (Self::Sensitive, crate::ArtifactDestination::Local) => None,
+            (Self::Normal, _)
+            | (
+                Self::Sensitive,
+                crate::ArtifactDestination::Local | crate::ArtifactDestination::ConfiguredModel,
+            ) => None,
             (Self::Sensitive, crate::ArtifactDestination::Remote) => {
                 Some(crate::EligibilityDeniedReason::SensitiveRemote)
             }

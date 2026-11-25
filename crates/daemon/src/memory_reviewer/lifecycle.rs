@@ -131,8 +131,10 @@ struct GateEvaluation {
 /// The sampler's published projection; `health()` reads it and never touches the store. The activation state is the worker's, published beside the sampler's block.
 pub struct MemoryReviewerStatus {
     snapshot: ArcSwap<Published>,
-    /// `None` until the first evaluation, which nothing can age.
+    /// The owner's activation record as the worker last evaluated it; `None` until the first evaluation, which nothing can age.
     activation: ArcSwap<Option<GateEvaluation>>,
+    /// When the worker's latest pass over projects under the review switch stops being current; `None` while no such project is under review.
+    switched: ArcSwap<Option<Instant>>,
 }
 
 impl Default for MemoryReviewerStatus {
@@ -143,6 +145,7 @@ impl Default for MemoryReviewerStatus {
                 stale_at: Instant::now() + SAMPLE_STALE_AFTER,
             }),
             activation: ArcSwap::from_pointee(None),
+            switched: ArcSwap::from_pointee(None),
         }
     }
 }
@@ -163,17 +166,36 @@ impl MemoryReviewerStatus {
         block
     }
 
-    /// The activation state [`Self::reported`] carries, with an expired evaluation reported as `stale`.
+    /// The activation state [`Self::reported`] carries: `open` while a project under the review switch is under review, and the owner's record otherwise, with an expired evaluation reported as `stale`.
     pub fn activation_state(&self) -> ActivationState {
         self.activation_state_at(Instant::now())
     }
 
     fn activation_state_at(&self, now: Instant) -> ActivationState {
+        if (**self.switched.load()).is_some_and(|stale_at| now < stale_at) {
+            return ActivationState::Open;
+        }
+        self.recorded_state_at(now)
+    }
+
+    /// The state of the owner's activation record alone. The record admits the reviews it was written for, which are fact sets and the selections of a Memory Classifier slot; the review switch admits reviews of stored memories and nothing else.
+    pub fn recorded_state(&self) -> ActivationState {
+        self.recorded_state_at(Instant::now())
+    }
+
+    fn recorded_state_at(&self, now: Instant) -> ActivationState {
         match &**self.activation.load() {
             None => ActivationState::Closed("unknown"),
             Some(evaluation) if now >= evaluation.stale_at => ActivationState::Closed("stale"),
             Some(evaluation) => evaluation.state,
         }
+    }
+
+    /// Records whether the worker's pass found a project under the review switch to review.
+    pub fn set_switched_review(&self, under_review: bool) {
+        self.switched.store(Arc::new(
+            under_review.then(|| Instant::now() + SAMPLE_STALE_AFTER),
+        ));
     }
 
     pub fn set_activation(&self, state: ActivationState) {
@@ -1306,6 +1328,31 @@ mod tests {
             ActivationState::Closed("identity_mismatch"),
             "names another provider".to_string()
         ));
+    }
+
+    /// A project under the review switch reads as `open` whatever the owner's record says, and leaves the record's own state and its closed reason as they are, so the handoff of fact sets still follows the record.
+    #[test]
+    fn a_switched_review_reads_open_and_leaves_the_records_state() {
+        let status = MemoryReviewerStatus::default();
+        assert!(status.set_closed(
+            ActivationState::Closed("unconfigured"),
+            "no activation record".to_string()
+        ));
+        status.set_switched_review(true);
+        assert_eq!(status.activation_state(), ActivationState::Open);
+        assert_eq!(
+            status.recorded_state(),
+            ActivationState::Closed("unconfigured")
+        );
+        assert!(!status.set_closed(
+            ActivationState::Closed("unconfigured"),
+            "no activation record".to_string()
+        ));
+        status.set_switched_review(false);
+        assert_eq!(
+            status.activation_state(),
+            ActivationState::Closed("unconfigured")
+        );
     }
 
     /// Before the worker's first evaluation nothing can go stale: `unknown` outlives the staleness bound. An evaluation does age into `stale`.

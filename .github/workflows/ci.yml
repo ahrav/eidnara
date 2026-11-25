@@ -179,6 +179,8 @@ jobs:
               - 'fixtures/schema/storage-inventory-v1.json'
               - 'packages/opencode-plugin/src/config/__fixtures__/project-docs-parity.json'
               - 'packages/opencode-plugin/src/config/__fixtures__/source-capture-parity.json'
+              # `crates/daemon/src/config.rs` embeds the reviewer model-reference parity cases.
+              - 'packages/opencode-plugin/src/config/__fixtures__/memory-reviewer-model-parity.json'
               - 'packages/opencode-plugin/src/hooks/context/module-transport.ts'
               - 'packages/pi-plugin/src/transform/__fixtures__/pi-codec-parity.json'
               - 'packages/e2e-tests/src/source-corpus/corpus.ts'

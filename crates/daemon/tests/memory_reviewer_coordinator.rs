@@ -493,6 +493,7 @@ impl Fixture {
             permits: Arc::clone(&self.permits),
             now_ms: Arc::new(move || clock.load(Ordering::SeqCst)),
             inspection_limit: self.inspection_limit,
+            stage_one: None,
         }
     }
 

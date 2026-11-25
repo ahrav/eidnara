@@ -7121,6 +7121,17 @@ macro_rules! authority_select {
     };
 }
 
+/// The `(context_store_uuid, project)` a route is bound to while that identity holds a `PREPARING`, `MODULE`, or `DRAINING` authority in any domain. The route root is `?1`.
+const LIVE_ROUTE_BINDING_SQL: &str = "SELECT binding.context_store_uuid, binding.project
+       FROM authority_route_bindings binding
+      WHERE binding.route_project_root = ?1
+        AND EXISTS (
+            SELECT 1 FROM authority authority
+             WHERE authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+               AND authority.state IN ('PREPARING', 'MODULE', 'DRAINING')
+        )";
+
 const AUTHORITY_SELECT_SQL: &str =
     authority_select!("context_store_uuid = ?1 AND project = ?2 AND domain = ?3");
 
@@ -8657,6 +8668,28 @@ impl MemoryStore {
         project: &str,
         route_project_root: &str,
     ) -> Result<(), MemoryStoreError> {
+        self.bind_route(context_store_uuid, project, route_project_root, false)
+            .map(|_| ())
+    }
+
+    /// [`Self::bind_authority_route`] for a caller that yields to a live owner. The transaction that writes the binding first reads the route's row: when it names another `(context_store_uuid, project)` that holds a `PREPARING`, `MODULE`, or `DRAINING` authority in any domain, the row stays as it is and the call writes nothing. Returns whether the route is bound to the given identity when the call returns.
+    pub fn bind_authority_route_unless_owned(
+        &self,
+        context_store_uuid: &str,
+        project: &str,
+        route_project_root: &str,
+    ) -> Result<bool, MemoryStoreError> {
+        self.bind_route(context_store_uuid, project, route_project_root, true)
+    }
+
+    /// Writes the route's binding in one fenced transaction. With `yield_to_owner`, a route [`LIVE_ROUTE_BINDING_SQL`] finds bound to another identity keeps its row, and the result is `false`.
+    fn bind_route(
+        &self,
+        context_store_uuid: &str,
+        project: &str,
+        route_project_root: &str,
+        yield_to_owner: bool,
+    ) -> Result<bool, MemoryStoreError> {
         let exact_binding = self.inner.with_conn(|conn| {
             conn.query_row(
                 "SELECT context_store_uuid, project FROM authority_route_bindings
@@ -8684,6 +8717,18 @@ impl MemoryStore {
         }
         self.with_prepared_note_conn_fenced(route_project_root, write, |coordinated| {
             let tx = coordinated.tx();
+            if yield_to_owner {
+                let owner = tx
+                    .query_row(LIVE_ROUTE_BINDING_SQL, params![route_project_root], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .optional()?;
+                if owner.is_some_and(|(uuid, bound_project)| {
+                    uuid != context_store_uuid || bound_project != project
+                }) {
+                    return Ok(WriteDisposition::Replay(false));
+                }
+            }
             tx.execute(
                 "INSERT INTO authority_route_bindings(route_project_root, context_store_uuid, project)
                  VALUES (?1, ?2, ?3)
@@ -8698,9 +8743,9 @@ impl MemoryStore {
             // the vocabulary law independent of write ordering.
             normalize_authority_note_route_tx(tx, context_store_uuid, project, route_project_root)?;
             Ok(if is_replay {
-                WriteDisposition::Replay(())
+                WriteDisposition::Replay(true)
             } else {
-                WriteDisposition::Applied(())
+                WriteDisposition::Applied(true)
             })
         })
     }
@@ -8753,6 +8798,21 @@ impl MemoryStore {
                     params![route_project_root, domain],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
+                .optional()
+            })
+            .map_err(Into::into)
+    }
+
+    /// Returns the route's bound `(context_store_uuid, project)` when any domain has a matching authority row in `PREPARING`, `MODULE`, or `DRAINING`.
+    pub fn bound_authority_identity_for_route(
+        &self,
+        route_project_root: &str,
+    ) -> Result<Option<(String, String)>, MemoryStoreError> {
+        self.inner
+            .with_conn(|conn| {
+                conn.query_row(LIVE_ROUTE_BINDING_SQL, params![route_project_root], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
                 .optional()
             })
             .map_err(Into::into)

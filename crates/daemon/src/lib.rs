@@ -288,6 +288,8 @@ pub const OBSERVATIONAL_HARNESS: &str = "cli";
 pub(crate) struct RouteBindings {
     by_route: HashMap<RouteHandle, BoundRoute>,
     next_bind_seq: u64,
+    /// The newest participating binding of each root that set the review switch, kept after its route closes: the switch is the user's consent, and a review of a session's memories starts when a worker pass next runs, which can be after the session's route is gone. A later bind of the root with the switch off drops the entry.
+    reviewed: HashMap<PathBuf, (u64, SessionBinding)>,
 }
 
 struct BoundRoute {
@@ -353,6 +355,14 @@ impl RouteBindings {
     fn insert(&mut self, channel: RouteHandle, binding: SessionBinding) -> Option<SessionBinding> {
         let seq = self.next_bind_seq;
         self.next_bind_seq += 1;
+        if !binding.is_observational() {
+            if binding.config.memory_reviewer.enabled {
+                self.reviewed
+                    .insert(binding.project_root.clone(), (seq, binding.clone()));
+            } else {
+                self.reviewed.remove(&binding.project_root);
+            }
+        }
         self.by_route
             .insert(
                 channel,
@@ -412,6 +422,7 @@ impl RouteBindings {
 
     fn clear(&mut self) {
         self.by_route.clear();
+        self.reviewed.clear();
     }
 
     /// The bindings that take part in background work, with the sequence that orders them by insertion time. Observational bindings are excluded here, before any newest-per-root selection, so an observer never replaces an older participating binding, an observer-only root contributes nothing, and closing an observer reveals no binding that was not already selected. This is the only view background work reads: the MemoryReviewer worker's projects, the scheduler's roots and schedules, and the search maintenance roster.
@@ -438,6 +449,15 @@ impl RouteBindings {
                 .or_insert_with(|| binding.kernel_project.scope().clone());
         }
         projects.into_iter().collect()
+    }
+
+    /// The roots the MemoryReviewer worker runs for: the newest participating binding on every bound root, and for a root under the review switch whose routes have closed, the binding that last set the switch.
+    pub(crate) fn review_roots(&self) -> BTreeMap<&Path, (u64, &SessionBinding)> {
+        let mut roots = self.latest_per_root();
+        for (root, (seq, binding)) in &self.reviewed {
+            roots.entry(root.as_path()).or_insert((*seq, binding));
+        }
+        roots
     }
 
     /// The newest participating binding on every root that has one, with the sequence that orders bindings by insertion time.
@@ -2910,6 +2930,8 @@ pub struct HandlerCore {
     memory_reviewer_host: Mutex<Option<Arc<memory_reviewer::worker::MemoryReviewerHost>>>,
     /// The data home the owner's MemoryReviewer records live under, known once the SQLite store opens; `review.accept` reads the acceptance record there.
     memory_reviewer_home: Arc<std::sync::OnceLock<std::path::PathBuf>>,
+    /// The MemoryReviewer worker, once the store-open task has spawned it, so a caller that holds the core can run its passes to completion.
+    memory_reviewer_worker: Arc<std::sync::OnceLock<Arc<memory_reviewer::worker::Worker>>>,
     /// The owner's acceptance record, held open between `review.accept` requests while its path still names it unchanged.
     memory_reviewer_acceptance_record: Arc<Mutex<Option<projection_lifecycle::HeldRecord>>>,
     source_health: Mutex<Option<host_runtime::model_execution::source_health::SourceHealthCell>>,
@@ -3622,6 +3644,15 @@ impl Handler {
     }
 }
 
+impl HandlerCore {
+    /// Runs MemoryReviewer passes until one settles nothing and returns the runs settled; `None` before the store-open task has spawned the worker. A harness calls it between sessions so every review the last session caused has ended before the next begins.
+    #[cfg(any(test, feature = "test-support", feature = "direct-host-fixture"))]
+    pub async fn drain_memory_reviewer(&self) -> Option<usize> {
+        let worker = self.memory_reviewer_worker.get().cloned()?;
+        Some(worker.drain(&self.cancel).await)
+    }
+}
+
 impl Deref for Handler {
     type Target = HandlerCore;
 
@@ -3849,6 +3880,7 @@ impl Handler {
             verifier_counters: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
             memory_reviewer_home: Arc::default(),
+            memory_reviewer_worker: Arc::default(),
             memory_reviewer_acceptance_record: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
@@ -4021,6 +4053,9 @@ impl HandlerCore {
         let contradiction_candidates = Arc::clone(&self.contradiction_candidates);
         let candidates_enabled = self.candidates_enabled();
         let memory_reviewer_home = Arc::clone(&self.memory_reviewer_home);
+        let memory_reviewer_worker = Arc::clone(&self.memory_reviewer_worker);
+        let review_producers = Arc::clone(&self.producer_factory);
+        let review_search_lifecycle = Arc::clone(&self.search_lifecycle);
         let memory_reviewer_host = self
             .memory_reviewer_host
             .lock()
@@ -4130,27 +4165,49 @@ impl HandlerCore {
                                     .get("AWS_REGION")
                                     .map(|region| region.as_str()),
                             );
-                            task_admission.spawn(memory_reviewer::worker::run(
-                                Arc::new(memory_reviewer::worker::Worker {
-                                    host,
-                                    home,
-                                    store,
-                                    kernel: Arc::new(move || {
-                                        memory_reviewer::worker::ready_kernel(&kernel_source)
-                                    }),
-                                    projects: Arc::new(move || {
-                                        memory_reviewer::worker::module_projects(
-                                            &project_store,
-                                            &project_bindings,
-                                        )
-                                    }),
-                                    status: Arc::clone(&memory_reviewer_status),
-                                    permits: memory_reviewer_permits,
-                                    providers,
-                                    rejection: Default::default(),
+                            // The search lifecycle owner publishes claim descriptors where it runs; the worker publishes them for a switched project on a host without one.
+                            let claims_published: Arc<dyn Fn() -> bool + Send + Sync> =
+                                Arc::new(move || {
+                                    review_search_lifecycle
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .is_some()
+                                });
+                            let review_config = Mutex::new(config::ConfigCache::default());
+                            let worker = Arc::new(memory_reviewer::worker::Worker {
+                                host,
+                                home,
+                                store,
+                                kernel: Arc::new(move || {
+                                    memory_reviewer::worker::ready_kernel(&kernel_source)
                                 }),
-                                cancel.clone(),
-                            ));
+                                projects: Arc::new(move || {
+                                    // The switch and its models are the user tier's, read on every pass, so a change there takes effect at the next pass, also for a root whose routes have closed.
+                                    let user_tier = review_config
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .user_tier(
+                                            std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+                                            std::env::var("HOME").ok().as_deref(),
+                                        );
+                                    memory_reviewer::worker::module_projects(
+                                        &project_store,
+                                        &project_bindings,
+                                        Some(&user_tier),
+                                    )
+                                }),
+                                status: Arc::clone(&memory_reviewer_status),
+                                permits: memory_reviewer_permits,
+                                providers,
+                                rejection: Default::default(),
+                                switched: memory_reviewer::worker::SwitchedReview::through(
+                                    review_producers,
+                                    Some(claims_published),
+                                ),
+                            });
+                            let _ = memory_reviewer_worker.set(Arc::clone(&worker));
+                            task_admission
+                                .spawn(memory_reviewer::worker::run(worker, cancel.clone()));
                         }
                         if kernel.state() == kernel_routes::KernelState::Ready
                             && kernel.background_sampler_enabled()
@@ -4402,6 +4459,7 @@ impl Handler {
             verifier_counters: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
             memory_reviewer_home: Arc::default(),
+            memory_reviewer_worker: Arc::default(),
             memory_reviewer_acceptance_record: Arc::default(),
             source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
@@ -6100,8 +6158,13 @@ impl HandlerCore {
     ) -> Option<memory_reviewer::handoff::HandoffTarget> {
         let route_root = binding.project_root.to_string_lossy().to_string();
         match memories_authority_for_route(store, &route_root) {
-            Ok(MemoriesAuthority::Module(_)) => {}
-            Ok(MemoriesAuthority::NotModule { .. }) | Err(_) => return None,
+            // The authority the review switch gave a root covers reviews of its stored memories. Fact sets are handed to review under an authority the root's owner recorded.
+            Ok(MemoriesAuthority::Module(authority))
+                if authority.context_store_uuid
+                    != memory_reviewer::review_cycle::SWITCH_AUTHORITY_STORE => {}
+            Ok(MemoriesAuthority::Module(_) | MemoriesAuthority::NotModule { .. }) | Err(_) => {
+                return None;
+            }
         }
         let kernel = self.memory_classifier.kernel.kernel_store().ok()?;
         let budget = kernel::applicability::EvalBudget::new(
@@ -15789,7 +15852,7 @@ impl memory_classifier_scheduler::SchedulerHost for SchedulerBridge {
                 std::collections::btree_map::Entry::Occupied(_) => {}
             }
         }
-        let memory_reviewer_open = self.memory_reviewer_status.activation_state()
+        let memory_reviewer_open = self.memory_reviewer_status.recorded_state()
             == memory_reviewer::lifecycle::ActivationState::Open
             && memory_reviewer::selection::PRODUCTION_SELECTION_OPEN;
         Ok(by_project
@@ -19356,6 +19419,8 @@ mod tests {
     mod fold_authority_handler_tests;
     #[path = "memory_auto_delivery_tests.rs"]
     mod memory_auto_delivery_tests;
+    #[path = "memory_reviewer_switch_tests.rs"]
+    mod memory_reviewer_switch_tests;
     #[path = "named_files_tests.rs"]
     mod named_files_tests;
     #[path = "pi_native_serving_tests.rs"]
@@ -24756,6 +24821,7 @@ mod tests {
             Ok(ProducerOutput {
                 text,
                 length_capped: false,
+                model: None,
             })
         }
 
@@ -27077,6 +27143,7 @@ mod tests {
             source_capture_enabled: false,
             contradiction_candidates_enabled: false,
             verifier_enabled: false,
+            memory_reviewer: crate::config::MemoryReviewerConfig::default(),
             auto_search: crate::config::AutoSearchConfig::default(),
             terse_text_compression: crate::config::TerseTextCompressionConfig::default(),
             auto_promote: true,
@@ -34953,6 +35020,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
@@ -35039,6 +35107,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(&ids),
                     length_capped: false,
+                    model: None,
                 }));
             let harness = MemoryClassifierHarness::start(&producer).await;
             let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
@@ -35097,6 +35166,7 @@ mod tests {
             results.push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         }
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -35206,6 +35276,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         harness
@@ -35265,6 +35336,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(&ids),
                     length_capped: false,
+                    model: None,
                 }));
             let harness = MemoryClassifierHarness::start(&producer).await;
             let operation_key = memory_classifier_operation_key("ses", "fenced-mid-run");
@@ -35353,6 +35425,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let mut payload = classify_payload(&ids, TEST_CLASSIFY_TIMEOUT_MS);
@@ -35462,6 +35535,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         harness
@@ -35610,6 +35684,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text,
                     length_capped: false,
+                    model: None,
                 }));
             let harness = MemoryClassifierHarness::start(&producer).await;
             let payload = classify_payload(std::slice::from_ref(&id), TEST_CLASSIFY_TIMEOUT_MS);
@@ -36174,7 +36249,11 @@ mod tests {
         let views = || {
             let roster = harness.handler.bindings.lock().unwrap().bound_projects();
             (
-                memory_reviewer::worker::module_projects(&harness.store, &harness.handler.bindings),
+                memory_reviewer::worker::module_projects(
+                    &harness.store,
+                    &harness.handler.bindings,
+                    None,
+                ),
                 bridge.scheduled_projects().unwrap(),
                 bridge
                     .binding_for_root(&root)
@@ -36286,6 +36365,68 @@ mod tests {
             }
             assert_eq!(views(), dormant);
         }
+    }
+
+    /// A project whose authority its owner recorded stays under the owner's record while any of its
+    /// roots is bound. A root that closed with the review switch on is still listed, newest first,
+    /// for the reviews of its stored memories, and a fact set is run under a bound root alone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_owner_recorded_project_stays_under_the_record_while_a_root_is_bound() {
+        let producer = Arc::new(ProducerState::default());
+        let harness = MemoryClassifierHarness::start(&producer).await;
+        harness.handler.bind_route(
+            test_route(7),
+            binding_with_harness(&harness.route_root, "pi", "ses-live"),
+        );
+        let worktree = harness._dir.path().join("switched-worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        harness
+            .store
+            .bind_authority_route("context", "git:identity", worktree.to_str().unwrap())
+            .unwrap();
+        let mut switched = binding_with_harness(worktree.to_str().unwrap(), "pi", "ses-switched");
+        switched.config.memory_reviewer = config::MemoryReviewerConfig {
+            enabled: true,
+            model: Some("test/reviewer".to_string()),
+            ..Default::default()
+        };
+        harness.handler.bind_route(test_route(8), switched);
+        harness.handler.unbind_route(test_route(8));
+        let projects = memory_reviewer::worker::module_projects(
+            &harness.store,
+            &harness.handler.bindings,
+            None,
+        );
+        assert_eq!(projects.len(), 1);
+        let project = &projects[0];
+        assert_eq!(
+            project
+                .roots
+                .iter()
+                .map(|root| (root.project_root.clone(), root.bound))
+                .collect::<Vec<_>>(),
+            [
+                (worktree, false),
+                (PathBuf::from(&harness.route_root), true)
+            ],
+            "the closed root was bound last"
+        );
+        assert!(project.review.is_some(), "the closed root set the switch");
+        assert!(
+            project.recorded,
+            "the bound root keeps the project under the owner's record"
+        );
+        harness.handler.unbind_route(test_route(7));
+        let projects = memory_reviewer::worker::module_projects(
+            &harness.store,
+            &harness.handler.bindings,
+            None,
+        );
+        assert_eq!(projects.len(), 1);
+        assert!(
+            !projects[0].recorded,
+            "with every root closed the record runs nothing for the project"
+        );
     }
 
     /// Several route roots can bind to one authority project; the scheduler
@@ -36458,6 +36599,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         harness.schedule(Some("*/15 * * * *"));
@@ -37440,6 +37582,7 @@ mod tests {
                     ids[0], ids[1]
                 ),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         // Caller-asserted provenance literals ride along in the payload; the
@@ -37503,6 +37646,7 @@ mod tests {
                      <memory id=\"{other}\" importance=\"50\" scope=\"ecosystem\" shareable=\"true\"/></classify>"
                 ),
                 length_capped: false,
+                model: None,
             }));
             results.push_back(Ok(ProducerOutput {
                 text: format!(
@@ -37510,6 +37654,7 @@ mod tests {
                      <memory id=\"{second}\" importance=\"95\" scope=\"project\" shareable=\"true\"/></classify>"
                 ),
                 length_capped: false,
+                model: None,
             }));
         }
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -37668,6 +37813,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(std::slice::from_ref(&memory)),
                     length_capped: false,
+                    model: None,
                 }));
             let outcome = harness
                 .handler
@@ -37717,6 +37863,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: classify_manifest(std::slice::from_ref(&memory)),
                     length_capped: false,
+                    model: None,
                 }));
         }
         let harness = MemoryClassifierHarness::start(&producer).await;
@@ -37811,6 +37958,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(std::slice::from_ref(&memory)),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let payload = classify_payload(std::slice::from_ref(&memory), TEST_CLASSIFY_TIMEOUT_MS);
@@ -38120,6 +38268,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(std::slice::from_ref(&memory)),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let own_scope = binding_with_harness(&harness.route_root, "pi", "ses")
@@ -38221,6 +38370,7 @@ mod tests {
             .push_back(Ok(ProducerOutput {
                 text: classify_manifest(&ids),
                 length_capped: false,
+                model: None,
             }));
         let harness = MemoryClassifierHarness::start(&producer).await;
         let store = Arc::clone(&harness.store);
@@ -38562,10 +38712,12 @@ mod tests {
             Ok(ProducerOutput {
                 text: classify_manifest(&[requested.clone(), unexpected]),
                 length_capped: false,
+                model: None,
             }),
             Ok(ProducerOutput {
                 text: classify_manifest(std::slice::from_ref(&requested)),
                 length_capped: false,
+                model: None,
             }),
         ]);
         let mut payload =
@@ -42001,6 +42153,7 @@ mod tests {
                         "A stale snapshot must not publish this fact.",
                     ),
                     length_capped: false,
+                    model: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -42135,6 +42288,7 @@ mod tests {
                         "Atomic cleanup race fact.",
                     ),
                     length_capped: false,
+                    model: None,
                 }));
             hook_handler
                 .transform_snapshots
@@ -42214,6 +42368,7 @@ mod tests {
                 .push_back(Ok(ProducerOutput {
                     text: history_summarizer_output_with_fact(start, end, "Fence race fact."),
                     length_capped: false,
+                    model: None,
                 }));
             hook_handler
                 .transform_snapshots

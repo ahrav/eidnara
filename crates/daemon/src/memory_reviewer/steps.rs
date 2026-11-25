@@ -105,6 +105,17 @@ pub struct Citation {
     pub range: Option<ByteRange>,
 }
 
+/// The object inside one Markdown code fence that wraps the whole answer, or the answer itself. Chat models often fence a JSON answer; the fence adds nothing to the step.
+pub(super) fn unfenced(text: &str) -> &str {
+    let trimmed = text.trim();
+    trimmed
+        .strip_prefix("```")
+        .and_then(|rest| rest.strip_suffix("```"))
+        .and_then(|rest| rest.split_once('\n'))
+        .filter(|(language, _)| matches!(language.trim(), "" | "json"))
+        .map_or(trimmed, |(_, body)| body.trim())
+}
+
 impl Step {
     /// Decodes and validates one step against `broker`'s issued aliases and the job's target kind; the refusal is the code rendered back to the model. Nothing here touches a store.
     pub fn parse(
@@ -113,7 +124,7 @@ impl Step {
         targets_memory: bool,
     ) -> Result<Self, RefusalCode> {
         let envelope: Envelope =
-            serde_json::from_str(text).map_err(|_| RefusalCode::Undecodable)?;
+            serde_json::from_str(unfenced(text)).map_err(|_| RefusalCode::Undecodable)?;
         if envelope.v != STEP_VERSION {
             return Err(RefusalCode::Undecodable);
         }

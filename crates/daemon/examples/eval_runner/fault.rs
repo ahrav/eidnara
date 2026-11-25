@@ -2534,12 +2534,15 @@ impl ReviewerRig {
             Endpoint::for_test("localhost", self.peer.port, self.peer.roots.clone()).unwrap();
         let kernel = Arc::clone(&stores.corpus.kernel);
         let route = ProjectRoute {
+            review: None,
+            recorded: true,
             project: reviewer::PROJECT.to_string(),
             authority_generation: self.generation,
             roots: vec![RootScope {
                 project_root: self.project_root.clone(),
                 project_digest: REVIEWER_DIGEST.to_string(),
                 scope_id: format!("project:{REVIEWER_DIGEST}"),
+                bound: true,
             }],
         };
         Arc::new(Worker {
@@ -2552,6 +2555,7 @@ impl ReviewerRig {
             permits: Arc::new(InvestigationPermits::default()),
             providers: Providers::at(endpoint.clone(), endpoint, "us-east-1"),
             rejection: Default::default(),
+            switched: Default::default(),
         })
     }
 }

@@ -1113,7 +1113,7 @@ fn unknown_partial_and_declined_runs_complete_without_content() {
     // A truncated disclosure abstains with its reason, whatever the model produced.
     let fixture = Fixture::open();
     let mut broker = fixture.broker(1);
-    broker.ledger.record_partial_disclosure();
+    broker.ledger.record_truncation(RefusalCode::ByteLimit);
     let evidence = fixture.evidence_id();
     assert_eq!(
         fixture
