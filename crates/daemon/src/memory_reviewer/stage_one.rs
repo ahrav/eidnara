@@ -285,7 +285,7 @@ struct WireAnswers {
 }
 
 impl ChatAnswers {
-    /// The answers of `text`: one JSON object with the four members, alone or inside one code fence. `None` for any other text, such as an answer cut at the output cap, prose, or a value outside a question's closed set.
+    /// The answers of `text`: one JSON object with the four members, alone or inside one code fence. A member beside the four is passed over, since the four answers read the same with it. `None` for any other text, such as an answer cut at the output cap, prose, a missing member, or a value outside a question's closed set.
     pub fn parse(state: &ReviewState, text: &str) -> Option<Self> {
         let wire: WireAnswers = serde_json::from_str(unfenced(text)).ok()?;
         Some(Self {
@@ -559,6 +559,13 @@ pub(super) mod tests {
             ChatAnswers::parse(&state, elsewhere).unwrap().strongest,
             None,
             "an id outside the state names no reference"
+        );
+        let with_a_fifth_member = r#"{"strongest":"ref-3","relation":"adds","changes":"no","work_ended":"no","explanation":"The later message adds a rule."}"#;
+        let parsed = ChatAnswers::parse(&state, with_a_fifth_member).expect("the four answers");
+        assert_eq!(
+            (parsed.changes, parsed.relation, parsed.work_ended),
+            (Verdict::No, Relation::Adds, Verdict::No),
+            "a member beside the four leaves the four answers as written"
         );
         for malformed in [
             "",

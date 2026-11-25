@@ -788,6 +788,12 @@ impl Worker {
                                 let (kernel_incarnation, memstore_incarnation) =
                                     (kernel_incarnation.clone(), memstore_incarnation.clone());
                                 let mode = switch.apply;
+                                let walk = self
+                                    .switched
+                                    .selection
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .walk();
                                 // A change acts on the later references of a review stage 1 flagged. A run with no stage-1 record, as one adopted after a restart, has none.
                                 let later = stage_one
                                     .filter(|record| {
@@ -805,6 +811,7 @@ impl Worker {
                                             project_digest: &root.project_digest,
                                             kernel_incarnation: &kernel_incarnation,
                                             memstore_incarnation: &memstore_incarnation,
+                                            walk,
                                         },
                                         &job.causal_identity,
                                         mode,

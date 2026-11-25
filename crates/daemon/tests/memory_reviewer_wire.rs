@@ -532,11 +532,31 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         &record(&kernel_incarnation),
     );
 
+    let read = || {
+        daemon.call(envelope(
+            "review.read",
+            &project,
+            json!({ "causal_identity": begun.job.causal_identity }),
+        ))
+    };
+    let active_holds = || kernel.list_active_review_holds(now_ms(), 16).unwrap().len();
+    assert_eq!(read().await["kind"], json!("proposal"));
+    assert_eq!(
+        active_holds(),
+        1,
+        "the refused acceptances left the proposal's review hold"
+    );
     let settled = daemon.call(accept("caller-1", &target)).await;
     assert_eq!(
         (&settled["kind"], &settled["replayed"]),
         (&json!("settled"), &json!(false)),
         "{settled}"
+    );
+    // The settlement is the decision the review hold waited for: the hold ends with the acceptance, its place in the project's allowance returns, and the proposal reads as a review that ended.
+    assert_eq!(active_holds(), 0, "the acceptance ended the review hold");
+    assert_eq!(
+        read().await,
+        json!({ "kind": "terminal", "terminal": "review_expired" })
     );
     let settlement = &settled["settlement"];
     assert_eq!(settlement["action"], json!("create"));
@@ -604,8 +624,7 @@ async fn review_accept_applies_the_selected_proposal_only_under_the_owners_accep
         subject: settlement["proposal_id"].as_str().unwrap().to_string(),
         generation: 1,
     };
-    let hold = kernel.lookup_review_hold(&review, now).unwrap().unwrap();
-    kernel.release_review_hold(&hold.hold_id, &review).unwrap();
+    assert_eq!(kernel.lookup_review_hold(&review, now).unwrap(), None);
     let after_hold = daemon.call(accept("caller-5", &target)).await;
     assert_eq!(
         (&after_hold["replayed"], &after_hold["settlement"]),

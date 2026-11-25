@@ -17,7 +17,7 @@ use memory_store::{MemoryStore, MemoryStoreError};
 
 use super::settlement::{
     AcceptRefusal, ReadRefusal, ReviewOutcome, accept_selected_proposal, list_review_outcomes,
-    read_selected_proposal,
+    read_selected_proposal, release_settled_review_hold,
 };
 
 pub(crate) const LIST: &str = "review.list";
@@ -381,9 +381,9 @@ impl HandlerCore {
                 .admits_memory_store(&memstore_incarnation)
                 .map_err(|_| "disabled")?;
             // The Kernel checks its live incarnation against the one the record names before it reads anything else, so an acceptance it answers ran under an open gate. A refusal reads the live Kernel incarnation, so a closed gate answers `disabled` before any other terminal.
-            accept_selected_proposal(
+            let outcome = accept_selected_proposal(
                 &scope.kernel,
-                receipt,
+                receipt.clone(),
                 (record.kernel_incarnation(), &memstore_incarnation),
                 &parsed.causal_identity,
                 &parsed.operation_key,
@@ -401,7 +401,22 @@ impl HandlerCore {
                     .admits(&kernel_incarnation, &memstore_incarnation)
                     .map_err(|_| "disabled")?;
                 Err(accept_terminal(&refusal))
-            })
+            })?;
+            // The settlement is the decision the review hold waited for, so the hold ends with it, after a replayed settlement as after a new one. A release the store fails leaves the hold to its review window, and the settlement is answered.
+            if let Some(receipt) = receipt
+                && let Err(error) = release_settled_review_hold(
+                    &scope.kernel,
+                    receipt,
+                    &memstore_incarnation,
+                    &parsed.causal_identity,
+                    crate::now_ms(),
+                )
+            {
+                eprintln!(
+                    "daemon: memory_reviewer kept the review hold of a settled proposal: {error}"
+                );
+            }
+            Ok(outcome)
         })
         .await;
         match accepted {

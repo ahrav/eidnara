@@ -42,7 +42,7 @@ pub const SWITCH_AUTHORITY_STORE: &str = "eidnara-memory-reviewer";
 pub const SELECTION_PRODUCER: &str = "memory-reviewer-switch";
 /// The operation key the worker accepts its own proposals under in `apply` mode.
 pub const APPLY_OPERATION_KEY: &str = "memory-reviewer-switch";
-/// Claim descriptors one selection examines, of every project and representation in the store, so a selection's work is bounded whatever the inventory's size. A larger store is covered over successive passes.
+/// Claim descriptors one walk examines, of every project and representation in the store, so the work of one walk's reads is bounded whatever the inventory's size. A selection runs one walk a pass and covers a larger store over successive passes. The lookup of the memory a contest names runs walk after walk to the inventory's end within one cycle budget.
 pub const MAX_WALKED_DESCRIPTORS: usize = 4096;
 /// Later overlapping sources a job carries as starting references, newest first. The newest names the job.
 pub const MAX_LATER_SOURCES: usize = 4;
@@ -69,8 +69,17 @@ pub enum Grant {
     LeftToOwner,
 }
 
-/// Gives `route_root` MODULE memories authority when no authority is bound to it, with the root itself as the authority project, so every key derived from the authority project keeps the value an unmanaged root has. A root that holds an authority, active or draining, is left as it is. A grant that stopped after its acknowledgement left its row MODULE and unbound; the next call binds it.
+/// Gives `route_root` MODULE memories authority when no authority is bound to it, with the root itself as the authority project, so every key derived from the authority project keeps the value an unmanaged root has. A root that holds an authority, active or draining, is left as it is. The binding write reads the route again in its own transaction, so a binding another identity committed during the grant stands and the grant returns `LeftToOwner`. A grant that stopped after its acknowledgement, or that left the route to such an identity, left its row MODULE and unbound; a later call binds it while no other identity with a preparing, active, or draining authority holds the route.
 pub fn grant_authority(store: &MemoryStore, route_root: &str) -> Result<Grant, MemoryStoreError> {
+    grant_authority_inner(store, route_root, None)
+}
+
+/// [`grant_authority`] with `before_bind` run between the grant's authority steps and its binding write, so a test can commit an owner's binding inside that window.
+fn grant_authority_inner(
+    store: &MemoryStore,
+    route_root: &str,
+    before_bind: Option<&dyn Fn()>,
+) -> Result<Grant, MemoryStoreError> {
     const DOMAIN: &str = "memories";
     if store
         .authority_project_state_for_route(route_root, DOMAIN)?
@@ -109,8 +118,20 @@ pub fn grant_authority(store: &MemoryStore, route_root: &str) -> Result<Grant, M
             begun.generation,
         )?;
     }
-    store.bind_authority_route(SWITCH_AUTHORITY_STORE, route_root, route_root)?;
-    Ok(Grant::Held)
+    if let Some(before_bind) = before_bind {
+        before_bind();
+    }
+    Ok(
+        if store.bind_authority_route_unless_owned(
+            SWITCH_AUTHORITY_STORE,
+            route_root,
+            route_root,
+        )? {
+            Grant::Held
+        } else {
+            Grant::LeftToOwner
+        },
+    )
 }
 
 /// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, or a slice is blocked, so every live memory decision has its descriptors before a selection reads them. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one.
@@ -262,6 +283,11 @@ impl SelectionMemory {
     #[cfg(test)]
     pub fn walk_within(&mut self, walk: Walk) {
         self.walk = Some(walk);
+    }
+
+    /// The bounds of one walk of the claim descriptors.
+    pub fn walk(&self) -> Walk {
+        self.walk.unwrap_or(Walk::PRODUCTION)
     }
 
     /// The writer and publishing commit of the live source `evidence_id`, read once and remembered. `None` for a source no live descriptor cites: one not yet published, which the next pass looks up again, and one found retired, which is looked up again after [`RETIRED_RECHECK`]. A read the store fails is an error and is remembered as nothing.
@@ -638,7 +664,7 @@ pub fn select_and_enqueue(
     let tip = kernel
         .tip_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
-    let walk = memory.walk.unwrap_or(Walk::PRODUCTION);
+    let walk = memory.walk();
     let (descriptors, next) = subject_descriptors(
         kernel,
         scope.project,
@@ -1134,6 +1160,8 @@ pub struct ApplyScope<'a> {
     pub project_digest: &'a str,
     pub kernel_incarnation: &'a str,
     pub memstore_incarnation: &'a str,
+    /// The bounds of one walk of the claim descriptors, as the selection's: [`SelectionMemory::walk`].
+    pub walk: Walk,
 }
 
 /// The contradictions of a change proposal that pass the action rule: the model states `low` uncertainty, and the contradiction cites one of `later`, the later references that count as evidence in a review stage 1 flagged. `later` is `None` for a review stage 1 did not flag. The memory's own source, another memory and a project file the run read are none of them, so a proposal that cites only those changes nothing.
@@ -1172,6 +1200,8 @@ fn decision_row(kernel: &KernelStore, object_id: &str) -> Result<Option<Decision
 }
 
 /// The live memory of the project that capture stored for a later message a review cites: one recorded after `statement` that cites one of `evidence`. Among several, the one sharing most subject terms with the statement, then the newest. `None` when capture stored none.
+///
+/// The lookup reads the claim descriptors to their end at one tip, one walk of `scope.walk` after another from the cursor the last one returned, and keeps the best memory found so far and that cursor between walks. Each Kernel read covers the descriptors of one walk and takes the cycle budget before it acquires a reader, so a read past the deadline ends the lookup with an error, which its caller reports as a refused write.
 fn later_memory_citing(
     kernel: &KernelStore,
     scope: &ApplyScope<'_>,
@@ -1183,47 +1213,57 @@ fn later_memory_citing(
     let tip = kernel
         .tip_within_budget(&budget)
         .map_err(CycleError::Kernel)?;
-    let (descriptors, _) =
-        subject_descriptors(kernel, &project, tip, &budget, None, Walk::PRODUCTION)?;
-    let ids: Vec<&str> = descriptors
-        .iter()
-        .filter_map(decision_of)
-        .filter(|id| *id != statement.object_id)
-        .collect();
-    let linked = kernel
-        .linked_decisions_evidence_within_budget(
-            &ids,
-            tip,
-            super::selection::MAX_LINKED_EVIDENCE,
-            &budget,
-        )
-        .map_err(CycleError::Kernel)?;
-    let citing: Vec<String> = ids
-        .iter()
-        .zip(&linked)
-        .filter(|(_, rows)| {
-            rows.iter()
-                .any(|row| row.live && evidence.contains(&row.evidence_id.as_str()))
-        })
-        .map(|(id, _)| (*id).to_string())
-        .collect();
     let stated = crate::memory_capture::stated_commit(statement);
     let terms = subject_terms(&statement.payload.summary);
-    Ok(kernel
-        .decisions_for_objects_as_of_within_budget(&citing, tip, &budget)
-        .map_err(CycleError::Kernel)?
-        .into_iter()
-        .filter(|row| row.created_commit_seq > stated)
-        .max_by_key(|row| {
-            (
-                subject_terms(&row.payload.summary)
-                    .intersection(&terms)
-                    .count(),
-                row.created_commit_seq,
-                std::cmp::Reverse(row.object_id.clone()),
+    let mut best: Option<(usize, i64, std::cmp::Reverse<String>)> = None;
+    let mut after: Option<String> = None;
+    loop {
+        let (descriptors, next) =
+            subject_descriptors(kernel, &project, tip, &budget, after.as_deref(), scope.walk)?;
+        let ids: Vec<&str> = descriptors
+            .iter()
+            .filter_map(decision_of)
+            .filter(|id| *id != statement.object_id)
+            .collect();
+        let linked = kernel
+            .linked_decisions_evidence_within_budget(
+                &ids,
+                tip,
+                super::selection::MAX_LINKED_EVIDENCE,
+                &budget,
             )
-        })
-        .map(|row| row.object_id))
+            .map_err(CycleError::Kernel)?;
+        let citing: Vec<String> = ids
+            .iter()
+            .zip(&linked)
+            .filter(|(_, rows)| {
+                rows.iter()
+                    .any(|row| row.live && evidence.contains(&row.evidence_id.as_str()))
+            })
+            .map(|(id, _)| (*id).to_string())
+            .collect();
+        best = kernel
+            .decisions_for_objects_as_of_within_budget(&citing, tip, &budget)
+            .map_err(CycleError::Kernel)?
+            .into_iter()
+            .filter(|row| row.created_commit_seq > stated)
+            .map(|row| {
+                (
+                    subject_terms(&row.payload.summary)
+                        .intersection(&terms)
+                        .count(),
+                    row.created_commit_seq,
+                    std::cmp::Reverse(row.object_id),
+                )
+            })
+            .chain(best)
+            .max();
+        match next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    Ok(best.map(|(_, _, std::cmp::Reverse(object_id))| object_id))
 }
 
 /// Treats the proposal the job's completed receipt selects as `mode` says. A `retain` or `no_change` proposal asks for no write, so every mode accepts it at once: the acceptance leaves the memory as it is and ends the proposal's review hold, which keeps the project's hold allowance for proposals that wait on a decision.
@@ -1566,6 +1606,81 @@ mod tests {
         assert_eq!(grant_authority(&store, unmanaged).unwrap(), Grant::Held);
         assert_eq!(state(unmanaged, "memories"), module(unmanaged));
         assert_eq!(grant_authority(&store, unmanaged).unwrap(), Grant::Held);
+    }
+
+    /// An owner's binding committed after the grant read the route and before the grant's own binding write stands: the write leaves the route to the owner's identity, the grant returns `LeftToOwner`, and the owner's notes authority resolves through the route as before.
+    #[test]
+    fn an_owner_binding_committed_during_the_grant_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let store =
+            MemoryStore::open(&crate::dev_descriptor_at(data_home.to_str().unwrap())).unwrap();
+        let raced = "/work/raced";
+        let owner_binds = || {
+            activate(&store, "git:identity", "notes");
+            store
+                .bind_authority_route("context", "git:identity", raced)
+                .unwrap();
+        };
+        assert_eq!(
+            grant_authority_inner(&store, raced, Some(&owner_binds)).unwrap(),
+            Grant::LeftToOwner
+        );
+        assert_eq!(
+            store.bound_authority_identity_for_route(raced).unwrap(),
+            Some(("context".to_string(), "git:identity".to_string()))
+        );
+        assert_eq!(
+            store
+                .authority_project_state_for_route(raced, "notes")
+                .unwrap(),
+            Some(("git:identity".to_string(), "MODULE".to_string()))
+        );
+        assert_eq!(
+            store
+                .authority_project_state_for_route(raced, "memories")
+                .unwrap(),
+            None
+        );
+        assert_eq!(grant_authority(&store, raced).unwrap(), Grant::LeftToOwner);
+    }
+
+    /// The grant's binding write replaces a binding to an identity that holds no authority, and replays a binding that already names the switch's identity.
+    #[test]
+    fn the_grant_binds_over_a_binding_with_no_authority_and_replays_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let store =
+            MemoryStore::open(&crate::dev_descriptor_at(data_home.to_str().unwrap())).unwrap();
+        let switch_identity =
+            |root: &str| Some((SWITCH_AUTHORITY_STORE.to_string(), root.to_string()));
+
+        let ended = "/work/ended";
+        store
+            .bind_authority_route("context", "git:identity", ended)
+            .unwrap();
+        assert_eq!(grant_authority(&store, ended).unwrap(), Grant::Held);
+        assert_eq!(
+            store.bound_authority_identity_for_route(ended).unwrap(),
+            switch_identity(ended)
+        );
+
+        let twice = "/work/twice";
+        let switch_binds = || {
+            store
+                .bind_authority_route(SWITCH_AUTHORITY_STORE, twice, twice)
+                .unwrap();
+        };
+        assert_eq!(
+            grant_authority_inner(&store, twice, Some(&switch_binds)).unwrap(),
+            Grant::Held
+        );
+        assert_eq!(
+            store.bound_authority_identity_for_route(twice).unwrap(),
+            switch_identity(twice)
+        );
     }
 
     /// A proposal that waits for a reader, a disputed target, and a refused write each hold their memory; every other outcome frees it.

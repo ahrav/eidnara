@@ -1185,6 +1185,49 @@ async fn a_revise_with_no_later_memory_leaves_the_statement_as_it_is() {
     }
 }
 
+/// The memory capture stored for the later message a `revise` cites is found wherever the store's descriptor order places it: the lookup reads the claim descriptors to their end, one walk after another. Here one walk examines a single descriptor and two statements are each replaced by a later statement of their own, so at most one of the two later memories lies in the first walk, and both statements are marked contested, each by its own later statement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_memory_past_the_first_walk_contests_the_statement() {
+    const FORMATTER: &str = "Run the formatter instead of the linter before every commit.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.user_says_later("later-2", 1_700_000_100_000, FORMATTER)
+        .await;
+    memory_auto_delivery_tests::capture(
+        &rig.handler,
+        SECOND,
+        "s2",
+        &[("later-1", "user", TUESDAY), ("later-2", "user", FORMATTER)],
+        |text, _| vec![memory_auto_delivery_tests::classed(text, "lasting")],
+    )
+    .await;
+    rig.worker.switched.walk_within(Walk {
+        page_rows: 1,
+        bound: 1,
+    });
+    rig.flagged(&[REVISE_CITING_LATER, REVISE_CITING_LATER]);
+    let mut settled = 0;
+    for _ in 0..64 {
+        settled += rig.worker.pass(&CancellationToken::new()).await;
+    }
+    assert_eq!(settled, 2, "both replaced statements were reviewed");
+    let block = rig.block().await;
+    for (replaced, later) in [(THURSDAY, TUESDAY), (LINTER, FORMATTER)] {
+        let line = block
+            .lines()
+            .find(|line| line.contains(replaced))
+            .unwrap_or_else(|| panic!("the replaced statement left the block: {block}"));
+        assert!(line.contains("; contested "), "{line}");
+        assert!(
+            line.contains(&format!("\"{}\"", stated(later))),
+            "the line quotes its own later statement: {line}"
+        );
+    }
+    assert_eq!(rig.active_review_holds(), 0);
+}
+
 /// A response the provider stopped itself settles the review on that request as the model declining: one request is made and the statement stays.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_response_the_provider_stopped_settles_the_review_on_one_request() {
