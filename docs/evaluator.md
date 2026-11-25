@@ -2702,8 +2702,8 @@ a reply `lose_charge_reply` lost.
 `FaultAction::heal` is the heal each class permits: `consumed` for one-shot
 enums, `released` for gates and lock holders, `reopen` for kills, corruption,
 and R11 (the reopen's projection rebuild clears it), and `permanent` for R24,
-whose retained receipt charges refuse admission for the rest of the store
-incarnation. A restore interrupted `before_displace` or `after_displace` is
+whose retained receipt charges refuse admission until the retirement sweep
+frees them, ninety days on and so past any run. A restore interrupted `before_displace` or `after_displace` is
 rolled back by the handle before the fault returns and is `consumed`; only
 `recovery_failure` leaves the store for a `reopen`. A projection batch fault
 rolls its transaction back and is `consumed`, as are a backup that fails
@@ -2899,7 +2899,7 @@ page plus the receipt charge and the allowance per open job or frozen page,
 so no byte figure in a sample is taken on trust; `admissions_remaining` divides the remaining bytes by one admission's
 charge as a report figure, not an acceptance count. Reaching the quota is R24,
 recorded as an expected refusal, and the report does not judge whether
-permanent exhaustion is intended.
+exhaustion within a run is intended.
 
 A `ResourceSample` is everything a campaign holds at one quiescent point: per
 store family the file, `-wal`, and `-shm` bytes; artifact objects, temporary
@@ -2957,8 +2957,8 @@ not a panic. `verdict` and `validate` re-check the step, commit, and R24
 ordering over the whole ledger, with every cumulative count
 (`commit_log_rows`, `terminal_jobs`, `admitted_total`, `r24_refusals`, and
 frozen plus terminal pages) never receding (`CountNotMonotonic { step,
-field }`, the commit log being append-only and job and page rows permanent
-receipts) and `admitted_total` equal to pending plus terminal jobs
+field }`, the commit log being append-only and job and page rows staying for
+the ninety-day retention window, far past a run) and `admitted_total` equal to pending plus terminal jobs
 (`AdmittedMismatch`), and refuse a negative
 commit sequence (`CommitSeqNegative`, since a negative baseline would buy
 allowance for commits that never happened), because a deserialized
@@ -3427,7 +3427,7 @@ and handed to the production `memory_reviewer::worker::Worker` through
 a local TLS peer on an OS-allocated port, the credential identity derived),
 and the rest go through the real reservation, staging, claim, and receipt
 path and stay pending, so the ledger holds both pending allowances and
-permanent receipt charges. The step then drains to quiescence, counting the
+receipt charges. The step then drains to quiescence, counting the
 catch-up episodes, runs `Worker::pass` directly until every handed job has
 settled or the approved `reviewer_coordinator_passes` is spent, records that
 as the next sample's `QuiescenceProgress`, and samples. The handed subjects
@@ -3445,8 +3445,8 @@ settled by abstention as well (a handed one by the coordinator at once; its
 passes count toward the next quiescence's witness and draw on that
 quiescence's `reviewer_coordinator_passes`, so the drain's own settle runs
 only what the cap-triggered one left); the pending queue then holds one slot free and
-every later admission becomes a permanent receipt charge, which is how a long
-history reaches the receipt quota. The reviewer
+every later admission holds a receipt charge for the ninety-day retention
+window, which is how a long history reaches the receipt quota. The reviewer
 queue's deadlines are wall-clock by design, so its admissions are stamped with
 the wall clock; every other time the drive passes is the event's own.
 

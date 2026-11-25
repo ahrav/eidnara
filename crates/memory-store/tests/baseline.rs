@@ -88,6 +88,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "memory_reviewer_jobs"),
     ("table", "memory_reviewer_metadata_totals"),
     ("table", "memory_reviewer_receipts"),
+    ("table", "memory_reviewer_retired_generation"),
     ("table", "memory_reviewer_selection_cursors"),
     ("table", "memory_reviewer_store_identity"),
     ("table", "note_deliveries"),
@@ -149,6 +150,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "memory_reviewer_receipts_deadlines_immutable"),
     ("trigger", "memory_reviewer_receipts_no_delete"),
     ("trigger", "memory_reviewer_receipts_reject_secret_update"),
+    ("trigger", "memory_reviewer_retired_generation_no_decrease"),
+    ("trigger", "memory_reviewer_retired_generation_no_delete"),
+    ("trigger", "memory_reviewer_retired_generation_no_reinsert"),
     (
         "trigger",
         "memory_reviewer_selection_cursors_reject_secret_insert",
@@ -485,11 +489,12 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
     );
 }
 
-/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds no
-/// `contradiction_candidates` table.
+/// The preceding Memory Store baseline, frozen byte for byte, and its digest. Its
+/// MemoryReviewer receipt and attempt triggers refuse every delete, so a settled job kept its
+/// rows for the store incarnation.
 const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
 const PRIOR_BASELINE_DIGEST: &str =
-    "a4a933cd154fc7d3f6c7dc6f018f6b6b1bc39f2192b3b52748a5deef9eafe9b7";
+    "55edb9a928bb249a0860f69e23cc0e342c9a0fd246edaffe09d83b636202987d";
 
 /// A store laid down under the prior baseline refuses to open and is left byte-identical.
 #[test]

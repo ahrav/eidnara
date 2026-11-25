@@ -107,6 +107,43 @@ fn incarnation_survives_reopen_and_changes_on_replacement() {
     assert_ne!(replaced.memory_reviewer_store_incarnation().unwrap(), first);
 }
 
+/// The retired generation keeps its row and its value only rises under every statement form. `REPLACE` runs as delete-then-insert past the delete guard, so a second insert is refused, as are a delete and a lowering update.
+#[test]
+fn the_retired_generation_refuses_a_replace_a_second_insert_a_delete_and_a_lowering_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    store
+        .with_fenced_conn_for_test(|conn| {
+            conn.execute(
+                "INSERT INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 5)",
+                [],
+            )
+            .map(drop)
+        })
+        .unwrap();
+    for refused in [
+        "INSERT OR REPLACE INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 1)",
+        "INSERT OR REPLACE INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 9)",
+        "INSERT INTO memory_reviewer_retired_generation (id, generation) VALUES (0, 9)",
+        "DELETE FROM memory_reviewer_retired_generation",
+        "UPDATE memory_reviewer_retired_generation SET generation = 4",
+    ] {
+        let outcome: Result<(), _> =
+            store.with_fenced_conn_for_test(|conn| conn.execute(refused, []).map(drop));
+        assert!(outcome.is_err(), "{refused}");
+        let stored: i64 = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT generation FROM memory_reviewer_retired_generation WHERE id = 0",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(stored, 5, "{refused}");
+    }
+}
+
 #[test]
 fn identical_causal_inputs_deduplicate_and_changed_evidence_permits_one_new_job() {
     let dir = tempfile::tempdir().unwrap();
@@ -616,6 +653,97 @@ fn rebinding_hands_a_reserved_row_to_another_firing_of_the_same_producer() {
                 .unwrap_err()
         ),
         MemoryReviewerJobRefusal::Terminal
+    );
+}
+
+/// Each successful rebind updates the job's firing and replaces its rebind scan audit. A refused rebind preserves the audit. The retirement sweep deletes the audit with the job.
+#[test]
+fn a_rebind_retires_the_audit_of_the_rebind_it_supersedes() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let job = reserved(
+        store
+            .reserve_memory_reviewer_job("proj", &producer("f0"), &inputs("cand-1"), NOW)
+            .unwrap(),
+    );
+    let audit = || -> (i64, i64, i64, i64) {
+        let count = |sql: &str| -> i64 {
+            store
+                .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+                .unwrap()
+        };
+        (
+            count("SELECT COUNT(*) FROM scan_batches"),
+            count("SELECT COUNT(*) FROM field_scans"),
+            count("SELECT COUNT(*) FROM scan_owner_copies"),
+            count("SELECT COUNT(*) FROM scan_domain_owners"),
+        )
+    };
+    let rebind = |firing: i64| {
+        store.rebind_reserved_memory_reviewer_job(
+            "proj",
+            &job.causal_identity,
+            &producer(&format!("f{firing}")),
+            NOW + firing,
+        )
+    };
+    let reserved_audit = audit();
+    rebind(1).unwrap();
+    let one_rebind = audit();
+    assert_eq!(
+        (
+            one_rebind.0 - reserved_audit.0,
+            one_rebind.1 - reserved_audit.1
+        ),
+        (1, 3),
+        "a rebind records one batch and the project, producer, and firing scans"
+    );
+    for firing in 2..=50 {
+        rebind(firing).unwrap();
+    }
+    assert_eq!(audit(), one_rebind, "fifty rebinds hold the audit of one");
+    let mut foreign = producer("f51");
+    foreign.producer = "other-producer".to_string();
+    assert_eq!(
+        refusal(
+            store
+                .rebind_reserved_memory_reviewer_job(
+                    "proj",
+                    &job.causal_identity,
+                    &foreign,
+                    NOW + 51
+                )
+                .unwrap_err()
+        ),
+        MemoryReviewerJobRefusal::ProducerMismatch
+    );
+    assert_eq!(
+        audit(),
+        one_rebind,
+        "a refused rebind leaves the standing audit"
+    );
+    assert_eq!(
+        store
+            .lookup_memory_reviewer_job("proj", &job.causal_identity)
+            .unwrap()
+            .unwrap()
+            .producer,
+        producer("f50")
+    );
+
+    let retire_at = job.queue_deadline_ms + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    store.expire_memory_reviewer_work(retire_at).unwrap();
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        audit(),
+        (0, 0, 0, 0),
+        "the sweep takes the rebound job's audit"
     );
 }
 
@@ -1454,6 +1582,213 @@ fn a_cursor_for_an_overlong_project_is_refused_before_it_is_written() {
     assert_eq!(rows, 0);
 }
 
+/// A terminal page leaves the store after the jobs it enqueued: the retirement sweep deletes the page one queue lifetime after its jobs retire, with the scan audit of its references and cursor, and its receipt charge returns. The continuation row the enqueue advanced stays. A project's metadata therefore holds the pages and jobs of one retention window.
+#[test]
+fn a_terminal_page_is_retired_after_the_jobs_it_enqueued() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    let page = FrozenSelectionPage {
+        references: vec![inputs("cand-1"), inputs("cand-2")],
+        next_cursor: Some("cursor-1".to_string()),
+    };
+    let frozen = store
+        .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+        .unwrap();
+    let outcome = store
+        .with_fenced_conn_for_test(|conn| {
+            enqueue_frozen_selection_in_tx(conn, "proj", &frozen, &producer("f1"), NOW + 1)
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, EnqueueOutcome::Enqueued { jobs: 2, .. }),
+        "{outcome:?}"
+    );
+    let count = |sql: &str| -> i64 {
+        store
+            .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .unwrap()
+    };
+    let page_rows = || count("SELECT COUNT(*) FROM memory_reviewer_frozen_selections");
+    let owners = || count("SELECT COUNT(*) FROM scan_domain_owners");
+    let charged = || {
+        store
+            .memory_reviewer_headroom("proj")
+            .unwrap()
+            .project_metadata_bytes
+    };
+    assert!(
+        owners() > 0,
+        "the page owns the scan audit of its references"
+    );
+
+    // The queue deadline closes both jobs, and the first retirement takes them. The page is one queue lifetime short of its own window.
+    let jobs_retire_at =
+        NOW + 1 + MEMORY_REVIEWER_QUEUE_LIFETIME_MS + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    store.expire_memory_reviewer_work(jobs_retire_at).unwrap();
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(jobs_retire_at)
+            .unwrap(),
+        2
+    );
+    assert_eq!(page_rows(), 1);
+    assert_eq!(charged(), FROZEN_PAGE_RECEIPT_CHARGE_BYTES);
+    assert!(owners() > 0);
+
+    let page_retires_at = frozen.selection_deadline_ms
+        + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+        + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(page_retires_at - 1)
+            .unwrap(),
+        0
+    );
+    assert_eq!(page_rows(), 1, "the page stays inside its window");
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(page_retires_at)
+            .unwrap(),
+        1,
+        "the page"
+    );
+    assert_eq!(page_rows(), 0);
+    assert_eq!(charged(), 0, "the page returned its charge");
+    assert_eq!(
+        owners(),
+        0,
+        "the audit of the page's references and cursor went with it"
+    );
+    assert_eq!(
+        store.selection_cursor("proj", "slot-1").unwrap().as_deref(),
+        Some("cursor-1"),
+        "the continuation row stays"
+    );
+}
+
+/// A page ended through `complete_frozen_selection` owns the scan audit of that completion, so the retirement sweep deletes it with the page for both standalone terminal states.
+#[test]
+fn a_page_completed_standalone_takes_the_audit_of_its_completion_with_it() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    for state in [
+        FrozenSelectionState::FailedSlot,
+        FrozenSelectionState::Expired,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let page = FrozenSelectionPage {
+            references: vec![inputs("cand-1")],
+            next_cursor: None,
+        };
+        let frozen = store
+            .freeze_selection("proj", "slot-1", "attempt-1", &page, NOW)
+            .unwrap();
+        store
+            .complete_frozen_selection("proj", "slot-1", "attempt-1", state, NOW + 1)
+            .unwrap();
+        let page_retires_at = frozen.selection_deadline_ms
+            + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+            + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+        assert_eq!(
+            store
+                .retire_settled_memory_reviewer_jobs(page_retires_at)
+                .unwrap(),
+            1,
+            "{state:?}"
+        );
+        let count = |sql: &str| -> i64 {
+            store
+                .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+                .unwrap()
+        };
+        assert_eq!(
+            (
+                count("SELECT COUNT(*) FROM scan_domain_owners"),
+                count("SELECT COUNT(*) FROM field_scans"),
+                count("SELECT COUNT(*) FROM scan_batches"),
+            ),
+            (0, 0, 0),
+            "{state:?}"
+        );
+    }
+}
+
+/// Each project holds its scan audit in a separate scope, even when both jobs review identical inputs.
+#[test]
+fn a_sweep_across_projects_retires_the_scan_audit_of_each_project() {
+    use memory_store::memory_reviewer_jobs::MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+    for project in ["proj-a", "proj-b"] {
+        let job = reserved(
+            store
+                .reserve_memory_reviewer_job(project, &producer("f1"), &inputs("cand-1"), NOW)
+                .unwrap(),
+        );
+        store
+            .activate_memory_reviewer_job(
+                project,
+                &job.causal_identity,
+                &producer("f1"),
+                &input("cand-1"),
+                NOW,
+            )
+            .unwrap();
+        store
+            .finish_memory_reviewer_job(
+                project,
+                &job.causal_identity,
+                MemoryReviewerJobOutcome::Failed,
+                NOW + 1,
+            )
+            .unwrap();
+    }
+    let frozen = store
+        .freeze_selection(
+            "proj-b",
+            "slot-1",
+            "attempt-1",
+            &FrozenSelectionPage {
+                references: vec![inputs("cand-2")],
+                next_cursor: None,
+            },
+            NOW,
+        )
+        .unwrap();
+    store
+        .expire_memory_reviewer_work(frozen.selection_deadline_ms)
+        .unwrap();
+    let count = |sql: &str| -> i64 {
+        store
+            .with_conn_for_test(|conn| conn.query_row(sql, [], |row| row.get(0)))
+            .unwrap()
+    };
+    let owners = || count("SELECT COUNT(*) FROM scan_domain_owners");
+    let scopes = || count("SELECT COUNT(*) FROM scan_owner_scopes");
+    assert_eq!(
+        scopes(),
+        2,
+        "each project holds the audit of its own writes"
+    );
+    assert!(owners() > 2, "{} owners", owners());
+
+    let retire_at = (NOW + MEMORY_REVIEWER_QUEUE_LIFETIME_MS).max(frozen.selection_deadline_ms)
+        + MEMORY_REVIEWER_QUEUE_LIFETIME_MS
+        + MEMORY_REVIEWER_SETTLED_RETENTION_MS;
+    assert_eq!(
+        store
+            .retire_settled_memory_reviewer_jobs(retire_at)
+            .unwrap(),
+        3,
+        "both jobs and the page"
+    );
+    assert_eq!(owners(), 0, "no owner of either project remains");
+    assert_eq!(scopes(), 0, "each project's scope went with its last owner");
+    assert_eq!(count("SELECT COUNT(*) FROM field_scans"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM scan_batches"), 0);
+}
+
 /// The transaction-local enqueue writes nothing when it defers: a caller that commits its own transaction around a `Deferred` outcome must find the page still frozen with its references, not a committed `enqueued` row without jobs.
 #[test]
 fn a_deferred_enqueue_leaves_the_page_frozen_even_when_its_transaction_commits() {
@@ -1499,7 +1834,7 @@ fn a_deferred_enqueue_leaves_the_page_frozen_even_when_its_transaction_commits()
     );
 }
 
-/// A page whose references became jobs keeps the scan audit of those identities: the audit now describes the job rows, which retain the same target, template, signals, and evidence text for the store incarnation.
+/// A page whose references became jobs keeps the scan audit of those identities: the audit now describes the job rows, which retain the same target, template, signals, and evidence text until the retirement sweep deletes them and then the page.
 #[test]
 fn an_enqueued_page_keeps_the_scan_audit_of_its_references() {
     let dir = tempfile::tempdir().unwrap();

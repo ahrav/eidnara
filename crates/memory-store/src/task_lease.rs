@@ -32,7 +32,7 @@ use crate::{
 };
 
 /// The write family every task-lease ledger writes under.
-const LEDGER_FAMILY: DurableWriteFamily = DurableWriteFamily::NoteEvaluationLedgers;
+pub(crate) const LEDGER_FAMILY: DurableWriteFamily = DurableWriteFamily::NoteEvaluationLedgers;
 
 const ID_MAX_LEN: usize = 200;
 const RESPONSE_MAX_LEN: usize = 2048;
