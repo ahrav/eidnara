@@ -2,7 +2,7 @@
 
 ## Discovery trigger
 
-`HOST_LAUNCH_IDENTITY_VARS` at `subprocess.rs:30-35` carries the reason for
+`HOST_LAUNCH_IDENTITY_VARS` at `subprocess.rs:29-34` carries the reason for
 this record: a harness child that inherited `EIDNARA_MODULE_ID` and
 `EIDNARA_LAUNCH_NONCE` "could reconnect to the daemon as the supervised
 module". The second half of the guarantee is about ambient credentials: an
@@ -12,26 +12,31 @@ receives from snapshot capture through `env_clear` at spawn.
 
 ## Evidence trail
 
-References into `pi.rs`, `opencode.rs`, `config.rs`, `mod.rs`, and the two test
-binaries are at the tree this record was last revised with. References into
-`subprocess.rs` are at `e16e39e`.
+All references are at the tree this record was last revised with.
 
-Capture. `EnvSnapshot::from_vars` at `subprocess.rs:122-133` filters the
+Capture. `EnvSnapshot::from_vars` at `subprocess.rs:183-194` filters the
 launch-identity names out of every snapshot regardless of construction path.
-`capture_from` at `:97-118` wraps it and charges each entry its string bytes
+`capture_from` at `:158-179` wraps it and charges each entry its string bytes
 plus two plus `ENV_ENTRY_OVERHEAD_BYTES` (128, `config.rs:120`), rejecting the
 snapshot when the sum exceeds `MAX_ENV_SNAPSHOT_BYTES` (1536 KiB,
 `config.rs:116`).
 
-Selection. `provider_row` at `:140-165` maps the canonical provider to one
-variable name (`:145-150`), finds that one variable (`:151-157`), rejects an
-empty value (`:158-160`), rejects a value over `CREDENTIAL_VALUE_CAP_BYTES`
-(16 KiB, `:48`, check at `:161-163`), and returns a one-element `Vec`
-(`:164`). Nothing else from the snapshot is returned. The doc at `:139`
+Selection. `provider_row` at `subprocess.rs:201-233` maps the canonical
+provider to a row specification (`provider_row_spec`, `:118-149`): one
+variable for `anthropic`, `google`, and `openai`, and for `amazon-bedrock` the
+access key, the secret key, the region, and an optional session token. It
+looks up each named variable (`:208-223`), treats an empty value as absent
+(`:216-218`), rejects a value over `CREDENTIAL_VALUE_CAP_BYTES` (16 KiB,
+`:47`, check at `:219-221`), fails with `CredentialMissing` when a required
+variable is absent (`:229`), and returns the row in specification order
+(`:224-232`). Nothing else from the snapshot is returned. The doc at `:200`
 states the intended effect: no loader, proxy, cloud-chain, `PATH`, `HOME`, or
 unrelated provider variable survives.
 
-Composition. Both adapters start `child_env` from `provider_row` and append
+Composition. Both adapters start `child_env` from the row
+`aws_refresh::child_credentials` returns (`aws_refresh.rs:576-614`):
+`provider_row`'s row, or, for `amazon-bedrock` under an AWS profile source, the
+leased access key, secret key, session token, and region. They append
 only adapter-owned variables. OpenCode (`opencode.rs:255-266`, `:312-329`)
 adds `OPENCODE_DB`, `OPENCODE_CONFIG_CONTENT`,
 `OPENCODE_DISABLE_PROJECT_CONFIG`, `EIDNARA_MODEL_EXECUTION_CHILD`, and `HOME`. Pi
@@ -40,8 +45,8 @@ adds `OPENCODE_DB`, `OPENCODE_CONFIG_CONTENT`,
 The `OPENCODE_CONFIG_CONTENT` value is bounded before spawn by
 `MAX_OPENCODE_CONFIG_BYTES` (`opencode.rs:217-229`).
 
-Spawn. `run` calls `.env_clear()` at `subprocess.rs:317` and then sets exactly
-the entries of `spec.env` at `:357-359`. The daemon's own environment is never
+Spawn. `run` calls `.env_clear()` at `subprocess.rs:391` and then sets exactly
+the entries of `spec.env` at `:517-519`. The daemon's own environment is never
 inherited.
 
 Existing checks, verified. Three are unit-level against `EnvSnapshot`:
@@ -94,15 +99,14 @@ Two distinct leaks, both closed by `env_clear` plus single-row selection:
 
 ## Timing windows and dependencies
 
-None. The environment is fixed before `spawn` at `subprocess.rs:361`, and
+None. The environment is fixed before `spawn` at `subprocess.rs:1199`, and
 `env_clear` makes the daemon's later environment changes irrelevant.
 
-The record's `Check` line says "no entry over the per-value cap". Only the
-credential value is capped per-value (`:161`). `OPENCODE_CONFIG_CONTENT` has
-its own cap at `opencode.rs:218`; the other adapter values are short constants
-or paths. `CREDENTIAL_ROW_CAP_BYTES` at `subprocess.rs:51` is declared but has
-no reader in the crate; with a one-variable row and a 16 KiB value cap it
-cannot be reached.
+The record's `Check` line says "no entry over the per-value cap". Only a
+credential value is capped per-value (`subprocess.rs:219-221`).
+`OPENCODE_CONFIG_CONTENT` has its own cap at `opencode.rs:218`; the other
+adapter values are short constants or paths. A row holds at most four
+variables (`subprocess.rs:118-149`), each within the 16 KiB value cap.
 
 ## What a test must construct
 
@@ -121,7 +125,7 @@ control channel and the test would still pass.
 
 ### Q: Does the child receive the snapshot, or only the provider row?
 
-- Sources examined: `subprocess.rs:139-165`, `:317`, `:357-359`;
+- Sources examined: `subprocess.rs:200-233`, `:391`, `:517-519`;
   `opencode.rs:255-266`, `:312-334`; `pi.rs:390-401`, `:522-544`; the record's
   `Guarantee` line.
 - Findings: only the provider row plus adapter-owned variables. The record's
@@ -149,3 +153,16 @@ control channel and the test would still pass.
 - Conclusion: resolved with answer: the record is `test-only`. In this checkout
   the aggregate cap and the verifier are reached only from tests, and the daemon
   wiring that would decide the production path is scheduled for U4.
+
+## Dated note (2026-11-25, #1240)
+
+Dated note, 2026-11-25, #1240: at this head the daemon's host binary captures
+its startup environment with `EnvSnapshot::capture_from`
+(`crates/daemon/src/bin/eidnara_host/serve.rs:1226`) and constructs the
+component with `new_with_credentials` when its startup envelope carries
+credentials or an AWS source
+(`crates/daemon/src/bin/eidnara_host/serve.rs:1043-1045`, `:1250-1259`). Every
+clause in this record that says these calls have no caller outside tests, or
+that the daemon is scheduled for U4, is invalidated. The catalog's `test-only`
+label stays under the catalog's definition of `default-production` until the
+ModelExecution records are reclassified together.
