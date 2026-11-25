@@ -368,14 +368,20 @@ impl ClassifierExchange {
         })
     }
 
-    /// Hands `result` to the review that waits under `lease`; `false` when no request of `project` waits under it.
-    pub fn submit(&self, project: &str, lease: &str, result: Result<Value, String>) -> bool {
+    /// Hands `result` to the review that waits under `lease`; `false` when no request of `project` for `classifier` waits under it.
+    pub fn submit(
+        &self,
+        project: &str,
+        classifier: &str,
+        lease: &str,
+        result: Result<Value, String>,
+    ) -> bool {
         let mut inner = self.lock();
-        let Some(parked) = inner
-            .parked
-            .iter_mut()
-            .find(|parked| parked.project == project && parked.lease.as_deref() == Some(lease))
-        else {
+        let Some(parked) = inner.parked.iter_mut().find(|parked| {
+            parked.project == project
+                && parked.classifier == classifier
+                && parked.lease.as_deref() == Some(lease)
+        }) else {
             return false;
         };
         parked
@@ -565,12 +571,21 @@ mod tests {
             None,
             "the lease holds the request"
         );
-        assert!(!exchange.submit("project", "0000", Ok(json!({}))));
-        assert!(!exchange.submit("other", &work.lease, Ok(json!({}))));
-        assert!(exchange.submit("project", &work.lease, Ok(json!({"answered": true}))));
+        assert!(!exchange.submit("project", "typesafe/jev-latest", "0000", Ok(json!({}))));
+        assert!(!exchange.submit("other", "typesafe/jev-latest", &work.lease, Ok(json!({}))));
+        assert!(
+            !exchange.submit("project", "other/m", &work.lease, Ok(json!({}))),
+            "another classifier's submission"
+        );
+        assert!(exchange.submit(
+            "project",
+            "typesafe/jev-latest",
+            &work.lease,
+            Ok(json!({"answered": true}))
+        ));
         assert_eq!(run.await.unwrap(), Ok(json!({"answered": true})));
         assert!(
-            !exchange.submit("project", &work.lease, Ok(json!({}))),
+            !exchange.submit("project", "typesafe/jev-latest", &work.lease, Ok(json!({}))),
             "an answered request is gone"
         );
     }
@@ -593,7 +608,7 @@ mod tests {
             })
         };
         let work = pull(&exchange, "project", "c/m").await;
-        assert!(exchange.submit("project", &work.lease, Err("cancelled".to_string())));
+        assert!(exchange.submit("project", "c/m", &work.lease, Err("cancelled".to_string())));
         run.await.unwrap().unwrap_err();
         let cancel = CancellationToken::new();
         let run = {
@@ -687,7 +702,7 @@ mod tests {
         assert_eq!(run.await.unwrap(), Err(ClassifyError::Unanswered));
         assert!(exchange.present("project", "c/m"));
         assert!(
-            !exchange.submit("project", &work.lease, Ok(json!({}))),
+            !exchange.submit("project", "c/m", &work.lease, Ok(json!({}))),
             "the review stopped waiting"
         );
         // A harness that pulled a request and stayed silent for the whole of a long wait has left.
@@ -699,6 +714,7 @@ mod tests {
         let work = pull(&exchange, "project", "c/m").await;
         assert!(exchange.submit(
             "project",
+            "c/m",
             &work.lease,
             Err("provider_unavailable".to_string())
         ));
@@ -710,7 +726,7 @@ mod tests {
         // A harness reports `cancelled` as it closes, which ends its presence.
         let run = classify(Duration::from_secs(5));
         let work = pull(&exchange, "project", "c/m").await;
-        assert!(exchange.submit("project", &work.lease, Err("cancelled".to_string())));
+        assert!(exchange.submit("project", "c/m", &work.lease, Err("cancelled".to_string())));
         assert_eq!(
             run.await.unwrap(),
             Err(ClassifyError::Harness("cancelled".to_string()))

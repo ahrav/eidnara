@@ -141,6 +141,28 @@ describe("createReviewClassifierPump", () => {
         }
     });
 
+    it("reports a classifier result outside the daemon's answer bound as model_failed", async () => {
+        // `{"pad":"…"}` is ten bytes of JSON text around the padding.
+        const padded = (bytes: number) => ({ pad: "x".repeat(bytes - 10) });
+        for (const [result, accepted] of [
+            [padded(16 * 1024), true],
+            [padded(16 * 1024 + 1), false],
+            [["changes"], false],
+            ["changes", false],
+            [null, false],
+        ] as const) {
+            const fake = daemon([work(), { state: "disabled" }]);
+            const pump = createReviewClassifierPump(fake.client, async () => result as never);
+            pump.start(SCOPE);
+            await pump.idle();
+            const submitted = fake.calls.find(
+                (call) => call.method === "memory.review.classify.submit",
+            );
+            expect(submitted?.body.error).toBe(accepted ? undefined : "model_failed");
+            expect(submitted?.body.answers).toEqual(accepted ? result : undefined);
+        }
+    });
+
     it("reports a classifier call that outlasts the work's duration as provider_unavailable", async () => {
         const fake = daemon([work({ max_duration_ms: 5 }), { state: "disabled" }]);
         const pump = createReviewClassifierPump(

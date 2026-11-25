@@ -70,13 +70,13 @@ impl HandlerCore {
         }
     }
 
-    /// Takes a harness's answers, or its failure code, for the request `lease` names. `processed` means the waiting review took them; `stale` means no review waits under the lease.
+    /// Takes a harness's answers, or its failure code, for the request `lease` names. `processed` means the waiting review took them; `stale` means no review of the route's classifier waits under the lease.
     pub(crate) fn handle_review_classify_submit(
         &self,
         channel: RouteHandle,
         request: &Value,
     ) -> PreparedOutcome {
-        let (project, _) = match self.review_classifier(
+        let (project, classifier) = match self.review_classifier(
             channel,
             request,
             SUBMIT,
@@ -111,7 +111,10 @@ impl HandlerCore {
                 );
             }
         };
-        let state = if self.review_classifiers.submit(&project, lease, result) {
+        let state = if self
+            .review_classifiers
+            .submit(&project, &classifier, lease, result)
+        {
             "processed"
         } else {
             "stale"

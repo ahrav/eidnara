@@ -1772,6 +1772,69 @@ async fn classifier_work_is_offered_only_for_the_configured_classifier() {
     }
 }
 
+/// A submission settles a request only through a route whose configuration names the classifier the request was parked for. A route of the same project bound under another classifier answers `stale` for that lease, and the request stays leased for its own classifier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lease_is_settled_only_under_the_classifier_it_was_pulled_for() {
+    const FOURTH: u16 = 34;
+    const OTHER: &str = "other/classifier";
+    let rig = Rig::classified(ReviewApply::Apply).await;
+    let root = rig.project.to_str().unwrap();
+    rig.handler.bind_route(
+        test_route(FOURTH),
+        SessionBinding {
+            config: classified_config(ReviewApply::Apply, Some(OTHER)),
+            ..binding_with_harness(root, "pi", "s4")
+        },
+    );
+    let project = kernel_routes::ProjectBinding::new(Path::new(root))
+        .digest()
+        .to_string();
+    let review = {
+        let exchange = Arc::clone(&rig.handler.review_classifiers);
+        tokio::spawn(async move {
+            exchange
+                .classify(
+                    &project,
+                    CLASSIFIER,
+                    "{}".to_string(),
+                    Duration::from_secs(5),
+                    &CancellationToken::new(),
+                )
+                .await
+        })
+    };
+    let work = loop {
+        let work = rig
+            .call(json!({"method": NEXT, "session_id": "s1", "classifier": CLASSIFIER}))
+            .await;
+        if work["state"] == "work" {
+            break work;
+        }
+        tokio::task::yield_now().await;
+    };
+    let other_route = memory_auto_delivery_tests::body(
+        rig.handler
+            .dispatch_value_for_test(
+                test_route(FOURTH),
+                json!({
+                    "method": SUBMIT, "session_id": "s4", "classifier": OTHER,
+                    "lease": work["lease"], "answers": {"from": "other"},
+                }),
+            )
+            .await,
+    );
+    assert_eq!(other_route, json!({"state": "stale"}));
+    assert_eq!(
+        rig.call(json!({
+            "method": SUBMIT, "session_id": "s1", "classifier": CLASSIFIER,
+            "lease": work["lease"], "answers": {"from": "own"},
+        }))
+        .await,
+        json!({"state": "processed"})
+    );
+    assert_eq!(review.await.unwrap(), Ok(json!({"from": "own"})));
+}
+
 /// In `contest` mode a `retire` that cites a contradiction disputes its target: the statement leaves the next session's block and stays on explicit search as a labeled row. The retained statement is untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn contest_moves_a_contradicted_statement_from_the_block_to_labeled_search() {

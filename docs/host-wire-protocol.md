@@ -2618,11 +2618,11 @@ configured model destination admits, and the daemon runs its render check over
 the assembled request before it parks it. A parked request is handed out as it
 was admitted.
 
-The lease belongs to the project and names the request for as long as its
-review waits, which is at most 20 seconds from the moment the request was
-parked. A request under a lease is offered to no other `next` call. Requests
-and leases are process-local, and the daemon parks at most 64 requests at
-once; a request past that bound ends its attempt as failed.
+The lease belongs to the project and its classifier and names the request for
+as long as its review waits, which is at most 20 seconds from the moment the
+request was parked. A request under a lease is offered to no other `next`
+call. Requests and leases are process-local, and the daemon parks at most 64
+requests at once; a request past that bound ends its attempt as failed.
 
 The harness submits the classifier's answers, or one content-free `error`
 (`cancelled`, `provider_unavailable`, or `model_failed`), with `lease` and the
@@ -2635,13 +2635,13 @@ same `classifier`:
 `answers` is an object of at most 16 KiB by question id: a `bool` answer carries
 `type` and `probability` in 0 to 1, and a `choice` answer carries `type` and
 `choice`; other members are ignored. The response `state` is `processed` when
-the waiting review took the submission, `stale` when no review waits under the
-lease, and `disabled` as for `next`. A body is `invalid_params` when
-`classifier` is absent or not a string; when `lease` is absent, not a string,
-empty, or longer than 64 bytes; when it carries both `answers` and `error` or
-neither; when `answers` is not an object or exceeds 16 KiB; or when `error` is
-outside the three codes. Answers the daemon cannot read as the four typed
-answers end that review attempt as failed.
+the waiting review took the submission, `stale` when no review of that
+classifier waits under the lease, and `disabled` as for `next`. A body is
+`invalid_params` when `classifier` is absent or not a string; when `lease` is
+absent, not a string, empty, or longer than 64 bytes; when it carries both
+`answers` and `error` or neither; when `answers` is not an object or exceeds
+16 KiB; or when `error` is outside the three codes. Answers the daemon cannot
+read as the four typed answers end that review attempt as failed.
 
 Each `next` call answered `work` or `ready` marks the project as having that
 classifier for 120 seconds. A stage-1 attempt of a project with no such mark is

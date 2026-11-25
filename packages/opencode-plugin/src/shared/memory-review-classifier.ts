@@ -62,6 +62,8 @@ const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_DURATION_MS = 10_000;
 /** How long past its duration a classifier call may take to settle after its signal aborts. */
 const SETTLE_GRACE_MS = 2_000;
+/** The largest answers object the daemon takes in a submit (`MAX_ANSWERS_BYTES`, `crates/daemon/src/memory_reviewer/classifier_wire.rs`). */
+const MAX_ANSWERS_BYTES = 16 * 1024;
 const RETRY_DELAY_MS = 5_000;
 /** Consecutive failed `next` calls after which a loop ends; the next `start` begins another. */
 const MAX_CONSECUTIVE_FAILURES = 5;
@@ -173,13 +175,18 @@ export function createReviewClassifierPump(
         try {
             if (closing.signal.aborted) throw new ReviewClassifierError("cancelled");
             running = execute(work, controller.signal);
-            outcome = {
-                answers: await withTimeout(
+            const answers = record(
+                await withTimeout(
                     running,
                     work.maxDurationMs + settleGraceMs,
                     "memory review classifier call",
                 ),
-            };
+            );
+            // The daemon takes an answers object whose JSON text fits `MAX_ANSWERS_BYTES`. A classifier result of another shape or size fails the call with `model_failed`.
+            if (!answers || Buffer.byteLength(JSON.stringify(answers)) > MAX_ANSWERS_BYTES) {
+                throw new ReviewClassifierError("model_failed");
+            }
+            outcome = { answers };
         } catch (error) {
             if (error instanceof TimeoutError && running) stuck = { call: running };
             const code = closing.signal.aborted

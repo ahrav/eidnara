@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, type ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { ReviewClassifierError } from "@eidnara/opencode/shared/memory-review-classifier";
 import { piHasReviewClassifier, piReviewClassifierExecutor } from "./memory-review-classifier";
 
@@ -46,6 +46,24 @@ describe("piHasReviewClassifier", () => {
         // A classifier the registry lists without a credential leaves the chat model to decide.
         const listed = { ...registry({}), hasConfiguredAuth: () => false };
         expect(piHasReviewClassifier(context(listed), "typesafe/jev-latest")).toBe(false);
+    });
+
+    // `docs/memory-reviewer-operations.md` ("Stage 1 by a typed classifier") states that the Pi this package pins and CI tests has a registry without the classifier surface. A pin that moves to a Pi with the surface changes this case, that sentence, and the peer range together.
+    it("finds no classifier in the registry the pinned Pi builds", async () => {
+        const pinned = ModelRegistry.inMemory(AuthStorage.inMemory()) as unknown as Record<
+            string,
+            unknown
+        >;
+        expect(typeof pinned.hasConfiguredAuth).toBe("function");
+        expect(typeof pinned.getModelOfType).toBe("undefined");
+        expect(typeof pinned.classify).toBe("undefined");
+        expect(piHasReviewClassifier(context(pinned), "typesafe/jev-latest")).toBe(false);
+        const call = piReviewClassifierExecutor(context(pinned))(
+            WORK,
+            new AbortController().signal,
+        );
+        await expect(call).rejects.toBeInstanceOf(ReviewClassifierError);
+        await expect(call).rejects.toMatchObject({ code: "provider_unavailable" });
     });
 });
 
