@@ -50,7 +50,7 @@ import {
     disabled,
     isServedMemoryDecisionRow,
     type KernelMemorySnapshot,
-    kernelMemorySnapshotFrom,
+    readSearchMemorySnapshot,
     stateKey,
 } from "../shared/kernel-client";
 import { getLoggerDiagnostics, log } from "../shared/logger";
@@ -207,7 +207,6 @@ const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
 );
-// The memory snapshot shares the status cache's TTL so one sidebar poll costs at most one daemon read per surface.
 const memorySnapshotCache = new CoalescedTtlCache<KernelMemorySnapshot>(
     RUST_STATUS_CACHE_TTL_MS,
     POLL_CACHE_MAX_ENTRIES,
@@ -835,9 +834,7 @@ export function registerRpcHandlers(
                 sessionId,
                 projectRoot: resolveProjectRootDirectory(dir),
             });
-            return kernelMemorySnapshotFrom(
-                await client.read({ surface: "explicit_search", gated: true }),
-            );
+            return readSearchMemorySnapshot(client);
         });
     };
 

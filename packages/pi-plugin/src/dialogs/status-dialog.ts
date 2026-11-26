@@ -25,7 +25,7 @@ import {
     isServedMemoryDecisionRow,
     type KernelClientResolver,
     type KernelMemorySnapshot,
-    kernelMemorySnapshotFrom,
+    readSearchMemorySnapshot,
     type StateKey,
     stateKey,
 } from "@eidnara/opencode/shared/kernel-client";
@@ -190,13 +190,7 @@ export async function readStatusMemory(
         sessionId,
         projectRoot: resolveProjectRootDirectory(directory),
     });
-    return kernelMemorySnapshotFrom(
-        await client.read({
-            surface: "explicit_search",
-            gated: true,
-            ...(signal ? { signal } : {}),
-        }),
-    );
+    return readSearchMemorySnapshot(client, signal);
 }
 
 /**

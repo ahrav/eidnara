@@ -13,7 +13,7 @@ import {
 } from "../shared/conflict-detector";
 import { fixConflicts } from "../shared/conflict-fixer";
 import { formatThresholdPercent } from "../shared/format-threshold";
-import { formatMemoryCount } from "../shared/rpc-types";
+import { formatMemoryStatus } from "../shared/rpc-types";
 import { formatTailHygiene } from "../shared/tail-hygiene-status";
 import { formatWindowDerivationLine } from "../shared/window-geometry";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off";
@@ -596,11 +596,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                             <R
                                 t={t()}
                                 l="Active"
-                                v={
-                                    s().memoryState && s().memoryState !== "available"
-                                        ? String(s().memoryState)
-                                        : formatMemoryCount(s())
-                                }
+                                v={formatMemoryStatus(s())}
                                 fg={
                                     s().memoryState && s().memoryState !== "available"
                                         ? t().warning

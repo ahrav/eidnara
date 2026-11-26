@@ -375,6 +375,30 @@ describe("Pi status dialog", () => {
         expect(text()).toContain("0 memories (0 injected, unavailable:daemon_absent)");
     });
 
+    it("counts the memories explicit search serves while the freshness gate withholds the read", async () => {
+        const sessionId = "ses-status-canonical";
+        for (const state of [
+            { kind: "stale", lag_positions: 4, oldest_unconsumed_age_ms: 61_000 },
+            { kind: "unavailable", reason: "no_required_consumer" },
+        ] as const) {
+            const fake = fakeKernelResolver();
+            fake.kernel.seedDecision({
+                object_id: `mem_${"3".repeat(32)}`,
+                decision_kind: "NAMING",
+                summary: "One memory.",
+            });
+            fake.kernel.gatedSurfaceStates.set("explicit_search", state);
+            const { ctx, text } = renderingContext(sessionId, 110);
+
+            await showStatusDialog(fakePi, ctx as never, deps(fake.kernelClient));
+            const label = state.kind === "stale" ? "stale" : "unavailable:no_required_consumer";
+            expect(text()).toContain(`1 memories (0 injected, ${label})`);
+            expect(
+                fake.transport.calls.map((call) => (call.body as { gated: boolean }).gated),
+            ).toEqual([true, false]);
+        }
+    });
+
     it("forwards the command's abort signal to the memory read", async () => {
         const sessionId = "ses-status-signal";
         const fake = fakeKernelResolver();

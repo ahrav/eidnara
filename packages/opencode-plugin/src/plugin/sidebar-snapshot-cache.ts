@@ -71,7 +71,7 @@ export function applyStickySnapshotCache(
         return fresh;
     }
     // A memory count is evidence of a reset only when the read behind it is complete:
-    // a non-`available` state carries no rows, and a truncated read is a lower bound,
+    // only `available` reads qualify for comparison, and a truncated read gives only a lower bound,
     // so a decrease in either case does not prove state was deleted.
     const memoryCountIsEvidence =
         fresh.memoryState === "available" && fresh.memoryTruncated !== true;

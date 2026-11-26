@@ -43,6 +43,7 @@ export {
     sha256Hex,
 } from "./client";
 export { isServedMemoryDecisionRow, renderToolStateText } from "./render";
+export { readSearchMemorySnapshot } from "./snapshot-read";
 export {
     ALL_STATE_KEYS,
     abstained,
@@ -59,6 +60,7 @@ export {
     type InvalidReason,
     invalid,
     type LagFacts,
+    leavesCanonicalRows,
     MEMORY_STATE_GUIDANCE,
     type MemoryState,
     type StateKey,

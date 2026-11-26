@@ -10,6 +10,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { Deadline } from "../../shared/host-client";
 import {
     type KernelClient,
+    leavesCanonicalRows,
     type MemoryState,
     type ReadRow,
     renderToolStateText,
@@ -337,11 +338,9 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
 
 /** The note for a gated read's state that leaves the canonical rows complete, so the scan may read them ungated: a consumer a search serves from lags, or none of them is registered. `undefined` for every other state, which the search reports as an error. */
 function canonicalTipNote(state: MemoryState): string | undefined {
+    if (!leavesCanonicalRows(state)) return undefined;
     if (state.kind === "stale") {
         return "Memory: a search consumer is behind recent changes. These results are read from the canonical tip and include them.";
     }
-    if (state.kind === "unavailable" && state.reason === "no_required_consumer") {
-        return `Memory: ${renderToolStateText(state)} Results are read from the canonical tip.`;
-    }
-    return undefined;
+    return `Memory: ${renderToolStateText(state)} Results are read from the canonical tip.`;
 }
