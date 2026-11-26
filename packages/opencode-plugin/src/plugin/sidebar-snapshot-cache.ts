@@ -6,6 +6,7 @@
  *
  */
 import { BoundedSessionMap } from "../shared/bounded-session-map";
+import { leavesCanonicalRows } from "../shared/kernel-client/state";
 import type { SidebarSnapshot } from "../shared/rpc-types";
 
 interface CachedSnapshot {
@@ -70,11 +71,14 @@ export function applyStickySnapshotCache(
         dropCached(scope);
         return fresh;
     }
-    // A memory count is evidence of a reset only when the read behind it is complete:
-    // only `available` reads qualify for comparison, and a truncated read gives only a lower bound,
-    // so a decrease in either case does not prove state was deleted.
+    // A memory count is evidence of a reset only when the read behind it is complete.
+    // An `available` read and a read whose state leaves the canonical rows both count the rows of the tip;
+    // every other state counts no rows, and a truncated read gives only a lower bound.
+    const memoryState = fresh.memoryState;
     const memoryCountIsEvidence =
-        fresh.memoryState === "available" && fresh.memoryTruncated !== true;
+        memoryState !== null &&
+        (memoryState === "available" || leavesCanonicalRows(memoryState)) &&
+        fresh.memoryTruncated !== true;
     const stateSurvived =
         fresh.history_segmentCount >= cached.snapshot.history_segmentCount &&
         (!memoryCountIsEvidence || fresh.memoryCount >= cached.snapshot.memoryCount);

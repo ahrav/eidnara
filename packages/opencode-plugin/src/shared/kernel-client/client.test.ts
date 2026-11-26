@@ -1263,4 +1263,48 @@ describe("readSearchMemorySnapshot", () => {
         });
         expect(gatedFlags(transport)).toEqual([true, false]);
     });
+
+    test("a connection that changed between the two reads is snapshot_diverged, with no rows", async () => {
+        const lagging = { kind: "stale", lag_positions: 4, oldest_unconsumed_age_ms: 61_000 };
+        const unjudged = { kind: "unavailable", reason: "no_required_consumer" };
+        for (const state of [lagging, unjudged]) {
+            const transport = new FakeTransport();
+            transport.identity = "gen-1";
+            transport.queue(
+                () => {
+                    transport.identity = "gen-2";
+                    return { state };
+                },
+                readReply(9, "o1"),
+            );
+            expect(await readSearchMemorySnapshot(client(transport))).toEqual({
+                state: { kind: "unavailable", reason: "snapshot_diverged" },
+                rows: [],
+                knownAsOf: null,
+            });
+            expect(transport.calls.map((call) => call.connectionIdentity)).toEqual([
+                "gen-1",
+                "gen-2",
+            ]);
+            expect(gatedFlags(transport)).toEqual([true, false]);
+        }
+    });
+
+    test("after a connection change, a state the ungated read answers is still the snapshot's state", async () => {
+        const busy = { kind: "unavailable", reason: "store_busy" };
+        const transport = new FakeTransport();
+        transport.identity = "gen-1";
+        transport.queue(
+            () => {
+                transport.identity = "gen-2";
+                return { state: { kind: "unavailable", reason: "no_required_consumer" } };
+            },
+            { state: busy },
+        );
+        expect(await readSearchMemorySnapshot(client(transport))).toEqual({
+            state: busy,
+            rows: [],
+            knownAsOf: null,
+        });
+    });
 });
