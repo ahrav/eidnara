@@ -209,3 +209,12 @@ export const disabled = (): MemoryState => ({ kind: "disabled" });
 export const cancelled = (): MemoryState => ({ kind: "cancelled" });
 export const stale = (lag: LagFacts): MemoryState => ({ kind: "stale", ...lag });
 export const abstained = (lag: LagFacts): MemoryState => ({ kind: "abstained", ...lag });
+
+const CANONICAL_ROW_STATES: ReadonlySet<string> = new Set<StateKey>([
+    "stale",
+    "unavailable:no_required_consumer",
+]);
+
+export function leavesCanonicalRows(state: MemoryState | string): boolean {
+    return CANONICAL_ROW_STATES.has(typeof state === "string" ? state : stateKey(state));
+}

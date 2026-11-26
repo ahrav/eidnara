@@ -10,6 +10,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { Deadline } from "../../shared/host-client";
 import {
     type KernelClient,
+    leavesCanonicalRows,
     type MemoryState,
     type ReadRow,
     renderToolStateText,
@@ -247,12 +248,12 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
     // The connection that reported the route disabled or unavailable is the one the scan reads. After a turnover the pass is refused, and the search asks the live connection's route.
     if (client.connectionIdentity() !== connection) return diverged;
     // The legacy snapshot scan answers only when the route reports itself disabled or unavailable, and its result names that fallback. The snapshot read is gated on
-    // freshness: a lagging projector answers `stale` and the search says so instead of
-    // ranking rows that may miss recent writes.
+    // freshness, which the daemon judges by the consumers a search serves from: a lagging one answers `stale`. The scan ranks the canonical rows of the tip,
+    // which each commit writes itself, so the read is repeated ungated and the result carries the lag as a note (`canonicalTipNote`).
     // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name.
     const idQuery = parseObjectIdQuery(query);
-    // The gate judges the lag of registered consumers. A deployment with no consumer at all
-    // (no admitted search projection) has no derived state that can lag behind the canonical
+    // A deployment with none of those consumers registered (no admitted search projection)
+    // answers `no_required_consumer`: it has no derived state that can lag behind the canonical
     // rows this read returns, so the same read is repeated ungated and the result says that
     // freshness was not judged, instead of the search failing for the deployment's lifetime.
     const readMemory = async (gated: boolean): Promise<MemoryRead> => {
@@ -294,9 +295,9 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
             : { state: read.state };
     };
     let memory = await readMemory(true);
-    let freshnessNote: string | undefined;
-    if (memory.state?.kind === "unavailable" && memory.state.reason === "no_required_consumer") {
-        freshnessNote = `Memory: ${renderToolStateText(memory.state)} Results are read from the canonical tip.`;
+    // A lagging consumer and an empty consumer set both leave the canonical rows complete.
+    const freshnessNote = memory.state ? canonicalTipNote(memory.state) : undefined;
+    if (freshnessNote) {
         memory = await readMemory(false);
     }
     if (memory.state) {
@@ -333,4 +334,13 @@ async function searchPass(pass: SearchPass): Promise<EidnaraSearchExecution> {
     if (client.connectionIdentity() !== connection) return diverged;
     if (contestNote) notes.push(contestNote);
     return completeFrom(hits, notes.join("\n"));
+}
+
+/** The note for a gated read's state that leaves the canonical rows complete, so the scan may read them ungated: a consumer a search serves from lags, or none of them is registered. `undefined` for every other state, which the search reports as an error. */
+function canonicalTipNote(state: MemoryState): string | undefined {
+    if (!leavesCanonicalRows(state)) return undefined;
+    if (state.kind === "stale") {
+        return "Memory: a search consumer is behind recent changes. These results are read from the canonical tip and include them.";
+    }
+    return `Memory: ${renderToolStateText(state)} Results are read from the canonical tip.`;
 }

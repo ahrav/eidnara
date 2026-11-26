@@ -4,6 +4,7 @@
  */
 
 import type { FoldAuthorityStatus } from "./fold-authority-status";
+import { leavesCanonicalRows } from "./kernel-client/state";
 import type { LoggerDiagnostics } from "./logger";
 
 export interface TailHygieneStatus {
@@ -132,14 +133,13 @@ export function formatMemoryCount(
     return `${snapshot.memoryCount}${snapshot.memoryTruncated ? "+" : ""}`;
 }
 
-/** A non-`available` state such as `disabled` or `unavailable:daemon_absent` replaces the count, which is 0 only because nothing was read. */
+/** When a state prevents reading canonical rows, displaying the state alone distinguishes a missing count from a measured zero. */
 export function formatMemoryStatus(
     snapshot: Pick<SidebarSnapshot, "memoryCount" | "memoryTruncated" | "memoryState">,
 ): string {
-    if (snapshot.memoryState && snapshot.memoryState !== "available") {
-        return snapshot.memoryState;
-    }
-    return formatMemoryCount(snapshot);
+    const state = snapshot.memoryState;
+    if (!state || state === "available") return formatMemoryCount(snapshot);
+    return leavesCanonicalRows(state) ? `${formatMemoryCount(snapshot)} (${state})` : state;
 }
 
 export interface StatusDetail extends SidebarSnapshot {

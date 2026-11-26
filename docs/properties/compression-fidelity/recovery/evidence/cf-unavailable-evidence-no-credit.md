@@ -45,16 +45,21 @@ and owns pressure setup, rather than defining another disposition oracle.
   [inventory helper, lines 731-744](../../../../../crates/daemon/tests/harness_sources.rs#L731)
   maps absence to empty text, so that helper alone cannot observe this
   distinction for a C6 result.
-- [Search execution, lines 127-186, 302-318](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L127)
+- [Search execution, lines 128-187, 303-319](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L128)
   distinguishes invalid state, complete delivery, and packed results. An
   explicit empty sources list completes without reading. Unresolved IDs and
   truncated reads carry notes rather than proof of a complete search.
-- [Search fallback, lines 296-301](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L296)
-  retries only `no_required_consumer` ungated and adds a freshness note. Do
-  not classify that first refusal as terminal if the permitted second read
-  actually delivers supporting evidence.
+- [Search fallback, lines 297-302, 310, 339-346](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L297)
+  retries `stale` and `no_required_consumer` ungated and adds a freshness
+  note; `canonicalTipNote` at lines 339-346 takes the two states from
+  `leavesCanonicalRows` (`packages/opencode-plugin/src/shared/kernel-client/state.ts:213-220`)
+  and names their notes. Do not classify that first refusal as terminal if
+  the permitted second read actually delivers supporting evidence.
 - [Search tests, lines 374-449](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L374)
-  cover stale, no-consumer fallback, busy, disabled, and absent-daemon cases.
+  cover the busy-store error text, the no-consumer fallback, a busy store
+  after one read, and the disabled and absent-daemon cases.
+  [Lines 660-693](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L660)
+  cover the stale fallback.
   [Lines 497-532](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L497)
   distinguish pre-pack omissions from delivered results and complete-empty
   from invalid execution. The backing kernel in these tests is a fake.

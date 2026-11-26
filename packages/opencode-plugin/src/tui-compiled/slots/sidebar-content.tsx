@@ -870,7 +870,7 @@ const SidebarContent = props => {
             _$insertNode(_el$67, _$createTextNode(`Memories`));
             _$insert(_el$69, (() => {
               var _c$12 = _$memo(() => !!(s()?.memoryState && s()?.memoryState !== "available"));
-              return () => _c$12() ? String(s().memoryState) : _$memo(() => (s()?.memoryBlockCount ?? 0) > 0)() ? `${s().memoryBlockCount}/${formatMemoryCount(s() ?? {
+              return () => _c$12() ? formatMemoryStatus(s()) : _$memo(() => (s()?.memoryBlockCount ?? 0) > 0)() ? `${s().memoryBlockCount}/${formatMemoryCount(s() ?? {
                 memoryCount: 0
               })}` : formatMemoryCount(s() ?? {
                 memoryCount: 0

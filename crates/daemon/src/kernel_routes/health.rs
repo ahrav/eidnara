@@ -52,6 +52,8 @@ pub struct KernelFactsBlock {
 impl KernelFactsBlock {
     /// Every lag field, including the threshold verdict, comes from the one
     /// outbox snapshot inside `facts`, so the displayed lag and the flag agree.
+    /// The sampler reads `facts` over the consumers a read is judged by, so
+    /// the block and a gated read report one verdict.
     pub fn from_facts(facts: &KernelFacts) -> Self {
         let lag = &facts.outbox_lag;
         Self {
@@ -221,9 +223,10 @@ impl KernelOpenCoordinator {
         };
         let started = Instant::now();
         let cancel = cancel.clone();
+        let unserved = self.unserved_consumers();
         let worker = tokio::task::spawn_blocking(move || {
             store
-                .facts_unless(now_ms, &|| cancel.is_cancelled())
+                .facts_unless(now_ms, unserved, &|| cancel.is_cancelled())
                 .map(|facts| facts.as_ref().map(KernelFactsBlock::from_facts))
         });
         let block = match worker.await {

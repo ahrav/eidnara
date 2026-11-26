@@ -16,6 +16,7 @@ import {
     kernelMemorySnapshotFrom,
     StoreLifecycleError,
 } from "./client";
+import { readSearchMemorySnapshot } from "./snapshot-read";
 import { MAX_COMMIT_OPERATIONS, MAX_COMMIT_TOKENS, MAX_READ_OBJECT_IDS } from "./wire";
 
 const PROJECT = "/repo/project";
@@ -1203,6 +1204,105 @@ describe("kernelMemorySnapshotFrom", () => {
         const read = await client(transport).read({ surface: "explicit_search" });
         expect(kernelMemorySnapshotFrom(read)).toEqual({
             state: { kind: "unavailable", reason: "store_busy" },
+            rows: [],
+            knownAsOf: null,
+        });
+    });
+});
+
+describe("readSearchMemorySnapshot", () => {
+    const gatedFlags = (transport: FakeTransport) =>
+        transport.bodies("kernel.read").map((body) => body.gated);
+
+    test("an available gated read is the snapshot, in one read", async () => {
+        const transport = new FakeTransport().queue({ ...readReply(9, "o1"), gated: true });
+        const snapshot = await readSearchMemorySnapshot(client(transport));
+        expect(snapshot.state).toEqual({ kind: "available" });
+        expect(snapshot.rows.map((row) => row.object.object_id)).toEqual(["o1"]);
+        expect(gatedFlags(transport)).toEqual([true]);
+    });
+
+    test("a state that leaves the canonical rows complete carries the rows of an ungated read under the gate's state", async () => {
+        const lagging = { kind: "stale", lag_positions: 4, oldest_unconsumed_age_ms: 61_000 };
+        const unjudged = { kind: "unavailable", reason: "no_required_consumer" };
+        for (const state of [lagging, unjudged]) {
+            const transport = new FakeTransport().queue(
+                { state },
+                { ...readReply(9, "o1", "o2"), truncated: true },
+            );
+            const signal = new AbortController().signal;
+            const snapshot = await readSearchMemorySnapshot(client(transport), signal);
+            expect(snapshot).toMatchObject({ state, knownAsOf: 9, truncated: true });
+            expect(snapshot.rows.map((row) => row.object.object_id)).toEqual(["o1", "o2"]);
+            expect(gatedFlags(transport)).toEqual([true, false]);
+            expect(transport.calls.map((call) => call.signal)).toEqual([signal, signal]);
+        }
+    });
+
+    test("any other state is reported with no rows and no second read", async () => {
+        const busy = { kind: "unavailable", reason: "store_busy" };
+        const transport = new FakeTransport().queue({ state: busy });
+        expect(await readSearchMemorySnapshot(client(transport))).toEqual({
+            state: busy,
+            rows: [],
+            knownAsOf: null,
+        });
+        expect(gatedFlags(transport)).toEqual([true]);
+    });
+
+    test("a state the ungated read answers replaces the gate's state", async () => {
+        const busy = { kind: "unavailable", reason: "store_busy" };
+        const transport = new FakeTransport().queue(
+            { state: { kind: "stale", lag_positions: 1, oldest_unconsumed_age_ms: 60_000 } },
+            { state: busy },
+        );
+        expect(await readSearchMemorySnapshot(client(transport))).toEqual({
+            state: busy,
+            rows: [],
+            knownAsOf: null,
+        });
+        expect(gatedFlags(transport)).toEqual([true, false]);
+    });
+
+    test("a connection that changed between the two reads is snapshot_diverged, with no rows", async () => {
+        const lagging = { kind: "stale", lag_positions: 4, oldest_unconsumed_age_ms: 61_000 };
+        const unjudged = { kind: "unavailable", reason: "no_required_consumer" };
+        for (const state of [lagging, unjudged]) {
+            const transport = new FakeTransport();
+            transport.identity = "gen-1";
+            transport.queue(
+                () => {
+                    transport.identity = "gen-2";
+                    return { state };
+                },
+                readReply(9, "o1"),
+            );
+            expect(await readSearchMemorySnapshot(client(transport))).toEqual({
+                state: { kind: "unavailable", reason: "snapshot_diverged" },
+                rows: [],
+                knownAsOf: null,
+            });
+            expect(transport.calls.map((call) => call.connectionIdentity)).toEqual([
+                "gen-1",
+                "gen-2",
+            ]);
+            expect(gatedFlags(transport)).toEqual([true, false]);
+        }
+    });
+
+    test("after a connection change, a state the ungated read answers is still the snapshot's state", async () => {
+        const busy = { kind: "unavailable", reason: "store_busy" };
+        const transport = new FakeTransport();
+        transport.identity = "gen-1";
+        transport.queue(
+            () => {
+                transport.identity = "gen-2";
+                return { state: { kind: "unavailable", reason: "no_required_consumer" } };
+            },
+            { state: busy },
+        );
+        expect(await readSearchMemorySnapshot(client(transport))).toEqual({
+            state: busy,
             rows: [],
             knownAsOf: null,
         });
