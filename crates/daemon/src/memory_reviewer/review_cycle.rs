@@ -55,7 +55,7 @@ const _: () =
     assert!(MAX_LATER_SOURCES + MAX_CITED_SOURCES <= MAX_MEMORY_REVIEWER_STARTING_REFERENCES);
 /// Candidate rows read per decision.
 const CANDIDATE_ROWS_PER_DECISION: usize = 16;
-/// Decisions per `first_candidates_for_decisions` call.
+/// Decisions per `first_candidates_for_decisions` call, and job names per `memory_reviewer_jobs_exist` call.
 const CANDIDATE_READ_BATCH: usize = 64;
 /// The representation of a decision whose descriptor a job reviews.
 const SUBJECT_REPRESENTATION: &str = "decision_summary";
@@ -657,15 +657,20 @@ fn admitted_within(terms: &[BTreeSet<String>], steps: usize) -> usize {
     terms.len()
 }
 
-/// For each decision, the later decisions that share enough subject terms with it: [`MIN_SHARED_SUBJECT_TERMS`] within one category and [`MIN_SHARED_SUBJECT_TERMS_ACROSS_CATEGORIES`] across two. Each later decision names at most [`REOPENED_PER_STATEMENT`] earlier ones. A statement is ordered by the commit that first recorded it, which a contest's rewrite of its row leaves unchanged. This is the second way a memory comes back to review beside the ledger's candidate rows: a later statement about the same subject reaches the earlier one even when it shares too few words for a candidate row.
+/// The commit that first recorded each decision's statement, in the decisions' order. One selection derives the list once: each entry parses the statement's rationale.
+fn stated_commits(decisions: &[&DecisionRow]) -> Vec<i64> {
+    decisions
+        .iter()
+        .map(|decision| crate::memory_capture::stated_commit(decision))
+        .collect()
+}
+
+/// For each decision, the later decisions that share enough subject terms with it: [`MIN_SHARED_SUBJECT_TERMS`] within one category and [`MIN_SHARED_SUBJECT_TERMS_ACROSS_CATEGORIES`] across two. Each later decision names at most [`REOPENED_PER_STATEMENT`] earlier ones. A statement is ordered by `stated`, the commit that first recorded it ([`stated_commits`]), which a contest's rewrite of its row leaves unchanged. This is the second way a memory comes back to review beside the ledger's candidate rows: a later statement about the same subject reaches the earlier one even when it shares too few words for a candidate row.
 fn reopened_by_later_statements(
     decisions: &[&DecisionRow],
     terms: &[BTreeSet<String>],
+    stated: &[i64],
 ) -> Vec<Vec<usize>> {
-    let stated: Vec<i64> = decisions
-        .iter()
-        .map(|decision| crate::memory_capture::stated_commit(decision))
-        .collect();
     let mut postings: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, terms) in terms.iter().enumerate() {
         for term in terms {
@@ -807,14 +812,11 @@ pub fn select_and_enqueue(
         );
     }
     // When the Kernel recorded the commit that first stored each statement of the walk, read in one statement.
-    let stated_commits: Vec<i64> = rows
-        .iter()
-        .map(|decision| crate::memory_capture::stated_commit(decision))
-        .collect();
+    let first_stated = stated_commits(&rows);
     let recorded = kernel
-        .commits_recorded_at_within_budget(&stated_commits, &budget)
+        .commits_recorded_at_within_budget(&first_stated, &budget)
         .map_err(CycleError::Kernel)?;
-    let reopened = reopened_by_later_statements(&rows, &terms);
+    let reopened = reopened_by_later_statements(&rows, &terms, &first_stated);
     let mut candidates = Vec::new();
     let mut candidate_rows = Vec::new().into_iter();
     for (index, (descriptor, decision)) in subjects.iter().enumerate() {
@@ -835,7 +837,7 @@ pub fn select_and_enqueue(
                 .into_iter();
         }
         let cited = cited_by(decision);
-        let stated = crate::memory_capture::stated_commit(decision);
+        let stated = first_stated[index];
         let mut evidence: Vec<LaterEvidence> = candidate_rows
             .next()
             .unwrap_or_default()
@@ -935,17 +937,44 @@ pub fn select_and_enqueue(
             signals,
         });
     }
-    if !candidates.is_empty() {
-        let ids: Vec<&str> = candidates
+    // Each candidate and its inputs, with the name of the job its newest evidence starts. A job is named by the newest later source it is shown. Newer evidence names a new job and reviews the memory again; evidence that ages out of the store leaves the name of the last review standing and starts none.
+    let mut named = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let linked_rows = linked
+            .get(candidate.decision.object_id.as_str())
+            .map_or(&[][..], |rows| rows.as_slice());
+        let Some((mut inputs, _)) =
+            super::selection::causal_inputs(candidate.descriptor, linked_rows, &policy_versions)
+        else {
+            continue;
+        };
+        inputs.question_template = QuestionTemplate::MemoryStatement.id().to_string();
+        let Some(newest) = candidate.signals.first() else {
+            continue;
+        };
+        inputs.signals = vec![newest.clone()];
+        let Ok(name) = inputs.causal_identity() else {
+            continue;
+        };
+        named.push(((candidate, inputs), name));
+    }
+    // A candidate whose job the ledger already holds is passed here. The delivery read and the order cover the candidates with new evidence.
+    let mut unreviewed = new_to_the_ledger(named, |names| {
+        ledger
+            .memory_reviewer_jobs_exist(scope.ledger_project, names)
+            .map_err(|error| CycleError::Ledger(error.to_string()))
+    })?;
+    if !unreviewed.is_empty() {
+        let ids: Vec<&str> = unreviewed
             .iter()
-            .map(|candidate| candidate.decision.object_id.as_str())
+            .map(|(candidate, _)| candidate.decision.object_id.as_str())
             .collect();
         let delivered = automatically_delivered(kernel, &ids)?;
-        for candidate in &mut candidates {
+        for (candidate, _) in &mut unreviewed {
             candidate.delivered = delivered.contains(&candidate.decision.object_id);
         }
     }
-    candidates.sort_by(|a, b| {
+    unreviewed.sort_by(|(a, _), (b, _)| {
         (
             std::cmp::Reverse(a.delivered),
             std::cmp::Reverse(a.recency),
@@ -957,35 +986,20 @@ pub fn select_and_enqueue(
                 &b.decision.object_id,
             ))
     });
-    for candidate in candidates {
+    // Whether the ledger holds the job `shown` names for `inputs`: the lookup of a candidate whose newest source the store retired after the selection named its job.
+    let reviewed = |inputs: &mut CausalInputs, shown: &str| {
+        inputs.signals = vec![shown.to_string()];
+        let Ok(causal_identity) = inputs.causal_identity() else {
+            return Ok(true);
+        };
+        ledger
+            .memory_reviewer_jobs_exist(scope.ledger_project, &[causal_identity.as_str()])
+            .map(|exists| exists.first().copied().unwrap_or(true))
+            .map_err(|error| CycleError::Ledger(error.to_string()))
+    };
+    for (candidate, mut inputs) in unreviewed {
         if selected.total() >= room {
             break;
-        }
-        let linked_rows = linked
-            .get(candidate.decision.object_id.as_str())
-            .map_or(&[][..], |rows| rows.as_slice());
-        let Some((mut inputs, _)) =
-            super::selection::causal_inputs(candidate.descriptor, linked_rows, &policy_versions)
-        else {
-            continue;
-        };
-        inputs.question_template = QuestionTemplate::MemoryStatement.id().to_string();
-        // A job is named by the newest later source it is shown. Newer evidence names a new job and reviews the memory again; evidence that ages out of the store leaves the name of the last review standing and starts none.
-        let reviewed = |inputs: &mut CausalInputs, newest: &str| {
-            inputs.signals = vec![newest.to_string()];
-            let Ok(causal_identity) = inputs.causal_identity() else {
-                return Ok(true);
-            };
-            ledger
-                .memory_reviewer_jobs_exist(scope.ledger_project, &[causal_identity.as_str()])
-                .map(|exists| exists.first().copied().unwrap_or(true))
-                .map_err(|error| CycleError::Ledger(error.to_string()))
-        };
-        let Some(newest) = candidate.signals.first() else {
-            continue;
-        };
-        if reviewed(&mut inputs, newest)? {
-            continue;
         }
         if memory
             .pending
@@ -1019,7 +1033,7 @@ pub fn select_and_enqueue(
         let Some(shown) = signals.first() else {
             continue;
         };
-        if shown != newest && reviewed(&mut inputs, shown)? {
+        if candidate.signals.first() != Some(shown) && reviewed(&mut inputs, shown)? {
             continue;
         }
         inputs.signals = vec![shown.clone()];
@@ -1202,6 +1216,30 @@ fn subject_descriptors(
     let mut permitted = permitted.into_iter();
     rows.retain(|_| permitted.next().unwrap_or(false));
     Ok((rows, after))
+}
+
+/// The items of `named` whose job is new to the ledger, in their order. Each item comes with the name of its job. `held` reads the ledger and answers, for each name it is asked, whether the ledger holds that job. It is asked [`CANDIDATE_READ_BATCH`] names at a time, and each read's answers are paired with the names that read asked. An item whose name a read leaves unanswered is left out, as one whose job the ledger holds is.
+fn new_to_the_ledger<T>(
+    named: Vec<(T, String)>,
+    mut held: impl FnMut(&[&str]) -> Result<Vec<bool>, CycleError>,
+) -> Result<Vec<T>, CycleError> {
+    let mut new = Vec::new();
+    let mut named = named.into_iter();
+    loop {
+        let batch: Vec<(T, String)> = named.by_ref().take(CANDIDATE_READ_BATCH).collect();
+        if batch.is_empty() {
+            return Ok(new);
+        }
+        let names: Vec<&str> = batch.iter().map(|(_, name)| name.as_str()).collect();
+        let answers = held(&names)?;
+        new.extend(
+            batch
+                .into_iter()
+                .zip(answers)
+                .filter(|(_, held)| !held)
+                .map(|((item, _), _)| item),
+        );
+    }
 }
 
 /// Each source of `evidence` once, under the strongest of the triggers that found it.
@@ -1958,7 +1996,8 @@ mod tests {
             ),
         ];
         let refs: Vec<&DecisionRow> = rows.iter().collect();
-        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
+        let reopened =
+            reopened_by_later_statements(&refs, &statement_terms(&refs), &stated_commits(&refs));
         assert_eq!(
             reopened[0],
             [3],
@@ -1991,7 +2030,8 @@ mod tests {
             10,
         ));
         let refs: Vec<&DecisionRow> = many.iter().collect();
-        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
+        let reopened =
+            reopened_by_later_statements(&refs, &statement_terms(&refs), &stated_commits(&refs));
         let by_latest = reopened.iter().filter(|later| later.contains(&6)).count();
         assert_eq!(by_latest, REOPENED_PER_STATEMENT);
         assert!(
@@ -2025,7 +2065,8 @@ mod tests {
             ),
         ];
         let refs: Vec<&DecisionRow> = rows.iter().collect();
-        let reopened = reopened_by_later_statements(&refs, &statement_terms(&refs));
+        let reopened =
+            reopened_by_later_statements(&refs, &statement_terms(&refs), &stated_commits(&refs));
         assert_eq!(
             reopened[0],
             [2],
@@ -2035,6 +2076,88 @@ mod tests {
             reopened[1].is_empty(),
             "one shared term across categories: {:?}",
             reopened[1]
+        );
+    }
+
+    /// The job lookup keeps each item whose job is new to the ledger, in order, and asks the ledger 64 names at a time. Of 130 names the ledger holds the jobs of the 65th and the last: the first name of the second read and the last of the third. A read that answers one name fewer than it was asked leaves that name's item out and the later reads keep their own answers. A read the ledger fails ends the lookup with its error.
+    #[test]
+    fn the_job_lookup_asks_a_batch_of_names_and_pairs_it_with_its_own_answers() {
+        let last = 2 * CANDIDATE_READ_BATCH + 1;
+        let held = [CANDIDATE_READ_BATCH, last];
+        let name = |index: usize| format!("job-{index}");
+        let named =
+            || -> Vec<(usize, String)> { (0..=last).map(|index| (index, name(index))).collect() };
+        let answers = |names: &[&str]| -> Vec<bool> {
+            names
+                .iter()
+                .map(|asked| held.iter().any(|&index| name(index) == *asked))
+                .collect()
+        };
+        let mut asked = Vec::new();
+        let new = new_to_the_ledger(named(), |names| {
+            asked.push(names.len());
+            Ok(answers(names))
+        })
+        .unwrap();
+        assert_eq!(asked, [CANDIDATE_READ_BATCH, CANDIDATE_READ_BATCH, 2]);
+        let expected: Vec<usize> = (0..=last).filter(|index| !held.contains(index)).collect();
+        assert_eq!(new, expected);
+
+        let mut reads = 0;
+        let new = new_to_the_ledger(named(), |names| {
+            reads += 1;
+            let mut answers = answers(names);
+            if reads == 1 {
+                answers.pop();
+            }
+            Ok(answers)
+        })
+        .unwrap();
+        let expected: Vec<usize> = (0..=last)
+            .filter(|index| *index != CANDIDATE_READ_BATCH - 1 && !held.contains(index))
+            .collect();
+        assert_eq!(new, expected, "the first read's last name went unanswered");
+
+        let mut reads = 0;
+        let failed = new_to_the_ledger(named(), |names| {
+            reads += 1;
+            if reads == 2 {
+                return Err(CycleError::Ledger("closed".to_string()));
+            }
+            Ok(answers(names))
+        });
+        assert!(matches!(failed, Err(CycleError::Ledger(_))));
+        assert_eq!(reads, 2, "no read follows the failed one");
+    }
+
+    /// The association orders two statements by the first commits it is handed, whichever commit their rows carry: the statement the list places later reopens the other. A contest rewrites a statement's row at a later commit and leaves the commit that first recorded it.
+    #[test]
+    fn the_association_orders_statements_by_the_first_commits_it_is_given() {
+        let rows = [
+            decision(
+                "a",
+                "NAMING",
+                "User stated: Name test files with the suffix _spec.",
+                9,
+            ),
+            decision(
+                "b",
+                "NAMING",
+                "User stated: From now on test files take the suffix _test.",
+                2,
+            ),
+        ];
+        let refs: Vec<&DecisionRow> = rows.iter().collect();
+        let terms = statement_terms(&refs);
+        assert_eq!(
+            reopened_by_later_statements(&refs, &terms, &[1, 2]),
+            [vec![1], vec![]],
+            "first stated at commit 1, the first statement is the earlier one"
+        );
+        assert_eq!(
+            reopened_by_later_statements(&refs, &terms, &stated_commits(&refs)),
+            [vec![], vec![0]],
+            "by the commits of the rows as they stand, it is the later one"
         );
     }
 

@@ -1060,6 +1060,82 @@ async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {
     assert_eq!(reviewed, [stated(THURSDAY), NOTE.to_string()]);
 }
 
+/// A selection passes a memory whose newest evidence it has reviewed and spends its room on the delivered statement ahead of the note with newer evidence. With room for one job, a first selection enqueues the statement's review alone, and a second, which now holds two reviewed memories among its candidates, enqueues the note's. The pass runs both in that order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reviewed_memory_takes_no_room_and_a_delivered_statement_takes_the_first() {
+    use crate::memory_reviewer::review_cycle::{
+        SelectionMemory, SelectionScope, select_and_enqueue,
+    };
+    const NOTE: &str = "Changelog entries are kept in reverse chronological order.";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    commit_decision(
+        &rig,
+        "mem_note_changelog",
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        "repo",
+        NOTE,
+    );
+    assert_eq!(rig.drain().await, 0);
+    rig.user_says_later(
+        "later-0",
+        later_than_now(30_000),
+        "We still run the linter before every commit.",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.drain().await, 1, "the linter rule is reviewed and kept");
+    rig.user_says_later(
+        "later-1",
+        later_than_now(60_000),
+        "The release branches are still cut from main every Thursday.",
+    )
+    .await;
+    rig.user_says_later(
+        "later-2",
+        later_than_now(120_000),
+        "Keep the changelog entries in chronological order, oldest entries first.",
+    )
+    .await;
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let root = rig.project.to_string_lossy().to_string();
+    let digest = kernel_routes::ProjectBinding::new(&rig.project)
+        .digest()
+        .to_string();
+    // Each selection enqueues one job, the first a second before the next, so the pass runs their jobs in the selections' order.
+    for before_ms in [2_000, 1_000] {
+        let selected = select_and_enqueue(
+            &kernel,
+            &rig.store,
+            &mut SelectionMemory::default(),
+            &SelectionScope {
+                project: &kernel::ProjectScope::new(&digest).unwrap(),
+                project_digest: &digest,
+                ledger_project: &root,
+            },
+            1,
+            crate::now_ms() - before_ms,
+        )
+        .unwrap();
+        assert_eq!(selected.total(), 1, "room for one job");
+    }
+    rig.decides(&[KEEP, KEEP]);
+    assert_eq!(rig.worker.pass(&CancellationToken::new()).await, 2);
+    let reviewed: Vec<String> = rig
+        .attempts()
+        .iter()
+        .map(|attempt| {
+            let state: Value =
+                serde_json::from_str(&attempt.prompt).expect("the state is JSON text");
+            state["memory"]["text"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(
+        reviewed,
+        [stated(LINTER), stated(THURSDAY), NOTE.to_string()]
+    );
+}
+
 /// A memory review reads stored memory and conversation text. A step that asks for a file of the project's working tree is refused as unavailable, the model is told so, and no file text reaches a request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_memory_review_reads_no_file_of_the_working_tree() {
