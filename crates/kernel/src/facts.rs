@@ -2,7 +2,7 @@ use rusqlite::{Transaction, TransactionBehavior};
 
 use super::open::family_sidecars;
 use super::outbox::published_watermark;
-use super::{KernelError, KernelStore};
+use super::{CachedSql, KernelError, KernelStore};
 
 /// One-gibibyte main database size used by callers as an operational warning threshold.
 ///
@@ -39,7 +39,7 @@ pub struct ArtifactBudgetFacts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboxLag {
     /// Published outbox rows the slowest required consumer has not acknowledged.
-    /// `None` when no consumer is registered.
+    /// `None` when the lag counts no registered consumer.
     pub position_lag: Option<i64>,
     pub oldest_unconsumed_age_ms: Option<i64>,
     pub consumer_count: u64,
@@ -52,15 +52,19 @@ impl KernelStore {
     /// Future-dated outbox rows report age zero. Missing database sidecar files contribute zero bytes.
     pub fn facts(&self, now_ms: i64) -> Result<KernelFacts, KernelError> {
         Ok(self
-            .facts_unless(now_ms, &|| false)?
+            .facts_unless(now_ms, &[], &|| false)?
             .expect("an uncancellable sample completes"))
     }
 
     /// [`facts`](Self::facts) whose artifact traversal, the one unbounded step,
-    /// stops once `cancelled` returns true and yields `None`.
+    /// stops once `cancelled` returns true and yields `None`. The consumer
+    /// facts (`minimum_required_checkpoint`, `commit_lag`, `outbox_lag`)
+    /// describe the registered consumers other than `excluded`, read in the
+    /// transaction that reads the commit counters.
     pub fn facts_unless(
         &self,
         now_ms: i64,
+        excluded: &[&str],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<KernelFacts>, KernelError> {
         if now_ms < 0 {
@@ -80,7 +84,7 @@ impl KernelStore {
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(|_| KernelError::Io)?;
-            let consumers = consumer_horizon(&tx)?;
+            let consumers = consumer_horizon(&tx, excluded)?;
             let lag = outbox_lag_in(&tx, &consumers, now_ms)?;
             let retained_outbox_rows: u64 = tx
                 .query_row("SELECT COUNT(*) FROM outbox", [], |row| {
@@ -92,7 +96,7 @@ impl KernelStore {
             tx.commit().map_err(|_| KernelError::Io)?;
             (commit_seq, consumers, lag, retained_outbox_rows)
         };
-        // `None` distinguishes no registered consumer from a caught-up consumer.
+        // `None` distinguishes no counted consumer from a caught-up consumer.
         let commit_lag = consumers
             .minimum_checkpoint
             .map(|checkpoint| commit_seq.saturating_sub(checkpoint));
@@ -128,6 +132,20 @@ impl KernelStore {
     /// Returns [`KernelError::InvalidInput`] if `now_ms` is negative or
     /// [`KernelError::Io`] if a database operation fails.
     pub fn outbox_lag(&self, now_ms: i64) -> Result<OutboxLag, KernelError> {
+        self.outbox_lag_excluding(now_ms, &[])
+    }
+
+    /// [`outbox_lag`](Self::outbox_lag) over the registered consumers other than `excluded`, so a caller that serves a read from some consumers' output measures the lag of those consumers alone. The count, the position lag and the age all describe the remaining consumers; with none remaining the lag reads as it does for an empty consumer set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] if `now_ms` is negative or
+    /// [`KernelError::Io`] if a database operation fails.
+    pub fn outbox_lag_excluding(
+        &self,
+        now_ms: i64,
+        excluded: &[&str],
+    ) -> Result<OutboxLag, KernelError> {
         if now_ms < 0 {
             return Err(KernelError::InvalidInput);
         }
@@ -135,7 +153,7 @@ impl KernelStore {
         let tx = reader
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| KernelError::Io)?;
-        let consumers = consumer_horizon(&tx)?;
+        let consumers = consumer_horizon(&tx, excluded)?;
         let lag = outbox_lag_in(&tx, &consumers, now_ms)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(lag)
@@ -169,10 +187,16 @@ struct ConsumerHorizon {
     count: u64,
 }
 
-fn consumer_horizon(tx: &Transaction<'_>) -> Result<ConsumerHorizon, KernelError> {
-    tx.query_row(
-        "SELECT MIN(checkpoint_commit_seq), COUNT(*) FROM outbox_consumers",
-        [],
+/// The slowest checkpoint and the count of the registered consumers other than `excluded`.
+fn consumer_horizon(
+    tx: &Transaction<'_>,
+    excluded: &[&str],
+) -> Result<ConsumerHorizon, KernelError> {
+    let excluded = serde_json::to_string(excluded).map_err(|_| KernelError::InvalidInput)?;
+    tx.query_row_cached(
+        "SELECT MIN(checkpoint_commit_seq), COUNT(*) FROM outbox_consumers
+         WHERE consumer_id NOT IN (SELECT value FROM json_each(?1))",
+        [excluded],
         |row| {
             Ok(ConsumerHorizon {
                 minimum_checkpoint: row.get::<_, Option<i64>>(0)?,
@@ -202,14 +226,14 @@ fn outbox_lag_in(
     };
     let watermark = published_watermark(tx)?;
     let position_lag = tx
-        .query_row(
+        .query_row_cached(
             "SELECT COUNT(*) FROM outbox WHERE commit_seq>?1 AND outbox_position<=?2",
             [checkpoint, watermark],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|_| KernelError::Io)?;
     let oldest_unconsumed_created_at = tx
-        .query_row(
+        .query_row_cached(
             "SELECT MIN(created_at) FROM outbox WHERE commit_seq>?1",
             [checkpoint],
             |row| row.get::<_, Option<i64>>(0),

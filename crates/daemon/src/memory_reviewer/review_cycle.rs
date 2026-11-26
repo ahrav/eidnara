@@ -137,17 +137,17 @@ fn grant_authority_inner(
     )
 }
 
-/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, a slice is blocked, or `cancelled` answers true, so every live memory decision has its descriptors before a selection reads them. `cancelled` is read before each slice, so a cancelled pass waits for one slice at most. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one.
+/// Runs claim-source slices from `progress` until the consumer reaches the Kernel's tip, the budget ends, a slice is blocked, or `cancelled` answers true, so every live memory decision has its descriptors before a selection reads them. `cancelled` is read before each slice, so a cancelled pass waits for one slice at most. The host's search lifecycle owner runs the same consumer where it exists; this catch-up serves a deployment without one. Returns whether the consumer reached its target; a catch-up that was cancelled, blocked, failed, or left slices for a later call returns false.
 pub fn publish_claims(
     kernel: &KernelStore,
     progress: &mut ClaimProgress,
     now: i64,
     cancelled: &dyn Fn() -> bool,
-) {
+) -> bool {
     let budget = EvalBudget::new(Some(Instant::now() + CYCLE_BUDGET), Arc::default());
     for _ in 0..MAX_CLAIM_SLICES {
         if cancelled() {
-            return;
+            return false;
         }
         let report = ClaimMaterializer::new(kernel, ProviderEgress::LocalOnly).run_slice(
             progress,
@@ -157,17 +157,19 @@ pub fn publish_claims(
         );
         match report.map(|report| report.end) {
             Ok(MaterializationEnd::Continues) => {}
-            Ok(MaterializationEnd::ReachedTarget | MaterializationEnd::Exhausted) => return,
+            Ok(MaterializationEnd::ReachedTarget) => return true,
+            Ok(MaterializationEnd::Exhausted) => return false,
             Ok(MaterializationEnd::Blocked(blocked)) => {
                 eprintln!("daemon: memory_reviewer claim catch-up is blocked: {blocked:?}");
-                return;
+                return false;
             }
             Err(error) => {
                 eprintln!("daemon: memory_reviewer claim catch-up failed: {error}");
-                return;
+                return false;
             }
         }
     }
+    false
 }
 
 /// Decision kinds a recorder writes from a tool event and keeps current itself: the record of a command's failure, which its next run replaces or resolves, and the record of a project file's use.

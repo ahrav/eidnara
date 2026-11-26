@@ -430,6 +430,7 @@ fn new_worker(
     status: &Arc<MemoryReviewerStatus>,
 ) -> Arc<Worker> {
     let kernel = Arc::clone(&handler.kernel);
+    let claims = Arc::clone(&handler.kernel);
     let (project_store, bindings) = (Arc::clone(store), Arc::clone(&handler.bindings));
     Arc::new(Worker {
         host: Arc::new(MemoryReviewerHost {
@@ -450,7 +451,8 @@ fn new_worker(
             Arc::new(TestProducerFactory {
                 state: Arc::clone(state),
             }),
-            None,
+            // As the daemon builds it: the coordinator says whether a search lifecycle owner runs the claim consumer.
+            Some(Arc::new(move || claims.claims_feed_search())),
             Arc::clone(&handler.review_classifiers),
         ),
     })
@@ -2684,5 +2686,186 @@ async fn a_root_with_a_refused_configuration_is_not_reviewed() {
         module_projects(&rig.store, &rig.handler.bindings, Some(&user_tier))
             .iter()
             .all(|route| route.review.is_none())
+    );
+}
+
+/// The claim consumer's lag behind the Kernel's tip, in commits.
+fn claim_lag(rig: &Rig) -> i64 {
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let checkpoint = kernel
+        .outbox_consumer_checkpoint(crate::claim_sources::CLAIM_CONSUMER)
+        .unwrap()
+        .expect("the worker registered the claim consumer");
+    kernel.tip().unwrap() - checkpoint
+}
+
+/// A review pass that outlasts the staleness window leaves search and the block answering. The worker's claim consumer serves review selection alone on this host, so while it trails a commit older than the window, a gated explicit search answers as it does with the reviewer off, the rows are served, the next session receives its block, and the health block reports no lag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pass_that_outlasts_the_staleness_window_leaves_search_and_the_block_answering() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    assert_eq!(rig.drain().await, 0);
+    // A commit arrives after the pass read the tip, as one does while a pass runs its reviews.
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    assert!(claim_lag(&rig) > 0, "the claim consumer trails the tip");
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    // Two minutes on, the commit is older than the window and the pass has yet to end.
+    let late = crate::now_ms() + 120_000;
+    assert!(
+        kernel_routes::serving::lag_threshold_tripped(&kernel.outbox_lag(late).unwrap()),
+        "the lag over every consumer is past the age threshold"
+    );
+
+    let mut request =
+        kernel_route_fixtures::read_request(&rig.project, "s3", "explicit_search", None);
+    request["gated"] = json!(true);
+    request["now_ms"] = json!(late);
+    let gated = memory_auto_delivery_tests::body(
+        rig.handler
+            .dispatch_value_for_test(test_route(THIRD), request)
+            .await,
+    );
+    assert_eq!(gated["state"]["kind"], "unavailable", "{gated}");
+    assert_eq!(gated["state"]["reason"], "no_required_consumer", "{gated}");
+    // The search repeats that read ungated, as it does with the reviewer off, and is served the rows.
+    let served: Vec<String> = rig.search().await.into_iter().map(|row| row.0).collect();
+    assert_eq!(served, [stated(THURSDAY), stated(LINTER)]);
+    rig.handler.sample_kernel_health_for_test(late).await;
+    {
+        let facts = rig.handler.kernel.health_block();
+        let facts = facts.block.facts.as_ref().expect("a sampled block");
+        assert_eq!(facts.required_consumer_count, 0);
+        assert!(!facts.lag_threshold_tripped);
+    }
+    // The block is read under those facts and recorded as plainly served: a served read after it changes no recorded verdict, where a read recorded as served while consumers lag would report the change.
+    let block = rig.block().await;
+    assert!(
+        block.contains(THURSDAY) && block.contains(LINTER),
+        "{block}"
+    );
+    let project = kernel_routes::ProjectBinding::new(&rig.project);
+    let report = rig.handler.kernel.memory_read_report();
+    // Recording a served read returns the log line of a change of verdict, so it returns one only when the read before it left a lag verdict.
+    let line_for_a_served_read =
+        || report.observe(&project, crate::canonical_memory::Observed::Served);
+    assert_eq!(line_for_a_served_read(), None);
+    // The same read is recorded as served while consumers lag once the claim consumer counts, as it does on a host whose search lifecycle owner runs it.
+    rig.handler.kernel.set_claims_feed_search();
+    rig.handler.sample_kernel_health_for_test(late).await;
+    assert!(!rig.block().await.is_empty());
+    assert!(
+        line_for_a_served_read().is_some(),
+        "the report holds the lag verdict"
+    );
+}
+
+/// On a host whose search lifecycle owner runs the claim consumer the worker leaves the consumer to it: a pass registers no claim consumer and publishes no claim descriptor, so it selects nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_worker_leaves_the_claim_consumer_to_a_search_lifecycle_owner() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.handler.kernel.set_claims_feed_search();
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.flagged(&[RETIRE_CITING_LATER]);
+    assert_eq!(rig.drain().await, 0);
+    assert!(rig.attempts().is_empty());
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    assert_eq!(
+        kernel
+            .outbox_consumer_checkpoint(crate::claim_sources::CLAIM_CONSUMER)
+            .unwrap(),
+        None,
+        "the worker registered no claim consumer"
+    );
+}
+
+/// A claim catch-up reports whether the consumer reached the Kernel's tip, which is what lets a pass repeat it before each review: true once the consumer has read through the tip, false for a cancelled catch-up and for one a slice blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_catch_up_reports_whether_it_reached_the_tip() {
+    use crate::claim_sources::{CLAIM_CONSUMER, ClaimProgress};
+    use crate::memory_reviewer::review_cycle::publish_claims;
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    let mut progress = ClaimProgress::default();
+    assert!(
+        !publish_claims(&kernel, &mut progress, crate::now_ms(), &|| true),
+        "a cancelled catch-up"
+    );
+    assert_eq!(
+        kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER).unwrap(),
+        None,
+        "a cancelled catch-up runs no slice"
+    );
+    assert!(publish_claims(
+        &kernel,
+        &mut progress,
+        crate::now_ms(),
+        &|| false
+    ));
+    assert!(
+        publish_claims(&kernel, &mut progress, crate::now_ms(), &|| false),
+        "a caught-up consumer reaches the tip again"
+    );
+    assert_eq!(
+        kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER).unwrap(),
+        Some(kernel.tip().unwrap()),
+        "the consumer has read through the tip"
+    );
+    // With its consumer removed from the Kernel, the next slice is blocked. The Kernel deregisters a consumer only at the tip.
+    kernel
+        .commit(
+            kernel_route_fixtures::intent("deregister-claims"),
+            |envelope| {
+                envelope.deregister_outbox_consumer(CLAIM_CONSUMER, crate::now_ms())?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    assert!(
+        !publish_claims(&kernel, &mut progress, crate::now_ms(), &|| false),
+        "a blocked catch-up"
+    );
+}
+
+/// The worker brings the claim consumer up to the tip before each review of a pass, so after a pass of two reviews the consumer trails the tip by the commits of the last review alone, as it does after a pass of one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_claim_consumer_advances_between_the_reviews_of_one_pass() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    assert_eq!(rig.drain().await, 0);
+    let pass = CancellationToken::new();
+
+    rig.user_says_later(
+        "later-1",
+        1_700_000_000_000,
+        "The release branches are still cut from main every Thursday.",
+    )
+    .await;
+    rig.decides(&[KEEP]);
+    assert_eq!(rig.worker.pass(&pass).await, 1);
+    let after_one = claim_lag(&rig);
+    assert!(after_one > 0, "a review's settlement follows the catch-up");
+
+    rig.user_says_later(
+        "later-2",
+        1_700_000_100_000,
+        "Cut the release branches from main on Thursday as before.",
+    )
+    .await;
+    rig.user_says_later(
+        "later-3",
+        1_700_000_200_000,
+        "Keep running the linter before every commit.",
+    )
+    .await;
+    rig.decides(&[KEEP, KEEP]);
+    assert_eq!(rig.worker.pass(&pass).await, 2);
+    assert_eq!(
+        claim_lag(&rig),
+        after_one,
+        "the consumer read the first review's commits before the second ran"
     );
 }
