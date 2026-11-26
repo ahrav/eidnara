@@ -494,6 +494,16 @@ mod tests {
         };
         assert_eq!(
             decided(&reported, answers(0.8, "replaces", 0.0, "ref-3")),
+            Stage1::Keep,
+            "a reported fact takes later evidence from the user alone"
+        );
+        let reported_then_user = ReviewState {
+            memory: "Assistant reported: the limit is 2.".to_string(),
+            said_by: Writer::Assistant,
+            ..by_user.clone()
+        };
+        assert_eq!(
+            decided(&reported_then_user, answers(0.8, "replaces", 0.0, "ref-3")),
             Stage1::Flagged
         );
         let work = ReviewState {
