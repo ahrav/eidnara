@@ -15,7 +15,7 @@ import { isCompactionEnabled } from "../config/agent-disable";
 import { detectConflicts, resolveCompactionForBoot } from "../shared/conflict-detector";
 import { fixConflicts } from "../shared/conflict-fixer";
 import { formatThresholdPercent } from "../shared/format-threshold";
-import { formatMemoryStatus } from "../shared/rpc-types";
+import { formatMemoryCount, formatMemoryStatus } from "../shared/rpc-types";
 import { formatTailHygiene } from "../shared/tail-hygiene-status";
 import { formatWindowDerivationLine } from "../shared/window-geometry";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off";
@@ -708,7 +708,7 @@ const StatusDialog = props => {
           },
           l: "Active",
           get v() {
-            return formatMemoryStatus(s());
+            return _$memo(() => !!(s().memoryState && s().memoryState !== "available"))() ? formatMemoryStatus(s()) : formatMemoryCount(s());
           },
           get fg() {
             return _$memo(() => !!(s().memoryState && s().memoryState !== "available"))() ? t().warning : t().accent;
