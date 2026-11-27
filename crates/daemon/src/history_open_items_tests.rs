@@ -340,6 +340,57 @@ fn an_unanswered_question_leaves_once_a_later_segment_passes_over_it() {
 }
 
 #[test]
+fn a_waiting_line_stored_with_any_key_leaves_once_a_later_fold_stores_a_segment() {
+    let case = &ANSWERED[0];
+    let mut messages = case.asking();
+    messages.push(user(
+        3,
+        "Separate task: add a changelog entry for the last release.",
+    ));
+    messages.push(assistant(
+        4,
+        "The changelog has the entry for the last release.",
+    ));
+    let long = format!("migration.{}", "remaining-scope-".repeat(5));
+    for key in [
+        "Migration.RemainingScope",
+        "migration remaining scope",
+        long.as_str(),
+        "миграция.объём",
+        "",
+    ] {
+        let waiting = format!("Waiting on user ({key}): {}", case.question);
+        let stored_p1 = format!("I worked through the request.\n{waiting}");
+        let first = output(
+            &[segment_xml(
+                1,
+                2,
+                [&stored_p1, &stored_p1, "Worked on it.", ""],
+            )],
+            &[],
+            3,
+        );
+        let mut stored = Vec::new();
+        fold(&mut stored, &first, &chunk_of(&messages, 1, 3));
+        let newest = &rendered_tiers(&stored)[0];
+        assert!(newest[0].contains(&waiting), "{key}: {}", newest[0]);
+        assert!(newest[1].contains(&waiting), "{key}: {}", newest[1]);
+
+        let p1 = "The user asked for a changelog entry; I added it.";
+        let second = output(&[segment_xml(3, 4, [p1, p1, p1, ""])], &[], 5);
+        fold(&mut stored, &second, &chunk_of(&messages, 3, 5));
+
+        let history = rendered_tiers(&stored);
+        assert_eq!(history.len(), 2);
+        for tier in history.iter().flatten() {
+            assert!(!tier.contains("Waiting on user"), "{key}: {tier}");
+        }
+        assert!(history[0][0].contains("I worked through the request."));
+        assert_eq!(stored[0].p1.as_deref(), Some(stored_p1.as_str()));
+    }
+}
+
+#[test]
 fn a_question_raised_again_in_a_later_segment_renders_once_there() {
     let case = &ANSWERED[2];
     let mut messages = case.asking();
