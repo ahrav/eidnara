@@ -19440,8 +19440,6 @@ mod tests {
     mod repository_identity_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
-    #[path = "request_loop_tests.rs"]
-    mod request_loop_tests;
     #[path = "source_capture_tests.rs"]
     mod source_capture_tests;
     #[path = "source_corpus.rs"]

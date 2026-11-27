@@ -4035,8 +4035,8 @@ fn apply_once(
         sequence > loaded.meta.folded_history_segment_seq
             && sequence <= m1_signal.max_history_segment_seq
     });
-    let published_above_fold_at_cap = m1_signal.max_history_segment_seq
-        > loaded.meta.folded_history_segment_seq
+    let published_above_coverage_at_cap = m1_signal.max_history_segment_seq
+        > meta_coverage_history_segment_seq(&loaded.meta)
         && crate::history_summarizer_archive::WindowSize::after(&projection, None).at_cap();
     let system_absorb_hard_due = if serializer_profile
         == Some(SerializerProfile::ClaudeCodeAnthropic)
@@ -4054,7 +4054,7 @@ fn apply_once(
         false
     };
     let coverage_fold_due =
-        system_absorb_hard_due || archive_fold_due || published_above_fold_at_cap;
+        system_absorb_hard_due || archive_fold_due || published_above_coverage_at_cap;
     let ActivationGates {
         hard_fold_requested,
         ordinary_history_summarizer_veto,
@@ -11376,13 +11376,9 @@ fn assert_no_orphaned_tool_arcs(messages: &[ServedMessage]) {
     }
 }
 
-/// Each tracked session hash retains the last reported duplicate count.
 #[derive(Default)]
 struct DuplicateToolUseReports {
-    reported: HashMap<u64, usize>,
-    /// At [`DUPLICATE_TOOL_USE_REPORT_SESSIONS`] tracked hashes, inserting a new hash evicts
-    /// the earliest inserted hash.
-    order: VecDeque<u64>,
+    reported: HashMap<String, usize>,
 }
 
 const DUPLICATE_TOOL_USE_REPORT_SESSIONS: usize = 1_024;
@@ -11390,28 +11386,17 @@ const DUPLICATE_TOOL_USE_REPORT_SESSIONS: usize = 1_024;
 static DUPLICATE_TOOL_USE_REPORTS: OnceLock<Mutex<DuplicateToolUseReports>> = OnceLock::new();
 
 impl DuplicateToolUseReports {
-    /// `duplicates` contains one location per occurrence of a tool-call id after its first
-    /// occurrence in the served messages. A session logs its first count and each count at
-    /// least twice the last one logged.
     fn line(&mut self, session_id: &str, duplicates: &[(String, usize, usize)]) -> Option<String> {
         let (first_id, message_index, block_index) = duplicates.first()?;
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            session_id.hash(&mut hasher);
-            hasher.finish()
-        };
-        match self.reported.get_mut(&key) {
+        match self.reported.get_mut(session_id) {
             Some(last) if duplicates.len() < last.saturating_mul(2) => return None,
             Some(last) => *last = duplicates.len(),
             None => {
-                if self.order.len() == DUPLICATE_TOOL_USE_REPORT_SESSIONS
-                    && let Some(oldest) = self.order.pop_front()
-                {
-                    self.reported.remove(&oldest);
+                if self.reported.len() == DUPLICATE_TOOL_USE_REPORT_SESSIONS {
+                    self.reported.clear();
                 }
-                self.order.push_back(key);
-                self.reported.insert(key, duplicates.len());
+                self.reported
+                    .insert(session_id.to_string(), duplicates.len());
             }
         }
         let ids = duplicates
@@ -11426,6 +11411,17 @@ impl DuplicateToolUseReports {
     }
 }
 
+fn duplicate_tool_use_report(
+    session_id: &str,
+    duplicates: &[(String, usize, usize)],
+) -> Option<String> {
+    DUPLICATE_TOOL_USE_REPORTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("duplicate tool-use reports mutex")
+        .line(session_id, duplicates)
+}
+
 fn enforce_unique_tool_use_ids(
     messages: Vec<ServedMessage>,
     session_id: &str,
@@ -11435,12 +11431,7 @@ fn enforce_unique_tool_use_ids(
         return messages;
     }
 
-    let line = DUPLICATE_TOOL_USE_REPORTS
-        .get_or_init(Mutex::default)
-        .lock()
-        .expect("duplicate tool-use reports mutex")
-        .line(session_id, &duplicates);
-    if let Some(line) = line {
+    if let Some(line) = duplicate_tool_use_report(session_id, &duplicates) {
         eprintln!("{line}");
     }
     debug_assert!(
@@ -22900,15 +22891,14 @@ pub(crate) mod tests {
         let sessions = DUPLICATE_TOOL_USE_REPORT_SESSIONS + 10;
         for session in 0..sessions {
             assert!(reports.line(&format!("session-{session}"), &one).is_some());
+            assert!(reports.reported.len() <= DUPLICATE_TOOL_USE_REPORT_SESSIONS);
         }
-        assert_eq!(reports.reported.len(), DUPLICATE_TOOL_USE_REPORT_SESSIONS);
-        assert_eq!(reports.order.len(), DUPLICATE_TOOL_USE_REPORT_SESSIONS);
+        assert_eq!(reports.reported.len(), 10);
         assert_eq!(
             reports.line(&format!("session-{}", sessions - 1), &one),
             None
         );
         assert!(reports.line("session-0", &one).is_some());
-        assert_eq!(reports.reported.len(), DUPLICATE_TOOL_USE_REPORT_SESSIONS);
     }
 
     #[test]
@@ -22920,20 +22910,13 @@ pub(crate) mod tests {
             ]
         };
         let session = "belt-reports-through-the-table";
-        let _ = std::panic::catch_unwind(|| enforce_unique_tool_use_ids(messages(), session));
         let duplicates = duplicate_tool_use_locations(&messages());
         assert_eq!(duplicates.len(), 1);
-        let mut reports = DUPLICATE_TOOL_USE_REPORTS
-            .get()
-            .expect("the belt created the table")
-            .lock()
-            .unwrap();
-        assert_eq!(reports.line(session, &duplicates), None);
-        assert!(
-            reports
-                .line(session, &[duplicates.clone(), duplicates].concat())
-                .is_some()
-        );
+        let _ = std::panic::catch_unwind(|| enforce_unique_tool_use_ids(messages(), session));
+        assert_eq!(duplicate_tool_use_report(session, &duplicates), None);
+        let doubled = [duplicates.clone(), duplicates].concat();
+        assert!(duplicate_tool_use_report(session, &doubled).is_some());
+        assert_eq!(duplicate_tool_use_report(session, &doubled), None);
     }
 
     #[cfg(debug_assertions)]
