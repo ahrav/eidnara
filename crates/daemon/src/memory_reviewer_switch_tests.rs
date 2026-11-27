@@ -1246,6 +1246,72 @@ async fn a_selection_reaches_the_users_correction_behind_sixteen_restatements() 
     assert_eq!(later[0]["text"], CORRECTED);
 }
 
+/// A note's sixteen highest-ranked candidate rows are user messages written before the note and published after it. The selection reviews the note on the user's later correction, which ranks behind them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_selection_reaches_the_users_correction_behind_sixteen_origin_messages() {
+    const NOTE: &str =
+        "The integration suite needs a local Redis on port 6380 during nightly runs.";
+    const CORRECTED: &str = "The integration suite needs a local Redis on port 6390 now.";
+    const OBJECT: &str = "mem_note_redis";
+    const WEIGHED: usize = 16;
+    let rig = Rig::open(ReviewApply::Contest).await;
+    let before_the_note = later_than_now(-60_000);
+    commit_decision(
+        &rig,
+        OBJECT,
+        crate::canonical_memory::MEMORY_DOMAIN_ID,
+        "repo",
+        NOTE,
+    );
+    for turn in 0..WEIGHED {
+        rig.user_says_later(
+            &format!("origin-{turn}"),
+            before_the_note + turn as u64,
+            &format!(
+                "As I said in turn {turn}: the integration suite needs a local Redis on port 6380 during nightly runs."
+            ),
+        )
+        .await;
+    }
+    assert_eq!(
+        rig.drain().await,
+        0,
+        "messages written before the note leave it as it is"
+    );
+    rig.user_says_later("corrected", later_than_now(60_000), CORRECTED)
+        .await;
+    let digest = kernel_routes::ProjectBinding::new(&rig.project)
+        .digest()
+        .to_string();
+    let first = rig
+        .store
+        .candidates_for_decision(&digest, OBJECT, None, WEIGHED)
+        .unwrap();
+    assert_eq!(first.items.len(), WEIGHED);
+    let rest = rig
+        .store
+        .candidates_for_decision(&digest, OBJECT, first.next.as_deref(), WEIGHED)
+        .unwrap();
+    assert_eq!(rest.items.len(), 1, "the correction's row alone follows");
+    assert!(
+        rest.items[0].score_bp < first.items[WEIGHED - 1].score_bp,
+        "the correction repeats less of the note than any earlier message"
+    );
+
+    rig.decides(&[KEEP]);
+    assert_eq!(
+        rig.drain().await,
+        1,
+        "the user's correction brings the note to review"
+    );
+    let attempts = rig.attempts();
+    let state: Value = serde_json::from_str(&attempts[0].prompt).expect("the state is JSON text");
+    assert_eq!(state["memory"]["text"], NOTE);
+    let later = state["later"].as_array().unwrap();
+    assert_eq!(later.len(), 1, "the later message alone is evidence");
+    assert_eq!(later[0]["text"], CORRECTED);
+}
+
 /// A selection reviews a statement eligible for a session's block before a search-only note with newer evidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {

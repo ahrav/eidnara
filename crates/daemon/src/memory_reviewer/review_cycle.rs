@@ -842,52 +842,7 @@ pub fn select_and_enqueue(
         let stated = first_stated[index];
         let work_in_progress = crate::memory_capture::states_current_work(decision);
         let said_by = Writer::of_statement(&decision.payload.summary);
-        // A row is evidence while it is one the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before this selection's tip. The source lookup below judges its evidence's liveness.
-        let served = |row: &StoredCandidate| {
-            row.publish_tip > stated
-                && row.publish_tip <= tip
-                && row.kernel_incarnation_id == incarnation
-                && row.matcher_digest == matcher_digest()
-                && row.evidence_id.len() <= MAX_IDENTITY_BYTES
-        };
-        let weighed = weighed_rows(
-            candidate_rows.next().unwrap_or_default(),
-            |row| {
-                Ok(served(row)
-                    && memory
-                        .source(kernel, &row.evidence_id, tip, &budget)?
-                        .is_some_and(|source| {
-                            !takes_evidence(said_by, work_in_progress, source.writer)
-                        }))
-            },
-            |after| {
-                ledger
-                    .candidates_for_decision(
-                        scope.project_digest,
-                        &decision.object_id,
-                        Some(after),
-                        MAX_CANDIDATE_PAGE,
-                    )
-                    .map_err(|error| CycleError::Ledger(error.to_string()))
-            },
-        )?;
-        let mut evidence: Vec<LaterEvidence> = weighed
-            .into_iter()
-            .filter(served)
-            .map(|row| LaterEvidence {
-                evidence_id: row.evidence_id,
-                trigger: Trigger::LaterMessage,
-            })
-            .collect();
-        for &later in &reopened[index] {
-            let statement = rows[later];
-            evidence.extend(cited_by(statement).into_iter().take(1).map(|evidence_id| {
-                LaterEvidence {
-                    evidence_id,
-                    trigger: Trigger::LaterStatement,
-                }
-            }));
-        }
+        let mut evidence: Vec<LaterEvidence> = Vec::new();
         // The memory that contests a statement names its own source, which is what the review is shown. Two rewrites of a statement's row set a floor under its evidence, the row's commit. A contest without a recording session is one a review wrote: the statement takes as evidence only sources published after it. A statement the user settled after a contest is the user's latest word, which sources older than it leave standing.
         let mut reviewed_through =
             crate::memory_capture::is_settled(decision).then_some(decision.created_commit_seq);
@@ -907,28 +862,68 @@ pub fn select_and_enqueue(
         }
         // When the memory was stated, read once, for the first source that carries a time.
         let mut stated_at: Option<Option<i64>> = None;
-        // Each source the memory does not cite, with the commit that published it. A source keeps that place whichever trigger brings it up and whenever a later memory comes to cite it.
-        let mut later = Vec::new();
-        for (evidence_id, trigger) in strongest_triggers(evidence) {
-            if cited.contains(&evidence_id) {
-                continue;
+        // The facts of the source `evidence_id` when it is later evidence for this memory: a live source the memory does not cite, from a writer the memory takes evidence from, published after `reviewed_through`, and written after the memory was stated.
+        let mut later_source = |memory: &mut SelectionMemory,
+                                evidence_id: &str|
+         -> Result<Option<SourceFacts>, CycleError> {
+            if cited.iter().any(|cited| cited == evidence_id) {
+                return Ok(None);
             }
-            let Some(source) = memory.source(kernel, &evidence_id, tip, &budget)? else {
-                continue;
+            let Some(source) = memory.source(kernel, evidence_id, tip, &budget)? else {
+                return Ok(None);
             };
             if !takes_evidence(said_by, work_in_progress, source.writer)
                 || reviewed_through.is_some_and(|through| source.published <= through)
             {
-                continue;
+                return Ok(None);
             }
             if source.written.is_some() && stated_at.is_none() {
                 let recorded = recorded.get(&stated).copied();
                 stated_at = Some(memory.stated_at(kernel, &cited, recorded, tip, &budget)?);
             }
-            if !written_later(&source, stated_at.flatten(), stated) {
-                continue;
+            Ok(written_later(&source, stated_at.flatten(), stated).then_some(source))
+        };
+        // A row is evidence while it is one the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before this selection's tip. `later_source` judges its evidence's liveness.
+        let served = |row: &StoredCandidate| {
+            row.publish_tip > stated
+                && row.publish_tip <= tip
+                && row.kernel_incarnation_id == incarnation
+                && row.matcher_digest == matcher_digest()
+                && row.evidence_id.len() <= MAX_IDENTITY_BYTES
+        };
+        let weighed = weighed_rows(
+            candidate_rows.next().unwrap_or_default(),
+            |row| Ok(served(row) && later_source(memory, &row.evidence_id)?.is_none()),
+            |after| {
+                ledger
+                    .candidates_for_decision(
+                        scope.project_digest,
+                        &decision.object_id,
+                        Some(after),
+                        MAX_CANDIDATE_PAGE,
+                    )
+                    .map_err(|error| CycleError::Ledger(error.to_string()))
+            },
+        )?;
+        evidence.extend(weighed.into_iter().filter(served).map(|row| LaterEvidence {
+            evidence_id: row.evidence_id,
+            trigger: Trigger::LaterMessage,
+        }));
+        for &later in &reopened[index] {
+            let statement = rows[later];
+            evidence.extend(cited_by(statement).into_iter().take(1).map(|evidence_id| {
+                LaterEvidence {
+                    evidence_id,
+                    trigger: Trigger::LaterStatement,
+                }
+            }));
+        }
+        // Each source the memory does not cite, with the commit that published it. A source keeps that place whichever trigger brings it up and whenever a later memory comes to cite it.
+        let mut later = Vec::new();
+        for (evidence_id, trigger) in strongest_triggers(evidence) {
+            if let Some(source) = later_source(memory, &evidence_id)? {
+                later.push((source.published, evidence_id, trigger));
             }
-            later.push((source.published, evidence_id, trigger));
         }
         // Newest first.
         later.sort_by(|a, b| (std::cmp::Reverse(a.0), &a.1).cmp(&(std::cmp::Reverse(b.0), &b.1)));
