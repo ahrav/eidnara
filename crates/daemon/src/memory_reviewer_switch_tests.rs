@@ -1122,6 +1122,81 @@ async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {
     assert_eq!(reviewed, [stated(THURSDAY), NOTE.to_string()]);
 }
 
+/// A selection reviews the statement a session's block carries before a verified `REJECTED_APPROACH` memory that is visible on the automatic-injection surface and has the newer evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_memory_of_a_category_the_block_leaves_out_is_reviewed_after_a_delivered_statement() {
+    const REJECTED: &str = "Changelog entries in reverse chronological order were rejected.";
+    const OBJECT: &str = "mem_rejected_changelog";
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    let kernel = rig.handler.kernel.kernel_store().unwrap();
+    kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "memory_reviewer-switch-test".to_string(),
+                operation_key: OBJECT.to_string(),
+                request_digest: "0".repeat(64),
+                actor: "test".to_string(),
+                cause: "proof".to_string(),
+            },
+            |envelope| {
+                let (_, scope) = kernel_route_fixtures::ensure_route_scope(envelope, &rig.project)?;
+                kernel_route_fixtures::ensure_domain(
+                    envelope,
+                    crate::canonical_memory::MEMORY_DOMAIN_ID,
+                )?;
+                envelope.insert_decision(kernel_route_fixtures::memory_decision_spec(
+                    OBJECT,
+                    &scope,
+                    "REJECTED_APPROACH",
+                    REJECTED,
+                ))?;
+                kernel_route_fixtures::verify_decision(envelope, OBJECT)?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    assert_eq!(rig.drain().await, 0);
+    let (_, served) = kernel
+        .preview(Instant::now() + Duration::from_secs(5), |preview| {
+            preview.served_rows_for(&[OBJECT], None)
+        })
+        .unwrap();
+    assert_eq!(
+        served[OBJECT].visibility(kernel::Surface::AutoInject),
+        kernel::SurfaceVisibility::Visible
+    );
+    let block = rig.block().await;
+    assert!(
+        block.contains(THURSDAY) && !block.contains(REJECTED),
+        "the block carries the statement and leaves the rejected approach out: {block}"
+    );
+    rig.user_says_later(
+        "later-1",
+        later_than_now(60_000),
+        "The release branches are still cut from main every Thursday.",
+    )
+    .await;
+    rig.user_says_later(
+        "later-2",
+        later_than_now(120_000),
+        "Keep the changelog entries in chronological order, oldest entries first.",
+    )
+    .await;
+    rig.decides(&[KEEP, KEEP]);
+    assert_eq!(rig.worker.pass(&CancellationToken::new()).await, 2);
+    let reviewed: Vec<String> = rig
+        .attempts()
+        .iter()
+        .map(|attempt| {
+            let state: Value =
+                serde_json::from_str(&attempt.prompt).expect("the state is JSON text");
+            state["memory"]["text"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(reviewed, [stated(THURSDAY), REJECTED.to_string()]);
+}
+
 /// A selection passes a memory whose newest evidence it has reviewed and spends its room on the delivered statement ahead of the note with newer evidence. With room for one job, a first selection enqueues the statement's review alone, and a second, which now holds two reviewed memories among its candidates, enqueues the note's. The pass runs both in that order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reviewed_memory_takes_no_room_and_a_delivered_statement_takes_the_first() {

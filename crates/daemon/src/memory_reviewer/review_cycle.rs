@@ -37,6 +37,7 @@ use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::claim_sources::{ClaimMaterializer, ClaimProgress, MaterializationEnd};
 use crate::config::ReviewApply;
 use crate::contradiction_candidates::scorer::matcher_digest;
+use crate::memory_render::is_positive_memory_category;
 
 /// The context store the switch's authority rows are recorded under.
 pub const SWITCH_AUTHORITY_STORE: &str = "eidnara-memory-reviewer";
@@ -985,12 +986,14 @@ pub fn select_and_enqueue(
             .memory_reviewer_jobs_exist(scope.ledger_project, names)
             .map_err(|error| CycleError::Ledger(error.to_string()))
     })?;
-    if !unreviewed.is_empty() {
-        let ids: Vec<&str> = unreviewed
-            .iter()
-            .map(|(candidate, _)| candidate.decision.object_id.as_str())
-            .collect();
-        let delivered = automatically_delivered(kernel, &ids)?;
+    // A session's block renders the positive memory categories, so the delivery read names the candidates of those categories.
+    let rendered: Vec<&str> = unreviewed
+        .iter()
+        .filter(|(candidate, _)| is_positive_memory_category(&candidate.decision.decision_kind))
+        .map(|(candidate, _)| candidate.decision.object_id.as_str())
+        .collect();
+    if !rendered.is_empty() {
+        let delivered = automatically_delivered(kernel, &rendered)?;
         for (candidate, _) in &mut unreviewed {
             candidate.delivered = delivered.contains(&candidate.decision.object_id);
         }
