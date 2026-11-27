@@ -625,6 +625,23 @@ pub(crate) fn metadata_bytes(
     Ok(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
+/// Projects whose metadata total leaves less room under the per-project quota than one job reservation charges, so [`check_quota`] refuses the next reservation of each.
+pub(crate) fn projects_at_metadata_quota(conn: &GuardedConn<'_>) -> rusqlite::Result<u64> {
+    let reservation = MEMORY_REVIEWER_RECEIPT_CHARGE_BYTES + MEMORY_REVIEWER_JOB_ALLOWANCE_BYTES;
+    let count: i64 = conn
+        .prepare_cached(
+            "SELECT COUNT(*) FROM memory_reviewer_metadata_totals WHERE metadata_bytes > ?1",
+        )?
+        .query_row(
+            [i64::try_from(
+                MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT.saturating_sub(reservation),
+            )
+            .unwrap_or(i64::MAX)],
+            |row| row.get(0),
+        )?;
+    Ok(u64::try_from(count).unwrap_or_default())
+}
+
 fn pending_jobs(conn: &GuardedConn<'_>, project: Option<&str>) -> rusqlite::Result<usize> {
     let count = scalar(
         conn,

@@ -1425,7 +1425,7 @@ mod tests {
     /// The serialized block carries exactly the counters the wire contract lists, so a field added on one side cannot drift silently past the host sanitizer.
     #[test]
     fn the_block_carries_exactly_the_documented_counters() {
-        const DOCUMENTED: [&str; 39] = [
+        const DOCUMENTED: [&str; 40] = [
             "memory_reviewer_state",
             "activation_state",
             "sampled_at_ms",
@@ -1458,6 +1458,7 @@ mod tests {
             "metadata_bytes",
             "metadata_quota_bytes",
             "metadata_headroom_bytes",
+            "projects_at_metadata_quota",
             "nonadmissions",
             "sessions_with_reservation",
             "latest_nonadmission_memory_reviewer_unavailable",

@@ -494,6 +494,15 @@ mod tests {
         };
         assert_eq!(
             decided(&reported, answers(0.8, "replaces", 0.0, "ref-3")),
+            Stage1::Keep,
+            "an assistant message changes no fact the assistant reported"
+        );
+        let corrected = ReviewState {
+            later: by_user.later.clone(),
+            ..reported.clone()
+        };
+        assert_eq!(
+            decided(&corrected, answers(0.8, "replaces", 0.0, "ref-3")),
             Stage1::Flagged
         );
         let work = ReviewState {

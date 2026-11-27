@@ -616,7 +616,7 @@ const MEMORY_REVIEWER_ACTIVATION_STATES: [&str; 12] = [
     "store",
 ];
 /// Every MemoryReviewer counter the wire contract names (`docs/host-wire-protocol.md`, `metrics.memory_reviewer`); an unknown field is dropped.
-const MEMORY_REVIEWER_COUNTERS: [&str; 36] = [
+const MEMORY_REVIEWER_COUNTERS: [&str; 37] = [
     "swept_jobs",
     "swept_selections",
     "jobs_reserved",
@@ -646,6 +646,7 @@ const MEMORY_REVIEWER_COUNTERS: [&str; 36] = [
     "metadata_bytes",
     "metadata_quota_bytes",
     "metadata_headroom_bytes",
+    "projects_at_metadata_quota",
     "nonadmissions",
     "sessions_with_reservation",
     "latest_nonadmission_memory_reviewer_unavailable",
@@ -1945,6 +1946,34 @@ mod memory_reviewer_block_tests {
             )),
             Some(serde_json::json!({ "memory_reviewer_state": "unavailable" }))
         );
+    }
+
+    /// The allowlist forwards exactly the counters the wire document lists for `metrics.memory_reviewer`, in its order, so a counter the daemon adds reaches an operator.
+    #[test]
+    fn the_wire_document_names_exactly_the_forwarded_counters() {
+        let doc = include_str!("../../../docs/host-wire-protocol.md");
+        let lines: Vec<&str> = doc.lines().collect();
+        let first = lines
+            .iter()
+            .position(|line| line.starts_with("| `memory_reviewer_state` |"))
+            .expect("the memory_reviewer table");
+        let documented: Vec<&str> = lines[first..]
+            .iter()
+            .take_while(|line| line.starts_with('|'))
+            .flat_map(|line| {
+                line.split(" | ")
+                    .next()
+                    .unwrap_or_default()
+                    .split('`')
+                    .skip(1)
+                    .step_by(2)
+            })
+            .collect();
+        assert_eq!(
+            documented[..3],
+            ["memory_reviewer_state", "activation_state", "sampled_at_ms"]
+        );
+        assert_eq!(documented[3..], MEMORY_REVIEWER_COUNTERS);
     }
 }
 
