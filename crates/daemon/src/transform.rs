@@ -4035,6 +4035,9 @@ fn apply_once(
         sequence > loaded.meta.folded_history_segment_seq
             && sequence <= m1_signal.max_history_segment_seq
     });
+    let published_above_fold_at_cap = m1_signal.max_history_segment_seq
+        > loaded.meta.folded_history_segment_seq
+        && crate::history_summarizer_archive::WindowSize::after(&projection, None).at_cap();
     let system_absorb_hard_due = if serializer_profile
         == Some(SerializerProfile::ClaudeCodeAnthropic)
         && history_segment_seq_changed_since_meta
@@ -4050,7 +4053,8 @@ fn apply_once(
     } else {
         false
     };
-    let coverage_fold_due = system_absorb_hard_due || archive_fold_due;
+    let coverage_fold_due =
+        system_absorb_hard_due || archive_fold_due || published_above_fold_at_cap;
     let ActivationGates {
         hard_fold_requested,
         ordinary_history_summarizer_veto,
@@ -6072,7 +6076,7 @@ struct ActivationGateInputs {
     render_config_changed: bool,
     first_fold_due: bool,
     idle_ttl_fired: bool,
-    /// A system-prompt absorb or an archive above the fold, either of which only a HARD folds.
+    /// Coverage above the fold that only a HARD folds.
     coverage_fold_due: bool,
     external_revision_changed: bool,
     project_memory_epoch_hard_due: bool,
@@ -11372,6 +11376,56 @@ fn assert_no_orphaned_tool_arcs(messages: &[ServedMessage]) {
     }
 }
 
+/// Each tracked session hash retains the last reported duplicate count.
+#[derive(Default)]
+struct DuplicateToolUseReports {
+    reported: HashMap<u64, usize>,
+    /// At [`DUPLICATE_TOOL_USE_REPORT_SESSIONS`] tracked hashes, inserting a new hash evicts
+    /// the earliest inserted hash.
+    order: VecDeque<u64>,
+}
+
+const DUPLICATE_TOOL_USE_REPORT_SESSIONS: usize = 1_024;
+
+static DUPLICATE_TOOL_USE_REPORTS: OnceLock<Mutex<DuplicateToolUseReports>> = OnceLock::new();
+
+impl DuplicateToolUseReports {
+    /// `duplicates` contains one location per occurrence of a tool-call id after its first
+    /// occurrence in the served messages. A session logs its first count and each count at
+    /// least twice the last one logged.
+    fn line(&mut self, session_id: &str, duplicates: &[(String, usize, usize)]) -> Option<String> {
+        let (first_id, message_index, block_index) = duplicates.first()?;
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            session_id.hash(&mut hasher);
+            hasher.finish()
+        };
+        match self.reported.get_mut(&key) {
+            Some(last) if duplicates.len() < last.saturating_mul(2) => return None,
+            Some(last) => *last = duplicates.len(),
+            None => {
+                if self.order.len() == DUPLICATE_TOOL_USE_REPORT_SESSIONS
+                    && let Some(oldest) = self.order.pop_front()
+                {
+                    self.reported.remove(&oldest);
+                }
+                self.order.push_back(key);
+                self.reported.insert(key, duplicates.len());
+            }
+        }
+        let ids = duplicates
+            .iter()
+            .map(|(id, _, _)| id.as_str())
+            .collect::<HashSet<_>>()
+            .len();
+        Some(format!(
+            "daemon: duplicate_tool_use_id session={session_id} duplicates={} ids={ids} first_id={first_id} message_index={message_index} block_index={block_index} action=drop_later",
+            duplicates.len()
+        ))
+    }
+}
+
 fn enforce_unique_tool_use_ids(
     messages: Vec<ServedMessage>,
     session_id: &str,
@@ -11381,11 +11435,13 @@ fn enforce_unique_tool_use_ids(
         return messages;
     }
 
-    for (id, message_index, block_index) in &duplicates {
-        eprintln!(
-            "daemon: duplicate_tool_use_id session={} id={} message_index={} block_index={} action=drop_later",
-            session_id, id, message_index, block_index
-        );
+    let line = DUPLICATE_TOOL_USE_REPORTS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("duplicate tool-use reports mutex")
+        .line(session_id, &duplicates);
+    if let Some(line) = line {
+        eprintln!("{line}");
     }
     debug_assert!(
         duplicates.is_empty(),
@@ -22795,6 +22851,89 @@ pub(crate) mod tests {
             .count();
 
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_session_that_repeats_tool_call_ids_logs_one_line_per_doubling() {
+        let mut reports = DuplicateToolUseReports::default();
+        let duplicates = |count: usize| -> Vec<(String, usize, usize)> {
+            (0..count)
+                .map(|at| ("repeated".to_string(), 2 * at + 2, 0))
+                .collect()
+        };
+        let lines: Vec<String> = (1..=4_000)
+            .filter_map(|count| reports.line("loop", &duplicates(count)))
+            .collect();
+        assert_eq!(lines.len(), 12);
+        assert_eq!(
+            lines[0],
+            "daemon: duplicate_tool_use_id session=loop duplicates=1 ids=1 first_id=repeated message_index=2 block_index=0 action=drop_later"
+        );
+        for (doubling, line) in lines.iter().enumerate() {
+            assert!(
+                line.contains(&format!(" duplicates={} ", 1 << doubling)),
+                "{line}"
+            );
+        }
+        assert_eq!(reports.line("loop", &duplicates(300)), None);
+        assert_eq!(reports.line("loop", &duplicates(4_095)), None);
+        assert!(reports.line("loop", &duplicates(4_096)).is_some());
+
+        let mixed = [
+            ("first".to_string(), 1, 0),
+            ("second".to_string(), 2, 0),
+            ("first".to_string(), 3, 1),
+        ];
+        assert_eq!(
+            reports.line("other", &mixed).as_deref(),
+            Some(
+                "daemon: duplicate_tool_use_id session=other duplicates=3 ids=2 first_id=first message_index=1 block_index=0 action=drop_later"
+            )
+        );
+        assert_eq!(reports.line("empty", &[]), None);
+    }
+
+    #[test]
+    fn the_duplicate_report_table_tracks_a_bounded_number_of_sessions() {
+        let mut reports = DuplicateToolUseReports::default();
+        let one = [("id".to_string(), 1, 0)];
+        let sessions = DUPLICATE_TOOL_USE_REPORT_SESSIONS + 10;
+        for session in 0..sessions {
+            assert!(reports.line(&format!("session-{session}"), &one).is_some());
+        }
+        assert_eq!(reports.reported.len(), DUPLICATE_TOOL_USE_REPORT_SESSIONS);
+        assert_eq!(reports.order.len(), DUPLICATE_TOOL_USE_REPORT_SESSIONS);
+        assert_eq!(
+            reports.line(&format!("session-{}", sessions - 1), &one),
+            None
+        );
+        assert!(reports.line("session-0", &one).is_some());
+        assert_eq!(reports.reported.len(), DUPLICATE_TOOL_USE_REPORT_SESSIONS);
+    }
+
+    #[test]
+    fn the_duplicate_belt_reports_through_the_session_table() {
+        let messages = || {
+            vec![
+                ServedMessage::from_message(assistant_tool_call("one", 1, "duplicate").ck),
+                ServedMessage::from_message(assistant_tool_call("two", 2, "duplicate").ck),
+            ]
+        };
+        let session = "belt-reports-through-the-table";
+        let _ = std::panic::catch_unwind(|| enforce_unique_tool_use_ids(messages(), session));
+        let duplicates = duplicate_tool_use_locations(&messages());
+        assert_eq!(duplicates.len(), 1);
+        let mut reports = DUPLICATE_TOOL_USE_REPORTS
+            .get()
+            .expect("the belt created the table")
+            .lock()
+            .unwrap();
+        assert_eq!(reports.line(session, &duplicates), None);
+        assert!(
+            reports
+                .line(session, &[duplicates.clone(), duplicates].concat())
+                .is_some()
+        );
     }
 
     #[cfg(debug_assertions)]
