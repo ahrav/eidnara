@@ -667,8 +667,9 @@ mod tests {
             CONSTRAINT
         );
         let spaced = "Constraint ( policy.measurement-fixes): No bug fixes during the run.";
+        let both = format!("{spaced}\n{CONSTRAINT}");
         assert_eq!(
-            p1s(&[same(1, spaced, vec![]), same(2, LIFTED, vec![lift()])])[0],
+            p1s(&[same(1, &both, vec![]), same(2, LIFTED, vec![lift()])])[0],
             spaced
         );
         let lifted_spaced = "Lifted ( policy.measurement-fixes): The user wants each bug fixed.";
