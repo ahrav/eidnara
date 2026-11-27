@@ -2,7 +2,7 @@ use rusqlite::{Transaction, TransactionBehavior};
 
 use super::open::family_sidecars;
 use super::outbox::published_watermark;
-use super::{KernelError, KernelStore};
+use super::{CachedSql, KernelError, KernelStore};
 
 /// One-gibibyte main database size used by callers as an operational warning threshold.
 ///
@@ -193,7 +193,7 @@ fn consumer_horizon(
     excluded: &[&str],
 ) -> Result<ConsumerHorizon, KernelError> {
     let excluded = serde_json::to_string(excluded).map_err(|_| KernelError::InvalidInput)?;
-    tx.query_row(
+    tx.query_row_cached(
         "SELECT MIN(checkpoint_commit_seq), COUNT(*) FROM outbox_consumers
          WHERE consumer_id NOT IN (SELECT value FROM json_each(?1))",
         [excluded],
@@ -226,14 +226,14 @@ fn outbox_lag_in(
     };
     let watermark = published_watermark(tx)?;
     let position_lag = tx
-        .query_row(
+        .query_row_cached(
             "SELECT COUNT(*) FROM outbox WHERE commit_seq>?1 AND outbox_position<=?2",
             [checkpoint, watermark],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|_| KernelError::Io)?;
     let oldest_unconsumed_created_at = tx
-        .query_row(
+        .query_row_cached(
             "SELECT MIN(created_at) FROM outbox WHERE commit_seq>?1",
             [checkpoint],
             |row| row.get::<_, Option<i64>>(0),

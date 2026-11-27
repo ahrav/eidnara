@@ -226,12 +226,17 @@ describe("applyStickySnapshotCache", () => {
         expect(result.memoryTruncated).toBe(true);
     });
 
-    test("a non-available memory state with a zero count is not reset evidence", () => {
+    test("a memory state whose read returned no rows is not reset evidence", () => {
         applyStickySnapshotCache(
             "ses_test",
             makeSnapshot({ inputTokens: 100_000, history_segmentCount: 5, memoryCount: 10 }),
         );
-        for (const memoryState of ["unavailable:daemon_absent", "stale", "disabled", null]) {
+        for (const memoryState of [
+            "unavailable:daemon_absent",
+            "unavailable:snapshot_diverged",
+            "disabled",
+            null,
+        ]) {
             const result = applyStickySnapshotCache(
                 "ses_test",
                 makeSnapshot({
@@ -244,6 +249,70 @@ describe("applyStickySnapshotCache", () => {
             expect(result.inputTokens).toBe(100_000);
             expect(result.memoryCount).toBe(0);
             expect(result.memoryState).toBe(memoryState);
+        }
+    });
+
+    test("a lower complete count read under a state that leaves the canonical rows is reset evidence", () => {
+        for (const memoryState of ["stale", "unavailable:no_required_consumer"]) {
+            const scope = { sessionId: `ses_${memoryState}`, directory: ROOT };
+            applyStickySnapshotCache(
+                scope,
+                makeSnapshot({
+                    inputTokens: 100_000,
+                    history_segmentCount: 5,
+                    memoryCount: 10,
+                    memoryState,
+                }),
+            );
+            const reset = applyStickySnapshotCache(
+                scope,
+                makeSnapshot({
+                    inputTokens: 0,
+                    history_segmentCount: 5,
+                    memoryCount: 4,
+                    memoryState,
+                }),
+            );
+            expect(reset.inputTokens).toBe(0);
+
+            const later = applyStickySnapshotCache(
+                scope,
+                makeSnapshot({ inputTokens: 0, history_segmentInProgress: true, memoryState }),
+            );
+            expect(later.inputTokens).toBe(0);
+        }
+    });
+
+    test("under those states a truncated lower count and a complete count that held keep the cached tokens", () => {
+        const held = [
+            { memoryCount: 4, memoryTruncated: true },
+            { memoryCount: 10 },
+            { memoryCount: 11 },
+        ];
+        for (const memoryState of ["stale", "unavailable:no_required_consumer"]) {
+            for (const [index, fresh] of held.entries()) {
+                const scope = { sessionId: `ses_${memoryState}_${index}`, directory: ROOT };
+                applyStickySnapshotCache(
+                    scope,
+                    makeSnapshot({
+                        inputTokens: 100_000,
+                        history_segmentCount: 5,
+                        memoryCount: 10,
+                        memoryState,
+                    }),
+                );
+                const result = applyStickySnapshotCache(
+                    scope,
+                    makeSnapshot({
+                        inputTokens: 0,
+                        history_segmentCount: 5,
+                        memoryState,
+                        ...fresh,
+                    }),
+                );
+                expect(result.inputTokens).toBe(100_000);
+                expect(result.memoryCount).toBe(fresh.memoryCount);
+            }
         }
     });
 

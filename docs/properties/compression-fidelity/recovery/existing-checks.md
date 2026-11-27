@@ -99,8 +99,8 @@ predicate over these registry inputs, not automatic product reporting.
 | [cas/read.rs:50-112](../../../../crates/kernel/src/cas/read.rs#L50) | Runtime checks return typed errors for malformed handles, non-live references, tombstones, missing objects, and digest mismatch. | unaudited |
 | [source_export.rs:535-566](../../../../crates/kernel/src/source_export.rs#L535) | Runtime preflight checks descriptor version, revision, evidence/digest association, identity, span, and policy. | unaudited |
 | [source_export.rs:372-403](../../../../crates/kernel/src/source_export.rs#L372) | Runtime materialization checks verified bytes, byte length, UTF-8 span, and selected payload identity. | unaudited |
-| [execute.ts:36-90,127-186](../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L36) | Memory-only source validation, query checks, project binding, and explicit empty-source behavior bound the allowed search request. | unaudited |
-| [execute.ts:296-318](../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L296) | Nonavailable states, the narrow fallback, and truncation/unresolved-ID notes remain distinct. | unaudited |
+| [execute.ts:37-91,128-187](../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L37) | Memory-only source validation, query checks, project binding, and explicit empty-source behavior bound the allowed search request. | unaudited |
+| [execute.ts:297-319](../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L297) | Nonavailable states, the narrow fallback, and truncation/unresolved-ID notes remain distinct. | unaudited |
 | [Pi index.ts:89,367-370](../../../../packages/pi-plugin/src/index.ts#L367) | Transform availability, now `true`, combines with the requested setting to decide whether compaction is off. | unaudited |
 
 No production assertion that measures compression fidelity or grants exact

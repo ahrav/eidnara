@@ -5,6 +5,7 @@ import {
     ALL_STATE_KEYS,
     CONFLICT_REASONS,
     INVALID_REASONS,
+    leavesCanonicalRows,
     MEMORY_STATE_GUIDANCE,
     type MemoryState,
     type StateKey,
@@ -71,5 +72,22 @@ describe("state vocabulary", () => {
             if (!key.startsWith("unavailable") && key !== "stale" && key !== "abstained") continue;
             expect(MEMORY_STATE_GUIDANCE[key].tool.toLowerCase()).not.toContain("retry");
         }
+    });
+});
+
+describe("leavesCanonicalRows", () => {
+    test("names a lagging consumer and an unjudged read, as a state and as its key", () => {
+        expect(ALL_STATE_KEYS.filter((key) => leavesCanonicalRows(key))).toEqual([
+            "stale",
+            "unavailable:no_required_consumer",
+        ]);
+        expect(
+            leavesCanonicalRows({ kind: "stale", lag_positions: 1, oldest_unconsumed_age_ms: 2 }),
+        ).toBe(true);
+        expect(leavesCanonicalRows({ kind: "unavailable", reason: "no_required_consumer" })).toBe(
+            true,
+        );
+        expect(leavesCanonicalRows({ kind: "unavailable", reason: "store_busy" })).toBe(false);
+        expect(leavesCanonicalRows({ kind: "available" })).toBe(false);
     });
 });

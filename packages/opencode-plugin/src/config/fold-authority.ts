@@ -77,7 +77,7 @@ function writtenTierRejections(written: unknown): string[] {
 const CHAIN_KEYS: readonly string[] = [...CHAIN_MODEL_KEYS, ...CHAIN_FALLBACK_KEYS];
 // `model_reference` in `crates/daemon/src/config.rs` reads these keys from the written file and
 // ignores a value that holds a reference, so the loader leaves such a value unset as well.
-const REVIEWER_MODEL_KEYS: readonly string[] = ["model", "stage1_model"];
+const REVIEWER_MODEL_KEYS: readonly string[] = ["model", "stage1_model", "classifier"];
 
 interface ExcludedValue {
     offset: number;

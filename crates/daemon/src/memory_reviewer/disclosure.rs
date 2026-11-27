@@ -13,8 +13,9 @@ use kernel::{ArtifactDestination, KernelStore, MemoryReviewerHoldKind};
 use memory_store::MemoryStore;
 use memory_store::memory_reviewer_ledger::{
     AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerError,
-    MemoryReviewerLedgerRefusal, ResponseUsage,
+    MemoryReviewerLedgerRefusal, ResponseAllowance, ResponseUsage,
 };
+use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -22,12 +23,23 @@ use super::broker::{
     BrokerId, EvidenceBroker, OriginClass, ProvenanceTag, Refusal, RefusalCode, RenderedBuffer,
     check_render, hold_refusal,
 };
+use super::classifier::{Answers, ClassifierRoute, ClassifyError};
 use super::model_request::{
     AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role,
     SIGNED_REQUEST_WINDOW_MS, SendError, Sender, Signed,
 };
 use super::model_response::StopReason;
 use super::stage_one::{self, ChatAnswers, MAX_REQUEST_BYTES, ReviewState};
+
+/// Whether a classifier's answers of `answer_bytes` fit the raw response bytes the job has left.
+fn within_allowance(answer_bytes: usize, allowance: ResponseAllowance) -> bool {
+    u64::try_from(answer_bytes).is_ok_and(|bytes| bytes <= allowance.raw_response_bytes)
+}
+
+/// The provider identity an attempt marker records for a classifier request, which the harness sends under its own registry and credential.
+pub const CLASSIFIER_PROVIDER: &str = "harness-classifier";
+/// The credential a classifier request's marker names: the one the harness's model registry holds for the classifier.
+pub const CLASSIFIER_CREDENTIAL_ID: &str = "harness-registry";
 
 /// The complete API and model profile of one request: the requested canonical model id and the exact sampling values or their omission. It is serialized into the body before dispatch and bound to the marker through the body digest; nothing resolves an alias or asks the provider what it means.
 #[derive(Debug, Clone, PartialEq)]
@@ -533,16 +545,11 @@ impl Disclosure<'_> {
         })
     }
 
-    /// One request through the host's model execution under `marker`. The marker commits first, under the claim, deadline, cutoff, and allowance checks of a direct attempt, and the host is asked only once the ledger hands the attempt over; the wait ends at the attempt deadline the marker committed under. The answer is released only when it comes from the model the route names, and the attempt's terminal is recorded on every path past the marker. Returns the attempt's index with the answer.
-    async fn exchange_through_host(
+    /// Commits `marker` under the claim, deadline, cutoff, and allowance checks of a direct attempt, and returns the attempt's index, its deadline, and the response allowance the ledger granted. A request is sent only once the ledger has handed the attempt over.
+    fn begin_attempt(
         &self,
-        host: &super::host_execution::HostExecution,
         marker: &AttemptMarker,
-        (system, prompt): (&str, &str),
-        max_tokens: u32,
-        cancel: &CancellationToken,
-        deadline: Instant,
-    ) -> Result<(u32, AssistantText), DisclosureRefusal> {
+    ) -> Result<(u32, i64, ResponseAllowance), DisclosureRefusal> {
         let hold = &self.broker.binding().hold;
         let outcome = self
             .ledger
@@ -563,36 +570,46 @@ impl Disclosure<'_> {
                     DisclosureRefusal::Store(error.to_string())
                 }
             })?;
-        let (attempt_index, attempt_deadline_ms, allowance) = match outcome {
+        match outcome {
             DispatchOutcome::ChargedNotDispatched {
                 attempt_index,
                 reason,
                 finished,
-            } => {
-                return Err(DisclosureRefusal::ChargedNotDispatched {
-                    attempt_index,
-                    reason,
-                    terminal_recorded: finished,
-                });
-            }
+            } => Err(DisclosureRefusal::ChargedNotDispatched {
+                attempt_index,
+                reason,
+                terminal_recorded: finished,
+            }),
             DispatchOutcome::Handed {
                 attempt_index,
                 attempt_deadline_ms,
                 allowance,
                 release,
                 ..
-            } => {
-                if let Err(error) = release {
-                    return Err(self.end(
-                        attempt_index,
-                        MemoryReviewerAttemptTerminal::Failed,
-                        ResponseUsage::NONE,
-                        DisclosureRefusal::Store(error.to_string()),
-                    ));
-                }
-                (attempt_index, attempt_deadline_ms, allowance)
-            }
-        };
+            } => match release {
+                Ok(()) => Ok((attempt_index, attempt_deadline_ms, allowance)),
+                Err(error) => Err(self.end(
+                    attempt_index,
+                    MemoryReviewerAttemptTerminal::Failed,
+                    ResponseUsage::NONE,
+                    DisclosureRefusal::Store(error.to_string()),
+                )),
+            },
+        }
+    }
+
+    /// One request through the host's model execution under `marker`. The marker commits first ([`Self::begin_attempt`]), and the host is asked only once the ledger hands the attempt over; the wait ends at the attempt deadline the marker committed under. The answer is released only when it comes from the model the route names, and the attempt's terminal is recorded on every path past the marker. Returns the attempt's index with the answer.
+    async fn exchange_through_host(
+        &self,
+        host: &super::host_execution::HostExecution,
+        marker: &AttemptMarker,
+        (system, prompt): (&str, &str),
+        max_tokens: u32,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<(u32, AssistantText), DisclosureRefusal> {
+        let (attempt_index, attempt_deadline_ms, allowance) = self.begin_attempt(marker)?;
+        let hold = &self.broker.binding().hold;
         let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
         let deadline = deadline.min(Instant::now() + Duration::from_millis(remaining));
         let session = super::host_execution::HostExecution::child_session(
@@ -714,7 +731,7 @@ impl Disclosure<'_> {
             .map_err(|_| DisclosureRefusal::PolicyUnion)
     }
 
-    /// One stage-1 attempt by the chat model this disclosure's sender reaches through the host: the fixed instructions as the system text and the review state as the prompt, under an attempt marker like a proposal request (`exchange_through_host`). Returns the decider's answers, or `None` for an answer outside the closed form, with the SHA-256 of the request body. An answer the provider stopped or cut at the output cap reads as outside the closed form.
+    /// One stage-1 attempt by the chat decider this disclosure's sender reaches through the host: the fixed instructions as the system text and the review state as the prompt, under an attempt marker like a proposal request (`exchange_through_host`). Returns the decider's answers, or `None` for an answer outside the closed form, with the SHA-256 of the request body. An answer the provider stopped or cut at the output cap reads as outside the closed form.
     pub async fn screen(
         &self,
         review: &ReviewState,
@@ -769,6 +786,113 @@ impl Disclosure<'_> {
             .then(|| ChatAnswers::parse(review, &text.text))
             .flatten();
         Ok((answers, body.digest().to_string()))
+    }
+
+    /// One stage-1 attempt by the project's typed classifier, which returns the answers with the SHA-256 of `request`, the text [`ReviewState::request_json`] wrote for `review`. The text goes to the classifier through the harness after the checks [`Self::screen`] makes on a state, under a marker that names the classifier and the harness's credential. The attempt's terminal is recorded on every path past the marker.
+    pub async fn classify(
+        &self,
+        route: &ClassifierRoute,
+        review: &ReviewState,
+        request: String,
+        cancel: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<(Answers, String), DisclosureRefusal> {
+        let union_digest = self.admit_stage_one(review, &request, cancel)?;
+        let body_digest = format!("{:x}", Sha256::digest(request.as_bytes()));
+        let marker = AttemptMarker {
+            body_digest: body_digest.clone(),
+            request_bytes: u64::try_from(request.len()).map_err(|_| DisclosureRefusal::Send {
+                attempt_index: None,
+                error: SendError::RequestTooLarge,
+                sent: false,
+            })?,
+            provider: CLASSIFIER_PROVIDER.to_string(),
+            model: route.classifier.clone(),
+            credential_id: CLASSIFIER_CREDENTIAL_ID.to_string(),
+            policy_union_digest: union_digest,
+        };
+        let (attempt_index, attempt_deadline_ms, allowance) = self.begin_attempt(&marker)?;
+        let remaining = u64::try_from(attempt_deadline_ms - (self.now_ms)()).unwrap_or(0);
+        let wait = deadline
+            .min(Instant::now() + Duration::from_millis(remaining))
+            .saturating_duration_since(Instant::now());
+        let answered = route
+            .exchange
+            .classify(&route.project, &route.classifier, request, wait, cancel)
+            .await;
+        // A request the harness pulled left the host; one that waited unpulled, or that the full exchange refused, stayed in it.
+        let failed = |error, sent| DisclosureRefusal::Send {
+            attempt_index: Some(attempt_index),
+            error,
+            sent,
+        };
+        let value = match answered {
+            Ok(value) => value,
+            Err(error) => {
+                let (terminal, refusal) = match error {
+                    ClassifyError::Cancelled => (
+                        MemoryReviewerAttemptTerminal::Cancelled,
+                        DisclosureRefusal::Cancelled,
+                    ),
+                    ClassifyError::Unanswered => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Deadline, true),
+                    ),
+                    ClassifyError::Unpulled => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Deadline, false),
+                    ),
+                    ClassifyError::Full => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Transport, false),
+                    ),
+                    ClassifyError::Harness(_) => (
+                        MemoryReviewerAttemptTerminal::Failed,
+                        failed(SendError::Transport, true),
+                    ),
+                };
+                return Err(self.end(attempt_index, terminal, ResponseUsage::NONE, refusal));
+            }
+        };
+        let answer_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+        let usage = ResponseUsage {
+            raw_response_bytes: u64::try_from(answer_bytes).ok(),
+            decoded_text_bytes: Some(0),
+        };
+        // The job's remaining response allowance bounds a classifier's answers as it bounds a chat answer: answers past it spend the whole remainder, so the job's next request is refused as exhausted.
+        if !within_allowance(answer_bytes, allowance) {
+            return Err(self.end(
+                attempt_index,
+                MemoryReviewerAttemptTerminal::Failed,
+                ResponseUsage {
+                    raw_response_bytes: Some(allowance.raw_response_bytes),
+                    decoded_text_bytes: Some(0),
+                },
+                failed(SendError::ResponseTooLarge, true),
+            ));
+        }
+        let answers = match Answers::parse(review, &value) {
+            Ok(answers) => answers,
+            Err(_) => {
+                return Err(self.end(
+                    attempt_index,
+                    MemoryReviewerAttemptTerminal::Failed,
+                    usage,
+                    failed(SendError::Transport, true),
+                ));
+            }
+        };
+        self.finish(
+            attempt_index,
+            MemoryReviewerAttemptTerminal::Complete,
+            usage,
+        )
+        .map_err(|error| DisclosureRefusal::TerminalNotRecorded {
+            attempt_index,
+            error,
+            cause: None,
+        })?;
+        Ok((answers, body_digest))
     }
 
     /// Re-judges every disclosed alias at the current clock, once per alias, and collects the evidence ids they name.
@@ -912,11 +1036,25 @@ mod tests {
     use crate::memory_reviewer::stage_one::tests::{reference, user_statement};
     use crate::memory_reviewer::stage_one::{StateReference, Writer};
 
-    /// A stage-1 request is refused whole when any text in it holds a credential, and when it is larger than the bound. The state the broker's reads produce passes.
+    /// A classifier's answers fit the job's remaining raw response bytes up to the last byte, and one byte more is past it.
+    #[test]
+    fn answers_fit_the_remaining_allowance_to_the_byte() {
+        let left = |raw_response_bytes| ResponseAllowance {
+            raw_response_bytes,
+            decoded_text_bytes: 0,
+        };
+        assert!(within_allowance(0, left(0)));
+        assert!(within_allowance(512, left(512)));
+        assert!(!within_allowance(513, left(512)));
+        assert!(!within_allowance(1, left(0)));
+    }
+
+    /// A stage-1 request is refused whole when any text in it holds a credential, whichever decider it is written for, and when it is larger than the bound. The state the broker's reads produce passes.
     #[test]
     fn a_stage_one_request_passes_the_render_check_and_the_size_bound() {
         let clean = user_statement(vec![reference("ref-3", Writer::User, "Deploy from main.")]);
         assert_eq!(admits_request(&clean, &clean.state_json()), Ok(()));
+        assert_eq!(admits_request(&clean, &clean.request_json()), Ok(()));
 
         // Built from parts so the source holds no credential-shaped literal.
         let credential = format!(
@@ -928,10 +1066,12 @@ mod tests {
             Writer::User,
             &format!("Deploy from main with {credential}."),
         )]);
-        assert_eq!(
-            admits_request(&leaking, &leaking.state_json()),
-            Err(DisclosureRefusal::RenderCheck)
-        );
+        for request in [leaking.state_json(), leaking.request_json()] {
+            assert_eq!(
+                admits_request(&leaking, &request),
+                Err(DisclosureRefusal::RenderCheck)
+            );
+        }
 
         // A key block holds line ends, which JSON text escapes. Each form of the request is checked: the text that is sent, and the plain texts a decider reads once the JSON is parsed.
         let key = format!(

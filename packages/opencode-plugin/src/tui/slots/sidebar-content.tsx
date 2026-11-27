@@ -777,7 +777,7 @@ const SidebarContent = (props: {
                                     }
                                 >
                                     {s()?.memoryState && s()?.memoryState !== "available"
-                                        ? String(s()!.memoryState)
+                                        ? formatMemoryStatus(s()!)
                                         : (s()?.memoryBlockCount ?? 0) > 0
                                           ? `${s()!.memoryBlockCount}/${formatMemoryCount(s() ?? { memoryCount: 0 })}`
                                           : formatMemoryCount(s() ?? { memoryCount: 0 })}

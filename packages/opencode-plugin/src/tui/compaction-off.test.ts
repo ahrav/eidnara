@@ -167,3 +167,23 @@ test("falls back to contextLimit when the native percentage is absent or zero", 
         ),
     ).toBe(80_000);
 });
+
+test("shows the count beside the state when the status read carried the canonical rows", () => {
+    const lagging = compactionOffSidebarRows(
+        snapshot({ memoryCount: 5, memoryState: "stale", sessionNoteCount: 0 }),
+    );
+    const unjudged = compactionOffSidebarRows(
+        snapshot({
+            memoryCount: 5,
+            memoryTruncated: true,
+            memoryState: "unavailable:no_required_consumer",
+            sessionNoteCount: 0,
+        }),
+    );
+
+    expect(lagging[0]).toEqual({ label: "Memories", value: "5 (stale)" });
+    expect(unjudged[0]).toEqual({
+        label: "Memories",
+        value: "5+ (unavailable:no_required_consumer)",
+    });
+});
