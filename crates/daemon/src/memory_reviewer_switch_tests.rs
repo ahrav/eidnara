@@ -1246,7 +1246,7 @@ async fn a_selection_reaches_the_users_correction_behind_sixteen_restatements() 
     assert_eq!(later[0]["text"], CORRECTED);
 }
 
-/// A selection reviews the memories a session receives automatically before the ones served on search alone, whatever the order of their evidence. Here the note's evidence is the newer, and the delivered statement's review runs first.
+/// A selection reviews a statement eligible for a session's block before a search-only note with newer evidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {
     const NOTE: &str = "Changelog entries are kept in reverse chronological order.";

@@ -551,7 +551,7 @@ struct Candidate<'a> {
     trigger: Trigger,
     /// The commit that published the newest later source, so the newest evidence is reviewed first.
     recency: i64,
-    /// Whether a session receives the memory in its block now. Such a memory is reviewed ahead of one served on explicit search alone.
+    /// Whether the memory is eligible for a session's block (`delivery=automatic`). Selection reviews such a memory ahead of a search-only one (`delivery=search`).
     delivered: bool,
     cited: Vec<String>,
     /// The later sources' evidence ids, newest first.
@@ -721,7 +721,7 @@ fn reopened_by_later_statements(
     reopened
 }
 
-/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, each Ready with its starting references: the memories a session receives automatically first, and within each group the newest evidence first, so a pass limit or a store bound that ends the selection has spent its room on the rows a session is handed. Evidence is a later source the memory does not cite, written after the memory was stated (`written_later`) by someone who may change it ([`takes_evidence`]): a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit that published it. A memory whose change proposal is pending waits for it.
+/// Selects the project's memories that new evidence bears on and enqueues at most `room` jobs, each Ready with its starting references: the memories eligible for a session's block first, and within each group the newest evidence first, so a pass limit or a store bound that ends the selection has spent its room on the memories a block can carry. Evidence is a later source the memory does not cite, written after the memory was stated (`written_later`) by someone who may change it ([`takes_evidence`]): a ledger candidate row, the source of a later memory about the same subject, or the source of the memory that contests it. The newest later source names the job, so a memory is reviewed again when newer evidence arrives and once on the same evidence. A source's place in that order is the commit that published it. A memory whose change proposal is pending waits for it.
 pub fn select_and_enqueue(
     kernel: &KernelStore,
     ledger: &MemoryStore,
@@ -1151,7 +1151,7 @@ fn written_later(source: &SourceFacts, stated_at: Option<i64>, stated: i64) -> b
     }
 }
 
-/// Those of the memories `ids` a session receives in its block now: the ones the Kernel serves on the automatic-injection surface. One read over the named rows, inside a five-second wait for a reader, as the read of a source's writer is.
+/// Returns the memories of `ids` that the Kernel serves on the automatic-injection surface. These form the `delivery=automatic` group, the memories eligible for a session's block. A session's token budget can trim an eligible memory from its block.
 fn automatically_delivered(
     kernel: &KernelStore,
     ids: &[&str],
