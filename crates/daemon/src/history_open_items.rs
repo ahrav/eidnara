@@ -1,14 +1,24 @@
 //! Open items in rendered history: the status lines a fold writes for questions that wait on the
 //! user and for constraints the user set, and the state that decides which of them still render.
 //!
-//! A status line is one tier line in one of four forms, each naming its item by a claim key. It
-//! may start with one `- ` or `* ` bullet and has text after its `):`:
+//! A status line is one tier line in one of four forms. Each form holds a key between
+//! parentheses. The line may start with one `- ` or `* ` bullet and has text after its `):`:
 //!
 //! - `Waiting on user (key): …`: a question I put to the user that is open at the end of the
 //!   segment.
 //! - `Constraint (key): …`: a standing limit the user set for the work.
 //! - `Decided (key): …`: the user's answer to an item.
 //! - `Lifted (key): …`: a user constraint the user later lifted, stated as lifted.
+//!
+//! A line's form makes it a status line, whatever its key holds. The prompt asks for a key in
+//! the claim-key grammar, and the fold stores the line as the summarizer wrote it, so a stored
+//! key may hold capitals, spaces, another alphabet, more bytes than a claim key, or nothing. The
+//! agent reads every line of the form as a status of the work, so every such line follows the
+//! rules below. The key is the bytes up to the line's first `):`. Two lines name one item when
+//! their keys hold a character other than whitespace and are equal byte for byte. The state is
+//! derived at render, so a row stored with any key renders under these rules. A constraint whose
+//! key lies outside the claim-key grammar stands while its segment renders: a lift needs a stored
+//! claim with the constraint's key, and a stored claim's key is in that grammar.
 //!
 //! Waiting and constraint lines are open; decided and lifted lines settle. The state of every key
 //! is derived from the stored segments, newest to oldest, each time the renderer builds its rows,
@@ -59,7 +69,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use memory_store::{Claim, StoredHistorySegment};
 
 use crate::decay_render::{Correction, DecayRenderHistorySegment};
-use crate::history_summarizer_citations::is_claim_key;
 
 /// The form of a status line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,15 +103,21 @@ fn unbulleted(line: &str) -> &str {
 }
 
 /// The status and key of `line` when it is a status line: one of the four prefixes after leading
-/// whitespace and at most one `- ` or `* ` bullet, a key in the claim-key grammar, and text after
-/// `):`.
+/// whitespace and at most one `- ` or `* ` bullet, a key that ends at the line's first `):`, and
+/// text after it. `status_line` preserves the key byte for byte.
 pub(crate) fn status_line(line: &str) -> Option<(Status, &str)> {
     let line = unbulleted(line);
     let (status, rest) = PREFIXES
         .iter()
         .find_map(|(prefix, status)| line.strip_prefix(prefix).map(|rest| (*status, rest)))?;
     let (key, text) = rest.split_once("):")?;
-    (is_claim_key(key) && !text.trim().is_empty()).then_some((status, key))
+    (!key.contains('\n') && !text.trim().is_empty()).then_some((status, key))
+}
+
+/// A settling line settles the waiting lines that carry its key, so two lines with blank keys
+/// stay separate items.
+fn names_item(key: &str) -> bool {
+    !key.trim().is_empty()
 }
 
 /// `memchr_lines` preserves [`str::lines`] semantics.
@@ -148,7 +163,7 @@ fn lifts(claim: &Claim) -> bool {
 struct Retired {
     /// A newer summarized segment exists, so every waiting line leaves.
     aged: bool,
-    /// The keys whose waiting lines leave: the row's own `p1` ends them with a settling line.
+    /// The keys whose last status line in the row's own `p1` settles them.
     answered: BTreeSet<String>,
     /// The keys whose constraint lines leave: a later row lifts them, or this row does and its
     /// `p1` ends them with the `Lifted` line.
@@ -239,8 +254,9 @@ fn retire_lines(text: &str, retired: &Retired) -> Option<String> {
     let leaves = |at: usize| match parsed[at] {
         Some((Status::Waiting, key)) => {
             retired.aged
-                || retired.answered.contains(key)
-                || last_settling.get(key).is_some_and(|&last| last > at)
+                || (names_item(key)
+                    && (retired.answered.contains(key)
+                        || last_settling.get(key).is_some_and(|&last| last > at)))
         }
         Some((Status::Constraint, key)) => retired.lifted.contains(key),
         _ => false,
@@ -464,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn a_status_line_needs_a_prefix_a_claim_key_and_text() {
+    fn a_status_line_needs_a_prefix_a_key_in_parentheses_and_text() {
         assert_eq!(
             status_line(WAITING),
             Some((Status::Waiting, "release.server-steps"))
@@ -486,18 +502,198 @@ mod tests {
             status_line(&format!("-   {DECIDED}")),
             Some((Status::Decided, "release.server-steps"))
         );
+        let long = "release.".repeat(9);
+        for key in [
+            "A.b",
+            "nodot",
+            "release server steps",
+            "выпуск.шаги",
+            "fn(x)",
+            " ",
+            "",
+            long.as_str(),
+        ] {
+            for (prefix, status) in PREFIXES {
+                assert_eq!(
+                    status_line(&format!("{prefix}{key}): text")),
+                    Some((status, key)),
+                    "{prefix}{key}"
+                );
+            }
+        }
+        assert_eq!(
+            status_line("Decided (a.b): the call f(x): returns"),
+            Some((Status::Decided, "a.b"))
+        );
         for line in [
             "- - Waiting on user (a.b): two bullets",
             "I am Waiting on user (a.b): not a line start",
-            "Waiting on user (nodot): key without a dot",
-            "Waiting on user (A.b): uppercase key",
             "Waiting on user (a.b):   ",
             "Waiting on user (a.b) no colon",
+            "Waiting on user: no parentheses",
+            "Lifted (see the note\nDecided (a.b): a key across two lines",
             "**Waiting on user (a.b): emphasised**",
             "1. Waiting on user (a.b): numbered",
         ] {
             assert_eq!(status_line(line), None, "{line}");
         }
+    }
+
+    /// `status_line` accepts these keys; `is_claim_key` rejects them.
+    fn free_keys() -> [String; 6] {
+        [
+            "Release.ServerSteps".to_owned(),
+            "release server steps".to_owned(),
+            format!("release.{}", "server-steps-".repeat(6)),
+            "выпуск.шаги".to_owned(),
+            "steps".to_owned(),
+            String::new(),
+        ]
+    }
+
+    #[test]
+    fn a_waiting_line_ages_by_position_whatever_its_key_holds() {
+        for key in free_keys() {
+            assert!(
+                !crate::history_summarizer_citations::is_claim_key(&key),
+                "{key}"
+            );
+            let waiting = format!("Waiting on user ({key}): Shared checklist or own file?");
+            let asked = row(
+                1,
+                [
+                    &format!("I drafted the steps.\n{waiting}"),
+                    &format!("- {waiting}\nSteps drafted."),
+                    &waiting,
+                    "",
+                ],
+                vec![],
+            );
+            let newest = render_rows(std::slice::from_ref(&asked), false);
+            for tier in [1, 2, 3] {
+                assert!(
+                    render_history_segment_at_tier(&newest[0], tier).contains(&waiting),
+                    "{key} tier {tier}"
+                );
+            }
+            let followed = render_rows(&[asked, same(2, "Later work.", vec![])], false);
+            assert_eq!(
+                [1, 2, 3].map(|tier| render_history_segment_at_tier(&followed[0], tier)),
+                [
+                    "## 10-19 \u{b7} row 1\nI drafted the steps.",
+                    "## 10-19 \u{b7} row 1\nSteps drafted.",
+                    "## 10-19 \u{b7} row 1",
+                ],
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settling_line_settles_the_waiting_lines_that_carry_its_exact_key() {
+        let waiting = |key: &str| format!("Waiting on user ({key}): Shared checklist or own file?");
+        let decided = |key: &str| format!("Decided ({key}): The user chose a separate file.");
+        let newest = |tiers: [&str; 4]| rows(&[row(1, tiers, vec![])]).next().unwrap();
+        for key in free_keys().into_iter().filter(|key| !key.is_empty()) {
+            let p1 = format!("{}\nThe user answered.\n{}", waiting(&key), decided(&key));
+            let answered = newest([&p1, &waiting(&key), "", ""]);
+            assert_eq!(
+                answered.p1.as_deref(),
+                Some(format!("The user answered.\n{}", decided(&key)).as_str()),
+                "{key}"
+            );
+            assert_eq!(answered.p2.as_deref(), Some(" "), "{key}");
+            let lower = format!("{}\n{}", waiting(&key), decided(&key));
+            assert_eq!(
+                newest(["Narrative.", &lower, "", ""]).p2.as_deref(),
+                Some(decided(&key).as_str()),
+                "{key}"
+            );
+        }
+        for (asked, settled) in [
+            ("Release.ServerSteps", "release.serversteps"),
+            ("release.server-steps", "Release.Server-Steps"),
+            ("release server steps", "release  server steps"),
+            ("release.server-steps", "release.server-steps-2"),
+            ("release.server-steps", " release.server-steps"),
+            ("release.server-steps ", "release.server-steps"),
+            ("", ""),
+            (" ", " "),
+        ] {
+            let text = format!("{}\n{}", waiting(asked), decided(settled));
+            let rendered = newest([&text, &text, "", ""]);
+            assert_eq!(
+                [rendered.p1.as_deref(), rendered.p2.as_deref()],
+                [Some(text.as_str()); 2],
+                "{asked:?} {settled:?}"
+            );
+        }
+        let open = waiting("Release Notes");
+        let mixed = format!("{WAITING}\n{open}\n{DECIDED}");
+        assert_eq!(
+            p1s(&[same(1, &mixed, vec![])]),
+            [format!("{open}\n{DECIDED}")]
+        );
+        assert_eq!(
+            p1s(&[same(1, &mixed, vec![]), same(2, "Later work.", vec![])])[0],
+            DECIDED
+        );
+    }
+
+    #[test]
+    fn a_constraint_whose_key_lies_outside_the_claim_grammar_stands() {
+        let set = "Constraint (Policy.MeasurementFixes): No bug fixes during the run.";
+        let lifted = "Lifted (Policy.MeasurementFixes): The user wants each bug fixed now.";
+        let claims = vec![claim("policy.measurementfixes", Some(lifted))];
+        let rendered: Vec<DecayRenderHistorySegment> =
+            rows(&[same(1, set, vec![]), same(2, lifted, claims)]).collect();
+        for tier in [&rendered[0].p1, &rendered[0].p2, &rendered[0].p3] {
+            assert_eq!(tier.as_deref(), Some(set));
+        }
+        let lifted_in_grammar = "Lifted (policy.measurementfixes): The user wants each bug fixed.";
+        let claims = vec![claim("policy.measurementfixes", Some(lifted_in_grammar))];
+        assert_eq!(
+            p1s(&[same(1, set, vec![]), same(2, lifted_in_grammar, claims)])[0],
+            set
+        );
+        let lifted_in_capitals =
+            "Lifted (Policy.Measurement-Fixes): The user wants each bug fixed.";
+        let claims = vec![claim("policy.measurement-fixes", Some(lifted_in_capitals))];
+        assert_eq!(
+            p1s(&[
+                same(1, CONSTRAINT, vec![]),
+                same(2, lifted_in_capitals, claims)
+            ])[0],
+            CONSTRAINT
+        );
+        let spaced = "Constraint ( policy.measurement-fixes): No bug fixes during the run.";
+        let both = format!("{spaced}\n{CONSTRAINT}");
+        assert_eq!(
+            p1s(&[same(1, &both, vec![]), same(2, LIFTED, vec![lift()])])[0],
+            spaced
+        );
+        let lifted_spaced = "Lifted ( policy.measurement-fixes): The user wants each bug fixed.";
+        let claims = vec![claim("policy.measurement-fixes", Some(lifted_spaced))];
+        assert_eq!(
+            p1s(&[same(1, CONSTRAINT, vec![]), same(2, lifted_spaced, claims)])[0],
+            CONSTRAINT
+        );
+        let port = |ordinal| Claim {
+            ordinal,
+            ..claim("db.port", Some("port 5432"))
+        };
+        let closed = "Constraint (DB Port): Keep port 5432 closed.";
+        let rendered = render_rows(
+            &[
+                same(1, closed, vec![port(1)]),
+                same(2, "Port moved.", vec![port(21)]),
+            ],
+            false,
+        );
+        assert_eq!(
+            render_history_segment_at_tier(&rendered[0], 1),
+            format!("## 10-19 \u{b7} row 1\n{closed}\n[corrections: db.port = v @21]")
+        );
     }
 
     #[test]
