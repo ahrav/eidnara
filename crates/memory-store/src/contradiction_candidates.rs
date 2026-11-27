@@ -98,7 +98,7 @@ pub struct StoredCandidate {
 
 /// One page of a decision's rows, in reader order, with the cursor that
 /// continues it; `next` is `None` on the last page.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CandidatePage {
     pub items: Vec<StoredCandidate>,
     pub next: Option<String>,
@@ -643,13 +643,13 @@ impl MemoryStore {
         query.page(items)
     }
 
-    /// Returns the items from the first [`Self::candidates_for_decision`] page for each ID in `decision_object_ids`, in input order. After validation, a nonempty batch reads all pages through one connection.
+    /// Returns the first candidate page for each decision ID in input order. To fetch the next page, pass `next` and the same decision ID to [`Self::candidates_for_decision`].
     pub fn first_candidates_for_decisions(
         &self,
         project_digest: &str,
         decision_object_ids: &[&str],
         limit: usize,
-    ) -> Result<Vec<Vec<StoredCandidate>>, MemoryStoreError> {
+    ) -> Result<Vec<CandidatePage>, MemoryStoreError> {
         let queries = decision_object_ids
             .iter()
             .map(|decision| PageQuery::new(project_digest, decision, None, limit))
@@ -664,7 +664,7 @@ impl MemoryStore {
         queries
             .into_iter()
             .zip::<Vec<Vec<StoredCandidate>>>(pages)
-            .map(|(query, items)| query.page(items).map(|page| page.items))
+            .map(|(query, items)| query.page(items))
             .collect()
     }
 

@@ -15,6 +15,7 @@ use kernel::{
     LiveDescriptor, MAX_ELIGIBILITY_CANDIDATES, ProjectScope, ProposalAction, ProposalTarget,
     ProviderEgress, SourceClass, Surface, TaintClass,
 };
+use memory_store::contradiction_candidates::{CandidatePage, MAX_CANDIDATE_PAGE, StoredCandidate};
 use memory_store::memory_reviewer_jobs::{
     CausalInputs, MAX_IDENTITY_BYTES, MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_HOST,
     MAX_MEMORY_REVIEWER_METADATA_BYTES_PER_PROJECT, MAX_MEMORY_REVIEWER_STARTING_REFERENCES,
@@ -838,18 +839,40 @@ pub fn select_and_enqueue(
         }
         let cited = cited_by(decision);
         let stated = first_stated[index];
-        let mut evidence: Vec<LaterEvidence> = candidate_rows
-            .next()
-            .unwrap_or_default()
+        let work_in_progress = crate::memory_capture::states_current_work(decision);
+        let said_by = Writer::of_statement(&decision.payload.summary);
+        // A row is evidence while it is one the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before this selection's tip. The source lookup below judges its evidence's liveness.
+        let served = |row: &StoredCandidate| {
+            row.publish_tip > stated
+                && row.publish_tip <= tip
+                && row.kernel_incarnation_id == incarnation
+                && row.matcher_digest == matcher_digest()
+                && row.evidence_id.len() <= MAX_IDENTITY_BYTES
+        };
+        let weighed = weighed_rows(
+            candidate_rows.next().unwrap_or_default(),
+            |row| {
+                Ok(served(row)
+                    && memory
+                        .source(kernel, &row.evidence_id, tip, &budget)?
+                        .is_some_and(|source| {
+                            !takes_evidence(said_by, work_in_progress, source.writer)
+                        }))
+            },
+            |after| {
+                ledger
+                    .candidates_for_decision(
+                        scope.project_digest,
+                        &decision.object_id,
+                        Some(after),
+                        MAX_CANDIDATE_PAGE,
+                    )
+                    .map_err(|error| CycleError::Ledger(error.to_string()))
+            },
+        )?;
+        let mut evidence: Vec<LaterEvidence> = weighed
             .into_iter()
-            // A row is evidence while it is one the candidate reader serves: written by this Kernel incarnation under the current matcher, at or before this selection's tip. The source lookup below judges its evidence's liveness.
-            .filter(|row| {
-                row.publish_tip > stated
-                    && row.publish_tip <= tip
-                    && row.kernel_incarnation_id == incarnation
-                    && row.matcher_digest == matcher_digest()
-                    && row.evidence_id.len() <= MAX_IDENTITY_BYTES
-            })
+            .filter(served)
             .map(|row| LaterEvidence {
                 evidence_id: row.evidence_id,
                 trigger: Trigger::LaterMessage,
@@ -864,7 +887,6 @@ pub fn select_and_enqueue(
                 }
             }));
         }
-        let work_in_progress = crate::memory_capture::states_current_work(decision);
         // The memory that contests a statement names its own source, which is what the review is shown. Two rewrites of a statement's row set a floor under its evidence, the row's commit. A contest without a recording session is one a review wrote: the statement takes as evidence only sources published after it. A statement the user settled after a contest is the user's latest word, which sources older than it leave standing.
         let mut reviewed_through =
             crate::memory_capture::is_settled(decision).then_some(decision.created_commit_seq);
@@ -882,7 +904,6 @@ pub fn select_and_enqueue(
                 }));
             }
         }
-        let said_by = Writer::of_statement(&decision.payload.summary);
         // When the memory was stated, read once, for the first source that carries a time.
         let mut stated_at: Option<Option<i64>> = None;
         // Each source the memory does not cite, with the commit that published it. A source keeps that place whichever trigger brings it up and whenever a later memory comes to cite it.
@@ -1239,6 +1260,37 @@ fn new_to_the_ledger<T>(
                 .filter(|(_, held)| !held)
                 .map(|((item, _), _)| item),
         );
+    }
+}
+
+/// If `first.next` is `None`, `weighed_rows` returns the whole page. Otherwise it returns up to [`CANDIDATE_ROWS_PER_DECISION`] rows in reader order for which `crowds` returns `false`. It calls `further` when the page ends below the limit and a cursor remains.
+fn weighed_rows(
+    first: CandidatePage,
+    mut crowds: impl FnMut(&StoredCandidate) -> Result<bool, CycleError>,
+    mut further: impl FnMut(&str) -> Result<CandidatePage, CycleError>,
+) -> Result<Vec<StoredCandidate>, CycleError> {
+    let CandidatePage {
+        items: mut page,
+        mut next,
+    } = first;
+    if next.is_none() {
+        return Ok(page);
+    }
+    let mut weighed = Vec::with_capacity(CANDIDATE_ROWS_PER_DECISION);
+    loop {
+        for row in page {
+            if crowds(&row)? {
+                continue;
+            }
+            weighed.push(row);
+            if weighed.len() == CANDIDATE_ROWS_PER_DECISION {
+                return Ok(weighed);
+            }
+        }
+        let Some(after) = next else {
+            return Ok(weighed);
+        };
+        CandidatePage { items: page, next } = further(&after)?;
     }
 }
 
@@ -2128,6 +2180,122 @@ mod tests {
         });
         assert!(matches!(failed, Err(CycleError::Ledger(_))));
         assert_eq!(reads, 2, "no read follows the failed one");
+    }
+
+    /// `weighed_rows` keeps a complete first page unchanged. For paginated input, it selects up to 16 non-crowding rows in reader order.
+    #[test]
+    fn a_crowding_row_gives_its_place_to_the_next_row_in_reader_order() {
+        let rows = |writer: &str, ids: std::ops::Range<usize>| -> Vec<StoredCandidate> {
+            ids.map(|id| StoredCandidate {
+                project_digest: String::new(),
+                evidence_id: format!("{writer}-{id}"),
+                decision_object_id: String::new(),
+                decision_id: String::new(),
+                matched_terms: 0,
+                decision_terms: 0,
+                score_bp: 0,
+                publish_tip: 0,
+                kernel_incarnation_id: String::new(),
+                matcher_digest: String::new(),
+                created_at_ms: 0,
+            })
+            .collect()
+        };
+        let page = |items: Vec<StoredCandidate>, next: Option<&str>| CandidatePage {
+            items,
+            next: next.map(str::to_string),
+        };
+        let crowds = |row: &StoredCandidate| -> Result<bool, CycleError> {
+            Ok(row.evidence_id.starts_with("assistant"))
+        };
+        let ids = |rows: Vec<StoredCandidate>| -> Vec<String> {
+            rows.into_iter().map(|row| row.evidence_id).collect()
+        };
+        let unread = |_: &str| -> Result<CandidatePage, CycleError> {
+            panic!("the first page fills the weighed places")
+        };
+
+        let whole = [rows("assistant", 0..3), rows("user", 0..2)].concat();
+        let weighed = weighed_rows(
+            page(whole.clone(), None),
+            |_| panic!("a whole page is weighed as read"),
+            unread,
+        )
+        .unwrap();
+        assert_eq!(weighed, whole);
+
+        let weighed = weighed_rows(page(rows("user", 0..16), Some("p1")), crowds, unread).unwrap();
+        assert_eq!(
+            ids(weighed),
+            ids(rows("user", 0..16)),
+            "a full first page of counted rows needs no further read"
+        );
+
+        let mut asked = Vec::new();
+        let weighed = weighed_rows(
+            page(rows("assistant", 0..16), Some("p1")),
+            crowds,
+            |after| {
+                asked.push(after.to_string());
+                Ok(match after {
+                    "p1" => page(
+                        [
+                            rows("user", 0..1),
+                            rows("assistant", 16..17),
+                            rows("user", 1..2),
+                        ]
+                        .concat(),
+                        Some("p2"),
+                    ),
+                    "p2" => page(rows("user", 2..40), Some("p3")),
+                    _ => panic!("the second further page fills the last place"),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ids(weighed),
+            ids(rows("user", 0..16)),
+            "sixteen crowding rows give all sixteen places to the rows behind them"
+        );
+        assert_eq!(asked, ["p1", "p2"]);
+
+        let first = [
+            rows("user", 0..7),
+            rows("assistant", 0..2),
+            rows("user", 7..14),
+        ]
+        .concat();
+        let weighed = weighed_rows(page(first, Some("p1")), crowds, |after| {
+            assert_eq!(after, "p1");
+            Ok(page(
+                [rows("assistant", 2..3), rows("user", 14..15)].concat(),
+                None,
+            ))
+        })
+        .unwrap();
+        assert_eq!(
+            ids(weighed),
+            ids(rows("user", 0..15)),
+            "the memory's rows end with fifteen counted"
+        );
+
+        let failed = weighed_rows(page(rows("assistant", 0..16), Some("p1")), crowds, |_| {
+            Err(CycleError::Ledger("closed".to_string()))
+        });
+        assert!(
+            matches!(failed, Err(CycleError::Ledger(_))),
+            "a failed read of a further page ends the selection"
+        );
+        let failed = weighed_rows(
+            page(rows("user", 0..16), Some("p1")),
+            |_| Err(CycleError::Kernel(KernelError::Deadline)),
+            unread,
+        );
+        assert!(
+            matches!(failed, Err(CycleError::Kernel(KernelError::Deadline))),
+            "a failed lookup of a row's writer ends the selection"
+        );
     }
 
     /// The association orders two statements by the first commits it is handed, whichever commit their rows carry: the statement the list places later reopens the other. A contest rewrites a statement's row at a later commit and leaves the commit that first recorded it.

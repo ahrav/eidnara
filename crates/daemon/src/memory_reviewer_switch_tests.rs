@@ -1015,6 +1015,68 @@ async fn work_in_progress_takes_evidence_from_the_assistant() {
     assert_eq!(state["later"][0]["writer"], "assistant");
 }
 
+/// For a fact the assistant reported, only the user's rows count toward the sixteen candidate rows a selection weighs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_selection_reaches_the_users_correction_behind_sixteen_restatements() {
+    const REPORTED: &str = "The integration suite needs a local Redis on port 6380.";
+    const CORRECTED: &str = "The integration suite needs a local Redis on port 6390 now.";
+    const WEIGHED: usize = 16;
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.report_facts(&[REPORTED]).await;
+    for turn in 0..WEIGHED {
+        rig.says_later(
+            "assistant",
+            &format!("restated-{turn}"),
+            1_700_000_000_000 + turn as u64,
+            &format!(
+                "As the assistant reported in turn {turn}: the integration suite needs a local Redis on port 6380."
+            ),
+        )
+        .await;
+    }
+    assert_eq!(
+        rig.drain().await,
+        0,
+        "the assistant's restatements leave its report as it is"
+    );
+    rig.user_says_later("corrected", 1_700_000_100_000, CORRECTED)
+        .await;
+    // All sixteen restatements outrank the correction, so the selection finds the user's evidence on the second page.
+    let reported = format!("Assistant reported: {REPORTED}");
+    let fact = memory_id(&rig, &reported).await;
+    let digest = kernel_routes::ProjectBinding::new(&rig.project)
+        .digest()
+        .to_string();
+    let first = rig
+        .store
+        .candidates_for_decision(&digest, &fact, None, WEIGHED)
+        .unwrap();
+    assert_eq!(first.items.len(), WEIGHED);
+    let rest = rig
+        .store
+        .candidates_for_decision(&digest, &fact, first.next.as_deref(), WEIGHED)
+        .unwrap();
+    assert_eq!(rest.items.len(), 1, "the correction's row alone follows");
+    assert!(
+        rest.items[0].score_bp < first.items[WEIGHED - 1].score_bp,
+        "the correction repeats less of the report than any restatement"
+    );
+
+    rig.decides(&[KEEP]);
+    assert_eq!(
+        rig.drain().await,
+        1,
+        "the user's correction brings the report to review"
+    );
+    let attempts = rig.attempts();
+    let state: Value = serde_json::from_str(&attempts[0].prompt).expect("the state is JSON text");
+    assert_eq!(state["memory"]["text"], reported);
+    let later = state["later"].as_array().unwrap();
+    assert_eq!(later.len(), 1, "the user's message alone is evidence");
+    assert_eq!(later[0]["writer"], "user");
+    assert_eq!(later[0]["text"], CORRECTED);
+}
+
 /// A selection reviews the memories a session receives automatically before the ones served on search alone, whatever the order of their evidence. Here the note's evidence is the newer, and the delivered statement's review runs first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delivered_statement_is_reviewed_before_a_search_only_note() {

@@ -1,6 +1,7 @@
 use memory_store::MemoryStore;
 use memory_store::contradiction_candidates::{
-    CandidateCaps, CandidateScore, DescriptorCandidates, MAX_CANDIDATE_PAGE, StoredCandidate,
+    CandidateCaps, CandidatePage, CandidateScore, DescriptorCandidates, MAX_CANDIDATE_PAGE,
+    StoredCandidate,
 };
 use rusqlite::Connection;
 
@@ -341,23 +342,29 @@ fn a_batch_read_answers_each_decision_as_its_own_first_page_does() {
         let batch = store
             .first_candidates_for_decisions(PROJECT, &decisions, limit)
             .unwrap();
-        let single: Vec<Vec<StoredCandidate>> = decisions
+        let single: Vec<CandidatePage> = decisions
             .iter()
             .map(|decision| {
                 store
                     .candidates_for_decision(PROJECT, decision, None, limit)
                     .unwrap()
-                    .items
             })
             .collect();
         assert_eq!(batch, single, "limit {limit}");
+        if limit == 4 {
+            assert!(
+                batch.iter().any(|page| page.next.is_some())
+                    && batch.iter().any(|page| page.next.is_none()),
+                "the limit splits one decision's rows and covers another's"
+            );
+        }
     }
     assert!(batch_is_empty(&store, OTHER_PROJECT, &decisions));
     assert_eq!(
         store
             .first_candidates_for_decisions(PROJECT, &[], 4)
             .unwrap(),
-        Vec::<Vec<StoredCandidate>>::new()
+        Vec::<CandidatePage>::new()
     );
     assert!(
         store
@@ -372,7 +379,7 @@ fn batch_is_empty(store: &MemoryStore, project: &str, decisions: &[&str]) -> boo
         .first_candidates_for_decisions(project, decisions, 4)
         .unwrap()
         .iter()
-        .all(Vec::is_empty)
+        .all(|page| page.items.is_empty())
 }
 
 #[test]
