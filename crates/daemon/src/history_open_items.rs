@@ -111,7 +111,7 @@ pub(crate) fn status_line(line: &str) -> Option<(Status, &str)> {
         .iter()
         .find_map(|(prefix, status)| line.strip_prefix(prefix).map(|rest| (*status, rest)))?;
     let (key, text) = rest.split_once("):")?;
-    (!text.trim().is_empty()).then_some((status, key))
+    (!key.contains('\n') && !text.trim().is_empty()).then_some((status, key))
 }
 
 /// A settling line settles the waiting lines that carry its key, so two lines with blank keys
@@ -212,7 +212,7 @@ fn retirements(segments: &[StoredHistorySegment]) -> Vec<Option<Retired>> {
                     aged: newer,
                     answered: last
                         .iter()
-                        .filter(|(key, status)| !status.is_open() && names_item(key))
+                        .filter(|(_, status)| !status.is_open())
                         .map(|(key, _)| (*key).to_owned())
                         .collect(),
                     lifted: keys
@@ -247,7 +247,6 @@ fn retire_lines(text: &str, retired: &Retired) -> Option<String> {
     for (at, status) in parsed.iter().enumerate() {
         if let Some((status, key)) = status
             && !status.is_open()
-            && names_item(key)
         {
             last_settling.insert(key, at);
         }
@@ -255,8 +254,9 @@ fn retire_lines(text: &str, retired: &Retired) -> Option<String> {
     let leaves = |at: usize| match parsed[at] {
         Some((Status::Waiting, key)) => {
             retired.aged
-                || retired.answered.contains(key)
-                || last_settling.get(key).is_some_and(|&last| last > at)
+                || (names_item(key)
+                    && (retired.answered.contains(key)
+                        || last_settling.get(key).is_some_and(|&last| last > at)))
         }
         Some((Status::Constraint, key)) => retired.lifted.contains(key),
         _ => false,
@@ -531,6 +531,7 @@ mod tests {
             "Waiting on user (a.b):   ",
             "Waiting on user (a.b) no colon",
             "Waiting on user: no parentheses",
+            "Lifted (see the note\nDecided (a.b): a key across two lines",
             "**Waiting on user (a.b): emphasised**",
             "1. Waiting on user (a.b): numbered",
         ] {
@@ -614,6 +615,8 @@ mod tests {
             ("release.server-steps", "Release.Server-Steps"),
             ("release server steps", "release  server steps"),
             ("release.server-steps", "release.server-steps-2"),
+            ("release.server-steps", " release.server-steps"),
+            ("release.server-steps ", "release.server-steps"),
             ("", ""),
             (" ", " "),
         ] {
@@ -647,6 +650,22 @@ mod tests {
         for tier in [&rendered[0].p1, &rendered[0].p2, &rendered[0].p3] {
             assert_eq!(tier.as_deref(), Some(set));
         }
+        let lifted_in_grammar = "Lifted (policy.measurementfixes): The user wants each bug fixed.";
+        let claims = vec![claim("policy.measurementfixes", Some(lifted_in_grammar))];
+        assert_eq!(
+            p1s(&[same(1, set, vec![]), same(2, lifted_in_grammar, claims)])[0],
+            set
+        );
+        let lifted_in_capitals =
+            "Lifted (Policy.Measurement-Fixes): The user wants each bug fixed.";
+        let claims = vec![claim("policy.measurement-fixes", Some(lifted_in_capitals))];
+        assert_eq!(
+            p1s(&[
+                same(1, CONSTRAINT, vec![]),
+                same(2, lifted_in_capitals, claims)
+            ])[0],
+            CONSTRAINT
+        );
         let port = |ordinal| Claim {
             ordinal,
             ..claim("db.port", Some("port 5432"))

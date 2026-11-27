@@ -657,6 +657,10 @@ fn a_lift_takes_effect_only_as_a_whole_line_whose_claim_cites_a_user_message() {
         lifted(&narrative, 6, "The assistant restated the plan."),
         (Some("The assistant restated the plan.".into()), 1)
     );
+    let free = "Lifted (Policy.BaselineFixes): The no-fixes rule is lifted.";
+    let free_line = format!("{free}\nI opened two pull requests.");
+    assert_eq!(lifted(&free_line, 6, free), (None, 1));
+    assert_eq!(lifted(&free_line, 5, free), (Some(free.into()), 1));
 }
 
 #[test]
