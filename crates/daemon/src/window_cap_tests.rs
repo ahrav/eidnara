@@ -738,8 +738,8 @@ mod request_loop {
         })
     }
 
-    /// Under `docs/host-wire-protocol.md` §7.10.3, a `null` boundary selects all rows; a message
-    /// boundary selects the suffix starting at the named row.
+    /// A `null` boundary selects all rows; a message boundary selects the suffix starting at the
+    /// named row.
     fn window<'a>(rows: &'a [Value], boundary: &Value) -> &'a [Value] {
         let Some(mid) = boundary["mid"].as_str() else {
             return rows;
@@ -829,6 +829,7 @@ mod request_loop {
         let mut minted_tags = 0;
         let mut widest_window = 0;
         let mut widest_submitted = 0;
+        let mut last_fired = false;
         let mut cap_folds = 0;
         let mut first_stored: BTreeMap<String, (String, i64)> = BTreeMap::new();
         let mut blocks_per_request = 0;
@@ -839,7 +840,9 @@ mod request_loop {
                 index,
                 "Validation failed: the path is required.",
             ));
+            widest_submitted = widest_submitted.max(window(&rows, &boundary).len());
             let response = pass(&handler, &store, &rows, &boundary).await;
+            last_fired = response["history_summarizer"]["fired"] == true;
             let timings = &response["timings"];
             let window_blocks = timings["ledger"]["window_blocks"].as_u64().unwrap() as usize;
             if index == 0 {
@@ -856,7 +859,6 @@ mod request_loop {
                 cap_folds += 1;
             }
             boundary = response["boundary"].clone();
-            widest_submitted = widest_submitted.max(window(&rows, &boundary).len());
             for row in window(&rows, &boundary) {
                 let mid = row["id"].as_str().unwrap();
                 if !first_stored.contains_key(mid)
@@ -901,6 +903,7 @@ mod request_loop {
         };
         unchanged(&store, settled);
 
+        assert!(!last_fired);
         for _ in 0..3 {
             let response = pass(&handler, &store, &rows, &boundary).await;
             assert_eq!(response["timings"]["tag_mint_new"], 0);

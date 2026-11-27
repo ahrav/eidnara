@@ -22847,13 +22847,12 @@ pub(crate) mod tests {
     #[test]
     fn a_session_that_repeats_tool_call_ids_logs_one_line_per_doubling() {
         let mut reports = DuplicateToolUseReports::default();
-        let duplicates = |count: usize| -> Vec<(String, usize, usize)> {
-            (0..count)
-                .map(|at| ("repeated".to_string(), 2 * at + 2, 0))
-                .collect()
-        };
+        let all: Vec<(String, usize, usize)> = (0..4_096)
+            .map(|at| ("repeated".to_string(), 2 * at + 2, 0))
+            .collect();
+        let duplicates = |count: usize| &all[..count];
         let lines: Vec<String> = (1..=4_000)
-            .filter_map(|count| reports.line("loop", &duplicates(count)))
+            .filter_map(|count| reports.line("loop", duplicates(count)))
             .collect();
         assert_eq!(lines.len(), 12);
         assert_eq!(
@@ -22866,9 +22865,9 @@ pub(crate) mod tests {
                 "{line}"
             );
         }
-        assert_eq!(reports.line("loop", &duplicates(300)), None);
-        assert_eq!(reports.line("loop", &duplicates(4_095)), None);
-        assert!(reports.line("loop", &duplicates(4_096)).is_some());
+        assert_eq!(reports.line("loop", duplicates(300)), None);
+        assert_eq!(reports.line("loop", duplicates(4_095)), None);
+        assert!(reports.line("loop", duplicates(4_096)).is_some());
 
         let mixed = [
             ("first".to_string(), 1, 0),

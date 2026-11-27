@@ -1236,3 +1236,37 @@ async fn a_revert_on_a_render_config_change_defers_then_folds() {
     assert_eq!(served_mids(&hard), ["n3"]);
     assert_eq!(store.load_history_segments(session()).unwrap().len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_window_at_the_cap_keeps_its_cache_once_a_soft_has_rendered_the_newest_segment() {
+    let (handler, store, _dir) = handler_for("cap-after-soft");
+    store
+        .replace_history_segments(session(), &[segment(1, 1, 2), segment(2, 3, 4)])
+        .unwrap();
+    let first = call(
+        &handler,
+        body(&["m1", "m2", "m3", "m4", "m5", "m6"], Value::Null),
+    )
+    .await;
+    assert_eq!(first["boundary"], anchor("m4", 2));
+    store
+        .append_history_segments(session(), &[segment(3, 5, 6)])
+        .unwrap();
+    store.arm_soft_refresh(session()).unwrap();
+    let soft = call(
+        &handler,
+        body(&["m4", "m5", "m6", "m7", "m8"], anchor("m4", 2)),
+    )
+    .await;
+    assert_eq!(soft["action"], "SOFT");
+    assert_eq!(soft["boundary"], anchor("m6", 3));
+    let loaded = store.load(session()).unwrap();
+    assert_eq!(loaded.meta.folded_history_segment_seq, 2);
+
+    let cap = crate::history_summarizer_archive::WINDOW_CAP_BLOCKS as u32;
+    let window = mids(6..=6 + cap);
+    let window: Vec<&str> = window.iter().map(String::as_str).collect();
+    let capped = call(&handler, body(&window, anchor("m6", 3))).await;
+    assert_ne!(capped["action"], "HARD", "{capped}");
+    assert_eq!(capped["boundary"], anchor("m6", 3));
+}
