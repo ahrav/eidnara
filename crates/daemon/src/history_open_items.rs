@@ -163,7 +163,7 @@ fn lifts(claim: &Claim) -> bool {
 struct Retired {
     /// A newer summarized segment exists, so every waiting line leaves.
     aged: bool,
-    /// The keys whose waiting lines leave: the row's own `p1` ends them with a settling line.
+    /// The keys whose last status line in the row's own `p1` settles them.
     answered: BTreeSet<String>,
     /// The keys whose constraint lines leave: a later row lifts them, or this row does and its
     /// `p1` ends them with the `Lifted` line.
@@ -664,6 +664,17 @@ mod tests {
                 same(1, CONSTRAINT, vec![]),
                 same(2, lifted_in_capitals, claims)
             ])[0],
+            CONSTRAINT
+        );
+        let spaced = "Constraint ( policy.measurement-fixes): No bug fixes during the run.";
+        assert_eq!(
+            p1s(&[same(1, spaced, vec![]), same(2, LIFTED, vec![lift()])])[0],
+            spaced
+        );
+        let lifted_spaced = "Lifted ( policy.measurement-fixes): The user wants each bug fixed.";
+        let claims = vec![claim("policy.measurement-fixes", Some(lifted_spaced))];
+        assert_eq!(
+            p1s(&[same(1, CONSTRAINT, vec![]), same(2, lifted_spaced, claims)])[0],
             CONSTRAINT
         );
         let port = |ordinal| Claim {
