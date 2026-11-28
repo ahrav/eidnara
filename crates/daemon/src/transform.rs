@@ -11305,11 +11305,11 @@ struct BuiltOutput {
     timings: BuildOutputTimings,
 }
 
-fn duplicate_tool_use_locations(messages: &[ServedMessage]) -> Vec<(String, usize, usize)> {
+fn duplicate_tool_use_locations(slots: &[ServedSlot<'_>]) -> Vec<(String, usize, usize)> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
-    for (message_index, message) in messages.iter().enumerate() {
-        for (block_index, block) in message.content().iter().enumerate() {
+    for (message_index, slot) in slots.iter().enumerate() {
+        for (block_index, block) in slot.content().iter().enumerate() {
             if let wire::BlockKind::ToolCall { id, .. } = block.kind()
                 && !seen.insert(id.clone())
             {
@@ -11422,13 +11422,13 @@ fn duplicate_tool_use_report(
         .line(session_id, duplicates)
 }
 
-fn enforce_unique_tool_use_ids(
-    messages: Vec<ServedMessage>,
+fn enforce_unique_tool_use_ids<'a>(
+    slots: Vec<ServedSlot<'a>>,
     session_id: &str,
-) -> Vec<ServedMessage> {
-    let duplicates = duplicate_tool_use_locations(&messages);
+) -> Vec<ServedSlot<'a>> {
+    let duplicates = duplicate_tool_use_locations(&slots);
     if duplicates.is_empty() {
-        return messages;
+        return slots;
     }
 
     if let Some(line) = duplicate_tool_use_report(session_id, &duplicates) {
@@ -11438,61 +11438,68 @@ fn enforce_unique_tool_use_ids(
         duplicates.is_empty(),
         "served output contains duplicate tool_use ids: {duplicates:?}"
     );
+    drop_later_tool_uses(slots, &duplicates)
+}
 
-    #[cfg(not(debug_assertions))]
-    {
-        let mut messages = messages;
-        let mut remove_positions = duplicates
+/// A tool result leaves with its call only when the call's message keeps no other block.
+fn drop_later_tool_uses<'a>(
+    slots: Vec<ServedSlot<'a>>,
+    duplicates: &[(String, usize, usize)],
+) -> Vec<ServedSlot<'a>> {
+    let mut remove_positions = duplicates
+        .iter()
+        .map(|(_, message_index, block_index)| (*message_index, *block_index))
+        .collect::<HashSet<_>>();
+    for (id, message_index, _) in duplicates {
+        let owner_becomes_empty = slots[*message_index]
+            .content()
             .iter()
-            .map(|(_, message_index, block_index)| (*message_index, *block_index))
-            .collect::<HashSet<_>>();
-        for (id, message_index, _) in &duplicates {
-            let owner_becomes_empty = messages[*message_index]
-                .content()
-                .iter()
-                .enumerate()
-                .all(|(block_index, _)| remove_positions.contains(&(*message_index, block_index)));
-            if !owner_becomes_empty {
-                continue;
-            }
-            if let Some(result) = messages.get(message_index + 1) {
-                for (block_index, block) in result.content().iter().enumerate() {
-                    if matches!(
-                        block.kind(),
-                        wire::BlockKind::ToolResult { id: result_id, .. } if result_id == id
-                    ) {
-                        remove_positions.insert((message_index + 1, block_index));
-                    }
+            .enumerate()
+            .all(|(block_index, _)| remove_positions.contains(&(*message_index, block_index)));
+        if !owner_becomes_empty {
+            continue;
+        }
+        if let Some(result) = slots.get(message_index + 1) {
+            for (block_index, block) in result.content().iter().enumerate() {
+                if matches!(
+                    block.kind(),
+                    wire::BlockKind::ToolResult { id: result_id, .. } if result_id == id
+                ) {
+                    remove_positions.insert((message_index + 1, block_index));
                 }
             }
         }
-
-        let original = std::mem::take(&mut messages);
-        for (message_index, served) in original.into_iter().enumerate() {
-            if !remove_positions
-                .iter()
-                .any(|(owner_index, _)| *owner_index == message_index)
-            {
-                messages.push(served);
-                continue;
-            }
-            let mut rendered = served.into_message();
-            let content = std::mem::take(rendered.content_mut())
-                .into_iter()
-                .enumerate()
-                .filter_map(|(block_index, block)| {
-                    (!remove_positions.contains(&(message_index, block_index))).then_some(block)
-                })
-                .collect();
-            *rendered.content_mut() = content;
-            if !rendered.content().is_empty() {
-                messages.push(ServedMessage::from_message(rendered));
-            }
-        }
-        messages
     }
-    #[cfg(debug_assertions)]
-    messages
+
+    // Each removal position names a duplicate's message or the message after it, both in `slots`.
+    let mut loses_a_block = vec![false; slots.len()];
+    for (message_index, _) in &remove_positions {
+        loses_a_block[*message_index] = true;
+    }
+    let mut kept = Vec::new();
+    for (message_index, slot) in slots.into_iter().enumerate() {
+        if !loses_a_block[message_index] {
+            kept.push(slot);
+            continue;
+        }
+        let mut rendered = match slot {
+            ServedSlot::Ready(served) => served.into_message(),
+            ServedSlot::Rendered(message, _) => message,
+        };
+        let content = std::mem::take(rendered.content_mut())
+            .into_iter()
+            .enumerate()
+            .filter_map(|(block_index, block)| {
+                (!remove_positions.contains(&(message_index, block_index))).then_some(block)
+            })
+            .collect();
+        *rendered.content_mut() = content;
+        if !rendered.content().is_empty() {
+            // The projected blocks describe the message before it lost a block.
+            kept.push(ServedSlot::Rendered(rendered, None));
+        }
+    }
+    kept
 }
 
 fn new_merged_reasoning_strip_units(
@@ -11797,10 +11804,27 @@ fn build_output(
 }
 
 /// A served message in output order: built, or rendered and waiting for its canonical bytes and
-/// fingerprints, which the output computes for every rendered message together.
+/// fingerprints, which the output computes together for the rendered messages the duplicate belt
+/// keeps.
 enum ServedSlot<'a> {
     Ready(ServedMessage),
     Rendered(WireMessage, Option<&'a [&'a FlatBlock]>),
+}
+
+impl ServedSlot<'_> {
+    fn content(&self) -> &[WireBlock] {
+        match self {
+            Self::Ready(served) => served.content(),
+            Self::Rendered(message, _) => message.content(),
+        }
+    }
+
+    fn into_served(self) -> ServedMessage {
+        match self {
+            Self::Ready(served) => served,
+            Self::Rendered(message, blocks) => ServedMessage::from_message_reusing(message, blocks),
+        }
+    }
 }
 
 // Provider and durable-watermark arguments stay explicit: they differ across replay paths.
@@ -12114,14 +12138,6 @@ fn build_output_with_tags(
         }
     }
 
-    // Each served message's canonical bytes and block fingerprints depend on that message alone.
-    let mut out = crate::parallel_map::map_with(out, |(), slot| match slot {
-        ServedSlot::Ready(served) => served,
-        ServedSlot::Rendered(message, blocks) => {
-            ServedMessage::from_message_reusing(message, blocks)
-        }
-    });
-    build_timings.tail_loop = elapsed_ms(tail_loop_started_at);
     if synthetic_todo_enabled
         && let Some(pair) = &meta.synthetic_todo
         && pair.anchor_mid.is_some()
@@ -12131,6 +12147,11 @@ fn build_output_with_tags(
             pair.anchor_mid.clone().unwrap_or_default(),
         ));
     }
+    // A rendered message gets its canonical bytes after the belt, so one the belt removes gets none.
+    let out = enforce_unique_tool_use_ids(out, &req.session_id);
+    // Each served message's canonical bytes and block fingerprints depend on that message alone.
+    let out = crate::parallel_map::map_with(out, |(), slot| slot.into_served());
+    build_timings.tail_loop = elapsed_ms(tail_loop_started_at);
     if serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
         let first_tail = out
             .iter()
@@ -12143,8 +12164,6 @@ fn build_output_with_tags(
             "claude-code-anthropic synthetic prefix must not contain system-role messages"
         );
     }
-
-    out = enforce_unique_tool_use_ids(out, &req.session_id);
 
     build_timings.total = elapsed_ms(build_output_started_at);
     Ok(BuiltOutput {
@@ -14222,8 +14241,9 @@ pub(crate) mod tests {
     /// The fixture fixes `now_ms` to avoid wall-clock-dependent expiry and uses an empty docs directory to avoid injected documentation.
     /// The fixture fixes `now_ms` to avoid wall-clock-dependent expiry and uses an empty docs directory to avoid injected documentation.
     fn assert_no_duplicate_tool_use_ids(messages: &[ServedMessage]) {
+        let slots: Vec<ServedSlot<'_>> = messages.iter().cloned().map(ServedSlot::Ready).collect();
         assert!(
-            duplicate_tool_use_locations(messages).is_empty(),
+            duplicate_tool_use_locations(&slots).is_empty(),
             "served array contains duplicate tool_use ids"
         );
     }
@@ -22904,8 +22924,8 @@ pub(crate) mod tests {
     fn the_duplicate_belt_reports_through_the_session_table() {
         let messages = || {
             vec![
-                ServedMessage::from_message(assistant_tool_call("one", 1, "duplicate").ck),
-                ServedMessage::from_message(assistant_tool_call("two", 2, "duplicate").ck),
+                ServedSlot::Rendered(assistant_tool_call("one", 1, "duplicate").ck, None),
+                ServedSlot::Rendered(assistant_tool_call("two", 2, "duplicate").ck, None),
             ]
         };
         let session = "belt-reports-through-the-table";
@@ -22918,13 +22938,156 @@ pub(crate) mod tests {
         assert_eq!(duplicate_tool_use_report(session, &doubled), None);
     }
 
+    #[test]
+    fn the_belt_removes_each_later_call_and_keeps_the_blocks_beside_it() {
+        let message = |mid: &str, role: &str, content: Vec<wire::BlockKind>| {
+            WireMessage::from_parts(
+                role,
+                content.into_iter().map(wire::WireBlock::bare).collect(),
+                None,
+                wire::ProviderExtras::new(),
+                wire::HarnessMeta {
+                    harness_id: Some(mid.to_string()),
+                    ..Default::default()
+                },
+            )
+        };
+        let call = |id: &str| wire::BlockKind::ToolCall {
+            id: id.to_string(),
+            name: "read".to_string(),
+            input: json!({ "path": "a.txt" }),
+            provider_executed: false,
+        };
+        let result = |id: &str, text: &str| wire::BlockKind::ToolResult {
+            id: id.to_string(),
+            tool_name: "read".to_string(),
+            output: wire::ToolOutput::bare(wire::OutputKind::Text {
+                text: text.to_string(),
+            }),
+            provider_executed: false,
+        };
+        let text = |text: &str| wire::BlockKind::Text {
+            text: text.to_string(),
+        };
+        let window = vec![
+            message("first-call", "assistant", vec![call("a")]),
+            message("first-result", "tool", vec![result("a", "first")]),
+            message(
+                "call-beside-text",
+                "assistant",
+                vec![text("note"), call("a")],
+            ),
+            message(
+                "result-of-kept-message",
+                "tool",
+                vec![result("a", "second")],
+            ),
+            message("other-call", "assistant", vec![call("b")]),
+            message("other-result", "tool", vec![result("b", "other")]),
+            message("lone-call", "assistant", vec![call("a")]),
+            message(
+                "result-beside-text",
+                "tool",
+                vec![result("a", "third"), text("trailer")],
+            ),
+            message("last-call", "assistant", vec![call("a")]),
+        ];
+        let ready = |messages: Vec<WireMessage>| -> Vec<ServedSlot<'static>> {
+            messages
+                .into_iter()
+                .map(|message| ServedSlot::Ready(ServedMessage::from_message(message)))
+                .collect()
+        };
+        let rendered = |messages: Vec<WireMessage>| -> Vec<ServedSlot<'static>> {
+            messages
+                .into_iter()
+                .map(|message| ServedSlot::Rendered(message, None))
+                .collect()
+        };
+        type Canonical = (Vec<u8>, Vec<(String, usize)>);
+        let state = |slots: Vec<ServedSlot<'_>>| -> Vec<Canonical> {
+            slots
+                .into_iter()
+                .map(ServedSlot::into_served)
+                .map(|message| {
+                    (
+                        message.canonical_bytes().to_vec(),
+                        message.block_fingerprints.to_vec(),
+                    )
+                })
+                .collect()
+        };
+
+        let mut expected = window.clone();
+        expected.remove(8);
+        expected[7] = message("result-beside-text", "tool", vec![text("trailer")]);
+        expected.remove(6);
+        expected[2] = message("call-beside-text", "assistant", vec![text("note")]);
+        for slots in [ready(window.clone()), rendered(window)] {
+            let duplicates = duplicate_tool_use_locations(&slots);
+            assert_eq!(
+                duplicates,
+                [
+                    ("a".to_string(), 2, 1),
+                    ("a".to_string(), 6, 0),
+                    ("a".to_string(), 8, 0),
+                ]
+            );
+            let healed = drop_later_tool_uses(slots, &duplicates);
+            assert!(duplicate_tool_use_locations(&healed).is_empty());
+            assert_eq!(state(healed), state(rendered(expected.clone())));
+        }
+    }
+
+    #[test]
+    fn a_missing_todo_anchor_is_refused_ahead_of_the_duplicate_belt() {
+        let core = CoreState {
+            frozen_units: vec![
+                synth_region("m0", "m0".to_string()),
+                synth_region("m1", "m1".to_string()),
+            ],
+            ..CoreState::empty()
+        };
+        let pair = crate::injection::build_synthetic_todo_pair(
+            r#"[{"content":"once","status":"pending","priority":"high"}]"#,
+        )
+        .unwrap()
+        .freeze_at(Some("absent".to_string()));
+        let meta = ModuleMeta {
+            synthetic_todo: Some(pair),
+            ..Default::default()
+        };
+        let request = req(
+            "missing-anchor-with-duplicates",
+            "cfg0",
+            vec![
+                assistant_tool_call("one", 1, "duplicate"),
+                assistant_tool_call("two", 2, "duplicate"),
+            ],
+        );
+        let projection = project_messages(&request.messages).unwrap();
+        let refused = build_output(
+            &core,
+            &meta,
+            &projection,
+            &normalize_synthetic_todo_ingress(&request),
+            None,
+            true,
+            None,
+        );
+        assert!(
+            matches!(&refused, Err(TransformError::SyntheticTodoAnchorMissing(mid)) if mid == "absent"),
+            "{refused:?}"
+        );
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "served output contains duplicate tool_use ids")]
     fn duplicate_tool_use_belt_panics_in_test_builds() {
         let messages = vec![
-            ServedMessage::from_message(assistant_tool_call("one", 1, "duplicate").ck),
-            ServedMessage::from_message(assistant_tool_call("two", 2, "duplicate").ck),
+            ServedSlot::Rendered(assistant_tool_call("one", 1, "duplicate").ck, None),
+            ServedSlot::Rendered(assistant_tool_call("two", 2, "duplicate").ck, None),
         ];
         let _ = enforce_unique_tool_use_ids(messages, "belt-test");
     }
@@ -22933,15 +23096,16 @@ pub(crate) mod tests {
     #[test]
     fn duplicate_tool_use_belt_drops_later_owner_and_result_in_release() {
         let messages = vec![
-            ServedMessage::from_message(assistant_tool_call("one", 1, "duplicate").ck),
-            ServedMessage::from_message(tool_result("one-result", 2, "duplicate", "first").ck),
-            ServedMessage::from_message(assistant_tool_call("two", 3, "duplicate").ck),
-            ServedMessage::from_message(tool_result("two-result", 4, "duplicate", "second").ck),
+            ServedSlot::Rendered(assistant_tool_call("one", 1, "duplicate").ck, None),
+            ServedSlot::Rendered(tool_result("one-result", 2, "duplicate", "first").ck, None),
+            ServedSlot::Rendered(assistant_tool_call("two", 3, "duplicate").ck, None),
+            ServedSlot::Rendered(tool_result("two-result", 4, "duplicate", "second").ck, None),
         ];
 
         let healed = enforce_unique_tool_use_ids(messages, "belt-release-test");
 
         assert!(duplicate_tool_use_locations(&healed).is_empty());
+        let healed: Vec<ServedMessage> = healed.into_iter().map(ServedSlot::into_served).collect();
         assert_eq!(healed.len(), 2);
         assert_eq!(healed[0].meta.harness_id.as_deref(), Some("one"));
         assert_eq!(healed[1].meta.harness_id.as_deref(), Some("one-result"));
