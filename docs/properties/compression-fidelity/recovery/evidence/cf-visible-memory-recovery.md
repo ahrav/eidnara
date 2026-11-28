@@ -23,7 +23,7 @@ Do not build a second fixture or a second three-way disposition oracle.
 
 ## Evidence trail
 
-- [Configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L340)
+- [Configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L341)
   defaults the plugin to enabled. The
   [registry, lines 34-59](../../../../../packages/opencode-plugin/src/plugin/tool-registry.ts#L34)
   registers search with a kernel client and session/project resolvers when
@@ -43,9 +43,9 @@ Do not build a second fixture or a second three-way disposition oracle.
 - [Daemon read, lines 674-758](../../../../../crates/daemon/src/kernel_routes/read.rs#L674)
   binds the request, applies the requested freshness gate, reads project-visible
   rows, and bounds serialized output. This is not native artifact expansion.
-- [Memory ranking, lines 179-182, 255-301](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L179)
+- [Memory ranking, lines 179-182, 255-301](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L187)
   uses memory decision summaries/rationales. Exact object-id matching is a
-  lookup mode. [Lines 188-229](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L178)
+  lookup mode. [Lines 188-229](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L186)
   render rejected approaches distinctly and carry their rationale.
 - [Delivery, lines 162-181, 320-336](../../../../../packages/opencode-plugin/src/tools/eidnara-search/execute.ts#L162)
   separates pre-pack ranking from delivered results. The

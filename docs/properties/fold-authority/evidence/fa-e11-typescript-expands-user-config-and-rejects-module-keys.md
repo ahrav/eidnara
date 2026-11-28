@@ -38,7 +38,7 @@ Clauses and their disposition at HEAD:
 - "Rejects the module keys as unknown": replaced. The summarizer schema
   declares `module_model`, `module_fallback_models`, and
   `context_limit_tokens` (`config/schema/eidnara.ts:121-141`), so
-  `assertKnownConfigKeys` (`:798-806`) no longer throws for them.
+  `assertKnownConfigKeys` (`:805-813`) no longer throws for them.
 - "Project sanitizer strips model, fallback, disallowed-tool, hidden-agent
   escalation, disable, and cost-cap fields": preserved and extended.
   `HISTORY_SUMMARIZER_USER_ONLY_FIELDS` (`config/project-security.ts:24-31`)

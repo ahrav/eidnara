@@ -33,7 +33,7 @@ integrity, lifecycle, compatibility. Inspected 2026-09-19 at
   warm m0/m1 replay; status unaudited. It does not execute the producer.
 
 Reachability is **default-production**: compaction defaults enabled in
-[config.rs:139-157](../../../../../crates/daemon/src/config.rs#L142-L160), and
+[config.rs:139-157](../../../../../crates/daemon/src/config.rs#L169-L187), and
 the composition functions above are ordinary serving code. Stored legacy input
 is a compatibility variant, not a claim that fresh tierless output validates.
 

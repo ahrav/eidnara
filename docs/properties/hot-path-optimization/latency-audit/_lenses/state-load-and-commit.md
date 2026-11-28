@@ -548,9 +548,9 @@ tree's line numbers: `MemoryStore::load` closes at 6223, not
 [status-read]: ../../../../../crates/daemon/src/lib.rs#L6267-L6321
 [age]: ../../../../../crates/daemon/src/lib.rs#L6321-L6332
 [health-read]: ../../../../../crates/daemon/src/lib.rs#L7924-L7963
-[cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L124
-[cfg-models]: ../../../../../crates/daemon/src/config.rs#L122
-[cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L129
+[cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L149
+[cfg-models]: ../../../../../crates/daemon/src/config.rs#L147
+[cfg-user-mem]: ../../../../../crates/daemon/src/config.rs#L154
 [plugin]: ../../../../../packages/opencode-plugin/src/hooks/context/command-handler.ts#L265-L268
 
 [cas-retry]: ../../../../../crates/daemon/src/transform.rs#L1951-L1990

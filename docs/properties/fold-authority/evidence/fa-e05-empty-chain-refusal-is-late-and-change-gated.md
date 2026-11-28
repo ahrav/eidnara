@@ -26,7 +26,7 @@ At HEAD `0ff62b29a`:
 - Replaced: `prepare_history_summarizer` returns `native_authority` first
   whenever the pass's applied authority is native
   (`crates/daemon/src/lib.rs:9440-9451`). An empty binding chain gives
-  native intent (`crates/daemon/src/config.rs:185-189`), so a fresh session
+  native intent (`crates/daemon/src/config.rs:212-216`), so a fresh session
   with the default empty chain adopts native and never reaches the late
   check.
 - Surviving: under an applied Eidnara authority, `prepare_history_summarizer_fire`

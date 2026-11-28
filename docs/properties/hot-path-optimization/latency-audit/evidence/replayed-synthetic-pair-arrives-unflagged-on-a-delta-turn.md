@@ -112,8 +112,8 @@ a shared-view design as well.
 [native-gate]: https://github.com/ahrav/eidnara/blob/9132344/crates/daemon/src/lib.rs#L8406
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
-[cfg-models]: ../../../../../crates/daemon/src/config.rs#L122
-[cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L124
+[cfg-models]: ../../../../../crates/daemon/src/config.rs#L147
+[cfg-compaction]: ../../../../../crates/daemon/src/config.rs#L149
 [plugin]: https://github.com/ahrav/eidnara/blob/9132344/packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts#L759-L761
 
 ## Executed delta witness

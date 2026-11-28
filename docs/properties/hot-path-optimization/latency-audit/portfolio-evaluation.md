@@ -279,7 +279,7 @@ Anchor verification against HEAD. Every anchor below was read; none is off.
 | `crates/kernel/src/cas/ingest.rs:333-342`, `:591-608` | verified | lock then `check_budget`; walk, presence, projected cap |
 | `crates/daemon/src/token_cache.rs:135-137`, `:57` | verified | `u32` bypass; thread-local counters |
 | `crates/daemon/src/lib.rs:2244-2258` | verified | the declared-bytes sum, 14 terms |
-| `crates/daemon/src/config.rs:270-292` | verified | doc on repeated warnings; clone at `:292` |
+| `crates/daemon/src/config.rs:297-319` | verified | doc on repeated warnings; clone at `:319` |
 | `crates/memory-store/src/lib.rs:6482-6496` | verified | `trace_pass_received` and its "never contends" doc |
 | `crates/memory-store/src/lib.rs:5900`, `:5914`, `:5921`, `:5928` | verified | the only `fail_next_*_for_test` seams; none for `pass_trace` |
 | `crates/daemon/src/conditional_note_evaluation.rs:163-192` | verified | doc at `:163-165`, `fn next_occurrence` at `:166` |

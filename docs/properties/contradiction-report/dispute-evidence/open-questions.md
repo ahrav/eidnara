@@ -134,7 +134,7 @@ Plan: OQ4-1 and OQ4-2 encode reporter class and `evidence_ref` in
 Evidence: single-baseline storage, no migrations (`crates/storage/AGENTS.md:
 3`); a Kernel baseline digest change makes a database created under the
 previous baseline refuse to open (P3 U1 test scenario; the Memory Store
-precedent at `docs/memory-reviewer-operations.md:86-88`).
+precedent at `docs/memory-reviewer-operations.md:104-106`).
 
 Consequence: there is no supported path by which a PR A dispute row exists
 in the Batch K1 store, so U3 has nothing to parse and no cutover to run.

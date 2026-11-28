@@ -56,7 +56,7 @@ evidence, not proof.
 - `default-production`: runs under `DaemonConfig::default()`. Every transform
   request projects its window, so wire flattening (`wire.rs:540`) runs on the
   default path, and the m0 composer reads project documents with
-  `inject_docs: true` (`crates/daemon/src/config.rs:168`; the additive-only
+  `inject_docs: true` (`crates/daemon/src/config.rs:195`; the additive-only
   composer reads them at `crates/daemon/src/transform.rs:2853-2854`).
   Selection, reduced-call rendering, and to-do injection do not run under the
   default: `model_chain` defaults empty (`config.rs:149`), so `eidnara_folds()`

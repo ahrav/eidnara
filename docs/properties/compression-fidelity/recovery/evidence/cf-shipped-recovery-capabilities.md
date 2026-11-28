@@ -35,7 +35,7 @@ record. No permanent prohibition on adding capabilities is inferred.
   calls `search_history_segments_and_notes_for_session` and emits history
   title/body or note snippets. A direct facade test is not a registered
   model-tool witness and does not expose exact native occurrence bytes.
-- [Memory ranking, lines 255-270](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L255)
+- [Memory ranking, lines 255-270](../../../../../packages/opencode-plugin/src/tools/eidnara-search/kernel-memory-search.ts#L263)
   emits exact object-id matches over memory decisions. The word `exact`
   here does not certify native occurrence/revision fidelity.
 - [Pi entrypoint, lines 84-89, 367-370](../../../../../packages/pi-plugin/src/index.ts#L84)
@@ -53,7 +53,7 @@ record. No permanent prohibition on adding capabilities is inferred.
   names: the pinned Pi-unsupported expectation is invalidated and needs
   review. No fidelity scenario replays Pi history, so Pi still earns no
   P1-P5 coverage from this catalog.
-- [Default configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L340)
+- [Default configuration, line 335](../../../../../packages/opencode-plugin/src/config/schema/eidnara.ts#L341)
   enables the plugin. The registry and startup paths are production evidence
   for the expected tool surface under the captured configuration.
 

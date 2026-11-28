@@ -295,7 +295,7 @@ were read at HEAD.
 | `crates/kernel/src/admission.rs:3818-4078` | verified | SQL 3818-3955; the sort by `object_id` is in Rust at 3328; decode 3979-4078. |
 | `crates/kernel/src/admission.rs:3608-3620` | verified | `visible_row`, which `visible_as_of_in_scope` applies through `visible_selected_as_of` at 3326. |
 | `crates/kernel/src/slice/read.rs:140-158` | verified | Payload-size query doc and return. |
-| `crates/daemon/src/config.rs:125` | verified | `memory_enabled: true`. |
+| `crates/daemon/src/config.rs:150` | verified | `memory_enabled: true`. |
 | `crates/host-runtime/src/dispatch.rs:823-855`, `:857-934`, `:937-954`, `:1226-1268` | verified | Permits, tracked spawn, cancel arm, close gate. |
 | `crates/host-runtime/tests/dispatch.rs:832-887` | verified | `closing_a_route_settles_its_admitted_work`. |
 | `crates/host-runtime/tests/dispatch.rs:357-399` | verified | `cancel_and_completion_settle_exactly_once`. |
