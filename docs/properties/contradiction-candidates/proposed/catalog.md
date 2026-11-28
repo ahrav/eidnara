@@ -906,7 +906,7 @@ enabled sweep runs;
 drives `pass_then_sweep`
 (`crates/daemon/src/memory_reviewer/lifecycle.rs:448`) with the flag off and
 then on. The key is `/contradiction_candidates/enabled`
-(`crates/daemon/src/config.rs:1044`), user-only and default false
+(`crates/daemon/src/config.rs:1071`), user-only and default false
 (`contradiction_candidates_default_off_and_only_the_user_tier_enables_them`,
 `config.rs:2299`); a configuration resolved before a user-tier rewrite keeps
 its value (`config.rs:2320`), and a bound route keeps the value it was bound
@@ -1084,5 +1084,5 @@ the source checks are lexical
 Existing check: the sweep and pass tests named under Exercised, unaudited.
 Impact: the plan's three stop conditions; a signal would reserve a
 receipt-charged reviewer job against the Q38 ceiling (2,048 per project per
-incarnation, `docs/memory-reviewer-operations.md:263`).
+incarnation, `docs/memory-reviewer-operations.md:281`).
 Open questions: None.

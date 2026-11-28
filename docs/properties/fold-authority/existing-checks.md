@@ -28,20 +28,20 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:30156` | FA-E09 | #905 | unaudited |
 | `selected_range_identity_drift_during_await_rejects_without_cooldown` | `crates/daemon/src/history_summarizer.rs:4077` | FA-E09 | #905 | unaudited |
 | `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:4131` | FA-E09 | #905 | unaudited |
-| `tier_policy_ignores_project_models_and_rejects_project_lowering` | `crates/daemon/src/config.rs:1537` | FA-E10 | #859 PR A | unaudited |
-| `compaction_enabled_defaults_true_and_is_user_tier_only` | `crates/daemon/src/config.rs:1644` | FA-E10 | #859 PR A | unaudited |
-| `module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set` | `crates/daemon/src/config.rs:2265` | FA-E10 | #859 PR A | unaudited |
-| `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change` | `crates/daemon/src/config.rs:2379` | FA-E10, FA-E06 | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `an_oversized_tier_file_is_ignored_with_a_warning` | `crates/daemon/src/config.rs:1448` | FA-E10 | #859 PR A | unaudited |
-| `unreadable_and_malformed_tiers_warn_while_missing_tiers_stay_silent` | `crates/daemon/src/config.rs:2419` | FA-E10, FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `every_fixture_row_matches_through_the_configuration_cache` | `crates/daemon/src/config.rs:2569` | FA-N01, FA-E10 | #898 (#852); #859 PR A | unaudited |
-| `excluded_chain_values_warn_with_their_key` | `crates/daemon/src/config.rs:2576` | FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `the_pre_parsed_merge_seam_fails_the_fixture` | `crates/daemon/src/config.rs:2603` | FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `jsonc_only_discovery_fails_the_fixture` | `crates/daemon/src/config.rs:2618` | FA-N01, FA-E10 | #898 (#852); #859 PR A | unaudited |
-| `a_rejected_reload_keeps_the_last_admitted_configuration` | `crates/daemon/src/config.rs:2629` | FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `a_first_load_rejection_keeps_the_tier_outside_the_authority_blocks` | `crates/daemon/src/config.rs:2694` | FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `an_unresolved_configuration_withdraws_fold_authority_from_the_retained_documents` | `crates/daemon/src/config.rs:3763` | FA-N01 | #898 (#852); #859 PR A | unaudited |
-| `retained_project_documents_are_bounded_and_the_user_document_survives_churn` | `crates/daemon/src/config.rs:3793` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `tier_policy_ignores_project_models_and_rejects_project_lowering` | `crates/daemon/src/config.rs:1579` | FA-E10 | #859 PR A | unaudited |
+| `compaction_enabled_defaults_true_and_is_user_tier_only` | `crates/daemon/src/config.rs:1686` | FA-E10 | #859 PR A | unaudited |
+| `module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set` | `crates/daemon/src/config.rs:2307` | FA-E10 | #859 PR A | unaudited |
+| `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change` | `crates/daemon/src/config.rs:2421` | FA-E10, FA-E06 | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `an_oversized_tier_file_is_ignored_with_a_warning` | `crates/daemon/src/config.rs:1480` | FA-E10 | #859 PR A | unaudited |
+| `unreadable_and_malformed_tiers_warn_while_missing_tiers_stay_silent` | `crates/daemon/src/config.rs:2461` | FA-E10, FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `every_fixture_row_matches_through_the_configuration_cache` | `crates/daemon/src/config.rs:2612` | FA-N01, FA-E10 | #898 (#852); #859 PR A | unaudited |
+| `excluded_chain_values_warn_with_their_key` | `crates/daemon/src/config.rs:2619` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `the_pre_parsed_merge_seam_fails_the_fixture` | `crates/daemon/src/config.rs:2646` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `jsonc_only_discovery_fails_the_fixture` | `crates/daemon/src/config.rs:2661` | FA-N01, FA-E10 | #898 (#852); #859 PR A | unaudited |
+| `a_rejected_reload_keeps_the_last_admitted_configuration` | `crates/daemon/src/config.rs:2672` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `a_first_load_rejection_keeps_the_tier_outside_the_authority_blocks` | `crates/daemon/src/config.rs:2737` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `an_unresolved_configuration_withdraws_fold_authority_from_the_retained_documents` | `crates/daemon/src/config.rs:3820` | FA-N01 | #898 (#852); #859 PR A | unaudited |
+| `retained_project_documents_are_bounded_and_the_user_document_survives_churn` | `crates/daemon/src/config.rs:3850` | FA-N01 | #898 (#852); #859 PR A | unaudited |
 | `an_unresolved_configuration_adopts_nothing` | `crates/daemon/src/fold_authority_handler_tests.rs:203` | FA-N01, FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `the_first_committing_pass_adopts_over_a_state_sync_row` | `crates/daemon/src/fold_authority_handler_tests.rs:135` | FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `a_losing_first_adopter_converges_on_the_winner` | `crates/daemon/src/fold_authority_handler_tests.rs:163` | FA-N02 | #903 (#855); #859 PR A | unaudited |

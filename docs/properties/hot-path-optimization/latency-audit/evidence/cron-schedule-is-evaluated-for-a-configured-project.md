@@ -116,8 +116,8 @@ route in `MODULE` authority. No existing test records the marker.
 [sched-projects]: ../../../../../crates/daemon/src/lib.rs#L15084-L15153
 [sched-authority]: ../../../../../crates/daemon/src/lib.rs#L15108-L15113
 [sched-filter]: ../../../../../crates/daemon/src/lib.rs#L15132
-[sched-default]: ../../../../../crates/daemon/src/config.rs#L155
-[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1255
+[sched-default]: ../../../../../crates/daemon/src/config.rs#L182
+[sched-accept]: ../../../../../crates/daemon/src/config.rs#L1286
 [valid]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L622-L632
 [occurrence]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L630-L632
 [note-due]: ../../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671

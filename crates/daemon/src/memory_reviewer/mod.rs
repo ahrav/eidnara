@@ -4,6 +4,7 @@ use std::ops::Range;
 
 pub mod activation;
 pub mod broker;
+pub mod change_detection;
 pub mod classifier;
 pub(crate) mod classifier_wire;
 pub mod coordinator;

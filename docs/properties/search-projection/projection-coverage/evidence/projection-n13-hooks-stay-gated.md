@@ -97,8 +97,8 @@ scheduler record rather than duplicating lease/receipt rules.
 [plan]: ../../../../../../commons/docs/plans/2026-09-10-feat-eidnara-rp2-1-projection-coverage-plan.md#L54-L59
 [handler]: ../../../../../crates/daemon/src/lib.rs#L11932-L11950
 [dispatch]: ../../../../../crates/daemon/src/lib.rs#L12620-L12691
-[config]: ../../../../../crates/daemon/src/config.rs#L1909-L1957
-[keys]: ../../../../../crates/daemon/src/config.rs#L550-L642
+[config]: ../../../../../crates/daemon/src/config.rs#L1951-L1999
+[keys]: ../../../../../crates/daemon/src/config.rs#L577-L669
 [facade]: ../../../../../crates/daemon/src/lib.rs#L10290-L10302
 [routes]: ../../../../../crates/daemon/src/lib.rs#L32976-L33016
 [scheduler]: ../../../../../crates/daemon/src/memory_classifier_scheduler.rs#L25-L36

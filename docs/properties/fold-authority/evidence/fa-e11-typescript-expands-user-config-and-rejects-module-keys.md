@@ -31,14 +31,14 @@ Clauses and their disposition at HEAD:
   (`:137-140`) before `substituteConfigVariables` (`:141-145`;
   `config/variable.ts:106`). The screen blanks every chain literal that is
   blank or holds `{env:`/`{file:` at its token span, so it is never
-  substituted or read (`config/fold-authority.ts:79-121`).
+  substituted or read (`config/fold-authority.ts:79-134`).
 - "Accepts string-or-array fallbacks": preserved
   (`config/schema/agent-overrides.ts:54-57`); the module fallbacks use the
   same shape (`config/schema/eidnara.ts:128-133`).
 - "Rejects the module keys as unknown": replaced. The summarizer schema
   declares `module_model`, `module_fallback_models`, and
   `context_limit_tokens` (`config/schema/eidnara.ts:121-141`), so
-  `assertKnownConfigKeys` (`:798-806`) no longer throws for them.
+  `assertKnownConfigKeys` (`:805-813`) no longer throws for them.
 - "Project sanitizer strips model, fallback, disallowed-tool, hidden-agent
   escalation, disable, and cost-cap fields": preserved and extended.
   `HISTORY_SUMMARIZER_USER_ONLY_FIELDS` (`config/project-security.ts:24-31`)

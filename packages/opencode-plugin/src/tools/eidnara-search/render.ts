@@ -60,7 +60,12 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
         result.work?.endedBy === undefined
             ? ""
             : `\nEnded by ${contestMemoryId(result.work.endedBy)}`;
-    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${routeFieldsOf(result)}${policy}${work}\n${boundDynamicField(result.content)}${contest}${ended}`;
+    // The change renders on its own line after the bounded text, so a long statement keeps it.
+    const changed =
+        result.changedBy === undefined
+            ? ""
+            : `\nChanged (${result.changedBy.effect})${result.changedBy.memory === undefined ? "" : ` by ${contestMemoryId(result.changedBy.memory)}`}`;
+    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${routeFieldsOf(result)}${policy}${work}\n${boundDynamicField(result.content)}${contest}${ended}${changed}`;
 }
 
 const SECTION_SEPARATOR = "\n\n";

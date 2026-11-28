@@ -42,8 +42,8 @@ never wait on the kernel or the job." Lens: concurrency; C9.
   `the_response_is_identical_whatever_capture_and_the_kernel_are_doing`;
   `:938` `capture_latency_measurement`; `:298`
   `capture_off_memory_off_or_a_subagent_session_runs_no_adapter`.
-- Reachability: `crates/daemon/src/config.rs:157` `source_capture_enabled:
-  false` by default; `:2296` JSON default; the module header's gate also
+- Reachability: `crates/daemon/src/config.rs:184` `source_capture_enabled:
+  false` by default; `:2338` JSON default; the module header's gate also
   requires `memory.enabled` and a non-subagent session.
 
 ## Failure scenario

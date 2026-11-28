@@ -332,6 +332,36 @@ fn read_at_tip(
     }
 }
 
+/// The rows a new session of the project receives in its block now, each with
+/// its decision row as stored: the project's memory at the tip, read for no
+/// session so the newest session's own rows are among them, trimmed to
+/// `memory_budget_tokens`, without the `NAMED_FILES` lines. A row's content
+/// is its delivered line, a contested statement's with its contest; the
+/// decision row keeps the statement's own text and rationale, which a writer
+/// rewrites.
+pub(crate) fn delivered_rows(
+    store: &kernel::KernelStore,
+    project: &ProjectBinding,
+    memory_budget_tokens: f64,
+) -> Result<Vec<(CanonicalMemory, kernel::DecisionRow)>, kernel::KernelError> {
+    let tip = store.tip()?;
+    let mut response = read_other_sessions(
+        store,
+        project,
+        &[None],
+        tip,
+        (MAX_READ_ROWS, MAX_READ_ROW_BYTES),
+    )?;
+    let stored = response.decisions.clone();
+    show_contests(store, project, &mut response)?;
+    let snapshot = injectable_snapshot(response, Vec::new(), memory_budget_tokens);
+    Ok(snapshot
+        .rows()
+        .iter()
+        .filter_map(|row| Some((row.clone(), stored.get(&row.object_id)?.clone())))
+        .collect())
+}
+
 /// The most payload pages one delivery walk loads. A page holds at most the
 /// caller's row and byte caps, so with the read caps of 8,192 rows and
 /// 8 MiB the walk loads up to 64 MiB of payloads before it stops. Every

@@ -3147,7 +3147,7 @@ evaluation of this area and its disposition are recorded in
 [paging]: ../../../../packages/opencode-plugin/src/hooks/context/module-wire.ts#L666-L676
 [fixture]: ../../../../crates/daemon/tests/direct_host.rs#L285-L290
 
-[cfg-compaction]: ../../../../crates/daemon/src/config.rs#L124
+[cfg-compaction]: ../../../../crates/daemon/src/config.rs#L149
 [expand]: ../../../../crates/daemon/src/lib.rs#L4468
 [store-pc]: https://github.com/ahrav/eidnara/blob/704568ec/crates/daemon/src/lib.rs#L4863
 [history_summarizer-fire]: ../../../../crates/daemon/src/lib.rs#L5317
@@ -3225,8 +3225,8 @@ evaluation of this area and its disposition are recorded in
 [floor-a]: ../../../../crates/daemon/src/lib.rs#L8955-L8959
 [floor-b]: ../../../../crates/daemon/src/lib.rs#L9014-L9019
 [completed-call]: ../../../../crates/daemon/src/lib.rs#L9082
-[cfg-models]: ../../../../crates/daemon/src/config.rs#L122
-[cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L129
+[cfg-models]: ../../../../crates/daemon/src/config.rs#L147
+[cfg-user-mem]: ../../../../crates/daemon/src/config.rs#L154
 [cas-retry]: ../../../../crates/daemon/src/transform.rs#L1942-L1981
 [stable-call]: ../../../../crates/daemon/src/transform.rs#L1823
 [descend]: ../../../../crates/memory-store/src/lib.rs#L9963
@@ -3465,8 +3465,8 @@ evaluation of this area and its disposition are recorded in
 [occurrence]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L630
 [note-cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L642-L671
 [sched-due]: ../../../../crates/daemon/src/memory_classifier_scheduler.rs#L735
-[sched-default]: ../../../../crates/daemon/src/config.rs#L155
-[sched-accept]: ../../../../crates/daemon/src/config.rs#L1249-L1267
+[sched-default]: ../../../../crates/daemon/src/config.rs#L182
+[sched-accept]: ../../../../crates/daemon/src/config.rs#L1279-L1298
 [eff-cfg]: ../../../../crates/daemon/src/lib.rs#L4892-L4901
 [binding-doc]: ../../../../crates/daemon/src/lib.rs#L237-L248
 [call-reattach]: ../../../../crates/daemon/src/lib.rs#L5153
@@ -3474,19 +3474,19 @@ evaluation of this area and its disposition are recorded in
 [call-fire-caller]: ../../../../crates/daemon/src/lib.rs#L5562
 [call-wrapup]: ../../../../crates/daemon/src/lib.rs#L5968
 [call-bind]: ../../../../crates/daemon/src/lib.rs#L13086
-[eff-proj]: ../../../../crates/daemon/src/config.rs#L476-L486
-[eff-warn]: ../../../../crates/daemon/src/config.rs#L533-L656
-[tier-cached]: ../../../../crates/daemon/src/config.rs#L743-L779
-[merge]: ../../../../crates/daemon/src/config.rs#L1107
-[raise-only]: ../../../../crates/daemon/src/config.rs#L903-L905
-[memo]: ../../../../crates/daemon/src/config.rs#L375-L473
-[memo-serves]: ../../../../crates/daemon/src/config.rs#L392-L399
-[memo-store]: ../../../../crates/daemon/src/config.rs#L624-L654
-[memo-bound]: ../../../../crates/daemon/src/config.rs#L286
-[memo-margin]: ../../../../crates/daemon/src/config.rs#L291
-[identity]: ../../../../crates/daemon/src/config.rs#L316-L373
-[t-memo]: ../../../../crates/daemon/src/config.rs#L2731-L3136
-[t-mtime]: ../../../../crates/daemon/src/config.rs#L2674-L2712
+[eff-proj]: ../../../../crates/daemon/src/config.rs#L503-L513
+[eff-warn]: ../../../../crates/daemon/src/config.rs#L560-L683
+[tier-cached]: ../../../../crates/daemon/src/config.rs#L770-L806
+[merge]: ../../../../crates/daemon/src/config.rs#L1134
+[raise-only]: ../../../../crates/daemon/src/config.rs#L930-L932
+[memo]: ../../../../crates/daemon/src/config.rs#L402-L500
+[memo-serves]: ../../../../crates/daemon/src/config.rs#L419-L426
+[memo-store]: ../../../../crates/daemon/src/config.rs#L651-L681
+[memo-bound]: ../../../../crates/daemon/src/config.rs#L313
+[memo-margin]: ../../../../crates/daemon/src/config.rs#L318
+[identity]: ../../../../crates/daemon/src/config.rs#L343-L400
+[t-memo]: ../../../../crates/daemon/src/config.rs#L2786-L3193
+[t-mtime]: ../../../../crates/daemon/src/config.rs#L2717-L2767
 
 [pb-redacted]: ../../../../crates/host-runtime/src/panic_boundary.rs#L7
 [pb-tls]: ../../../../crates/host-runtime/src/panic_boundary.rs#L11-L13

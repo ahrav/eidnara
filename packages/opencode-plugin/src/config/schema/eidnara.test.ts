@@ -94,25 +94,47 @@ describe("EidnaraConfigSchema", () => {
         it("keeps the memory reviewer off and contesting unless its keys say otherwise", () => {
             const parse = (value: unknown) =>
                 EidnaraConfigSchema.safeParse({ memory_reviewer: value });
-            const off = { enabled: false, apply: "contest" };
+            const off = { enabled: false, apply: "contest", review: "session" };
             expect(EidnaraConfigSchema.parse({}).memory_reviewer).toEqual(off);
             expect(parse({}).data?.memory_reviewer).toEqual(off);
             expect(
                 parse({ enabled: true, model: "provider/model", apply: "contest" }).data
                     ?.memory_reviewer,
-            ).toEqual({ enabled: true, model: "provider/model", apply: "contest" });
+            ).toEqual({
+                enabled: true,
+                model: "provider/model",
+                apply: "contest",
+                review: "session",
+            });
             expect(parse({ enabled: true, apply: "apply" }).data?.memory_reviewer).toEqual({
                 enabled: true,
                 apply: "apply",
+                review: "session",
             });
             expect(
                 parse({ enabled: true, classifier: "typesafe/jev-latest" }).data?.memory_reviewer,
-            ).toEqual({ enabled: true, apply: "contest", classifier: "typesafe/jev-latest" });
+            ).toEqual({
+                enabled: true,
+                apply: "contest",
+                classifier: "typesafe/jev-latest",
+                review: "session",
+            });
             expect(parse({ classifier: 1 }).success).toBe(false);
             expect(
                 parse({ enabled: true, stage1_model: "provider/small", apply: "propose" }).data
                     ?.memory_reviewer,
-            ).toEqual({ enabled: true, stage1_model: "provider/small", apply: "propose" });
+            ).toEqual({
+                enabled: true,
+                stage1_model: "provider/small",
+                apply: "propose",
+                review: "session",
+            });
+            expect(parse({ enabled: true, review: "memory" }).data?.memory_reviewer).toEqual({
+                enabled: true,
+                apply: "contest",
+                review: "memory",
+            });
+            expect(parse({ review: "off" }).success).toBe(false);
             expect(parse({ stage1_model: 1 }).success).toBe(false);
             expect(parse({ enabled: "yes" }).success).toBe(false);
             expect(parse({ apply: "always" }).success).toBe(false);
@@ -226,6 +248,7 @@ describe("EidnaraConfigSchema", () => {
                 memory_reviewer: {
                     enabled: false,
                     apply: "contest",
+                    review: "session",
                 },
                 terse_text_compression: {
                     enabled: false,

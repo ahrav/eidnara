@@ -261,7 +261,7 @@ Status: invalidated
 Invalidated: PR #898 (#852) replaces the "raw boolean only" clause with the
 chain clause of FA-N01 (`bd592e4a0`), and its merged history withdraws
 folding on an unresolved admission (`f5b10fefe`,
-`packages/opencode-plugin/src/config/fold-authority.ts:137-146`). The clauses
+`packages/opencode-plugin/src/config/fold-authority.ts:150-159`). The clauses
 "off omits `eidnara_reduce`" and "fold commands refuse while their
 definitions stay registered" survive unchanged. #900 and #904 consume the
 predicate through `foldAuthorityOf` and do not change it.
@@ -403,7 +403,7 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - firing assembly needs an Eidnara
-authority and a non-empty chain (`crates/daemon/src/config.rs:185-189`).
+authority and a non-empty chain (`crates/daemon/src/config.rs:212-216`).
 Status: invalidated
 Invalidated: #859 PR A (`fold-authority/m2-exit`, `fd0b52aa5`) charges each
 flushed block's serialized identities against a 256 KiB budget, so the
@@ -552,7 +552,7 @@ Corrections: `lib.rs:211-251` is now `:227-263`; `:5722` is `:5428`;
 `:5924-5925` is `:5640`; `config.rs:2158` is `:2350`.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:245`,
 `:778`; `crates/daemon/src/lib.rs:41248`;
-`crates/daemon/src/config.rs:2379`
+`crates/daemon/src/config.rs:2421`
 `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`.
 Impact: High. Route mode alone is not a session-wide authority fact, which
 is why FA-N02 stores one.
@@ -567,7 +567,7 @@ Reachability: explicit-config-only - corrected from `default-production`.
 At `265df096` the folding path ran whenever `compaction_enabled` held
 (default true). Since `8b1e04944` (#903) it runs only when the stored
 authority folds (`crates/daemon/src/transform.rs:3217-3218`), which needs a
-non-empty user-tier chain (`crates/daemon/src/config.rs:185-189`).
+non-empty user-tier chain (`crates/daemon/src/config.rs:212-216`).
 Status: active
 Exercised: yes - #906's recorded workspace gate runs
 `durable_scalars_join_retained_parts_by_generation`, which evaluates
@@ -739,8 +739,8 @@ Reachability: default-production - every daemon bind resolves configuration
 through `effective_for_project` (`crates/daemon/src/lib.rs:4756`).
 Status: invalidated
 Invalidated: PR #898 (#852) replaces the `.jsonc`-only discovery
-(`discover_tier`, `crates/daemon/src/config.rs:405-412`, now `.jsonc` then
-`.json`) and the array-only fallbacks (`chain_models`, `:1085-1104`, now a
+(`discover_tier`, `crates/daemon/src/config.rs:432-439`, now `.jsonc` then
+`.json`) and the array-only fallbacks (`chain_models`, `:1112-1131`, now a
 string or an array) under FA-N01. Surviving clauses: no variable
 substitution (`:470`), the 1 MiB bound and final-component symlink rejection
 (`:412`, `read_bounded_bytes` `:427-459`), user-tier-only chain keys
@@ -772,8 +772,8 @@ Corrections to the spec's `265df096` citations: defaults `config.rs:123-125`
 are now `:142-144`; `:274-404` is `:310-492`; `:325-370` is `:412-459`;
 `:675-691` is `:762-778`; `:772-824` is `:859-883`; the checks `:1317`,
 `:1424`, `:2045`, `:2158` are now `:1509`, `:1616`, `:2237`, `:2350`.
-Existing check: `crates/daemon/src/config.rs:1537`
-`tier_policy_ignores_project_models_and_rejects_project_lowering`; `:1644`
+Existing check: `crates/daemon/src/config.rs:1579`
+`tier_policy_ignores_project_models_and_rejects_project_lowering`; `:1686`
 `compaction_enabled_defaults_true_and_is_user_tier_only`; `:2237`
 `module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set`;
 `:2350` `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`;
@@ -794,7 +794,7 @@ Invalidated: PR #898 (#852) replaces two clauses under FA-N01: the module keys
 are declared on the summarizer schema
 (`packages/opencode-plugin/src/config/schema/eidnara.ts:121-141`), so they
 are accepted, not rejected; and chain-key values are screened before
-substitution (`screenUserTier`, `config/fold-authority.ts:97-121`, called at
+substitution (`screenUserTier`, `config/fold-authority.ts:98-134`, called at
 `config/index.ts:137-140`), so a chain reference is excluded, not expanded.
 Surviving clauses: `.jsonc` before `.json` (`shared/jsonc-parser.ts:227-243`),
 user-tier substitution before parsing for the rest of the document
@@ -994,7 +994,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the default configuration has an empty
-chain and `compaction_enabled: true` (`crates/daemon/src/config.rs:145-147`),
+chain and `compaction_enabled: true` (`crates/daemon/src/config.rs:172-174`),
 so every daemon bind resolves the predicate through
 `ConfigCache::effective_for_project` (`crates/daemon/src/lib.rs:4756`) and
 every plugin boot through `loadPluginConfigDetailed`
@@ -1004,7 +1004,7 @@ Exercised: yes - one 49-row fixture
 (`packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json`)
 runs through the daemon's production file path in
 `every_fixture_row_matches_through_the_configuration_cache`
-(`crates/daemon/src/config.rs:2569`), green in #859 PR A's run at `fd0b52aa5`
+(`crates/daemon/src/config.rs:2612`), green in #859 PR A's run at `fd0b52aa5`
 (6,124 passed); through the OpenCode loader in "every row matches through the
 production loader" (`packages/opencode-plugin/src/config/index.test.ts:1152`)
 and the Pi loader in "every row matches through the Pi loader"
@@ -1035,14 +1035,14 @@ Contract-versus-code: D1a says a rejected admission is "never `false`"; since
 `f5b10fefe`, which merged with #898 after its description, both loaders
 return `false` for an unresolved configuration
 (`config.rs:181-185`; `withdrawUnresolvedFoldAuthority`,
-`packages/opencode-plugin/src/config/fold-authority.ts:137-146`) and carry
+`packages/opencode-plugin/src/config/fold-authority.ts:150-159`) and carry
 `Unresolved` beside it, and the fixture contract encodes that reading. The
 consumers found read the admission first
 (`crates/daemon/src/fold_authority.rs:105-113`;
 `packages/cli/src/commands/setup-opencode.ts:618-628`;
 `packages/cli/src/commands/doctor-opencode.ts:539-542`).
-Existing check: `crates/daemon/src/config.rs:2569`
-`every_fixture_row_matches_through_the_configuration_cache`; `:2576`
+Existing check: `crates/daemon/src/config.rs:2612`
+`every_fixture_row_matches_through_the_configuration_cache`; `:2619`
 `excluded_chain_values_warn_with_their_key`; `:2573`
 `the_pre_parsed_merge_seam_fails_the_fixture`; `:2588`
 `jsonc_only_discovery_fails_the_fixture`; `:2599`
@@ -1102,7 +1102,7 @@ Confidence: high - [evidence](evidence/fa-n02-first-commit-adopts-authority.md).
 The field's serde default and skip (`crates/memory-store/src/lib.rs:2482-2487`),
 the SQL read and Serde error (`:13272-13315`), the planner's adopt arms
 (`fold_authority.rs:105-112`), the admission-aware intent
-(`crates/daemon/src/config.rs:185-189`), and the row-version fence
+(`crates/daemon/src/config.rs:212-216`), and the row-version fence
 (`transform.rs:2158-2163`) were read at HEAD; the witnesses were run in the
 cited gates. The competing adopter is a direct store commit from the
 pre-commit hook, not a second handler pass.
@@ -1249,7 +1249,7 @@ Open questions:
 Type: safety
 Reachability: default-production - an empty chain is the default, so a fresh
 session adopts native (`DaemonConfig::eidnara_folds`,
-`crates/daemon/src/config.rs:186-190` at `07ea883b5`) and every non-subagent
+`crates/daemon/src/config.rs:213-217` at `07ea883b5`) and every non-subagent
 pass reaches the gate (`crates/daemon/src/lib.rs:9665-9676`).
 Status: active
 Exercised: partial - the preparation clause is covered from both callers
@@ -1529,7 +1529,7 @@ derived state. `apply_once` returns through `apply_additive_only` unless the
 session's stored authority folds (`crates/daemon/src/transform.rs:3217-3218`),
 the additive result carries `derived: None` (`:3162`), and a session adopts
 Eidnara folds only from a configuration with a non-empty user-tier chain
-(`DaemonConfig::eidnara_folds`, `crates/daemon/src/config.rs:185-189`).
+(`DaemonConfig::eidnara_folds`, `crates/daemon/src/config.rs:212-216`).
 Status: active
 Exercised: yes - #906's recorded `cargo test --workspace --all-features
 --locked` gate runs the promotion family:
@@ -1855,8 +1855,8 @@ Type: safety
 Reachability: explicit-config-only - firing assembly runs only on a session
 whose stored authority is Eidnara, and Eidnara folds only with an admitted,
 non-empty summarizer chain (`DaemonConfig::eidnara_folds`,
-`crates/daemon/src/config.rs:185-189`); the default chain is empty
-(`:145`).
+`crates/daemon/src/config.rs:212-216`); the default chain is empty
+(`:172`).
 Status: active
 Exercised: yes - #859 PR C's recorded run at `0ff62b29a` (workspace tests,
 6,156 passed) ran

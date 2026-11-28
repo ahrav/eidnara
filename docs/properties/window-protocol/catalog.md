@@ -136,7 +136,7 @@ path runs without configuration: the plugin builds the Rust-mode transform
 unconditionally (`packages/opencode-plugin/src/hooks/context/hook.ts:518` at
 `f2442b2f`; `4061315c` removed `transform_mode`). `explicit-config-only` means
 a configured summarizer model chain is required (`model_chain` defaults to
-empty at `crates/daemon/src/config.rs:126`). There are eight campaign
+empty at `crates/daemon/src/config.rs:151`). There are eight campaign
 markers (WP-P16 to WP-P23). Seven are `test-only`: they assert enabling state
 through test instrumentation. WP-P16 is `explicit-config-only`, because its
 production overlap needs a configured summarizer.
@@ -347,7 +347,7 @@ Open questions: None. D10 decides the reset; the record stays for
 Type: safety
 Reachability: explicit-config-only - publication requires a nonempty
 summarizer model chain; the default is empty (`model_chain: Vec::new()` at
-`crates/daemon/src/config.rs:126`, `f2442b2f`).
+`crates/daemon/src/config.rs:151`, `f2442b2f`).
 Status: active
 Exercised: yes -
 `selected_range_identity_drift_during_await_rejects_without_cooldown`,
@@ -1054,7 +1054,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - the withdrawal record runs on ordinary
 passes, but the competing publication requires a configured summarizer
-(`model_chain` defaults empty, `crates/daemon/src/config.rs:126`).
+(`model_chain` defaults empty, `crates/daemon/src/config.rs:151`).
 Status: active
 Exercised: yes -
 `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`

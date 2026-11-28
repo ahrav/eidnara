@@ -78,6 +78,7 @@ const CHAIN_KEYS: readonly string[] = [...CHAIN_MODEL_KEYS, ...CHAIN_FALLBACK_KE
 // `model_reference` in `crates/daemon/src/config.rs` reads these keys from the written file and
 // ignores a value that holds a reference, so the loader leaves such a value unset as well.
 const REVIEWER_MODEL_KEYS: readonly string[] = ["model", "stage1_model", "classifier"];
+const REVIEWER_MODE_KEYS: readonly string[] = ["apply", "review"];
 
 interface ExcludedValue {
     offset: number;
@@ -113,6 +114,18 @@ function excludedModelValues(rawText: string): ExcludedValue[] {
                     offset,
                     length,
                     warning: `Ignoring a memory_reviewer.${String(key)} value: the key takes a literal provider/model reference without {env:} or {file:} references.`,
+                });
+            }
+            // The daemon reads both modes as literals and keeps its default for a value that holds a reference.
+            const reviewerMode =
+                block === "memory_reviewer" &&
+                REVIEWER_MODE_KEYS.includes(String(key)) &&
+                index === undefined;
+            if (reviewerMode && hasVariableReference(value)) {
+                spans.push({
+                    offset,
+                    length,
+                    warning: `Ignoring a memory_reviewer.${String(key)} value: the key takes a literal mode without {env:} or {file:} references.`,
                 });
             }
         },

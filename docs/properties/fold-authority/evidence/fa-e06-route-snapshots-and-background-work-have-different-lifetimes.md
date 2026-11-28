@@ -51,7 +51,7 @@ Checks at HEAD:
   chain while the handler's live configuration has none, so preparation
   reads the live one.
 - `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`
-  (`crates/daemon/src/config.rs:2379`): a configuration edit is visible to the
+  (`crates/daemon/src/config.rs:2421`): a configuration edit is visible to the
   live read after an mtime change.
 
 Citation corrections from `265df096` to HEAD: `lib.rs:211-251` (binding and

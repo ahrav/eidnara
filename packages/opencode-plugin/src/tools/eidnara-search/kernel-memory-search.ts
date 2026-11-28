@@ -58,6 +58,14 @@ export interface MemorySearchResult {
     contestedBy?: MemoryContest;
     /** `work` is present when the capture rationale specifies `lifetime: "current_work"`. */
     work?: WorkInProgress;
+    /** Present on a labeled capture row whose rationale holds `changed_by`: a session review found a later user message that replaced the statement or made it moot. */
+    changedBy?: MemoryChange;
+}
+
+/** A labeled row whose `changed_by` holds `effect` `replaced` or `moot`, a string `session`, and a string `message` supplies `effect`, and `memory` when the record names the row of the user's later sentence as a string. */
+export interface MemoryChange {
+    effect: "replaced" | "moot";
+    memory?: string;
 }
 
 /** A labeled row whose `ended_by` holds a string `memory` and a string `session` reports `ended` and supplies `endedBy`. Otherwise, unlabeled rows report `live` and labeled rows omit `state`. */
@@ -302,6 +310,30 @@ function workInProgressOf(row: ReadRow, decision: ReadDecision): WorkInProgress 
     return row.labeled ? {} : { state: "live" };
 }
 
+function changeOf(row: ReadRow, decision: ReadDecision): MemoryChange | undefined {
+    const { rationale } = decision.payload;
+    if (!isCaptureRow(row) || !row.labeled || !rationale.includes("changed_by")) return undefined;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(rationale);
+    } catch {
+        return undefined;
+    }
+    const change = isRecord(parsed) ? parsed.changed_by : undefined;
+    // The whole record, as the daemon writes it: a closed effect, the session and the message that had the change, and the later sentence's row when one was recorded.
+    if (
+        !isRecord(change) ||
+        (change.effect !== "replaced" && change.effect !== "moot") ||
+        typeof change.session !== "string" ||
+        typeof change.message !== "string"
+    ) {
+        return undefined;
+    }
+    return typeof change.memory === "string"
+        ? { effect: change.effect, memory: change.memory }
+        : { effect: change.effect };
+}
+
 /** Whether a reader is shown this memory as a contesting observation: a live memory decision the daemon serves on explicit search, labeled or not, with normal sensitivity. */
 function servesAsObservation(row: ReadRow): boolean {
     return (
@@ -404,6 +436,7 @@ export function memoryResultFromRow(
     }
     const contestingMemoryId = decision ? contestingMemoryOf(row, decision) : undefined;
     const work = decision ? workInProgressOf(row, decision) : undefined;
+    const changedBy = decision ? changeOf(row, decision) : undefined;
     return {
         source: "memory",
         // `rowText` ranks the rationale, so the rationale renders too; a hit matched only in the rationale would otherwise display none of the matched terms and read as unrelated.
@@ -417,6 +450,7 @@ export function memoryResultFromRow(
         ...(row.labeled ? { policyLabel: "labeled" } : {}),
         ...(contestingMemoryId === undefined ? {} : { contestingMemoryId }),
         ...(work === undefined ? {} : { work }),
+        ...(changedBy === undefined ? {} : { changedBy }),
     };
 }
 

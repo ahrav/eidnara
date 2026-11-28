@@ -14,7 +14,7 @@ revision.
 
 - Terms: `identity_terms`
   (`crates/daemon/src/memory_reviewer/activation.rs:174`).
-- Live values: `crates/daemon/src/memory_reviewer/worker.rs:166`.
+- Live values: `crates/daemon/src/memory_reviewer/worker.rs:174`.
 - Reachability: the gate opens only when the owner writes the record, so the
   closing behavior is explicit-config-only.
 

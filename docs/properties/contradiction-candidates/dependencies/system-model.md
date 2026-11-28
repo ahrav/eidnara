@@ -119,7 +119,7 @@ Activation gate: `identity_terms` (`crates/daemon/src/memory_reviewer/activation
 includes `("memory store baseline", live.memstore_baseline_digest)`;
 `evaluate` (`:218-240`) returns `Closed::IdentityMismatch(field)` on the first
 differing term; the live value is `memory_store::baseline_digest()`
-(`worker.rs:167`).
+(`worker.rs:175`).
 
 S6 harness-capture retention. `HARNESS_CAPTURE_RETENTION_CLASS =
 "harness_capture"` (`crates/kernel/src/cas/mod.rs:155`); evidence ingest sets
@@ -224,7 +224,7 @@ C9 `source_capture.rs:3`: "The response bytes never wait on the kernel or the
 job"; single publication slot; at most one screened batch under a 5 s budget.
 C10 `source_capture.rs:7`: counters carry a closed vocabulary, never unit text.
 C11 `storage/AGENTS.md`: single baseline; reject mismatches.
-`memory-reviewer-operations.md:86-88`, `:235-241`: a store at another
+`memory-reviewer-operations.md:104-106`, `:253-259`: a store at another
 baseline refuses to open; the activation gate binds `memstore_baseline_digest`.
 C12 `local_file.rs:240`: owners first, evidence second; cited evidence kept;
 descriptors retired.

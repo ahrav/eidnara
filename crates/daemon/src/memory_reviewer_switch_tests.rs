@@ -65,6 +65,8 @@ fn classified_config(apply: ReviewApply, classifier: Option<&str>) -> DaemonConf
             stage1_model: Some(SMALL.to_string()),
             apply,
             classifier: classifier.map(str::to_string),
+            // These tests script the per-memory review; the session-end pass has tests of its own.
+            review: crate::config::ReviewScope::Memory,
         },
         ..default_test_config()
     }
@@ -1597,6 +1599,7 @@ async fn a_default_stage_one_model_the_host_refuses_hands_the_review_to_the_revi
             stage1_model: None,
             apply: ReviewApply::Contest,
             classifier: None,
+            review: crate::config::ReviewScope::Memory,
         },
         ..switch_config(ReviewApply::Contest)
     })
@@ -1654,6 +1657,7 @@ async fn a_default_that_answered_and_then_fails_pauses_the_projects_reviews() {
             stage1_model: None,
             apply: ReviewApply::Contest,
             classifier: None,
+            review: crate::config::ReviewScope::Memory,
         },
         ..switch_config(ReviewApply::Contest)
     })
@@ -2224,6 +2228,7 @@ async fn a_failed_classifier_request_leaves_stage_one_with_the_derived_default()
             stage1_model: None,
             apply: ReviewApply::Apply,
             classifier: Some(CLASSIFIER.to_string()),
+            review: crate::config::ReviewScope::Memory,
         },
         ..switch_config(ReviewApply::Apply)
     })
@@ -3558,4 +3563,663 @@ async fn a_project_at_the_review_quota_queues_no_review_and_the_status_counts_it
         1,
         "the evidence is reviewed once room returns"
     );
+}
+
+/// The configuration of the tests of the session-end pass: the switch with change detection on.
+fn detection_config() -> DaemonConfig {
+    let config = switch_config(ReviewApply::Contest);
+    DaemonConfig {
+        memory_reviewer: MemoryReviewerConfig {
+            review: crate::config::ReviewScope::Session,
+            ..config.memory_reviewer.clone()
+        },
+        ..config
+    }
+}
+
+/// A change detection answer that names one change.
+fn change(
+    statement: &str,
+    effect: &str,
+    message: &str,
+    sentence: &str,
+    speaker: &str,
+    confidence: &str,
+) -> String {
+    json!({"changes": [{
+        "statement": statement, "effect": effect, "message": message, "sentence": sentence,
+        "speaker": speaker, "confidence": confidence,
+    }]})
+    .to_string()
+}
+
+const NO_CHANGES: &str = r#"{"changes":[]}"#;
+
+/// The requests the session-end pass sent: those whose system text holds its fixed instructions.
+fn detection_attempts(rig: &Rig) -> Vec<ProducerAttempt> {
+    rig.attempts()
+        .into_iter()
+        .filter(|attempt| {
+            attempt
+                .system
+                .ends_with(crate::memory_reviewer::change_detection::SYSTEM_TEXT)
+        })
+        .collect()
+}
+
+/// Each memory explicit search serves whose statement holds `needle`, with its visibility and rationale.
+async fn searched(rig: &Rig, needle: &str) -> Vec<(String, String, Value)> {
+    let request = kernel_route_fixtures::read_request(&rig.project, "s3", "explicit_search", None);
+    let body = memory_auto_delivery_tests::body(
+        rig.handler
+            .dispatch_value_for_test(test_route(THIRD), request)
+            .await,
+    );
+    body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["object"]["domain_id"] == "memory" && row["decision"].is_object())
+        .filter(|row| {
+            row["decision"]["payload"]["summary"]
+                .as_str()
+                .unwrap()
+                .contains(needle)
+        })
+        .map(|row| {
+            (
+                row["decision"]["payload"]["summary"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                row["visibility"].as_str().unwrap().to_string(),
+                serde_json::from_str(row["decision"]["payload"]["rationale"].as_str().unwrap())
+                    .unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// States THURSDAY in session `s1` and runs the pass over that session, which finds nothing to change.
+async fn thursday_stated() -> Rig {
+    let rig = Rig::open_with(detection_config()).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.answers(&[NO_CHANGES]);
+    rig.drain().await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        1,
+        "the pass read session s1 once"
+    );
+    rig
+}
+
+/// At a session's end the review model reads the session's user messages beside every statement the block delivers. A later message that gives the rule a new value replaces the statement although it does not name the statement: the user's sentence is delivered as the user's statement, and the old statement leaves the block and stays on explicit search, labeled, with a record naming the effect, the sentence's row, and the message. A second drain reads nothing new and sends no request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_message_that_replaces_a_statement_delivers_the_users_sentence() {
+    let rig = thursday_stated().await;
+    let later = "Branches are cut on Tuesdays from now on.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change("s1", "replaced", "m1", later, "user", "high")]);
+    rig.drain().await;
+    let attempts = detection_attempts(&rig);
+    assert_eq!(attempts.len(), 2);
+    let request: Value = serde_json::from_str(&attempts[1].prompt).unwrap();
+    assert_eq!(request["statements"][0]["text"], stated(THURSDAY));
+    assert_eq!(
+        request["messages"][0]["text"], later,
+        "the newest session's user message"
+    );
+    assert_eq!(
+        attempts[1].model, MODEL,
+        "the review model reads the session"
+    );
+
+    let block = rig.block().await;
+    assert!(
+        block.contains(&stated(later)),
+        "the user's sentence is delivered: {block}"
+    );
+    assert!(
+        !block.contains(&stated(THURSDAY)),
+        "the old statement left the block: {block}"
+    );
+    let kept = searched(&rig, THURSDAY).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let (_, visibility, rationale) = &kept[0];
+    assert_eq!(
+        visibility, "labeled",
+        "the old statement stays on explicit search"
+    );
+    assert_eq!(rationale["changed_by"]["effect"], "replaced");
+    assert_eq!(rationale["changed_by"]["message"], "later-1");
+    assert_eq!(rationale["changed_by"]["session"], "s2");
+    let new = searched(&rig, later).await;
+    assert_eq!(new.len(), 1, "{new:?}");
+    assert_eq!(new[0].1, "visible");
+    assert_eq!(
+        new[0].2["quote"], later,
+        "the delivered statement is the user's words, word for word"
+    );
+    assert_eq!(new[0].2["recorded_by"], "change_detection");
+    let by = rationale["changed_by"]["memory"].as_str().unwrap();
+    assert_eq!(
+        memory_id(&rig, &stated(later)).await,
+        by,
+        "the record names the row of the user's sentence"
+    );
+
+    let sent = detection_attempts(&rig).len();
+    rig.drain().await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        sent,
+        "the covered session is read once"
+    );
+    rig.restarted().drain(&CancellationToken::new()).await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        sent,
+        "the receipt in the Kernel keeps a restarted worker from reading the session again"
+    );
+}
+
+/// A later message that changes one part of a statement leaves it delivered with its line marked contested by the user's sentence, and with both dates; the part that still holds keeps reaching sessions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_message_that_narrows_a_statement_marks_it_contested() {
+    let rig = Rig::open_with(detection_config()).await;
+    rig.state_rules(&[TWO_RULES]).await;
+    rig.answers(&[NO_CHANGES]);
+    rig.drain().await;
+    rig.publish_later("later-1", 1_700_000_000_000, TEST_SUFFIX)
+        .await;
+    rig.settle_capture().await;
+    rig.answers(&[&change("s1", "narrowed", "m1", TEST_SUFFIX, "user", "high")]);
+    rig.drain().await;
+    let block = rig.block().await;
+    let line = block
+        .lines()
+        .find(|line| line.contains(TWO_RULES))
+        .unwrap_or_else(|| panic!("the two-rule statement left the block: {block}"));
+    assert!(line.contains("; contested "), "{line}");
+    assert!(line.contains("(stated "), "{line}");
+    assert!(
+        line.contains(TEST_SUFFIX),
+        "the line names the user's sentence: {line}"
+    );
+}
+
+/// The words a replacement cites must be the user's own. A sentence the model reads as passed on from another source, or one cut out of the user's sentence, is not delivered as the user's statement: the old statement stays delivered and its line names the sentence as contesting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_in_words_the_user_passes_on_only_contests_the_statement() {
+    for (speaker, sentence) in [
+        ("other", "Branches are cut on Tuesdays from now on."),
+        ("user", "cut on Tuesdays"),
+    ] {
+        let rig = thursday_stated().await;
+        let later = "The platform team wrote: Branches are cut on Tuesdays from now on.";
+        rig.publish_later("later-1", 1_700_000_000_000, later).await;
+        rig.settle_capture().await;
+        rig.answers(&[&change("s1", "replaced", "m1", sentence, speaker, "high")]);
+        rig.drain().await;
+        let block = rig.block().await;
+        let line = block
+            .lines()
+            .find(|line| line.contains(&stated(THURSDAY)))
+            .unwrap_or_else(|| panic!("{speaker}: the statement left the block: {block}"));
+        assert!(line.contains("; contested "), "{speaker}: {line}");
+        assert!(
+            !block.lines().any(|line| line.starts_with("mem_")
+                && line
+                    .split_once(": ")
+                    .is_some_and(|(_, text)| text == stated(sentence))),
+            "{speaker}: the sentence is not delivered as the user's statement: {block}"
+        );
+    }
+}
+
+/// The daemon writes a change only where the stores bear it out: the cited words stand in the cited message, word for word, and the message was published after the statement was recorded. A statement's own message changes nothing, and neither do words the message does not hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_the_stores_do_not_bear_out_writes_nothing() {
+    let rig = Rig::open_with(detection_config()).await;
+    rig.state_rules(&[THURSDAY]).await;
+    // The statement's own message, in its own session.
+    rig.answers(&[&change("s1", "replaced", "m1", THURSDAY, "user", "high")]);
+    rig.drain().await;
+    let later = "Branches are cut on Tuesdays from now on.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change(
+        "s1",
+        "replaced",
+        "m1",
+        "Branches are cut on Wednesdays from now on.",
+        "user",
+        "high",
+    )]);
+    rig.drain().await;
+    assert_eq!(detection_attempts(&rig).len(), 2);
+    let block = rig.block().await;
+    assert!(
+        block
+            .lines()
+            .any(|line| line.contains(&stated(THURSDAY)) && !line.contains("; contested ")),
+        "{block}"
+    );
+    assert!(!block.contains("Wednesdays"), "{block}");
+    assert!(
+        searched(&rig, THURSDAY)
+            .await
+            .iter()
+            .all(|(_, visibility, rationale)| visibility == "visible"
+                && rationale.get("changed_by").is_none())
+    );
+}
+
+/// Work in progress that a later message shows finished leaves the work section and stays on explicit search as ended, naming the row of the user's sentence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_a_later_message_finishes_leaves_the_work_section_and_stays_on_search_as_ended() {
+    let rig = Rig::open_with(detection_config()).await;
+    let plan = "Next session we add the export command.";
+    rig.publish("s1", "m0", "user", STATED_AT_MS, plan).await;
+    rig.settle_capture().await;
+    memory_auto_delivery_tests::capture(
+        &rig.handler,
+        FIRST,
+        "s1",
+        &[("m0", "user", plan)],
+        |text, _| vec![memory_auto_delivery_tests::classed(text, "current_work")],
+    )
+    .await;
+    rig.answers(&[NO_CHANGES]);
+    rig.drain().await;
+    assert!(
+        rig.block().await.contains(plan),
+        "the plan is delivered as work in progress"
+    );
+    let later = "The export command shipped, so the importer is next.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change("s1", "ended", "m1", later, "user", "high")]);
+    rig.drain().await;
+    assert!(!rig.block().await.contains(plan), "{}", rig.block().await);
+    let ended = searched(&rig, plan).await;
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0].1, "labeled");
+    assert_eq!(ended[0].2["ended_by"]["session"], "s2");
+    assert!(
+        ended[0].2["ended_by"]["memory"]
+            .as_str()
+            .unwrap()
+            .starts_with("mem_")
+    );
+}
+
+/// Every change the pass writes can be undone and stays visible: the changed row stays on explicit search, and its rationale or its line names what changed it and the change's kind. Nothing the pass writes deletes a row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_change_the_pass_writes_keeps_the_row_on_search_with_its_state_and_cause() {
+    for (effect, confidence) in [
+        ("replaced", "high"),
+        ("moot", "high"),
+        ("narrowed", "high"),
+        ("replaced", "low"),
+    ] {
+        let rig = thursday_stated().await;
+        let later = "Branches are cut on Tuesdays from now on.";
+        rig.publish_later("later-1", 1_700_000_000_000, later).await;
+        rig.settle_capture().await;
+        rig.answers(&[&change("s1", effect, "m1", later, "user", confidence)]);
+        rig.drain().await;
+        let rows = searched(&rig, THURSDAY).await;
+        assert_eq!(rows.len(), 1, "{effect} {confidence}: {rows:?}");
+        let (_, visibility, rationale) = &rows[0];
+        match (effect, confidence) {
+            ("replaced" | "moot", "high") => {
+                assert_eq!(visibility, "labeled", "{effect}");
+                assert_eq!(rationale["changed_by"]["effect"], effect);
+                assert_eq!(rationale["changed_by"]["message"], "later-1");
+                assert!(
+                    rationale["changed_by"]["memory"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("mem_")
+                );
+            }
+            _ => {
+                assert_eq!(
+                    visibility, "visible",
+                    "{effect} {confidence}: a contest keeps it delivered"
+                );
+                assert!(
+                    rationale["contested_by"]["memory"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("mem_"),
+                    "{rationale}"
+                );
+            }
+        }
+    }
+}
+
+/// Under `memory_reviewer.review: memory` the switch reviews stored memories one by one and sends no session-end request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_session_end_pass_runs_only_when_the_switch_reviews_sessions() {
+    let rig = Rig::open(ReviewApply::Contest).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.drain().await;
+    rig.publish_later(
+        "later-1",
+        1_700_000_000_000,
+        "Branches are cut on Tuesdays from now on.",
+    )
+    .await;
+    rig.settle_capture().await;
+    rig.decides(&[KEEP, KEEP]);
+    rig.drain().await;
+    assert!(detection_attempts(&rig).is_empty());
+}
+
+/// The worker's own loop reads a session once it has ended in practice: while the newest message is younger than `change_detection::QUIET` a pass reads nothing of that session, and a drain, which marks a session's end, reads it at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_loop_reads_a_session_once_it_is_quiet_and_a_drain_at_once() {
+    let rig = thursday_stated().await;
+    let later = "Branches are cut on Tuesdays from now on.";
+    rig.publish_later("later-1", u64::try_from(crate::now_ms()).unwrap(), later)
+        .await;
+    rig.settle_capture().await;
+    rig.worker.pass(&CancellationToken::new()).await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        1,
+        "a session still going is not read by the loop"
+    );
+    rig.answers(&[&change("s1", "replaced", "m1", later, "user", "high")]);
+    rig.drain().await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        2,
+        "a drain reads the newest session"
+    );
+    assert!(rig.block().await.contains(&stated(later)));
+}
+
+/// A newer session ends the one before it: while the newer one is still going, the loop reads the earlier session's messages that no pass covered, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_newer_session_lets_the_loop_read_the_session_before_it() {
+    let rig = Rig::open_with(detection_config()).await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.publish_later(
+        "later-1",
+        u64::try_from(crate::now_ms()).unwrap(),
+        "Let us look at the release notes.",
+    )
+    .await;
+    rig.settle_capture().await;
+    rig.answers(&[NO_CHANGES]);
+    rig.worker.pass(&CancellationToken::new()).await;
+    let attempts = detection_attempts(&rig);
+    assert_eq!(attempts.len(), 1, "the session before the newest is read");
+    let request: Value = serde_json::from_str(&attempts[0].prompt).unwrap();
+    assert_eq!(
+        request["messages"][0]["text"], THURSDAY,
+        "the earlier session's messages"
+    );
+    rig.worker.pass(&CancellationToken::new()).await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        1,
+        "a covered session is read once"
+    );
+}
+
+/// The worker's own loop reads the newest session once its newest message is ten minutes old, with no drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_loop_reads_a_newest_session_that_has_gone_quiet() {
+    let rig = thursday_stated().await;
+    let later = "Branches are cut on Tuesdays from now on.";
+    let old = u64::try_from(crate::now_ms()).unwrap() - 11 * 60 * 1000;
+    rig.publish_later("later-1", old, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change("s1", "replaced", "m1", later, "user", "high")]);
+    rig.worker.pass(&CancellationToken::new()).await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        2,
+        "the quiet session is read"
+    );
+    assert!(rig.block().await.contains(&stated(later)));
+}
+
+/// A session deleted while its request waits for the model grounds no change: the commit finds the message's blocks retired and writes nothing, and the statement stays delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_deleted_while_its_request_waits_writes_no_change() {
+    let rig = thursday_stated().await;
+    let later = "Branches are cut on Tuesdays from now on.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change("s1", "replaced", "m1", later, "user", "high")]);
+    rig.state.block_output.store(true, Ordering::SeqCst);
+    let drain = {
+        let worker = Arc::clone(&rig.worker);
+        tokio::spawn(async move { worker.drain(&CancellationToken::new()).await })
+    };
+    for _ in 0..1_000 {
+        if detection_attempts(&rig).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        2,
+        "the request is with the model"
+    );
+    let deleted = rig
+        .handler
+        .core
+        .handle_session_delete_value(
+            test_route(SECOND),
+            &json!({ "method": "session.delete", "session_id": "s2" }),
+        )
+        .await;
+    assert!(
+        !format!("{deleted:?}").starts_with("Error"),
+        "the delete succeeded: {deleted:?}"
+    );
+    rig.state.block_output.store(false, Ordering::SeqCst);
+    rig.state.notify.notify_one();
+    drain.await.unwrap();
+    assert!(
+        rig.state.await_results.lock().unwrap().is_empty(),
+        "the answer was read after the delete"
+    );
+    let block = rig.block().await;
+    assert!(block.contains(&stated(THURSDAY)), "{block}");
+    assert!(
+        searched(&rig, later).await.is_empty(),
+        "no row holds the deleted session's sentence"
+    );
+}
+
+/// An answer the host reports from a model other than the configured one writes nothing and closes review for the rest of the process, as on the per-memory route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_from_another_model_closes_session_review() {
+    let rig = thursday_stated().await;
+    let later = "Branches are cut on Tuesdays from now on.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers_from(
+        Some("other/model"),
+        &[&change("s1", "replaced", "m1", later, "user", "high")],
+    );
+    assert_eq!(rig.drain().await, 0);
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert_eq!(
+        rig.status.activation_state(),
+        ActivationState::Closed("unavailable")
+    );
+    rig.publish_later("later-2", 1_700_000_100_000, "Releases go out on Mondays.")
+        .await;
+    rig.settle_capture().await;
+    rig.answers(&[NO_CHANGES]);
+    rig.drain().await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        2,
+        "a later session sends nothing once review closed"
+    );
+}
+
+/// A request that fails leaves the session uncovered and waits before it is asked again, so a drain returns and a host that keeps failing is not asked in a loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_request_waits_before_the_session_is_asked_again() {
+    let rig = thursday_stated().await;
+    rig.publish_later(
+        "later-1",
+        1_700_000_000_000,
+        "Branches are cut on Tuesdays from now on.",
+    )
+    .await;
+    rig.settle_capture().await;
+    rig.state
+        .await_results
+        .lock()
+        .unwrap()
+        .push_back(Err(HistorySummarizerProducerError::TimedOut));
+    assert_eq!(rig.drain().await, 0, "a failed pass settles nothing");
+    assert_eq!(detection_attempts(&rig).len(), 2);
+    assert_eq!(rig.drain().await, 0);
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        2,
+        "the session waits before its next attempt"
+    );
+}
+
+/// `apply: propose` writes nothing a reader has not accepted, so a switch with `review: session` reviews stored memories one by one and sends no session request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn propose_keeps_the_per_memory_review() {
+    let config = detection_config();
+    let rig = Rig::open_with(DaemonConfig {
+        memory_reviewer: MemoryReviewerConfig {
+            apply: ReviewApply::Propose,
+            ..config.memory_reviewer.clone()
+        },
+        ..config
+    })
+    .await;
+    rig.state_rules(&[THURSDAY]).await;
+    rig.user_says_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    rig.decides(&[KEEP, KEEP, KEEP, KEEP]);
+    rig.drain().await;
+    assert!(detection_attempts(&rig).is_empty());
+    assert!(
+        rig.attempts().iter().any(|attempt| attempt.model != MODEL),
+        "the per-memory review asked its stage-one model"
+    );
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+}
+
+/// With capture's consent off, the pass records no sentence of its own: a finding no captured row of the message holds is left unwritten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_capture_consent_off_the_pass_records_no_sentence() {
+    let rig = thursday_stated().await;
+    let off = DaemonConfig {
+        memory_auto_capture: false,
+        ..detection_config()
+    };
+    for (channel, session) in [(FIRST, "s1"), (SECOND, "s2"), (THIRD, "s3")] {
+        rig.handler.bind_route(
+            test_route(channel),
+            SessionBinding {
+                config: off.clone(),
+                ..binding_with_harness(rig.project.to_str().unwrap(), "pi", session)
+            },
+        );
+    }
+    let later = "Branches are cut on Tuesdays from now on.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change("s1", "replaced", "m1", later, "user", "high")]);
+    rig.drain().await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        2,
+        "the pass asked the model after the opt-out"
+    );
+    assert!(
+        rig.state.await_results.lock().unwrap().is_empty(),
+        "and read its grounded answer"
+    );
+    assert!(rig.block().await.contains(&stated(THURSDAY)));
+    assert!(searched(&rig, later).await.is_empty());
+}
+
+/// A later sentence capture already holds as a delivered row of the message is the row the change names: the block holds the sentence once and the pass records no copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_change_names_the_row_capture_holds_for_the_sentence() {
+    let rig = thursday_stated().await;
+    rig.user_states_later("later-1", 1_700_000_000_000, TUESDAY)
+        .await;
+    // Both delivered statements are named; the one taken from the message itself is not changed by it.
+    let each = |alias: &str| {
+        json!({"statement": alias, "effect": "replaced", "message": "m1", "sentence": TUESDAY,
+               "speaker": "user", "confidence": "high"})
+    };
+    rig.answers(&[&json!({"changes": [each("s1"), each("s2")]}).to_string()]);
+    rig.drain().await;
+    let block = rig.block().await;
+    assert_eq!(block.matches(TUESDAY).count(), 1, "{block}");
+    assert!(!block.contains(&stated(THURSDAY)), "{block}");
+    let kept = searched(&rig, THURSDAY).await;
+    let captured = memory_id(&rig, &stated(TUESDAY)).await;
+    assert_eq!(kept[0].2["changed_by"]["memory"], captured.as_str());
+    assert!(
+        searched(&rig, TUESDAY)
+            .await
+            .iter()
+            .all(|(_, _, rationale)| rationale["recorded_by"] != "change_detection"),
+        "no row of the pass's own"
+    );
+}
+
+/// The pass lists every delivered statement and the write follows the model's answer, not shared words: a correction that shares no word with its statement changes it, and an unrelated statement stays as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_correction_with_no_shared_word_changes_only_the_statement_the_answer_names() {
+    let rig = Rig::open_with(detection_config()).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.answers(&[NO_CHANGES]);
+    rig.drain().await;
+    let first: Value = serde_json::from_str(&detection_attempts(&rig)[0].prompt).unwrap();
+    let listed: Vec<(String, String)> = first["statements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["id"].as_str().unwrap().to_string(),
+                entry["text"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    let alias = listed
+        .iter()
+        .find(|(_, text)| *text == stated(THURSDAY))
+        .map(|(alias, _)| alias.clone())
+        .unwrap();
+    let later = "Move that to Tuesdays.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change(&alias, "replaced", "m1", later, "user", "high")]);
+    rig.drain().await;
+    let second: Value = serde_json::from_str(&detection_attempts(&rig)[1].prompt).unwrap();
+    assert_eq!(second["statements"].as_array().unwrap().len(), 2);
+    let block = rig.block().await;
+    assert!(!block.contains(&stated(THURSDAY)), "{block}");
+    assert!(block.contains(&stated(LINTER)), "{block}");
+    assert!(block.contains(&stated(later)), "{block}");
 }

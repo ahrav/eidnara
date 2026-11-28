@@ -20,7 +20,7 @@ evidence. Inspected 2026-09-19 at
   `Withheld`.
 - [kernel_routes/read.rs:383-488](../../../../../crates/daemon/src/kernel_routes/read.rs#L383-L488)
   filters by the bound project and scope before applying row limits.
-- [canonical_memory.rs:808-861](../../../../../crates/daemon/src/canonical_memory.rs#L808-L861)
+- [canonical_memory.rs:838-891](../../../../../crates/daemon/src/canonical_memory.rs#L838-L891)
   keeps visible positive decisions, then trims to the memory budget.
 - [admission.rs:4686-4698](../../../../../crates/kernel/src/admission.rs#L4686-L4698)
   distinguishes verified active automatic visibility from candidate/labeled,
@@ -37,11 +37,11 @@ evidence. Inspected 2026-09-19 at
   publication is therefore neither fact acceptance nor canonical admission.
 - [crates/daemon/tests/transform_canonical_memory.rs:48-217](../../../../../crates/daemon/tests/transform_canonical_memory.rs#L48-L217)
   checks candidate, scope, category, lifecycle exclusion, and warm reuse.
-  [canonical_memory.rs:1887-1956](../../../../../crates/daemon/src/canonical_memory.rs#L1887-L1956)
+  [canonical_memory.rs:1917-1986](../../../../../crates/daemon/src/canonical_memory.rs#L1917-L1986)
   checks budget exclusion and withheld-versus-empty metadata. Status: unaudited.
 
 Reachability is **default-production**: memory defaults enabled at
-[config.rs:145](../../../../../crates/daemon/src/config.rs#L148). The pinned
+[config.rs:145](../../../../../crates/daemon/src/config.rs#L175). The pinned
 reader is called by normal transform execution, not only a test helper.
 
 ## Failure scenario

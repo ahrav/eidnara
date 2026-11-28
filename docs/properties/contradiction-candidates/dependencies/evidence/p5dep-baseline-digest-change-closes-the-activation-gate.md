@@ -7,8 +7,8 @@ HEAD `3a3b916b7`. Surface S5.
 Plan KTD3 and U3: the `contradiction_candidates` table is a memory-store
 baseline change; index D4 batches it into Batch M1. `crates/storage/AGENTS.md`:
 "Preserve single-baseline storage. Reject schema mismatches; do not add
-migrations or a version ledger." `docs/memory-reviewer-operations.md:86-88`,
-`:234-240` describe the operational consequence. Lenses: version
+migrations or a version ledger." `docs/memory-reviewer-operations.md:104-106`,
+`:252-258` describe the operational consequence. Lenses: version
 compatibility; lifecycle transitions; C11.
 
 ## Evidence trail
@@ -39,7 +39,7 @@ compatibility; lifecycle transitions; C11.
   baseline, kernel incarnation, memory store incarnation, provider);
   `:218-240` `evaluate`: `Malformed` checks, then the first differing term
   -> `Closed::IdentityMismatch(field)`.
-- `crates/daemon/src/memory_reviewer/worker.rs:167`: live
+- `crates/daemon/src/memory_reviewer/worker.rs:175`: live
   `memstore_baseline_digest: memory_store::baseline_digest()`.
 - `activation.rs:491-495` test table: `"memstore_baseline_digest"` changed ->
   `IdentityMismatch("memory store baseline")`.

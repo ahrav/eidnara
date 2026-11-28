@@ -118,10 +118,35 @@ impl ReviewApply {
     }
 }
 
+/// What the switch reviews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReviewScope {
+    /// Once a session has ended (ten minutes after its last message, when a newer session starts, or when a caller drains the worker) the review model reads the session's user messages beside the statements the project delivers and names each one a message changed (`memory_reviewer::change_detection`). Stored memories are not reviewed one by one.
+    #[default]
+    Session,
+    /// Each stored memory is reviewed when later evidence may bear on it: stage 1 decides whether it changed and the review model writes a proposal (`memory_reviewer::review_cycle`).
+    Memory,
+}
+
+impl ReviewScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Memory => "memory",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        [Self::Session, Self::Memory]
+            .into_iter()
+            .find(|scope| scope.as_str() == value)
+    }
+}
+
 /// The user tier's MemoryReviewer switch and its settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemoryReviewerConfig {
-    /// User-only consent to review the project's memories with the configured model: the worker selects memories, sends each with its evidence through the host's model execution, and records a proposal. The switch stands in for the deployment owner's activation record.
+    /// User-only consent to review the project's memories with the configured model through the host's model execution, as `review` says: by default each session that ended is read beside the delivered statements and the changes a later user message makes are written; under `review: memory` or `apply: propose` the worker selects memories, sends each with its evidence, and records a proposal. The switch stands in for the deployment owner's activation record.
     pub enabled: bool,
     /// The `provider/model` every proposal request names; absent, the first model of the History Summarizer's chain.
     pub model: Option<String>,
@@ -130,6 +155,8 @@ pub struct MemoryReviewerConfig {
     pub apply: ReviewApply,
     /// The `provider/model` of the typed classifier that decides stage 1 in the chat model's place, as the harness names it (`typesafe/jev-latest`). It decides while a harness of the project answers classifier work; otherwise the stage-1 chat model decides.
     pub classifier: Option<String>,
+    /// What the switch reviews: each session at its end, or each stored memory on later evidence.
+    pub review: ReviewScope,
 }
 
 /// The chat model that decides stage 1 of a project's reviews.
@@ -1109,6 +1136,7 @@ pub enum ConfigKey {
     MemoryReviewerStage1Model,
     MemoryReviewerApply,
     MemoryReviewerClassifier,
+    MemoryReviewerReview,
     AutoSearchEnabled,
     AutoSearchScoreThreshold,
     AutoSearchMinPromptChars,
@@ -1154,6 +1182,7 @@ impl ConfigKey {
         Self::MemoryReviewerStage1Model,
         Self::MemoryReviewerApply,
         Self::MemoryReviewerClassifier,
+        Self::MemoryReviewerReview,
         Self::AutoSearchEnabled,
         Self::AutoSearchScoreThreshold,
         Self::AutoSearchMinPromptChars,
@@ -1196,6 +1225,7 @@ impl ConfigKey {
             Self::MemoryReviewerStage1Model => "/memory_reviewer/stage1_model",
             Self::MemoryReviewerApply => "/memory_reviewer/apply",
             Self::MemoryReviewerClassifier => "/memory_reviewer/classifier",
+            Self::MemoryReviewerReview => "/memory_reviewer/review",
             Self::AutoSearchEnabled => "/memory/auto_search/enabled",
             Self::AutoSearchScoreThreshold => "/memory/auto_search/score_threshold",
             Self::AutoSearchMinPromptChars => "/memory/auto_search/min_prompt_chars",
@@ -1251,6 +1281,7 @@ impl ConfigKey {
             | Self::MemoryReviewerStage1Model
             | Self::MemoryReviewerApply
             | Self::MemoryReviewerClassifier
+            | Self::MemoryReviewerReview
             | Self::CacheTtl => true,
             Self::ExecuteThresholdPercentage
             | Self::CompactionEnabled
@@ -1293,6 +1324,7 @@ impl ConfigKey {
             | Self::MemoryReviewerStage1Model
             | Self::MemoryReviewerApply
             | Self::MemoryReviewerClassifier
+            | Self::MemoryReviewerReview
             | Self::PromptSurfaceGuidanceOverrideText
             | Self::PromptSurfaceGuidanceOverridePath
             | Self::CacheTtl => TierClass::UserOnly,
@@ -1478,6 +1510,16 @@ fn apply_key(cfg: &mut DaemonConfig, tier: &Value, key: ConfigKey, warnings: &mu
                     Some(mode) => cfg.memory_reviewer.apply = mode,
                     None => warnings.push(format!(
                         "ignoring {pointer}: expected propose, contest, or apply; the mode stays contest"
+                    )),
+                }
+            }
+        }
+        ConfigKey::MemoryReviewerReview => {
+            if let Some(scope) = tier.pointer(pointer).and_then(Value::as_str) {
+                match ReviewScope::parse(scope) {
+                    Some(scope) => cfg.memory_reviewer.review = scope,
+                    None => warnings.push(format!(
+                        "ignoring {pointer}: expected session or memory; the switch reviews each session at its end"
                     )),
                 }
             }
@@ -2554,6 +2596,7 @@ mod tests {
                 ConfigKey::MemoryReviewerStage1Model,
                 ConfigKey::MemoryReviewerApply,
                 ConfigKey::MemoryReviewerClassifier,
+                ConfigKey::MemoryReviewerReview,
                 ConfigKey::MemoryInjectionBudgetTokens,
                 ConfigKey::MemoryBudgetTokens,
                 ConfigKey::UserProfileBudgetTokens,
@@ -2710,6 +2753,18 @@ mod tests {
         let cfg = merge_tiers(Some(&claude), None);
         assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Propose);
         assert_eq!(
+            cfg.memory_reviewer.review,
+            ReviewScope::Session,
+            "a switch reviews each session by default"
+        );
+        let per_memory = serde_json::json!({
+            "memory_reviewer": { "enabled": true, "model": "prov/reviewer", "review": "memory" },
+        });
+        assert_eq!(
+            merge_tiers(Some(&per_memory), None).memory_reviewer.review,
+            ReviewScope::Memory
+        );
+        assert_eq!(
             cfg.memory_reviewer_stage1_model(),
             Some(Stage1Model {
                 reference: "amazon-bedrock/global.anthropic.claude-haiku-5-5".to_string(),
@@ -2727,18 +2782,20 @@ mod tests {
         // A model outside provider/model form and a mode outside the three are refused with a warning, and the defaults stand.
         let malformed = serde_json::json!({
             "history_summarizer": { "module_model": "prov/summarizer" },
-            "memory_reviewer": { "enabled": true, "model": "reviewer", "stage1_model": "small", "apply": "always", "classifier": "jev" },
+            "memory_reviewer": { "enabled": true, "model": "reviewer", "stage1_model": "small", "apply": "always", "classifier": "jev", "review": "sessions" },
         });
         let (cfg, warnings) = merge_tiers_with_warnings(Some(&malformed), None);
         assert_eq!(cfg.memory_reviewer_model(), Some("prov/summarizer"));
         assert_eq!(cfg.memory_reviewer.stage1_model, None);
         assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Contest);
         assert_eq!(cfg.memory_reviewer_classifier(), None);
+        assert_eq!(cfg.memory_reviewer.review, ReviewScope::Session);
         for pointer in [
             "/memory_reviewer/model",
             "/memory_reviewer/stage1_model",
             "/memory_reviewer/apply",
             "/memory_reviewer/classifier",
+            "/memory_reviewer/review",
         ] {
             assert!(
                 warnings.iter().any(|warning| warning.contains(pointer)),
@@ -2893,7 +2950,7 @@ mod tests {
             "source_capture": { "enabled": true },
             "contradiction_candidates": { "enabled": true },
             "verifier": { "enabled": true },
-            "memory_reviewer": { "enabled": true, "model": "hostile/model", "stage1_model": "hostile/small", "apply": "apply", "classifier": "hostile/classifier" },
+            "memory_reviewer": { "enabled": true, "model": "hostile/model", "stage1_model": "hostile/small", "apply": "apply", "classifier": "hostile/classifier", "review": "memory" },
             "user_memories": { "enabled": true },
             "memory_classifier": {
                 "inject_docs": true,
@@ -3137,7 +3194,7 @@ mod tests {
             0,
             "tier values are read through ConfigKey::pointer(), never a raw literal"
         );
-        assert_eq!(ConfigKey::ALL.len(), 36);
+        assert_eq!(ConfigKey::ALL.len(), 37);
     }
 
     /// The user-memory gate's two keys and the budget's two keys resolve the

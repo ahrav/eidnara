@@ -922,6 +922,69 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).toContain(`Contested by ${id(2)}: ${JSON.stringify(observation)}`);
     });
 
+    it("names what changed a statement a session review replaced or made moot, after its whole text, on the route and on the fallback", async () => {
+        // A statement longer than the field cap keeps its change line.
+        const replaced = `User stated: Cut release branches on Thursdays. ${"Keep notes. ".repeat(120)}`;
+        const moot = "User stated: Keep the legacy importer running.";
+        const forged = "User stated: Cut release branches on Fridays.";
+        const unsigned = "User stated: Cut release branches on Mondays.";
+        for (const fallback of [false, true]) {
+            const { kernel, run } = harness();
+            const changed = (object: number, summary: string, change: object) =>
+                kernel.seedDecision({
+                    object_id: id(object),
+                    decision_kind: "PROJECT_RULES",
+                    summary,
+                    rationale: JSON.stringify({ source: "memory_capture", changed_by: change }),
+                    source_id: "memory_capture",
+                    labeled: true,
+                });
+            changed(1, replaced, {
+                effect: "replaced",
+                memory: id(5),
+                session: "s2",
+                message: "n4",
+            });
+            changed(2, moot, { effect: "moot", session: "s2", message: "n6" });
+            // Only the closed effects, with the session and the message, make a record.
+            changed(3, forged, { effect: "renamed", memory: id(5), session: "s2", message: "n4" });
+            changed(4, unsigned, { effect: "replaced", memory: id(5) });
+            const objects = [1, 2, 3, 4];
+            kernel.routeReply = () =>
+                fallback
+                    ? { kind: "terminal", terminal: "disabled" }
+                    : fused(objects.map((object) => ({ object: id(object), labeled: true })));
+            const execution = await run({ query: "release branches importer" });
+            if (execution.status !== "complete") throw new Error(execution.text);
+            const lines = execution.text.split("\n");
+            const changeOf = (object: number) => {
+                const rest = lines.slice(
+                    lines.findIndex((line) => line.includes(` id=${id(object)} `)) + 1,
+                );
+                const next = rest.findIndex((line) => line.includes(" id=mem_"));
+                return rest
+                    .slice(0, next === -1 ? undefined : next)
+                    .filter((line) => line.startsWith("Changed "));
+            };
+            expect(changeOf(1)).toEqual([`Changed (replaced) by ${id(5)}`]);
+            expect(changeOf(2)).toEqual(["Changed (moot)"]);
+            expect(changeOf(3)).toEqual([]);
+            expect(changeOf(4)).toEqual([]);
+            const shown = Object.fromEntries(
+                execution.prePack.map((result) => [
+                    result.objectId,
+                    result.source === "memory" ? (result.changedBy ?? null) : null,
+                ]),
+            );
+            expect(shown).toEqual({
+                [id(1)]: { effect: "replaced", memory: id(5) },
+                [id(2)]: { effect: "moot" },
+                [id(3)]: null,
+                [id(4)]: null,
+            });
+        }
+    });
+
     it("serves a current-work statement with its class and state on the route and on the fallback", async () => {
         const plan = "User stated: Next, move the retry budget into the client config.";
         const older = "User stated: Next, move the retry budget into the server config.";

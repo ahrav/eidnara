@@ -24,7 +24,7 @@ issues, no incident history, no git-history lens.
 
 Assumption (inferred): "default build" means the daemon built without the
 `test-support` feature and run with `DaemonConfig::default()`
-(`crates/daemon/src/config.rs:153-182`): `memory_enabled: true`,
+(`crates/daemon/src/config.rs:180-209`): `memory_enabled: true`,
 `source_capture_enabled: false`, `contradiction_candidates_enabled: false`.
 
 Every documented guarantee below is a claim under test. Every `file:line`
@@ -755,14 +755,14 @@ baseline, then a binary with a changed `baseline.sql`; an activation record
 naming the old digest.
 Confidence: high - [evidence](evidence/p5dep-baseline-digest-change-closes-the-activation-gate.md).
 Read `memory-store/src/lib.rs:336-341`, `storage/src/lib.rs:2631`,
-`activation.rs:174-240`, `worker.rs:167`.
+`activation.rs:174-240`, `worker.rs:175`.
 Existing check: the tests above and
 `docs/properties/shared-primitives/catalog.md:676`
 `store-schema-identity-matches-the-baseline` (active) for the open refusal
 across consumers. Status unaudited here; that record reports its own audit.
 Impact: P5 U3 is a baseline rotation (index D4, Batch M1); every deployment
 must reset the store and renew the activation record; proposals bound to the
-old incarnation become unadoptable (`memory-reviewer-operations.md:236-240`).
+old incarnation become unadoptable (`memory-reviewer-operations.md:254-258`).
 Open questions: None.
 
 ### p5dep-harness-sweep-retires-owners-before-evidence

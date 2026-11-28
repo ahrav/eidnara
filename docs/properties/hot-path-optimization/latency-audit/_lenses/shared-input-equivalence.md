@@ -551,7 +551,7 @@ both sides and neither resolved here:
 [todo-prefix]: ../../../../../crates/daemon/src/injection.rs#L187-L189
 [chunk-build]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L350-L381
 [segment-served]: ../../../../../crates/daemon/src/dispatch.rs#L104-L110
-[compaction-default]: ../../../../../crates/daemon/src/config.rs#L124
+[compaction-default]: ../../../../../crates/daemon/src/config.rs#L149
 [tail-reclaim]: ../../../../../crates/daemon/src/healing.rs#L130-L139
 [ser-msg]: ../../../../../crates/memory-store/src/lib.rs#L145-L161
 [from-parts]: ../../../../../crates/memory-store/src/lib.rs#L166-L180

@@ -15,7 +15,7 @@ mechanism to remain unchallenged. K4 requires byte pressure separately from K3.
   decision payload bytes. Domain/kind and scope exclusion precede both caps.
   Since #1210 the canonical-memory delivery walk applies the same two caps to
   each reader in `read_other_sessions`
-  (`crates/daemon/src/canonical_memory.rs:372-376`).
+  (`crates/daemon/src/canonical_memory.rs:402-406`).
 - [slice/read.rs:140-158][sizes] queries `length(decision_payload)` at the
   requested snapshot. This is BLOB byte length, not rendered summary length.
 - [kernel_routes.rs:2112-2152][test] asserts a nonempty truncated newest prefix;

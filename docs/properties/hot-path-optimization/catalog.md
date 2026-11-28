@@ -825,8 +825,8 @@ them without creating implementation tickets.
 [r2]: #preparation-refusal-does-not-append-audit-state
 [r3]: #redaction-audit-does-not-depend-on-retained-payload
 [pass-read]: ../../../crates/daemon/src/lib.rs#L9742-L9746
-[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L508
-[memory-default]: ../../../crates/daemon/src/config.rs#L125
+[memory-read]: ../../../crates/daemon/src/canonical_memory.rs#L229-L538
+[memory-default]: ../../../crates/daemon/src/config.rs#L150
 [dispatch]: ../../../crates/host-runtime/src/dispatch.rs#L910-L1270
 [close]: ../../../crates/host-runtime/src/dispatch.rs#L1466-L1522
 [read-callback]: ../../../crates/storage/src/lib.rs#L346
