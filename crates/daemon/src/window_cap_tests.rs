@@ -561,6 +561,32 @@ async fn a_window_at_the_cap_fires_a_chunk_that_reaches_the_half_cap_cut() {
     producer.notify.notify_waiters();
 }
 
+/// A subagent session under Eidnara fold authority starts no History Summarizer run at the
+/// cap, so it publishes no segment and its later passes take no fold. The primary-session
+/// test above fires for the same window.
+#[tokio::test(flavor = "current_thread")]
+async fn a_subagent_window_at_the_cap_fires_no_summarizer_and_takes_no_fold() {
+    let (handler, store, _dir, _project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let mut request = request_with_usage(window(WINDOW_CAP_BLOCKS as u64 + 100), 1_000, 200_000);
+    request["is_subagent"] = json!(true);
+    for _ in 0..2 {
+        let response = call_transform_request(&handler, request.clone()).await;
+        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(
+            response["history_summarizer"]["no_fire"], "subagent_session",
+            "{response}"
+        );
+        assert_ne!(response["action"], "HARD", "{response}");
+        assert_eq!(response["boundary"], Value::Null, "{response}");
+    }
+    assert_eq!(
+        store.load("ses").unwrap().meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle
+    );
+    assert!(store.load_history_segments("ses").unwrap().is_empty());
+}
+
 /// Meta at the cap with a cap-triggered firing in flight, for one and five text blocks per
 /// message under production-length message ids, stays within 384 KiB (SB-P47).
 #[tokio::test(flavor = "current_thread")]
