@@ -1960,7 +1960,10 @@ a fact of the same text and category, admitted labeled, whose rationale holds
 `message` (the session and the native message id of the user message that has
 the change), and `memory` (the id of the fact holding the user's later
 sentence) when the review recorded or found one; its statement record is
-retired. `eidnara_search` renders such a labeled fact with a line
+retired. A sentence the review approves carries a statement record whose
+`source_id` is `memory_capture_statement:` followed by 32 hexadecimal digits
+of the digest of the project, the session, the message, the sentence, and its
+approval, so each approved sentence holds an authority lineage of its own. `eidnara_search` renders such a labeled fact with a line
 `Changed (<effect>) by <fact id>` after its text, or `Changed (<effect>)` when
 the record names no fact, the fact id shown by the block's rule for a fact
 id; a `changed_by` without one of the two effects and a string `session` and
