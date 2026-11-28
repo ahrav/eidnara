@@ -31,7 +31,7 @@ Clauses and their disposition at HEAD:
   (`:137-140`) before `substituteConfigVariables` (`:141-145`;
   `config/variable.ts:106`). The screen blanks every chain literal that is
   blank or holds `{env:`/`{file:` at its token span, so it is never
-  substituted or read (`config/fold-authority.ts:79-121`).
+  substituted or read (`config/fold-authority.ts:79-134`).
 - "Accepts string-or-array fallbacks": preserved
   (`config/schema/agent-overrides.ts:54-57`); the module fallbacks use the
   same shape (`config/schema/eidnara.ts:128-133`).

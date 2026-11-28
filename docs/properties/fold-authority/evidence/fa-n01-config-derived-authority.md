@@ -35,12 +35,12 @@ PR C's head; Rust references are verified at `0ff62b29a`.
   The chain normalizer is `normalizeSummarizerChain`
   (`packages/opencode-plugin/src/config/fold-authority.ts:22-32`).
 - TypeScript resolution: the user tier is screened before substitution
-  (`screenUserTier`, `fold-authority.ts:97-121`, called at
+  (`screenUserTier`, `fold-authority.ts:98-134`, called at
   `config/index.ts:139`); excluded chain literals are blanked at their token
-  span (`excludedChainValues`, `fold-authority.ts:79-95`). Admission is
+  span (`excludedChainValues`, `fold-authority.ts:79-96`). Admission is
   `admissionOf` (`config/index.ts:602-607`); an unresolved admission sets
   `compaction.enabled = false` (`withdrawUnresolvedFoldAuthority`,
-  `fold-authority.ts:137-146`, called at `config/index.ts:561-564`). Pi uses
+  `fold-authority.ts:150-159`, called at `config/index.ts:561-564`). Pi uses
   the same screen and withdrawal (`packages/pi-plugin/src/config/index.ts:94`,
   `:480-485`).
 - The fixture's `contract` field defines the supported-input limit (regular
@@ -92,7 +92,7 @@ path and must fail.
 
 ### Q: Does returning `false` for an unresolved configuration satisfy D1a?
 
-- Sources examined: D1a in #834; `config.rs:181-185`; `fold-authority.ts:137-146`;
+- Sources examined: D1a in #834; `config.rs:181-185`; `fold-authority.ts:150-159`;
   the fixture contract; `fold_authority::plan`
   (`crates/daemon/src/fold_authority.rs:105-113`); setup
   (`packages/cli/src/commands/setup-opencode.ts:618-628`); doctor

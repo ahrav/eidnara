@@ -261,7 +261,7 @@ Status: invalidated
 Invalidated: PR #898 (#852) replaces the "raw boolean only" clause with the
 chain clause of FA-N01 (`bd592e4a0`), and its merged history withdraws
 folding on an unresolved admission (`f5b10fefe`,
-`packages/opencode-plugin/src/config/fold-authority.ts:137-146`). The clauses
+`packages/opencode-plugin/src/config/fold-authority.ts:150-159`). The clauses
 "off omits `eidnara_reduce`" and "fold commands refuse while their
 definitions stay registered" survive unchanged. #900 and #904 consume the
 predicate through `foldAuthorityOf` and do not change it.
@@ -794,7 +794,7 @@ Invalidated: PR #898 (#852) replaces two clauses under FA-N01: the module keys
 are declared on the summarizer schema
 (`packages/opencode-plugin/src/config/schema/eidnara.ts:121-141`), so they
 are accepted, not rejected; and chain-key values are screened before
-substitution (`screenUserTier`, `config/fold-authority.ts:97-121`, called at
+substitution (`screenUserTier`, `config/fold-authority.ts:98-134`, called at
 `config/index.ts:137-140`), so a chain reference is excluded, not expanded.
 Surviving clauses: `.jsonc` before `.json` (`shared/jsonc-parser.ts:227-243`),
 user-tier substitution before parsing for the rest of the document
@@ -1035,7 +1035,7 @@ Contract-versus-code: D1a says a rejected admission is "never `false`"; since
 `f5b10fefe`, which merged with #898 after its description, both loaders
 return `false` for an unresolved configuration
 (`config.rs:181-185`; `withdrawUnresolvedFoldAuthority`,
-`packages/opencode-plugin/src/config/fold-authority.ts:137-146`) and carry
+`packages/opencode-plugin/src/config/fold-authority.ts:150-159`) and carry
 `Unresolved` beside it, and the fixture contract encodes that reading. The
 consumers found read the admission first
 (`crates/daemon/src/fold_authority.rs:105-113`;

@@ -284,9 +284,12 @@ pub(crate) fn module_projects(
                 classifier: config.memory_reviewer_classifier().map(str::to_string),
                 review: config.memory_reviewer.review,
                 memory_budget_bits: config.memory_budget_tokens.to_bits(),
+                // Capture's consent as capture reads it for the root: the user tier's own switches, and the root's merged load, whose project tier may turn memory or promotion off.
                 record_sentences: config.memory_enabled
                     && config.auto_promote
-                    && config.memory_auto_capture,
+                    && config.memory_auto_capture
+                    && binding.config.memory_enabled
+                    && binding.config.auto_promote,
                 harness: binding.harness.clone(),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
@@ -676,10 +679,18 @@ impl Worker {
             if switch.review == crate::config::ReviewScope::Session
                 && switch.apply != ReviewApply::Propose
             {
+                // The root's path is resolved again here; a path that now names another project than the one its route bound is left unread.
+                let project = ProjectBinding::new(&root.project_root);
+                if project.digest() != root.project_digest {
+                    eprintln!(
+                        "daemon: memory_reviewer leaves a switched root whose path no longer names the project its route bound"
+                    );
+                    continue;
+                }
                 let detected = super::change_detection::pass(
                     &kernel,
                     &self.store,
-                    &ProjectBinding::new(&root.project_root),
+                    &project,
                     &host,
                     &self.switched.detection,
                     super::change_detection::PassSettings {

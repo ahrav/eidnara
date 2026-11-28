@@ -4016,15 +4016,25 @@ async fn a_session_deleted_while_its_request_waits_writes_no_change() {
         2,
         "the request is with the model"
     );
-    rig.handler
+    let deleted = rig
+        .handler
         .core
         .handle_session_delete_value(
             test_route(SECOND),
             &json!({ "method": "session.delete", "session_id": "s2" }),
         )
         .await;
+    assert!(
+        !format!("{deleted:?}").starts_with("Error"),
+        "the delete succeeded: {deleted:?}"
+    );
     rig.state.block_output.store(false, Ordering::SeqCst);
+    rig.state.notify.notify_one();
     drain.await.unwrap();
+    assert!(
+        rig.state.await_results.lock().unwrap().is_empty(),
+        "the answer was read after the delete"
+    );
     let block = rig.block().await;
     assert!(block.contains(&stated(THURSDAY)), "{block}");
     assert!(
@@ -4106,6 +4116,10 @@ async fn propose_keeps_the_per_memory_review() {
     rig.decides(&[KEEP, KEEP, KEEP, KEEP]);
     rig.drain().await;
     assert!(detection_attempts(&rig).is_empty());
+    assert!(
+        rig.attempts().iter().any(|attempt| attempt.model != MODEL),
+        "the per-memory review asked its stage-one model"
+    );
     assert!(rig.block().await.contains(&stated(THURSDAY)));
 }
 
@@ -4131,6 +4145,15 @@ async fn with_capture_consent_off_the_pass_records_no_sentence() {
     rig.settle_capture().await;
     rig.answers(&[&change("s1", "replaced", "m1", later, "user", "high")]);
     rig.drain().await;
+    assert_eq!(
+        detection_attempts(&rig).len(),
+        2,
+        "the pass asked the model after the opt-out"
+    );
+    assert!(
+        rig.state.await_results.lock().unwrap().is_empty(),
+        "and read its grounded answer"
+    );
     assert!(rig.block().await.contains(&stated(THURSDAY)));
     assert!(searched(&rig, later).await.is_empty());
 }
@@ -4161,4 +4184,42 @@ async fn a_change_names_the_row_capture_holds_for_the_sentence() {
             .all(|(_, _, rationale)| rationale["recorded_by"] != "change_detection"),
         "no row of the pass's own"
     );
+}
+
+/// The pass lists every delivered statement and the write follows the model's answer, not shared words: a correction that shares no word with its statement changes it, and an unrelated statement stays as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_correction_with_no_shared_word_changes_only_the_statement_the_answer_names() {
+    let rig = Rig::open_with(detection_config()).await;
+    rig.state_rules(&[THURSDAY, LINTER]).await;
+    rig.answers(&[NO_CHANGES]);
+    rig.drain().await;
+    let first: Value = serde_json::from_str(&detection_attempts(&rig)[0].prompt).unwrap();
+    let listed: Vec<(String, String)> = first["statements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["id"].as_str().unwrap().to_string(),
+                entry["text"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    let alias = listed
+        .iter()
+        .find(|(_, text)| *text == stated(THURSDAY))
+        .map(|(alias, _)| alias.clone())
+        .unwrap();
+    let later = "Move that to Tuesdays.";
+    rig.publish_later("later-1", 1_700_000_000_000, later).await;
+    rig.settle_capture().await;
+    rig.answers(&[&change(&alias, "replaced", "m1", later, "user", "high")]);
+    rig.drain().await;
+    let second: Value = serde_json::from_str(&detection_attempts(&rig)[1].prompt).unwrap();
+    assert_eq!(second["statements"].as_array().unwrap().len(), 2);
+    let block = rig.block().await;
+    assert!(!block.contains(&stated(THURSDAY)), "{block}");
+    assert!(block.contains(&stated(LINTER)), "{block}");
+    assert!(block.contains(&stated(later)), "{block}");
 }

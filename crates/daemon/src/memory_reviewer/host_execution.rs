@@ -259,6 +259,17 @@ impl HostExecution {
             })
         })?;
         let bytes = output.text.len();
+        // An answer from another model is told to the caller before its body is judged, with none of the body released, so the caller's model check closes review whatever the body holds.
+        if !self.answered_by_requested(output.model.as_deref()) {
+            accounting.transport_bytes = bytes;
+            accounting.decoded_text_bytes = bytes;
+            return Ok(AssistantText {
+                text: String::new(),
+                stop_reason: Some(StopReason::EndTurn),
+                model: output.model,
+                accounting: *accounting,
+            });
+        }
         let over = |limit: u64| u64::try_from(bytes).unwrap_or(u64::MAX) > limit;
         if over(allowance.raw_response_bytes) || over(allowance.decoded_text_bytes) {
             // A response past the job's remainder spends the whole remainder, as the direct sender's collector records it.

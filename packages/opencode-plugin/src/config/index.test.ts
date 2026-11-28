@@ -1285,6 +1285,43 @@ describe("fold-authority parity fixture", () => {
         );
     });
 
+    it("keeps the daemon's default mode for a memory reviewer mode that holds a reference and warns with its key", () => {
+        for (const [key, reference, value, fallback] of [
+            ["apply", "{env:REVIEW_MODE}", "propose", "contest"],
+            ["review", "{file:mode.txt}", "memory", "session"],
+        ] as const) {
+            const user = JSON.stringify({ memory_reviewer: { enabled: true, [key]: reference } });
+            const { config } = loadDetailedWithTierFiles(
+                { "eidnara.jsonc": user, "mode.txt": value },
+                {},
+                { REVIEW_MODE: value },
+            );
+            const reviewer = (config as { memory_reviewer?: Record<string, unknown> })
+                .memory_reviewer;
+            expect([key, reviewer?.enabled, reviewer?.[key]]).toEqual([key, true, fallback]);
+            expect([
+                key,
+                config.configWarnings?.some((w) => w.includes(`memory_reviewer.${key}`)),
+            ]).toEqual([key, true]);
+        }
+        // Literal modes load as written and draw no warning.
+        const { config } = loadDetailedWithTierFiles(
+            {
+                "eidnara.jsonc": JSON.stringify({
+                    memory_reviewer: { enabled: true, apply: "propose", review: "memory" },
+                }),
+            },
+            {},
+        );
+        const reviewer = (config as { memory_reviewer?: Record<string, unknown> }).memory_reviewer;
+        expect([reviewer?.apply, reviewer?.review]).toEqual(["propose", "memory"]);
+        expect(
+            config.configWarnings?.some(
+                (w) => w.includes("memory_reviewer.apply") || w.includes("memory_reviewer.review"),
+            ),
+        ).not.toBe(true);
+    });
+
     it("rejects a raw lenient read that skips the loader pipeline", () => {
         const mismatches = fixture.rows.filter((row) => {
             const actual = outcome(() => {

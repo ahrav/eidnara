@@ -31,7 +31,7 @@ At HEAD `0ff62b29a`:
   in `bd592e4a0` (#898); `git log` shows no later commit to the file.
 - Unresolved admission forces `compaction.enabled = false` with a warning:
   `withdrawUnresolvedFoldAuthority`
-  (`packages/opencode-plugin/src/config/fold-authority.ts:137-146`), from
+  (`packages/opencode-plugin/src/config/fold-authority.ts:150-159`), from
   `f5b10fefe`, which is in #898's merged history (`git merge-base
   --is-ancestor f5b10fefe dd5dcc170`).
 - Tool registry: `compactionOff = !isCompactionEnabled(pluginConfig)` omits
@@ -115,7 +115,7 @@ for an empty chain.
 - Findings: No. #900 derives setup's and doctor's authority through
   `foldAuthorityOf`, which restates the rule over the same
   `normalizeSummarizerChain` and adds the `enabled: false` and unresolved
-  arms (`packages/opencode-plugin/src/config/fold-authority.ts:153-171`).
+  arms (`packages/opencode-plugin/src/config/fold-authority.ts:166-184`).
   #904 (`a4827a892`) moved `FoldAuthority`, `foldAuthorityOf`, and
   `describeFoldAuthority` there from the CLI. The rule therefore has two
   expressions, `isCompactionEnabled` and `foldAuthorityOf`; they agree on

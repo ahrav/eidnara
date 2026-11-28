@@ -4034,7 +4034,7 @@ struct End {
 /// holds as recorded: the effect, the later user message that has it, and
 /// the row that holds the user's later sentence. The record holds identifiers and no text, so a reader takes the
 /// words from the rows it names.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize)]
 pub(crate) struct Change {
     /// `replaced` or `moot`.
     pub(crate) effect: String,
@@ -4088,19 +4088,30 @@ pub(crate) fn capture_rationale(decision: &kernel::DecisionRow) -> CaptureRation
 /// Where a capture row's quotation came from, as its rationale records it:
 /// the session and the native id of the message, and the quotation itself.
 /// A row written before its rationale named the session carries no session.
-#[derive(Default, Deserialize)]
+#[derive(Default)]
 pub(crate) struct RowSource {
-    #[serde(default)]
     pub(crate) session: Option<String>,
-    #[serde(default)]
     pub(crate) message: Option<String>,
-    #[serde(default)]
     pub(crate) quote: Option<String>,
 }
 
-/// The source the rationale of capture row `decision` records.
+/// The source the rationale of capture row `decision` records. Each field is read on its own, so one of the wrong type leaves the others as recorded.
 pub(crate) fn capture_source(decision: &kernel::DecisionRow) -> RowSource {
-    serde_json::from_str(&decision.payload.rationale).unwrap_or_default()
+    let Ok(Value::Object(rationale)) = serde_json::from_str::<Value>(&decision.payload.rationale)
+    else {
+        return RowSource::default();
+    };
+    let field = |name: &str| {
+        rationale
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    RowSource {
+        session: field("session"),
+        message: field("message"),
+        quote: field("quote"),
+    }
 }
 
 /// Whether an observation contests the statement `decision` records.
@@ -4566,7 +4577,11 @@ pub(crate) fn record_reviewed_sentence(
     );
     let hex = &digest[..32];
     let id = format!("mem_{hex}");
-    if envelope.object_state(&id)?.is_some() {
+    // The row a replay finds is named only while it is live; a retired one is not recorded again.
+    if let Some(state) = envelope.object_state(&id)? {
+        if state.object.invalidated_commit_seq.is_some() {
+            return Err(kernel::KernelError::Conflict);
+        }
         return Ok(id);
     }
     let mut domains = HashSet::new();

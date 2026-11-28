@@ -1415,7 +1415,7 @@ the order `lasting`, `unsettled`, `current_work`, `request`, `status`, and no cl
 one of them carried none; the rule above for a `current_work` fact frozen
 contesting a fact served on `auto_inject` applies to the joined fact. A class on a proposal of an assistant source is
 stored in the same way and changes nothing: such a fact is never the user's
-statement. Capture alone writes the `user-statements` domain: a
+statement. Capture and the session review (below) are the writers of the `user-statements` domain: a
 `kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
 quotes: source kind `user`, source id `memory_capture_statement:` followed by
 the first 32 hexadecimal digits of the capture source's identity, revision 1.
@@ -1959,15 +1959,16 @@ a fact of the same text and category, admitted labeled, whose rationale holds
 `changed_by`, an object with `effect` (`replaced` or `moot`), `session` and
 `message` (the session and the native message id of the user message that has
 the change), and `memory` (the id of the fact holding the user's later
-sentence) when the review recorded or found one; its statement record is
-retired. A sentence the review approves carries a statement record whose
+sentence); its statement record is retired. A fact of work in progress the
+review finds replaced, made moot, or ended is ended instead, with `ended_by`
+as above. A sentence the review approves carries a statement record whose
 `source_id` is `memory_capture_statement:` followed by 32 hexadecimal digits
 of the digest of the project, the session, the message, the sentence, and its
 approval, so each approved sentence holds an authority lineage of its own. `eidnara_search` renders such a labeled fact with a line
-`Changed (<effect>) by <fact id>` after its text, or `Changed (<effect>)` when
-the record names no fact, the fact id shown by the block's rule for a fact
-id; a `changed_by` without one of the two effects and a string `session` and
-`message` renders no line. Both search routes build a result
+`Changed (<effect>) by <fact id>` after its text, the fact id shown by the
+block's rule for a fact id, or `Changed (<effect>)` for a record without a
+string `memory`; a `changed_by` without one of the two effects and a string
+`session` and `message` renders no line. Both search routes build a result
 from the fact's row as `explicit_search` serves it, so they render one
 class and state for a fact, and neither route selects facts by class or by
 approval. Only a later statement of the user whose
