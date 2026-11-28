@@ -11385,6 +11385,17 @@ const DUPLICATE_TOOL_USE_REPORT_SESSIONS: usize = 1_024;
 
 static DUPLICATE_TOOL_USE_REPORTS: OnceLock<Mutex<DuplicateToolUseReports>> = OnceLock::new();
 
+/// The bucket estimate assumes a 7/8 load factor with power-of-two sizing, one control byte
+/// per bucket, and a 16-byte trailing control group.
+pub(crate) const DUPLICATE_TOOL_USE_REPORT_RETAINED_BYTES_BOUND: usize = {
+    let buckets = DUPLICATE_TOOL_USE_REPORT_SESSIONS * 2;
+    let bucket_bytes = std::mem::size_of::<(String, usize)>() + 1;
+    std::mem::size_of::<OnceLock<Mutex<DuplicateToolUseReports>>>()
+        + buckets * bucket_bytes
+        + 16
+        + DUPLICATE_TOOL_USE_REPORT_SESSIONS * MAX_REQUEST_IDENTITY_BYTES
+};
+
 impl DuplicateToolUseReports {
     fn line(&mut self, session_id: &str, duplicates: &[(String, usize, usize)]) -> Option<String> {
         let (first_id, message_index, block_index) = duplicates.first()?;
@@ -22918,6 +22929,41 @@ pub(crate) mod tests {
             None
         );
         assert!(reports.line("session-0", &one).is_some());
+    }
+
+    #[test]
+    fn the_resident_declaration_counts_the_duplicate_report_table_at_its_bound() {
+        let mut reports = DuplicateToolUseReports::default();
+        let one = [("id".to_string(), 1, 0)];
+        let mut most_sessions = 0;
+        let mut most_bytes = 0;
+        for session in 0..3 * DUPLICATE_TOOL_USE_REPORT_SESSIONS + 7 {
+            let id = format!("{session:0>width$}", width = MAX_REQUEST_IDENTITY_BYTES);
+            assert!(reports.line(&id, &one).is_some());
+            let keys: usize = reports.reported.keys().map(String::capacity).sum();
+            // The estimate assumes a 7/8 load factor, one control byte per bucket, and a
+            // 16-byte trailing control group.
+            let buckets = (reports.reported.capacity() * 8).div_ceil(7);
+            let table = buckets * (std::mem::size_of::<(String, usize)>() + 1) + 16;
+            most_sessions = most_sessions.max(reports.reported.len());
+            most_bytes =
+                most_bytes.max(std::mem::size_of_val(&DUPLICATE_TOOL_USE_REPORTS) + keys + table);
+        }
+        assert_eq!(most_sessions, DUPLICATE_TOOL_USE_REPORT_SESSIONS);
+        assert!(most_bytes > DUPLICATE_TOOL_USE_REPORT_SESSIONS * MAX_REQUEST_IDENTITY_BYTES);
+        assert!(
+            most_bytes <= DUPLICATE_TOOL_USE_REPORT_RETAINED_BYTES_BOUND,
+            "{most_bytes}"
+        );
+
+        let (_, declaration) = include_str!("lib.rs")
+            .split_once("pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 =")
+            .expect("the daemon declares its retained resident bytes");
+        let (declaration, _) = declaration.split_once(';').unwrap();
+        assert!(
+            declaration.contains("transform::DUPLICATE_TOOL_USE_REPORT_RETAINED_BYTES_BOUND"),
+            "{declaration}"
+        );
     }
 
     #[test]
