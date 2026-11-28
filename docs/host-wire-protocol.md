@@ -1952,7 +1952,19 @@ serves the fact as approved and by ` state=ended` when it is labeled and its
 rationale holds `ended_by` with a string `memory` and a string `session`, in
 which case a line `Ended by <fact id>` follows its text, the
 fact id shown by the block's rule for a fact id; a fact stored labeled with
-no `ended_by` carries the class alone. Both search routes build a result
+no `ended_by` carries the class alone. A session review
+(`memory_reviewer.review` `session`, `docs/memory-reviewer-operations.md`)
+supersedes a fact it finds replaced or made moot by a later user message with
+a fact of the same text and category, admitted labeled, whose rationale holds
+`changed_by`, an object with `effect` (`replaced` or `moot`), `session` and
+`message` (the session and the native message id of the user message that has
+the change), and `memory` (the id of the fact holding the user's later
+sentence) when the review recorded or found one; its statement record is
+retired. `eidnara_search` renders such a labeled fact with a line
+`Changed (<effect>) by <fact id>` after its text, or `Changed (<effect>)` when
+the record names no fact, the fact id shown by the block's rule for a fact
+id; a `changed_by` without one of the two effects and a string `session` and
+`message` renders no line. Both search routes build a result
 from the fact's row as `explicit_search` serves it, so they render one
 class and state for a fact, and neither route selects facts by class or by
 approval. Only a later statement of the user whose

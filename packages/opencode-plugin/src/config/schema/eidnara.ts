@@ -646,7 +646,7 @@ export const EidnaraConfigSchema = z
                     .boolean()
                     .default(false)
                     .describe(
-                        "User-only: review the project's memories with the configured models. The daemon selects a memory when later messages may have changed it, asks a small model whether they did, and for a memory that model flags asks the review model for a cited proposal to retain, revise, or retire it, all through the host's model execution (default: false). Also turns on source_capture and contradiction_candidates, whose rows a review reads. Project values are ignored with a warning.",
+                        "User-only: review the project's memories with the configured models, through the host's model execution, as memory_reviewer.review says: by default the review model reads each session that ended beside the statements the project delivers and marks the statements a later user message changed; with review memory the daemon selects a memory when later messages may have changed it, asks a small model whether they did, and for a memory that model flags asks the review model for a cited proposal to retain, revise, or retire it (default: false). Also turns on source_capture and contradiction_candidates, whose rows a review reads. Project values are ignored with a warning.",
                     ),
                 model: MemoryReviewerModelSchema.optional().describe(
                     "User-only: the provider/model every proposal request names, as a literal; {env:} and {file:} references are not supported. Absent, reviews use the history summarizer's model.",
@@ -658,7 +658,7 @@ export const EidnaraConfigSchema = z
                     .enum(["propose", "contest", "apply"])
                     .default("contest")
                     .describe(
-                        "User-only: what the daemon does with a change proposal that stage 1 flagged, that states low uncertainty, and that cites a later message. contest marks a replaced memory as disputed, which moves it from automatic delivery to explicit search and can be undone; apply retires or revises it; propose leaves every proposal for review.accept. In contest and apply, a user statement that a later statement replaces in part stays delivered and its line names the later statement (default: contest).",
+                        "User-only: what the daemon does with a change proposal that stage 1 flagged, that states low uncertainty, and that cites a later message. contest marks a replaced memory as disputed, which moves it from automatic delivery to explicit search and can be undone; apply retires or revises it; propose leaves every proposal for review.accept, and keeps the per-memory review whatever memory_reviewer.review says. In contest and apply, a user statement that a later statement replaces in part stays delivered and its line names the later statement, and a session review writes its changes as memory_reviewer.review describes (default: contest).",
                     ),
                 classifier: MemoryReviewerModelSchema.optional().describe(
                     "User-only: the provider/model of a typed classifier that decides stage 1 in place of the small chat model, for example typesafe/jev-latest, as a literal; {env:} and {file:} references are not supported. A harness that can call it answers the daemon's classifier work, which sends the memory and the messages under review to the classifier's provider. Absent, or on a harness that cannot call a classifier, the small chat model decides.",
@@ -667,7 +667,7 @@ export const EidnaraConfigSchema = z
                     .enum(["session", "memory"])
                     .default("session")
                     .describe(
-                        "User-only: what the switch reviews. session: at each session's end the review model reads the session's user messages beside every statement the project delivers and names each statement a later message replaced, narrowed, made moot, or, for work in progress, ended; a replaced statement leaves automatic delivery for explicit search with what changed it and the user's later sentence is delivered in its place, and a narrowed one stays delivered with its line marked contested. memory: each stored memory is reviewed one by one when later messages may have changed it, as stage 1 and the review model decide (default: session).",
+                        "User-only: what the switch reviews. session: once a session has ended (ten minutes after its last message, when a newer session starts, or when a host drains the reviewer at its end) the review model reads the session's user messages beside every statement the project delivers and names each statement a later message replaced, narrowed, made moot, or, for work in progress, ended; a replaced statement leaves automatic delivery for explicit search with what changed it and the user's later sentence is delivered in its place, and a narrowed one stays delivered with its line marked contested. memory: each stored memory is reviewed one by one when later messages may have changed it, as stage 1 and the review model decide. apply propose keeps the memory review (default: session).",
                     ),
             })
             .default({ enabled: false, apply: "contest", review: "session" })

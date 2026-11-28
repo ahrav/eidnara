@@ -4032,16 +4032,14 @@ struct End {
 
 /// What a change detection pass found about a statement that no longer
 /// holds as recorded: the effect, the later user message that has it, and
-/// the row that records the user's later sentence, when the pass recorded
-/// one. The record holds identifiers and no text, so a reader takes the
+/// the row that holds the user's later sentence. The record holds identifiers and no text, so a reader takes the
 /// words from the rows it names.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Change {
     /// `replaced` or `moot`.
     pub(crate) effect: String,
-    /// The row holding the user's later sentence, when one was recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) memory: Option<String>,
+    /// The row holding the user's later sentence.
+    pub(crate) memory: String,
     pub(crate) session: String,
     /// The native id of the user message that has the change.
     pub(crate) message: String,
@@ -4087,26 +4085,22 @@ pub(crate) fn capture_rationale(decision: &kernel::DecisionRow) -> CaptureRation
     serde_json::from_str(&decision.payload.rationale).unwrap_or_default()
 }
 
-/// The native id of the message a capture row was taken from, as its rationale records it.
-pub(crate) fn capture_rationale_message(decision: &kernel::DecisionRow) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Message {
-        message: Option<String>,
-    }
-    serde_json::from_str::<Message>(&decision.payload.rationale)
-        .ok()?
-        .message
+/// Where a capture row's quotation came from, as its rationale records it:
+/// the session and the native id of the message, and the quotation itself.
+/// A row written before its rationale named the session carries no session.
+#[derive(Default, Deserialize)]
+pub(crate) struct RowSource {
+    #[serde(default)]
+    pub(crate) session: Option<String>,
+    #[serde(default)]
+    pub(crate) message: Option<String>,
+    #[serde(default)]
+    pub(crate) quote: Option<String>,
 }
 
-/// The quotation a capture row was stored from, as its rationale records it.
-pub(crate) fn capture_rationale_quote(decision: &kernel::DecisionRow) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Quote {
-        quote: Option<String>,
-    }
-    serde_json::from_str::<Quote>(&decision.payload.rationale)
-        .ok()?
-        .quote
+/// The source the rationale of capture row `decision` records.
+pub(crate) fn capture_source(decision: &kernel::DecisionRow) -> RowSource {
+    serde_json::from_str(&decision.payload.rationale).unwrap_or_default()
 }
 
 /// Whether an observation contests the statement `decision` records.
@@ -4417,6 +4411,17 @@ pub(crate) fn contest_reviewed_statement(
     )
 }
 
+/// Whether `statement` is still the row a change detection pass read and one
+/// capture wrote, read again inside the pass's commit: `Conflict` when the
+/// statement changed after the pass read it.
+pub(crate) fn reviewed_target(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    statement: &kernel::DecisionRow,
+) -> Result<bool, kernel::KernelError> {
+    Ok(reviewed_revision(envelope, project, statement)?.is_some())
+}
+
 /// The row of a statement a change detection pass may rewrite, read again
 /// inside its commit: `Conflict` when the statement changed after the pass
 /// read it, `Ok(None)` for a row capture did not write, and the row's
@@ -4455,12 +4460,13 @@ pub(crate) fn retire_reviewed_statement(
     let Some(revision) = reviewed_revision(envelope, project, statement)? else {
         return Ok(None);
     };
-    let rewrite = match (&change.memory, states_current_work(statement)) {
-        (Some(memory), true) => Rewrite::Ended(End {
-            memory: memory.clone(),
+    let rewrite = if states_current_work(statement) {
+        Rewrite::Ended(End {
+            memory: change.memory.clone(),
             session: change.session.clone(),
-        }),
-        _ => Rewrite::Changed(change),
+        })
+    } else {
+        Rewrite::Changed(change)
     };
     rewrite_statement(
         envelope,
@@ -4515,6 +4521,9 @@ pub(crate) struct ReviewedSentence<'a> {
     /// Whether the sentence states work in progress, as the statement it
     /// replaces does.
     pub(crate) current_work: bool,
+    /// Whose words the sentence is, as the pass read them; `None` when the
+    /// pass's answer named no speaker.
+    pub(crate) speaker: Option<Speaker>,
 }
 
 /// Whether `sentence` is one or more whole sentences of `text` that read as
@@ -4570,15 +4579,17 @@ pub(crate) fn record_reviewed_sentence(
     } else {
         Lifetime::Lasting
     };
-    let rationale = json!({
+    let mut rationale = json!({
         "source": CAPTURE_SOURCE_ID,
         "session": sentence.session,
         "message": sentence.message,
         "quote": sentence.sentence,
         "lifetime": lifetime,
-        "speaker": Speaker::User,
         "recorded_by": "change_detection",
     });
+    if let Some(speaker) = sentence.speaker {
+        rationale["speaker"] = json!(speaker);
+    }
     let summary = format!("{USER_STATED}: {}", sentence.sentence.trim());
     envelope.insert_decision(kernel::DecisionSpec {
         decision_id: format!("dec_{hex}"),

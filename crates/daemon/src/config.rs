@@ -121,7 +121,7 @@ impl ReviewApply {
 /// What the switch reviews.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReviewScope {
-    /// At each session's end the review model reads the session's user messages beside the statements the project delivers and names each one a message changed (`memory_reviewer::change_detection`). Stored memories are not reviewed one by one.
+    /// Once a session has ended (ten minutes after its last message, when a newer session starts, or when a caller drains the worker) the review model reads the session's user messages beside the statements the project delivers and names each one a message changed (`memory_reviewer::change_detection`). Stored memories are not reviewed one by one.
     #[default]
     Session,
     /// Each stored memory is reviewed when later evidence may bear on it: stage 1 decides whether it changed and the review model writes a proposal (`memory_reviewer::review_cycle`).
@@ -144,7 +144,7 @@ impl ReviewScope {
 }
 
 /// The user tier's MemoryReviewer switch and its settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemoryReviewerConfig {
     /// User-only consent to review the project's memories with the configured model: the worker selects memories, sends each with its evidence through the host's model execution, and records a proposal. The switch stands in for the deployment owner's activation record.
     pub enabled: bool,
@@ -157,19 +157,6 @@ pub struct MemoryReviewerConfig {
     pub classifier: Option<String>,
     /// What the switch reviews: each session at its end, or each stored memory on later evidence.
     pub review: ReviewScope,
-}
-
-impl Default for MemoryReviewerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: None,
-            stage1_model: None,
-            apply: ReviewApply::default(),
-            classifier: None,
-            review: ReviewScope::Session,
-        }
-    }
 }
 
 /// The chat model that decides stage 1 of a project's reviews.
@@ -2766,6 +2753,18 @@ mod tests {
         let cfg = merge_tiers(Some(&claude), None);
         assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Propose);
         assert_eq!(
+            cfg.memory_reviewer.review,
+            ReviewScope::Session,
+            "a switch reviews each session by default"
+        );
+        let per_memory = serde_json::json!({
+            "memory_reviewer": { "enabled": true, "model": "prov/reviewer", "review": "memory" },
+        });
+        assert_eq!(
+            merge_tiers(Some(&per_memory), None).memory_reviewer.review,
+            ReviewScope::Memory
+        );
+        assert_eq!(
             cfg.memory_reviewer_stage1_model(),
             Some(Stage1Model {
                 reference: "amazon-bedrock/global.anthropic.claude-haiku-5-5".to_string(),
@@ -2783,18 +2782,20 @@ mod tests {
         // A model outside provider/model form and a mode outside the three are refused with a warning, and the defaults stand.
         let malformed = serde_json::json!({
             "history_summarizer": { "module_model": "prov/summarizer" },
-            "memory_reviewer": { "enabled": true, "model": "reviewer", "stage1_model": "small", "apply": "always", "classifier": "jev" },
+            "memory_reviewer": { "enabled": true, "model": "reviewer", "stage1_model": "small", "apply": "always", "classifier": "jev", "review": "sessions" },
         });
         let (cfg, warnings) = merge_tiers_with_warnings(Some(&malformed), None);
         assert_eq!(cfg.memory_reviewer_model(), Some("prov/summarizer"));
         assert_eq!(cfg.memory_reviewer.stage1_model, None);
         assert_eq!(cfg.memory_reviewer.apply, ReviewApply::Contest);
         assert_eq!(cfg.memory_reviewer_classifier(), None);
+        assert_eq!(cfg.memory_reviewer.review, ReviewScope::Session);
         for pointer in [
             "/memory_reviewer/model",
             "/memory_reviewer/stage1_model",
             "/memory_reviewer/apply",
             "/memory_reviewer/classifier",
+            "/memory_reviewer/review",
         ] {
             assert!(
                 warnings.iter().any(|warning| warning.contains(pointer)),

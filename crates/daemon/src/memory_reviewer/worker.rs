@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
-use crate::kernel_routes::{KernelOpenCoordinator, KernelState};
+use crate::kernel_routes::{KernelOpenCoordinator, KernelState, ProjectBinding};
 use crate::{MemoriesAuthority, RouteBindings, SessionBinding, memories_authority_for_route};
 
 use super::activation::{self, Activation, Closed, LiveIdentity};
@@ -108,6 +108,10 @@ pub struct ReviewSwitch {
     pub classifier: Option<String>,
     /// What the switch reviews: each session at its end, or each stored memory on later evidence.
     pub review: crate::config::ReviewScope,
+    /// The user tier's memory budget, as `f64` bits: a session review reads the block a new session receives under it.
+    pub memory_budget_bits: u64,
+    /// Whether capture's consent holds (`memory_enabled`, `auto_promote`, and `memory_auto_capture`): a session review records a user's sentence as a row of its own only then.
+    pub record_sentences: bool,
     pub harness: String,
     pub credential_fingerprints: BTreeMap<String, String>,
 }
@@ -279,6 +283,10 @@ pub(crate) fn module_projects(
                 apply: config.memory_reviewer.apply,
                 classifier: config.memory_reviewer_classifier().map(str::to_string),
                 review: config.memory_reviewer.review,
+                memory_budget_bits: config.memory_budget_tokens.to_bits(),
+                record_sentences: config.memory_enabled
+                    && config.auto_promote
+                    && config.memory_auto_capture,
                 harness: binding.harness.clone(),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
@@ -652,11 +660,6 @@ impl Worker {
             else {
                 continue;
             };
-            // A decider that failed a moment ago is given time: the project's jobs stay Ready for a later pass.
-            let stage_one_failing = || self.switched.stage_one.failing(&root.project_digest);
-            if stage_one_failing() {
-                continue;
-            }
             let Ok(host) = HostExecution::new(
                 Arc::clone(&producers),
                 root.project_root.clone(),
@@ -669,6 +672,39 @@ impl Worker {
                 );
                 continue;
             };
+            // Under `review: session` the review model reads each session that ended beside the delivered statements, and stored memories are not reviewed one by one. `apply: propose` writes nothing a reader has not accepted, so it keeps the per-memory review, whose proposals wait for a reader.
+            if switch.review == crate::config::ReviewScope::Session
+                && switch.apply != ReviewApply::Propose
+            {
+                let detected = super::change_detection::pass(
+                    &kernel,
+                    &self.store,
+                    &ProjectBinding::new(&root.project_root),
+                    &host,
+                    &self.switched.detection,
+                    super::change_detection::PassSettings {
+                        moment,
+                        memory_budget_tokens: f64::from_bits(switch.memory_budget_bits),
+                        writes: super::change_detection::Writes {
+                            record_sentences: switch.record_sentences,
+                        },
+                    },
+                    cancel,
+                )
+                .await;
+                if let Some(rejection) = detected.rejection {
+                    self.latch(rejection);
+                    self.stamp_latched();
+                    return settled;
+                }
+                settled += usize::from(detected.covered);
+                continue;
+            }
+            // A decider that failed a moment ago is given time: the project's jobs stay Ready for a later pass.
+            let stage_one_failing = || self.switched.stage_one.failing(&root.project_digest);
+            if stage_one_failing() {
+                continue;
+            }
             let sender = Arc::new(Sender::through_host(Arc::new(host)));
             let Some(stage_one) = self.stage_one(
                 &producers,
@@ -681,23 +717,6 @@ impl Worker {
                 );
                 continue;
             };
-            // Under `review: session` the review model reads each session that ended beside the delivered statements, and stored memories are not reviewed one by one.
-            if switch.review == crate::config::ReviewScope::Session {
-                if let Some(host) = sender.host_route() {
-                    let detected = super::change_detection::pass(
-                        &kernel,
-                        &self.store,
-                        &root.project_root,
-                        host,
-                        &self.switched.detection,
-                        moment,
-                        cancel,
-                    )
-                    .await;
-                    settled += detected.requests;
-                }
-                continue;
-            }
             let mut coordinator = Coordinator {
                 store: Arc::clone(&kernel),
                 ledger: Arc::clone(&self.store),
@@ -1339,6 +1358,8 @@ mod tests {
             apply: ReviewApply::Contest,
             classifier: None,
             review: crate::config::ReviewScope::Memory,
+            memory_budget_bits: crate::config::DEFAULT_MEMORY_BUDGET_TOKENS.to_bits(),
+            record_sentences: true,
             harness: "pi".to_string(),
             credential_fingerprints: BTreeMap::new(),
         }
