@@ -2620,6 +2620,7 @@ pub const PEAK_SEARCH_CONNECTIONS: u64 = 2;
 /// The memory store's prepared-statement cache is bounded by `memory_store::STATEMENT_CACHE_CAPACITY` entries, not bytes: SQLite does not bound compiled-statement memory, so no byte figure is declared for it. A full 128-statement cache measured 861,472 bytes by `sqlite3_memory_used`.
 /// The MemoryReviewer host keeps its own bounded copy of the startup credentials and their keyed identities for the process lifetime (`memory_reviewer::worker::RETAINED_CREDENTIAL_BYTES`).
 /// The named-file memo holds each session's recorded path digests, and each write slot holds one pass's paths (`named_files::RETAINED_BYTES_BOUND`).
+/// The duplicate tool-call report table holds one session id and its last reported count for each tracked session (`transform::DUPLICATE_TOOL_USE_REPORT_RETAINED_BYTES_BOUND`).
 /// Each in-flight use-outcome serve write holds the served set it records after the pass's response released its charges; `use_outcome_writer::RETAINED_SERVED_SET_BYTES_BOUND` covers every write slot at the id bytes a block the Memory Store commit admits can hold.
 /// The transform-serving combined budget is the CK previous-output store plus the native previous-output store, which refuses an entry above `NATIVE_OUTPUT_ENTRY_BUDGET_BYTES` and evicts sessions past `NATIVE_OUTPUT_BUDGET_BYTES`.
 /// A ready transform snapshot holds the CK input and scalar fields, never native messages or a delta fallback, so the snapshot and lease budgets bound what `TransformRequest::snapshot_retained_bytes` charges.
@@ -2634,6 +2635,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
     + ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES as u64
     + token_cache::RETAINED_BYTES_BOUND as u64
     + transform::TAG_MINT_FRONTIER_CACHE_BUDGET_BYTES as u64
+    + transform::DUPLICATE_TOOL_USE_REPORT_RETAINED_BYTES_BOUND as u64
     + storage::SCHEMA_SNAPSHOT_RETAINED_BYTES_BOUND as u64
         * (STORAGE_CONNECTIONS - 1 + PEAK_SEARCH_CONNECTIONS)
     + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
