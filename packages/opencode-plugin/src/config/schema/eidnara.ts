@@ -323,6 +323,7 @@ export interface EidnaraConfig {
         stage1_model?: string;
         apply: "propose" | "contest" | "apply";
         classifier?: string;
+        review: "session" | "memory";
     };
     /**
      * User-only list of repository documents the daemon reads for the prompt block and, when
@@ -662,8 +663,14 @@ export const EidnaraConfigSchema = z
                 classifier: MemoryReviewerModelSchema.optional().describe(
                     "User-only: the provider/model of a typed classifier that decides stage 1 in place of the small chat model, for example typesafe/jev-latest, as a literal; {env:} and {file:} references are not supported. A harness that can call it answers the daemon's classifier work, which sends the memory and the messages under review to the classifier's provider. Absent, or on a harness that cannot call a classifier, the small chat model decides.",
                 ),
+                review: z
+                    .enum(["session", "memory"])
+                    .default("session")
+                    .describe(
+                        "User-only: what the switch reviews. session: at each session's end the review model reads the session's user messages beside every statement the project delivers and names each statement a later message replaced, narrowed, made moot, or, for work in progress, ended; a replaced statement leaves automatic delivery for explicit search with what changed it and the user's later sentence is delivered in its place, and a narrowed one stays delivered with its line marked contested. memory: each stored memory is reviewed one by one when later messages may have changed it, as stage 1 and the review model decide (default: session).",
+                    ),
             })
-            .default({ enabled: false, apply: "contest" })
+            .default({ enabled: false, apply: "contest", review: "session" })
             .describe("User-only model review of stored memories."),
         project_docs: z
             .strictObject({

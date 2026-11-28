@@ -106,6 +106,8 @@ pub struct ReviewSwitch {
     pub apply: ReviewApply,
     /// The `provider/model` of the typed classifier that decides stage 1 in the chat model's place, when the user tier names one.
     pub classifier: Option<String>,
+    /// What the switch reviews: each session at its end, or each stored memory on later evidence.
+    pub review: crate::config::ReviewScope,
     pub harness: String,
     pub credential_fingerprints: BTreeMap<String, String>,
 }
@@ -127,6 +129,8 @@ pub struct SwitchedReview {
     derived_defaults: Mutex<DerivedDefaults>,
     /// What selection remembers between passes: the writers of the sources it looked up and the memories that wait for a pending proposal.
     selection: Arc<Mutex<review_cycle::SelectionMemory>>,
+    /// The Kernel tip at which each project's change detection last found nothing left to read.
+    detection: super::change_detection::DetectionMemory,
 }
 
 impl SwitchedReview {
@@ -261,7 +265,7 @@ pub(crate) fn module_projects(
     let mut projects: BTreeMap<String, ProjectRoute> = BTreeMap::new();
     for (_, binding) in roots {
         let root = binding.project_root.to_string_lossy().to_string();
-        // The five `memory_reviewer` keys are the user tier's alone. The tier as it reads now decides them, so a switch turned off stops the reviews of a root whose routes have closed; without it the binding's own load stands.
+        // The six `memory_reviewer` keys are the user tier's alone. The tier as it reads now decides them, so a switch turned off stops the reviews of a root whose routes have closed; without it the binding's own load stands.
         let config = user_tier.unwrap_or(&binding.config);
         // A root whose own tier file the load refused is reviewed by no one, as it is folded by no one.
         let admitted = binding.config.admission == crate::config::ConfigAdmission::Admitted;
@@ -274,6 +278,7 @@ pub(crate) fn module_projects(
                 stage1_model,
                 apply: config.memory_reviewer.apply,
                 classifier: config.memory_reviewer_classifier().map(str::to_string),
+                review: config.memory_reviewer.review,
                 harness: binding.harness.clone(),
                 credential_fingerprints: binding.credential_fingerprints.clone(),
             });
@@ -461,6 +466,16 @@ impl Worker {
 
     /// One pass over every project the worker runs for: first the projects the owner's activation record admits, then the projects under the review switch. Both read one listing of the projects, so one pass sees one configuration. The record is evaluated on every pass, so the status always reads a current state. Returns how many runs settled. Passes of one worker run one at a time.
     pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
+        self.pass_at(cancel, super::change_detection::Moment::Idle)
+            .await
+    }
+
+    /// [`Self::pass`], with change detection told whether the caller marks the end of a session: a drain does, so the newest session's messages are read at once; the worker's own loop reads a session once it has been quiet (`change_detection::QUIET`) or a newer session has begun.
+    async fn pass_at(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        moment: super::change_detection::Moment,
+    ) -> usize {
         let _serial = self.switched.serial.lock().await;
         let projects = Arc::clone(&self.projects);
         let Ok(routes) = tokio::task::spawn_blocking(move || projects()).await else {
@@ -468,14 +483,16 @@ impl Worker {
             return 0;
         };
         let recorded = self.recorded_pass(&routes, cancel).await;
-        recorded + self.switched_pass(routes, cancel).await
+        recorded + self.switched_pass(routes, cancel, moment).await
     }
 
     /// Runs passes until one settles nothing and returns the runs settled. A pass also settles nothing while a project's reviews wait: for 60 seconds after a failed stage-1 request, and while its review holds are at their bound.
     pub async fn drain(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
         let mut settled = 0;
         loop {
-            let pass = self.pass(cancel).await;
+            let pass = self
+                .pass_at(cancel, super::change_detection::Moment::SessionEnd)
+                .await;
             settled += pass;
             if pass == 0 || cancel.is_cancelled() {
                 return settled;
@@ -580,6 +597,7 @@ impl Worker {
         self: &Arc<Self>,
         routes: Vec<ProjectRoute>,
         cancel: &CancellationToken,
+        moment: super::change_detection::Moment,
     ) -> usize {
         let Some(producers) = self.switched.producers.clone() else {
             return 0;
@@ -663,6 +681,23 @@ impl Worker {
                 );
                 continue;
             };
+            // Under `review: session` the review model reads each session that ended beside the delivered statements, and stored memories are not reviewed one by one.
+            if switch.review == crate::config::ReviewScope::Session {
+                if let Some(host) = sender.host_route() {
+                    let detected = super::change_detection::pass(
+                        &kernel,
+                        &self.store,
+                        &root.project_root,
+                        host,
+                        &self.switched.detection,
+                        moment,
+                        cancel,
+                    )
+                    .await;
+                    settled += detected.requests;
+                }
+                continue;
+            }
             let mut coordinator = Coordinator {
                 store: Arc::clone(&kernel),
                 ledger: Arc::clone(&self.store),
@@ -1303,6 +1338,7 @@ mod tests {
             },
             apply: ReviewApply::Contest,
             classifier: None,
+            review: crate::config::ReviewScope::Memory,
             harness: "pi".to_string(),
             credential_fingerprints: BTreeMap::new(),
         }

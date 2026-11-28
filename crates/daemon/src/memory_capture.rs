@@ -4030,6 +4030,23 @@ struct End {
     session: String,
 }
 
+/// What a change detection pass found about a statement that no longer
+/// holds as recorded: the effect, the later user message that has it, and
+/// the row that records the user's later sentence, when the pass recorded
+/// one. The record holds identifiers and no text, so a reader takes the
+/// words from the rows it names.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Change {
+    /// `replaced` or `moot`.
+    pub(crate) effect: String,
+    /// The row holding the user's later sentence, when one was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) memory: Option<String>,
+    pub(crate) session: String,
+    /// The native id of the user message that has the change.
+    pub(crate) message: String,
+}
+
 /// The commit that first recorded a statement: the one its contest record
 /// or its settled record names, and the row's own commit for a statement no
 /// contest has rewritten.
@@ -4068,6 +4085,28 @@ pub(crate) struct Contest {
 
 pub(crate) fn capture_rationale(decision: &kernel::DecisionRow) -> CaptureRationale {
     serde_json::from_str(&decision.payload.rationale).unwrap_or_default()
+}
+
+/// The native id of the message a capture row was taken from, as its rationale records it.
+pub(crate) fn capture_rationale_message(decision: &kernel::DecisionRow) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Message {
+        message: Option<String>,
+    }
+    serde_json::from_str::<Message>(&decision.payload.rationale)
+        .ok()?
+        .message
+}
+
+/// The quotation a capture row was stored from, as its rationale records it.
+pub(crate) fn capture_rationale_quote(decision: &kernel::DecisionRow) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Quote {
+        quote: Option<String>,
+    }
+    serde_json::from_str::<Quote>(&decision.payload.rationale)
+        .ok()?
+        .quote
 }
 
 /// Whether an observation contests the statement `decision` records.
@@ -4143,6 +4182,10 @@ enum Rewrite {
     /// The superseding row records `End` in its `ended_by` rationale field,
     /// is admitted without approval, and the statement record is retired.
     Ended(End),
+    /// The superseding row records `Change` in its `changed_by` rationale
+    /// field, is admitted without approval, and the statement record is
+    /// retired, as for `Ended`.
+    Changed(Change),
 }
 
 /// Supersedes approved user statement `statement` with a row of the same
@@ -4191,6 +4234,10 @@ fn rewrite_statement(
         }
         Rewrite::Settled => format!("{}:settled:{job_id}", statement.object_id),
         Rewrite::Ended(end) => format!("{}:ended:{}", statement.object_id, end.memory),
+        Rewrite::Changed(change) => format!(
+            "{}:changed:{}:{}",
+            statement.object_id, change.effect, change.message
+        ),
     };
     // A settled or ended statement keeps the commit that first recorded it.
     let uncontest = |rationale: &mut serde_json::Map<String, Value>| {
@@ -4213,6 +4260,11 @@ fn rewrite_statement(
         Rewrite::Ended(end) => {
             uncontest(&mut rationale);
             rationale.insert("ended_by".to_owned(), json!(end));
+            None
+        }
+        Rewrite::Changed(change) => {
+            uncontest(&mut rationale);
+            rationale.insert("changed_by".to_owned(), json!(change));
             None
         }
     };
@@ -4363,6 +4415,222 @@ pub(crate) fn contest_reviewed_statement(
         }),
         recorded_at,
     )
+}
+
+/// The row of a statement a change detection pass may rewrite, read again
+/// inside its commit: `Conflict` when the statement changed after the pass
+/// read it, `Ok(None)` for a row capture did not write, and the row's
+/// revision otherwise.
+fn reviewed_revision(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    statement: &kernel::DecisionRow,
+) -> Result<Option<i64>, kernel::KernelError> {
+    let mut filter = kernel_routes::project::ScopeFilter::new(project);
+    let state =
+        kernel_routes::commit::scoped_object_state(envelope, &mut filter, &statement.object_id)?;
+    if state.object.invalidated_commit_seq.is_some()
+        || state.object.created_commit_seq != statement.created_commit_seq
+    {
+        return Err(kernel::KernelError::Conflict);
+    }
+    Ok(is_capture_memory(&state.object).then_some(state.object.source_revision))
+}
+
+/// Takes the approved user statement `statement` out of automatic delivery
+/// for a change detection pass that found a later user message replacing it
+/// or making it moot. The statement is superseded by a labeled row of the same
+/// text whose rationale records `change`, so explicit search still serves
+/// it with what changed it, and the user can state it again. Work in
+/// progress ends instead, with the later row as what ended it. `Ok(None)`
+/// leaves the row as it is, as [`rewrite_statement`] does; `Conflict` when
+/// the statement changed after the pass read it.
+pub(crate) fn retire_reviewed_statement(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    statement: &kernel::DecisionRow,
+    change: Change,
+    recorded_at: i64,
+) -> Result<Option<String>, kernel::KernelError> {
+    let Some(revision) = reviewed_revision(envelope, project, statement)? else {
+        return Ok(None);
+    };
+    let rewrite = match (&change.memory, states_current_work(statement)) {
+        (Some(memory), true) => Rewrite::Ended(End {
+            memory: memory.clone(),
+            session: change.session.clone(),
+        }),
+        _ => Rewrite::Changed(change),
+    };
+    rewrite_statement(
+        envelope,
+        (project, ""),
+        (statement, revision),
+        rewrite,
+        recorded_at,
+    )
+}
+
+/// Ends the live work in progress `work` for a change detection pass that
+/// found a later user message finishing, cancelling, or setting it aside.
+/// The row leaves the work section and stays on explicit search as ended,
+/// naming `later`, the row of the user's sentence.
+pub(crate) fn end_reviewed_work(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    work: &kernel::DecisionRow,
+    later: &str,
+    session: &str,
+    recorded_at: i64,
+) -> Result<Option<String>, kernel::KernelError> {
+    let Some(revision) = reviewed_revision(envelope, project, work)? else {
+        return Ok(None);
+    };
+    if !states_current_work(work) {
+        return Ok(None);
+    }
+    rewrite_statement(
+        envelope,
+        (project, ""),
+        (work, revision),
+        Rewrite::Ended(End {
+            memory: later.to_owned(),
+            session: session.to_owned(),
+        }),
+        recorded_at,
+    )
+}
+
+/// A sentence of a user's message that a change detection pass records as a
+/// memory capture row of that message.
+pub(crate) struct ReviewedSentence<'a> {
+    pub(crate) session: &'a str,
+    /// The native id of the message.
+    pub(crate) message: &'a str,
+    /// The message's whole text, which holds `sentence` word for word.
+    pub(crate) text: &'a str,
+    pub(crate) sentence: &'a str,
+    /// The category of the statement the sentence changes.
+    pub(crate) category: &'a str,
+    /// Whether the sentence states work in progress, as the statement it
+    /// replaces does.
+    pub(crate) current_work: bool,
+}
+
+/// Whether `sentence` is one or more whole sentences of `text` that read as
+/// statements: the quotation shape capture approves as the user's own
+/// statement.
+pub(crate) fn states_whole_sentences(text: &str, sentence: &str) -> bool {
+    text.contains(sentence) && quotes_whole_statements(&Prose::of(text), sentence)
+}
+
+/// Records `sentence` as a capture row of its message and returns the row's
+/// id. `approve` records the user's statement behind it, so the Kernel
+/// delivers the row automatically as the user's own words; only a sentence
+/// that [`states_whole_sentences`] of the message and that the pass read as
+/// the user's own words is approved. Without `approve` the row is labeled
+/// and serves explicit search and the contested line of a statement it
+/// contests. The id digests the message and the sentence, so a replay finds
+/// the row it wrote and writes nothing.
+pub(crate) fn record_reviewed_sentence(
+    envelope: &mut kernel::Envelope<'_>,
+    project: &ProjectBinding,
+    sentence: &ReviewedSentence<'_>,
+    approve: bool,
+) -> Result<String, kernel::KernelError> {
+    use sha2::{Digest, Sha256};
+    if !sentence.text.contains(sentence.sentence) || sentence.sentence.trim().is_empty() {
+        return Err(kernel::KernelError::InvalidInput);
+    }
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "change-detection\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{approve}",
+                project.digest(),
+                sentence.session,
+                sentence.message,
+                sentence.sentence
+            )
+            .as_bytes()
+        )
+    );
+    let hex = &digest[..32];
+    let id = format!("mem_{hex}");
+    if envelope.object_state(&id)?.is_some() {
+        return Ok(id);
+    }
+    let mut domains = HashSet::new();
+    let mut ready = false;
+    let mut refusal = None;
+    kernel_routes::commit::ensure_domain(envelope, "memory", &mut domains)?;
+    kernel_routes::commit::ensure_scope(envelope, project, &mut ready, &mut domains, &mut refusal)?;
+    let lifetime = if sentence.current_work {
+        Lifetime::CurrentWork
+    } else {
+        Lifetime::Lasting
+    };
+    let rationale = json!({
+        "source": CAPTURE_SOURCE_ID,
+        "session": sentence.session,
+        "message": sentence.message,
+        "quote": sentence.sentence,
+        "lifetime": lifetime,
+        "speaker": Speaker::User,
+        "recorded_by": "change_detection",
+    });
+    let summary = format!("{USER_STATED}: {}", sentence.sentence.trim());
+    envelope.insert_decision(kernel::DecisionSpec {
+        decision_id: format!("dec_{hex}"),
+        object_id: id.clone(),
+        domain_id: "memory".into(),
+        proposition_id: None,
+        scope_id: Some(project.scope_id()),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: sentence.category.to_owned(),
+        payload: kernel::DecisionPayload {
+            summary: summary.clone(),
+            rationale: rationale.to_string(),
+        },
+        source_kind: CAPTURE_SOURCE_KIND.into(),
+        source_id: CAPTURE_SOURCE_ID.into(),
+        source_revision: 1,
+        sensitivity: kernel::Sensitivity::Normal,
+    })?;
+    if !approve {
+        kernel_routes::commit::admit_capture(envelope, &id, None)?;
+        return Ok(id);
+    }
+    kernel_routes::commit::ensure_domain(envelope, STATEMENT_DOMAIN_ID, &mut domains)?;
+    let statement = format!("stm_{hex}");
+    envelope.insert_decision(kernel::DecisionSpec {
+        decision_id: format!("dst_{hex}"),
+        object_id: statement.clone(),
+        domain_id: STATEMENT_DOMAIN_ID.into(),
+        proposition_id: None,
+        scope_id: Some(project.scope_id()),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: ACCEPTED_DECISION_KIND.into(),
+        payload: kernel::DecisionPayload {
+            summary,
+            rationale: json!({
+                "source": CAPTURE_SOURCE_ID,
+                "session": sentence.session,
+                "message": sentence.message,
+                "memory": id,
+            })
+            .to_string(),
+        },
+        source_kind: "user".into(),
+        source_id: format!("{STATEMENT_SOURCE_ID}:{hex}"),
+        source_revision: 1,
+        sensitivity: kernel::Sensitivity::Normal,
+    })?;
+    kernel_routes::commit::accept_statement(envelope, &statement)?;
+    kernel_routes::commit::admit_capture(envelope, &id, Some(&statement))?;
+    Ok(id)
 }
 
 /// One memory's contests, held until the plan's other writes are done.
