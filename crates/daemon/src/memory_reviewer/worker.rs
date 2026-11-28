@@ -110,7 +110,7 @@ pub struct ReviewSwitch {
     pub review: crate::config::ReviewScope,
     /// The user tier's memory budget, as `f64` bits: a session review reads the block a new session receives under it.
     pub memory_budget_bits: u64,
-    /// Whether capture's consent holds (`memory_enabled`, `auto_promote`, and `memory_auto_capture`): a session review records a user's sentence as a row of its own only then.
+    /// Whether capture's consent holds for the root (`memory_enabled` and `auto_promote` in the user tier and in the root's own load, and the user tier's `memory_auto_capture`): a session review records a user's sentence as a row of its own only then.
     pub record_sentences: bool,
     pub harness: String,
     pub credential_fingerprints: BTreeMap<String, String>,
@@ -680,11 +680,20 @@ impl Worker {
                 && switch.apply != ReviewApply::Propose
             {
                 // The root's path is resolved again here; a path that now names another project than the one its route bound is left unread.
-                let project = ProjectBinding::new(&root.project_root);
+                let project =
+                    tokio::task::block_in_place(|| ProjectBinding::new(&root.project_root));
                 if project.digest() != root.project_digest {
-                    eprintln!(
-                        "daemon: memory_reviewer leaves a switched root whose path no longer names the project its route bound"
-                    );
+                    static REPORTED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+                    let mut reported = REPORTED
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if reported.len() < MAX_REPORTED_OWNER_ROOTS
+                        && reported.insert(root.project_digest.clone())
+                    {
+                        eprintln!(
+                            "daemon: memory_reviewer leaves a switched root whose path no longer names the project its route bound"
+                        );
+                    }
                     continue;
                 }
                 let detected = super::change_detection::pass(

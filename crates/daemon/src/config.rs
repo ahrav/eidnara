@@ -146,7 +146,7 @@ impl ReviewScope {
 /// The user tier's MemoryReviewer switch and its settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemoryReviewerConfig {
-    /// User-only consent to review the project's memories with the configured model: the worker selects memories, sends each with its evidence through the host's model execution, and records a proposal. The switch stands in for the deployment owner's activation record.
+    /// User-only consent to review the project's memories with the configured model through the host's model execution, as `review` says: by default each session that ended is read beside the delivered statements and the changes a later user message makes are written; under `review: memory` or `apply: propose` the worker selects memories, sends each with its evidence, and records a proposal. The switch stands in for the deployment owner's activation record.
     pub enabled: bool,
     /// The `provider/model` every proposal request names; absent, the first model of the History Summarizer's chain.
     pub model: Option<String>,

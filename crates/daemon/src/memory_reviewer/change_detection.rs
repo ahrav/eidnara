@@ -7,8 +7,8 @@
 //! The daemon checks each answer against the stores before it writes: the statement is one the request listed, the message is one the request listed and no earlier pass covered, the message is later than the statement and is not the message the statement was taken from, and the words are copied from that message exactly. Each change is written in a commit that first checks the message's blocks are still live and served below `Secret`, so a session deleted or reclassified while the request waited writes nothing. A change is written so it can be undone, and the changed row stays on explicit search with what changed it:
 //! - replaced: the user's later sentence is recorded as the user's statement, approved for delivery when the model read it as the user's own words and it is one or more whole sentences of the message, and the old statement is superseded by a labeled row whose rationale names the change. Otherwise the old statement stays delivered and its line is marked contested by the sentence.
 //! - narrowed: the statement stays delivered and its line is marked contested by the sentence, with both dates.
-//! - moot: the statement is superseded by a labeled row that names the change, when the model read the words as the user's own; otherwise it is contested.
-//! - ended: the work in progress leaves the work section and stays on search as ended by the sentence, when the model read the words as the user's own; otherwise it is contested.
+//! - moot: the statement is superseded by a labeled row that names the change, when the model read the words as the user's own whole sentences; otherwise it is contested.
+//! - ended: the work in progress leaves the work section and stays on search as ended by the sentence, when the model read the words as the user's own whole sentences; otherwise it is contested.
 //! - an answer the model gives with low confidence marks the statement contested at most.
 //!
 //! Each pass records a receipt for the newest user message it covered, so a session is read again only when it holds a newer user message; the messages earlier passes covered are then sent as context, and a change citing one of them is not written. A request that fails is asked again after [`RETRY_AFTER`] from the failure, doubled at each failure, and after [`MAX_ATTEMPTS`] failed attempts that reached the model at one session's newest message, counted within the running daemon, the session is recorded covered with no answer; an answer from a model other than the one configured, or a refused credential, closes review for the rest of the process as it does on the per-memory route.
@@ -30,7 +30,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::broker::check_render;
+use super::broker::{check_render, check_whole_artifact};
 use super::coordinator::{MAX_REPORTED_MODEL_CHARS, Rejection};
 use super::host_execution::{CHILD_SESSION_PREFIX, HostExecution};
 use super::model_request::{ResponseAccounting, SendError};
@@ -63,8 +63,8 @@ pub const CAPTURE_WAIT: Duration = Duration::from_secs(30 * 60);
 pub const MAX_SESSIONS_CONSIDERED: usize = 4;
 /// The longest a request waits for its answer.
 const REQUEST_WAIT: Duration = Duration::from_secs(90);
-/// Changes one answer may carry; past it the answer is read up to the bound.
-const MAX_CHANGES_PER_ANSWER: usize = 32;
+/// Changes one answer may carry; an answer with more is read as cut short. A request lists at most one request's statements, so the bound is above what an answer names.
+const MAX_CHANGES_PER_ANSWER: usize = 64;
 /// The longest sentence a change may cite; a user's statement is a few sentences.
 const MAX_SENTENCE_BYTES: usize = 2048;
 /// Message descriptors a pass examines to find the project's sessions: 32 pages of 1,024. A project with more makes the pass stop without a reading, and it logs that once.
@@ -120,15 +120,18 @@ pub struct Frontier {
 }
 
 /// The failed attempts at one frontier and when the next may run.
+#[derive(Default)]
 struct Retry {
     /// Attempts that reached the model.
     counted: u32,
     /// Failures of any kind, which set the wait.
     failures: u32,
     next_ms: i64,
+    /// Every request answered and every change settled; only the receipt is left to write.
+    answered: bool,
 }
 
-/// What a pass remembers between passes, in this process: the Kernel tip at which a project had nothing left to read; when a project's sessions still going become quiet; the failed attempts at each frontier; a project whose frontier is waiting or whose scan stopped at its bound, at the tip it was found; since when capture's queue has held a project back; and whether its scan stopped at its bound. Each map holds at most [`Self::MAX_ENTRIES`] entries. The attempt bound holds within one daemon process: a restarted daemon counts afresh.
+/// What a pass remembers between passes, in this process: the Kernel tip at which a project had nothing left to read; when a project's sessions still going become quiet; the failed attempts at each frontier; a project whose frontier is waiting or whose scan stopped at its bound, at the tip it was found; since when capture's queue has held a project back; and whether its scan stopped at its bound. Each map holds at most 4,096 entries; at that bound the failure map keeps the frontiers whose counted attempts still gate a request. The attempt bound holds within one daemon process: a restarted daemon counts afresh.
 #[derive(Default)]
 pub struct DetectionMemory {
     quiet_at: Mutex<HashMap<String, i64>>,
@@ -215,23 +218,40 @@ impl DetectionMemory {
 
     /// Records a failed attempt at `frontier` observed at `now_ms`, counted toward the bound when it reached the model, and returns the attempts counted.
     fn note_failure(&self, frontier: &Frontier, counted: bool, now_ms: i64) -> u32 {
-        let mut retries = locked(&self.retries);
-        let (counted_before, failures_before) = retries
+        self.update_retry(frontier, now_ms, |retry| {
+            retry.counted += u32::from(counted)
+        })
+    }
+
+    /// Records that a pass at `frontier` settled everything but its receipt, observed at `now_ms`.
+    fn note_answered(&self, frontier: &Frontier, now_ms: i64) {
+        self.update_retry(frontier, now_ms, |retry| retry.answered = true);
+    }
+
+    /// Whether the last pass at `frontier` settled everything but its receipt.
+    fn answered(&self, frontier: &Frontier) -> bool {
+        locked(&self.retries)
             .get(frontier)
-            .map_or((0, 0), |retry| (retry.counted, retry.failures));
-        let failures = failures_before + 1;
-        let counted = counted_before + u32::from(counted);
-        let wait = RETRY_AFTER.saturating_mul(1 << (failures - 1).min(8));
-        bounded_insert(
-            &mut retries,
-            frontier.clone(),
-            Retry {
-                counted,
-                failures,
-                next_ms: now_ms.saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),
-            },
-        );
-        counted
+            .is_some_and(|retry| retry.answered)
+    }
+
+    /// Applies `change` to `frontier`'s retry state as one more failure observed at `now_ms`, which doubles the wait, and returns the attempts counted. At its bound the map keeps the frontiers whose counted attempts still gate a request.
+    fn update_retry(
+        &self,
+        frontier: &Frontier,
+        now_ms: i64,
+        change: impl FnOnce(&mut Retry),
+    ) -> u32 {
+        let mut retries = locked(&self.retries);
+        if retries.len() >= Self::MAX_ENTRIES && !retries.contains_key(frontier) {
+            retries.retain(|_, retry| retry.counted > 0 || retry.answered);
+        }
+        let retry = retries.entry(frontier.clone()).or_default();
+        retry.failures += 1;
+        change(retry);
+        let wait = RETRY_AFTER.saturating_mul(1 << (retry.failures - 1).min(8));
+        retry.next_ms = now_ms.saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX));
+        retry.counted
     }
 
     fn clear_failures(&self, frontier: &Frontier) {
@@ -307,8 +327,8 @@ pub struct SessionMessage {
     pub message_id: String,
     /// The descriptor of the message's first text block, whose evidence a change names.
     pub object_id: String,
-    /// Every text block of the message: its descriptor and its artifact digest. A write first checks each is still live.
-    pub blocks: Vec<(String, String)>,
+    /// Every text block of the message: its descriptor, its source revision, and its artifact digest. Each later request judges them again, and a write first checks each is still live.
+    pub blocks: Vec<EligibilityCandidate>,
     /// The harness's timestamp, in milliseconds.
     pub written_ms: i64,
     /// The commit that published the message's last text block.
@@ -565,11 +585,15 @@ pub fn chunks(statements: &[DeliveredStatement]) -> (Vec<Vec<usize>>, usize) {
 
 /// The changes `text` names, read in the closed form of [`SYSTEM_TEXT`]: an alias outside the request, an effect or speaker outside its words, or an empty sentence drops that change. `None` for an answer that is not the object. A fenced object reads as the object.
 pub fn parse_answer(text: &str, chunk: &[usize], messages: usize) -> Option<Vec<Finding>> {
-    let value = serde_json::from_str::<serde_json::Value>(unfenced(text)).ok()?;
-    if !value.is_object() {
+    let body = unfenced(text);
+    if !body.starts_with('{') {
         return None;
     }
-    let answer = serde_json::from_value::<RawAnswer>(value).ok()?;
+    let answer = serde_json::from_str::<RawAnswer>(body).ok()?;
+    // An answer past the bound is read as cut short, so the pass asks again rather than settle on part of it.
+    if answer.changes.len() > MAX_CHANGES_PER_ANSWER {
+        return None;
+    }
     let statement_of = |alias: &str| {
         chunk
             .iter()
@@ -682,6 +706,8 @@ pub struct PassOutcome {
     pub covered: bool,
     /// A provider's rejection, which closes review for the rest of the process.
     pub rejection: Option<Rejection>,
+    /// Whether the receipt records a frontier whose attempts were spent with no complete answer; the receipt's payload carries it.
+    pub exhausted: bool,
 }
 
 fn intent(key: String, request: &str, cause: &str) -> CommitIntent {
@@ -718,7 +744,7 @@ fn identity_value<'a>(detail: &'a kernel::SourceDescriptorDetail, field: &str) -
 
 /// A message block as the scan finds it.
 #[derive(Debug, Clone)]
-pub struct Block {
+struct Block {
     object_id: String,
     /// The harness that published the block; a session is one harness's session.
     harness: String,
@@ -731,6 +757,16 @@ pub struct Block {
     sensitivity: Sensitivity,
     handle: ArtifactHandle,
     span: Option<(u64, u64)>,
+}
+
+impl Block {
+    fn candidate(&self) -> EligibilityCandidate {
+        EligibilityCandidate {
+            object_id: self.object_id.clone(),
+            source_revision: self.written_ms,
+            artifact_digest: Some(self.handle.digest.clone()),
+        }
+    }
 }
 
 /// A session the pass found to read: its user blocks, the newest of them by publication, the commit up to which earlier passes covered it, and when each message of the project's scanned sessions was written.
@@ -755,7 +791,7 @@ fn read_session(
     project: &ProjectBinding,
     moment: Moment,
     now_ms: i64,
-    allowed: &dyn Fn(&[Block]) -> Option<Vec<bool>>,
+    allowed: &dyn Fn(&[EligibilityCandidate]) -> Option<Vec<bool>>,
 ) -> Result<Reading, KernelError> {
     let quiet_ms = i64::try_from(QUIET.as_millis()).unwrap_or(i64::MAX);
     let (_, found) = store.preview(std::time::Instant::now() + READ_DEADLINE, |preview| {
@@ -954,7 +990,7 @@ fn encoded_size(index: usize, text: &str, written_ms: i64) -> usize {
 fn messages_of(
     store: &KernelStore,
     found: &Found,
-    allowed: &dyn Fn(&[Block]) -> Option<Vec<bool>>,
+    allowed: &dyn Fn(&[EligibilityCandidate]) -> Option<Vec<bool>>,
 ) -> Picked {
     // The message's blocks in block order, by message id in the order of each message's first block.
     let mut order: Vec<&str> = Vec::new();
@@ -1007,7 +1043,8 @@ fn messages_of(
             picked.withheld += 1;
             continue;
         }
-        match allowed(&owned) {
+        let candidates: Vec<EligibilityCandidate> = owned.iter().map(Block::candidate).collect();
+        match allowed(&candidates) {
             None => {
                 picked.unjudged += 1;
                 continue;
@@ -1046,7 +1083,10 @@ fn messages_of(
             picked.unjudged += 1;
             continue;
         }
-        if !readable || text.trim().is_empty() || check_render(text.as_bytes(), None).is_err() {
+        if !readable
+            || text.trim().is_empty()
+            || check_whole_artifact(text.as_bytes(), None).is_err()
+        {
             picked.withheld += 1;
             continue;
         }
@@ -1057,6 +1097,8 @@ fn messages_of(
         }
         let size = encoded_size(kept.len(), &text, owned[0].written_ms);
         if bytes + size > MAX_MESSAGE_BYTES {
+            // The window is full: this message and every one after it are left out unread.
+            bytes = MAX_MESSAGE_BYTES;
             picked.left_out += 1;
             continue;
         }
@@ -1075,10 +1117,7 @@ fn messages_of(
             SessionMessage {
                 message_id: owned[0].message_id.clone(),
                 object_id: owned[0].object_id.clone(),
-                blocks: owned
-                    .iter()
-                    .map(|block| (block.object_id.clone(), block.handle.digest.clone()))
-                    .collect(),
+                blocks: owned.iter().map(Block::candidate).collect(),
                 written_ms: owned[0].written_ms,
                 published_seq,
                 text,
@@ -1092,33 +1131,25 @@ fn messages_of(
     picked
 }
 
-/// The Kernel's egress verdict for the configured model on each of `blocks`: a block is sent only when the verdict permits it. `None` when the judgement failed or its snapshot is not one a grant may rest on, which sends none of them.
+/// The Kernel's egress verdict for the configured model on each of `candidates`: a block is sent only when the verdict permits it. `None` when the judgement failed or its snapshot is not one a grant may rest on, which sends none of them.
 fn egress_allowed(
     store: &KernelStore,
     project: &ProjectBinding,
-    blocks: &[Block],
+    candidates: &[EligibilityCandidate],
 ) -> Option<Vec<bool>> {
     let scope = ProjectScope::new(project.digest()).ok()?;
     let budget = EvalBudget::new(
         Some(std::time::Instant::now() + READ_DEADLINE),
         Arc::default(),
     );
-    let mut permitted = Vec::with_capacity(blocks.len());
-    for chunk in blocks.chunks(MAX_ELIGIBILITY_CANDIDATES) {
-        let candidates: Vec<EligibilityCandidate> = chunk
-            .iter()
-            .map(|block| EligibilityCandidate {
-                object_id: block.object_id.clone(),
-                source_revision: block.written_ms,
-                artifact_digest: Some(block.handle.digest.clone()),
-            })
-            .collect();
+    let mut permitted = Vec::with_capacity(candidates.len());
+    for chunk in candidates.chunks(MAX_ELIGIBILITY_CANDIDATES) {
         let batch = store
             .judge_surface_eligibility_within_budget(
                 &scope,
                 ArtifactDestination::ConfiguredModel,
                 Surface::ExplicitSearch,
-                &candidates,
+                chunk,
                 &budget,
             )
             .ok()?;
@@ -1131,33 +1162,38 @@ fn egress_allowed(
     Some(permitted)
 }
 
-/// Whether every block of `messages` is still permitted to the configured model: judged again before each request after the first, so a later request carries no message whose evidence was reclassified since the read.
+/// Whether every block of `messages` is still permitted to the configured model, each at its own revision, and every statement of `chunk` is still delivered with the line the request carries, a contest's excerpt included: judged again before each request, so a request carries nothing the Kernel refused since the read.
 fn still_allowed(
     store: &KernelStore,
     project: &ProjectBinding,
     messages: &[SessionMessage],
+    statements: &[DeliveredStatement],
+    chunk: &[usize],
+    memory_budget_tokens: f64,
 ) -> bool {
-    let blocks: Vec<Block> = messages
+    let candidates: Vec<EligibilityCandidate> = messages
         .iter()
-        .flat_map(|message| message.blocks.iter().map(move |block| (message, block)))
-        .map(|(message, (object_id, digest))| Block {
-            object_id: object_id.clone(),
-            harness: String::new(),
-            session: String::new(),
-            message_id: message.message_id.clone(),
-            block_index: Some(0),
-            written_ms: message.written_ms,
-            published_seq: message.published_seq,
-            sensitivity: Sensitivity::Normal,
-            handle: ArtifactHandle {
-                digest: digest.clone(),
-                evidence_id: String::new(),
-            },
-            span: None,
+        .flat_map(|message| message.blocks.iter().cloned())
+        .collect();
+    let blocks_ok = egress_allowed(store, project, &candidates)
+        .is_some_and(|verdicts| verdicts.into_iter().all(|ok| ok));
+    let Ok(delivered) = read_statements(store, project, memory_budget_tokens) else {
+        return false;
+    };
+    let lines: HashMap<&str, &str> = delivered
+        .iter()
+        .map(|statement| {
+            (
+                statement.row.object_id.as_str(),
+                statement.row.content.as_str(),
+            )
         })
         .collect();
-    egress_allowed(store, project, &blocks)
-        .is_some_and(|verdicts| verdicts.into_iter().all(|ok| ok))
+    blocks_ok
+        && chunk.iter().all(|&index| {
+            let statement = &statements[index];
+            lines.get(statement.row.object_id.as_str()) == Some(&statement.row.content.as_str())
+        })
 }
 
 /// The statements the block delivers now under `memory_budget_tokens` that pass the render check, each with the commit that first recorded it.
@@ -1246,18 +1282,25 @@ fn message_live(
     envelope: &kernel::Envelope<'_>,
     message: &SessionMessage,
 ) -> Result<bool, KernelError> {
-    let ids: Vec<&str> = message.blocks.iter().map(|(id, _)| id.as_str()).collect();
+    if message.blocks.is_empty() {
+        return Ok(false);
+    }
+    let ids: Vec<&str> = message
+        .blocks
+        .iter()
+        .map(|block| block.object_id.as_str())
+        .collect();
     // The serving rows carry the class the Kernel folds for each block now, a reclassification of its evidence included.
     let served = envelope.served_rows_for(&ids, None)?;
-    for (object_id, digest) in &message.blocks {
-        let Some(state) = envelope.object_state(object_id)? else {
+    for block in &message.blocks {
+        let Some(state) = envelope.object_state(&block.object_id)? else {
             return Ok(false);
         };
-        let Some(row) = served.get(object_id) else {
+        let Some(row) = served.get(&block.object_id) else {
             return Ok(false);
         };
         if state.object.invalidated_commit_seq.is_some()
-            || state.artifact_digest.as_deref() != Some(digest.as_str())
+            || state.artifact_digest != block.artifact_digest
             || row.object.sensitivity == Sensitivity::Secret
             || row.visibility(Surface::ExplicitSearch) == kernel::SurfaceVisibility::Hidden
         {
@@ -1268,7 +1311,7 @@ fn message_live(
 }
 
 /// Writes one grounded finding in a commit of its own, keyed by the statement's lineage (the commit that first recorded it and its text, which a contest keeps) and the message, so a replayed pass writes nothing twice and a retried pass that reads the same message differently refuses its second answer. The commit first checks that the message's blocks are live and that the statement is the row the pass read and one capture wrote; it writes the later row only after those checks. A finding that writes nothing rolls back, so it holds no key. Returns the action written, or `None` when the stores left the statement as it was.
-pub fn apply(
+fn apply(
     store: &KernelStore,
     project: &ProjectBinding,
     statements: &[DeliveredStatement],
@@ -1290,11 +1333,30 @@ pub fn apply(
             .as_bytes()
         )
     );
+    // The message as the pass read it: its blocks in order, each by descriptor and bytes, so a block published later is new evidence.
+    let evidence = format!(
+        "{:x}",
+        Sha256::digest(
+            message
+                .blocks
+                .iter()
+                .map(|block| {
+                    format!(
+                        "{}\u{1f}{}",
+                        block.object_id,
+                        block.artifact_digest.as_deref().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\u{1e}")
+                .as_bytes()
+        )
+    );
     let key = format!(
         "{}#change#{}#{}",
         project.digest(),
         &lineage[..32],
-        message.object_id,
+        &evidence[..32],
     );
     let request = format!(
         "{key}\u{1f}{}\u{1f}{action:?}\u{1f}{}",
@@ -1433,7 +1495,8 @@ pub async fn pass(
         }
     }
     let read = tokio::task::block_in_place(|| {
-        let allowed = |blocks: &[Block]| egress_allowed(store, project, blocks);
+        let allowed =
+            |candidates: &[EligibilityCandidate]| egress_allowed(store, project, candidates);
         let read = match read_session(store, project, settings.moment, now_ms, &allowed)? {
             Reading::Read(read) => read,
             Reading::Nothing => return Ok(Err(true)),
@@ -1481,14 +1544,16 @@ pub async fn pass(
         return outcome;
     }
     let attempt = memory.attempts(&frontier);
-    // A frontier whose attempts are spent sends nothing more: only its receipt is left to write.
+    // A frontier whose attempts are spent, or one whose last pass answered and settled everything but its receipt, sends nothing more: only its receipt is left to write.
+    let answered_before = memory.answered(&frontier);
     let exhausted = attempt >= MAX_ATTEMPTS;
-    let mut complete = read.unjudged == 0;
+    let mut unjudged = read.unjudged > 0;
+    let mut complete = !unjudged;
     let mut stopped = false;
     let mut sent_any = false;
     let readable = read.messages.iter().any(|message| !message.covered);
     let mut chunk_findings: Vec<(Vec<usize>, Vec<Finding>)> = Vec::new();
-    if readable && !statements.is_empty() && !exhausted {
+    if readable && !statements.is_empty() && !exhausted && !answered_before {
         let (requests, omitted) = chunks(&statements);
         outcome.omitted = omitted;
         for (index, chunk) in requests.into_iter().enumerate() {
@@ -1496,11 +1561,19 @@ pub async fn pass(
                 stopped = true;
                 break;
             }
-            // A later request carries the messages again; each is judged again so a block reclassified since the read is not sent.
-            if index > 0
-                && !tokio::task::block_in_place(|| still_allowed(store, project, &read.messages))
-            {
+            // Every request's messages and statements are judged again just before it goes, so a block or a statement the Kernel refused since the read is not sent.
+            if !tokio::task::block_in_place(|| {
+                still_allowed(
+                    store,
+                    project,
+                    &read.messages,
+                    &statements,
+                    &chunk,
+                    settings.memory_budget_tokens,
+                )
+            }) {
                 complete = false;
+                unjudged = true;
                 break;
             }
             let prompt = request_json(&statements, &chunk, &read, &recorded);
@@ -1601,11 +1674,12 @@ pub async fn pass(
         .into_iter()
         .flat_map(|(_, findings)| findings)
         .collect();
-    settle_speakers(&mut findings);
+    settle_speakers(&mut findings, &read.messages);
     // The latest message's change of a statement is the one written.
     findings.sort_by_key(|finding| std::cmp::Reverse(finding.message));
     let mut changed: HashSet<usize> = HashSet::new();
-    if outcome.rejection.is_none() && !stopped && !cancel.is_cancelled() {
+    // Findings are written only from a complete set of answers, so a reading a missing answer would have given cannot be skipped.
+    if complete && outcome.rejection.is_none() && !stopped && !cancel.is_cancelled() {
         let now = crate::now_ms();
         for finding in findings {
             if !grounded(&finding, &statements, &read) {
@@ -1649,13 +1723,14 @@ pub async fn pass(
     }
     let settled = outcome.rejection.is_none() && !stopped && !cancel.is_cancelled();
     let mut gave_up = false;
-    if settled && !complete && !exhausted {
-        // An attempt that reached the model counts toward the bound; one that never left waits without counting.
-        let failures = memory.note_failure(&frontier, sent_any, crate::now_ms());
-        gave_up = failures >= MAX_ATTEMPTS;
+    if settled && !complete && !exhausted && !answered_before {
+        // An attempt that reached the model counts toward the bound, and so does one a read the pass could not judge held back; a request that never left waits without counting.
+        let counted = memory.note_failure(&frontier, sent_any || unjudged, crate::now_ms());
+        gave_up = counted >= MAX_ATTEMPTS;
     }
+    outcome.exhausted = gave_up || exhausted;
     // A pass whose requests all answered and whose changes all settled covers the session's messages up to its newest; one cut short is asked again after its wait, and a frontier whose attempts are spent is recorded covered with no answer.
-    if settled && (complete || gave_up || exhausted) {
+    if settled && (complete || gave_up || exhausted || answered_before) {
         let covered = tokio::task::block_in_place(|| {
             store.commit(
                 pass_intent(project, &read.harness, &read.session, &read.newest),
@@ -1668,7 +1743,8 @@ pub async fn pass(
                 memory.clear_failures(&frontier);
             }
             Err(error) => {
-                memory.note_failure(&frontier, false, crate::now_ms());
+                // Everything but the receipt settled: the next pass writes only the receipt, after its wait.
+                memory.note_answered(&frontier, crate::now_ms());
                 eprintln!(
                     "daemon: memory_reviewer change detection could not record its pass: {error}"
                 );
@@ -1695,7 +1771,7 @@ pub async fn pass(
         outcome.ended,
         outcome.refused,
         outcome.covered,
-        if gave_up || exhausted {
+        if outcome.exhausted {
             " after its last attempt"
         } else {
             ""
@@ -1704,19 +1780,36 @@ pub async fn pass(
     outcome
 }
 
-/// Settles whose words each finding cites, as capture settles its extractor's readings: a finding reads as the user's only when every finding whose sentence overlaps it in the same message reads as the user's too, repeated until no reading changes.
-fn settle_speakers(findings: &mut [Finding]) {
+/// Settles whose words each finding cites, as capture settles its extractor's readings: a finding reads as the user's only when no finding of the same message that is not the user's cites words overlapping its own at any place they stand in the message, repeated until no reading changes.
+fn settle_speakers(findings: &mut [Finding], messages: &[SessionMessage]) {
+    // Every place the words stand in the message, overlapping places included.
+    let places = |finding: &Finding| -> Vec<(usize, usize)> {
+        let text = messages[finding.message].text.as_str();
+        let words = finding.sentence.as_str();
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some(at) = text.get(from..).and_then(|rest| rest.find(words)) {
+            let start = from + at;
+            found.push((start, start + words.len()));
+            from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        found
+    };
+    let spans: Vec<Vec<(usize, usize)>> = findings.iter().map(places).collect();
     loop {
         let mut changed = false;
         for left in 0..findings.len() {
             if findings[left].speaker != Speaker::User {
                 continue;
             }
-            let disputed = findings.iter().any(|other| {
-                other.message == findings[left].message
-                    && other.speaker != Speaker::User
-                    && (other.sentence.contains(findings[left].sentence.as_str())
-                        || findings[left].sentence.contains(other.sentence.as_str()))
+            let disputed = (0..findings.len()).any(|right| {
+                findings[right].message == findings[left].message
+                    && findings[right].speaker != Speaker::User
+                    && spans[left].iter().any(|&(start, end)| {
+                        spans[right]
+                            .iter()
+                            .any(|&(other_start, other_end)| start < other_end && other_start < end)
+                    })
             });
             if disputed {
                 findings[left].speaker = Speaker::Unknown;
@@ -1774,7 +1867,11 @@ mod tests {
         SessionMessage {
             message_id: id.to_string(),
             object_id: format!("srcdesc:{id}"),
-            blocks: vec![(format!("srcdesc:{id}"), "digest".to_string())],
+            blocks: vec![EligibilityCandidate {
+                object_id: format!("srcdesc:{id}"),
+                source_revision: 1_700_000_000_000 + seq,
+                artifact_digest: Some("digest".to_string()),
+            }],
             written_ms: 1_700_000_000_000 + seq,
             published_seq: seq,
             text: text.to_string(),
@@ -1975,6 +2072,66 @@ mod tests {
             ),
             "a message written after the statement's own message"
         );
+        // Written and published orders apart: written before the source, published after the statement's commit.
+        let mut late = message("n6", "Deploy from staging.", 30);
+        late.written_ms = 1_700_000_000_000 + 5;
+        let late_published = read(vec![message("n1", "Deploy from main.", 12), late]);
+        assert!(
+            !grounded(
+                &finding(0, Effect::Replaced, 1, "Deploy from staging."),
+                &statements,
+                &late_published
+            ),
+            "a message written before the statement's own message, whenever it was published"
+        );
+        // The source lives in another scanned session: its time still decides.
+        let mut elsewhere = read(vec![message("n7", "Deploy from tags.", 5)]);
+        elsewhere.session = "s9".to_string();
+        elsewhere.written =
+            HashMap::from([(("s".to_string(), "n1".to_string()), 1_700_000_000_000 + 4)]);
+        assert!(
+            grounded(
+                &finding(0, Effect::Replaced, 0, "Deploy from tags."),
+                &statements,
+                &elsewhere
+            ),
+            "a later-written message of another session, published before the statement's commit"
+        );
+        // With no source time the publication order decides, both ways.
+        elsewhere.written.clear();
+        assert!(
+            !grounded(
+                &finding(0, Effect::Replaced, 0, "Deploy from tags."),
+                &statements,
+                &elsewhere
+            ),
+            "published before the statement's commit, with no source time"
+        );
+        let mut after = read(vec![message("n8", "Deploy from tags.", 40)]);
+        after.session = "s9".to_string();
+        after.written.clear();
+        assert!(grounded(
+            &finding(0, Effect::Replaced, 0, "Deploy from tags."),
+            &statements,
+            &after
+        ));
+        // A quote of the wrong type leaves the source's session and message as recorded.
+        let mut odd = statements.clone();
+        odd[0].decision.payload.rationale =
+            r#"{"source":"memory_capture","session":"s","message":"n1","quote":7}"#.to_string();
+        let own = read(vec![message(
+            "n1",
+            "Deploy from main. Deploy from tags.",
+            30,
+        )]);
+        assert!(
+            !grounded(
+                &finding(0, Effect::Replaced, 0, "Deploy from tags."),
+                &odd,
+                &own
+            ),
+            "the statement's own message, named by a rationale with a numeric quote"
+        );
     }
 
     #[test]
@@ -2041,6 +2198,16 @@ mod tests {
             action(&with(rule, Speaker::User, true, Effect::Ended), &whole),
             Action::End
         );
+        for effect in [Effect::Moot, Effect::Ended] {
+            assert_eq!(
+                action(
+                    &with("ship from the release branch", Speaker::User, true, effect),
+                    &whole
+                ),
+                Action::Contest,
+                "{effect:?} on part of a sentence"
+            );
+        }
         // The message was cut where the cited words end, so they may continue past the cut.
         let mut cut = message("n2", "Use the release branch. Deploy from tags.", 2);
         cut.cut = true;
@@ -2064,6 +2231,57 @@ mod tests {
             ),
             Action::Replace,
             "a whole sentence before the cut"
+        );
+        for (effect, whole_action) in [(Effect::Moot, Action::Retire), (Effect::Ended, Action::End)]
+        {
+            assert_eq!(
+                action(
+                    &with("Deploy from tags.", Speaker::User, true, effect),
+                    &cut
+                ),
+                Action::Contest,
+                "{effect:?} on words that end at the cut"
+            );
+            assert_eq!(
+                action(
+                    &with("Use the release branch.", Speaker::User, true, effect),
+                    &cut
+                ),
+                whole_action,
+                "{effect:?} on a whole sentence before the cut"
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_readings_of_one_message_settle_as_not_the_users() {
+        let messages = vec![
+            message("n1", "Ship on Fridays. The team said ship on Mondays.", 1),
+            message("n2", "Ship on Fridays.", 2),
+        ];
+        let reading = |message, sentence: &str, speaker| Finding {
+            speaker,
+            ..finding(0, Effect::Replaced, message, sentence)
+        };
+        let mut findings = vec![
+            reading(0, "Ship on Fridays. The team", Speaker::User),
+            reading(0, "The team said ship on Mondays.", Speaker::Other),
+            reading(0, "Ship on Fridays.", Speaker::User),
+            reading(1, "Ship on Fridays.", Speaker::User),
+        ];
+        settle_speakers(&mut findings, &messages);
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.speaker)
+                .collect::<Vec<_>>(),
+            vec![
+                Speaker::Unknown,
+                Speaker::Other,
+                Speaker::Unknown,
+                Speaker::User
+            ],
+            "a partly overlapping reading settles, chains settle, another message is left alone"
         );
     }
 

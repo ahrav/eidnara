@@ -1416,9 +1416,9 @@ one of them carried none; the rule above for a `current_work` fact frozen
 contesting a fact served on `auto_inject` applies to the joined fact. A class on a proposal of an assistant source is
 stored in the same way and changes nothing: such a fact is never the user's
 statement. Capture and the session review (below) are the writers of the `user-statements` domain: a
-`kernel.commit` operation that names it is refused as `invalid_input`. The statement record's source is the user message it
-quotes: source kind `user`, source id `memory_capture_statement:` followed by
-the first 32 hexadecimal digits of the capture source's identity, revision 1.
+`kernel.commit` operation that names it is refused as `invalid_input`. The statement record capture writes has the user message it
+quotes as its source: source kind `user`, source id `memory_capture_statement:` followed by
+the first 32 hexadecimal digits of the capture source's identity, revision 1; the session review's statement records carry their own source id (below).
 The Kernel bounds the authority-bearing accepted decisions of one source
 lineage at 64 and one batch proposes at most 64 memories, so the statements of
 one message fit its lineage and the number of live statements in a project has
@@ -1954,7 +1954,7 @@ which case a line `Ended by <fact id>` follows its text, the
 fact id shown by the block's rule for a fact id; a fact stored labeled with
 no `ended_by` carries the class alone. A session review
 (`memory_reviewer.review` `session`, `docs/memory-reviewer-operations.md`)
-supersedes a fact it finds replaced or made moot by a later user message with
+supersedes a fact it finds replaced or made moot by a later user message, under the grounding and confidence conditions that document states, with
 a fact of the same text and category, admitted labeled, whose rationale holds
 `changed_by`, an object with `effect` (`replaced` or `moot`), `session` and
 `message` (the session and the native message id of the user message that has
